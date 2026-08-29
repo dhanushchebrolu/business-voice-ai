@@ -14,6 +14,9 @@ import { Route as AppRouteImport } from './routes/app'
 import { Route as AuthRouteImport } from './routes/auth'
 import { Route as PricingRouteImport } from './routes/pricing'
 import { Route as ResetPasswordRouteImport } from './routes/reset-password'
+import { Route as AppIndexRouteImport } from './routes/app.index'
+import { Route as AppCallsRouteImport } from './routes/app.calls'
+import { Route as AppLeadsRouteImport } from './routes/app.leads'
 import { Route as AppOnboardingRouteImport } from './routes/app.onboarding'
 
 const IndexRoute = IndexRouteImport.update({
@@ -41,6 +44,21 @@ const ResetPasswordRoute = ResetPasswordRouteImport.update({
   path: '/reset-password',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AppIndexRoute = AppIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppCallsRoute = AppCallsRouteImport.update({
+  id: '/calls',
+  path: '/calls',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppLeadsRoute = AppLeadsRouteImport.update({
+  id: '/leads',
+  path: '/leads',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppOnboardingRoute = AppOnboardingRouteImport.update({
   id: '/onboarding',
   path: '/onboarding',
@@ -53,15 +71,20 @@ export interface FileRoutesByFullPath {
   '/auth': typeof AuthRoute
   '/pricing': typeof PricingRoute
   '/reset-password': typeof ResetPasswordRoute
+  '/app/calls': typeof AppCallsRoute
+  '/app/leads': typeof AppLeadsRoute
   '/app/onboarding': typeof AppOnboardingRoute
+  '/app/': typeof AppIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/app': typeof AppRouteWithChildren
   '/auth': typeof AuthRoute
   '/pricing': typeof PricingRoute
   '/reset-password': typeof ResetPasswordRoute
+  '/app/calls': typeof AppCallsRoute
+  '/app/leads': typeof AppLeadsRoute
   '/app/onboarding': typeof AppOnboardingRoute
+  '/app': typeof AppIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -70,15 +93,33 @@ export interface FileRoutesById {
   '/auth': typeof AuthRoute
   '/pricing': typeof PricingRoute
   '/reset-password': typeof ResetPasswordRoute
+  '/app/calls': typeof AppCallsRoute
+  '/app/leads': typeof AppLeadsRoute
   '/app/onboarding': typeof AppOnboardingRoute
+  '/app/': typeof AppIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    '/' | '/app' | '/auth' | '/pricing' | '/reset-password' | '/app/onboarding'
+    | '/'
+    | '/app'
+    | '/auth'
+    | '/pricing'
+    | '/reset-password'
+    | '/app/calls'
+    | '/app/leads'
+    | '/app/onboarding'
+    | '/app/'
   fileRoutesByTo: FileRoutesByTo
   to:
-    '/' | '/app' | '/auth' | '/pricing' | '/reset-password' | '/app/onboarding'
+    | '/'
+    | '/auth'
+    | '/pricing'
+    | '/reset-password'
+    | '/app/calls'
+    | '/app/leads'
+    | '/app/onboarding'
+    | '/app'
   id:
     | '__root__'
     | '/'
@@ -86,7 +127,10 @@ export interface FileRouteTypes {
     | '/auth'
     | '/pricing'
     | '/reset-password'
+    | '/app/calls'
+    | '/app/leads'
     | '/app/onboarding'
+    | '/app/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -134,6 +178,27 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ResetPasswordRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/app/': {
+      id: '/app/'
+      path: '/'
+      fullPath: '/app/'
+      preLoaderRoute: typeof AppIndexRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/app/calls': {
+      id: '/app/calls'
+      path: '/calls'
+      fullPath: '/app/calls'
+      preLoaderRoute: typeof AppCallsRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/app/leads': {
+      id: '/app/leads'
+      path: '/leads'
+      fullPath: '/app/leads'
+      preLoaderRoute: typeof AppLeadsRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/onboarding': {
       id: '/app/onboarding'
       path: '/onboarding'
@@ -145,11 +210,17 @@ declare module '@tanstack/react-router' {
 }
 
 interface AppRouteChildren {
+  AppCallsRoute: typeof AppCallsRoute
+  AppLeadsRoute: typeof AppLeadsRoute
   AppOnboardingRoute: typeof AppOnboardingRoute
+  AppIndexRoute: typeof AppIndexRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
+  AppCallsRoute: AppCallsRoute,
+  AppLeadsRoute: AppLeadsRoute,
   AppOnboardingRoute: AppOnboardingRoute,
+  AppIndexRoute: AppIndexRoute,
 }
 
 const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
