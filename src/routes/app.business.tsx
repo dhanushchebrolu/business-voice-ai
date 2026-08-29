@@ -63,7 +63,10 @@ function BusinessPage() {
     setSaving(true);
     const { error } = await supabase.from("businesses").update(profile).eq("id", business.id);
     setSaving(false);
-    if (error) return toast.error("Could not save changes.");
+    if (error) {
+      toast.error("Could not save changes.");
+      return;
+    }
     toast.success("Business profile saved. Publish your receptionist to apply it to calls.");
     refresh();
   }
@@ -73,13 +76,19 @@ function BusinessPage() {
     const { error } = await supabase
       .from(table)
       .insert({ organization_id: business.organization_id, business_id: business.id, ...values } as never);
-    if (error) return toast.error("Could not add that entry.");
+    if (error) {
+      toast.error("Could not add that entry.");
+      return;
+    }
     refresh();
   }
 
   async function removeRow(table: "services" | "faqs" | "business_rules", id: string) {
     const { error } = await supabase.from(table).delete().eq("id", id);
-    if (error) return toast.error("Could not delete that entry.");
+    if (error) {
+      toast.error("Could not delete that entry.");
+      return;
+    }
     refresh();
   }
 
@@ -201,14 +210,16 @@ function BusinessPage() {
               primary: s.name,
               secondary: [s.price ? `₹${s.price}` : null, s.description].filter(Boolean).join(" · "),
             }))}
-            onAdd={(v) =>
-              addRow("services", {
-                name: String(v.name),
-                price: v.price ? Number(v.price) : null,
-                description: v.description || null,
-              })
-            }
-            onRemove={(id) => removeRow("services", id)}
+            onAdd={async (v) => {
+              await addRow("services", {
+                name: String(v["name"]),
+                price: v["price"] ? Number(v["price"]) : null,
+                description: v["description"] || null,
+              });
+            }}
+            onRemove={async (id) => {
+              await removeRow("services", id);
+            }}
           />
         </TabsContent>
 
@@ -221,8 +232,12 @@ function BusinessPage() {
               { key: "answer", label: "Answer", placeholder: "We prefer appointments but keep two walk-in slots daily." },
             ]}
             rows={(faqs ?? []).map((f) => ({ id: f.id, primary: f.question, secondary: f.answer }))}
-            onAdd={(v) => addRow("faqs", { question: String(v.question), answer: String(v.answer) })}
-            onRemove={(id) => removeRow("faqs", id)}
+            onAdd={async (v) => {
+              await addRow("faqs", { question: String(v["question"]), answer: String(v["answer"]) });
+            }}
+            onRemove={async (id) => {
+              await removeRow("faqs", id);
+            }}
           />
         </TabsContent>
 
@@ -232,8 +247,12 @@ function BusinessPage() {
             description="Hard constraints the receptionist must follow on every call."
             fields={[{ key: "rule", label: "Rule", placeholder: "Never give medical advice over the phone." }]}
             rows={(rules ?? []).map((r) => ({ id: r.id, primary: r.rule, secondary: `Priority ${r.priority}` }))}
-            onAdd={(v) => addRow("business_rules", { rule: String(v.rule), priority: (rules?.length ?? 0) + 1 })}
-            onRemove={(id) => removeRow("business_rules", id)}
+            onAdd={async (v) => {
+              await addRow("business_rules", { rule: String(v["rule"]), priority: (rules?.length ?? 0) + 1 });
+            }}
+            onRemove={async (id) => {
+              await removeRow("business_rules", id);
+            }}
           />
         </TabsContent>
       </Tabs>

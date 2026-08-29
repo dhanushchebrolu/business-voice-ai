@@ -16,10 +16,13 @@ import { Route as PricingRouteImport } from './routes/pricing'
 import { Route as ResetPasswordRouteImport } from './routes/reset-password'
 import { Route as AppIndexRouteImport } from './routes/app.index'
 import { Route as AppAgentRouteImport } from './routes/app.agent'
+import { Route as AppBillingRouteImport } from './routes/app.billing'
 import { Route as AppBusinessRouteImport } from './routes/app.business'
 import { Route as AppCallsRouteImport } from './routes/app.calls'
 import { Route as AppLeadsRouteImport } from './routes/app.leads'
+import { Route as AppNumbersRouteImport } from './routes/app.numbers'
 import { Route as AppOnboardingRouteImport } from './routes/app.onboarding'
+import { Route as AppSettingsRouteImport } from './routes/app.settings'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -56,6 +59,11 @@ const AppAgentRoute = AppAgentRouteImport.update({
   path: '/agent',
   getParentRoute: () => AppRoute,
 } as any)
+const AppBillingRoute = AppBillingRouteImport.update({
+  id: '/billing',
+  path: '/billing',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppBusinessRoute = AppBusinessRouteImport.update({
   id: '/business',
   path: '/business',
@@ -71,9 +79,19 @@ const AppLeadsRoute = AppLeadsRouteImport.update({
   path: '/leads',
   getParentRoute: () => AppRoute,
 } as any)
+const AppNumbersRoute = AppNumbersRouteImport.update({
+  id: '/numbers',
+  path: '/numbers',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppOnboardingRoute = AppOnboardingRouteImport.update({
   id: '/onboarding',
   path: '/onboarding',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppSettingsRoute = AppSettingsRouteImport.update({
+  id: '/settings',
+  path: '/settings',
   getParentRoute: () => AppRoute,
 } as any)
 
@@ -84,10 +102,13 @@ export interface FileRoutesByFullPath {
   '/pricing': typeof PricingRoute
   '/reset-password': typeof ResetPasswordRoute
   '/app/agent': typeof AppAgentRoute
+  '/app/billing': typeof AppBillingRoute
   '/app/business': typeof AppBusinessRoute
   '/app/calls': typeof AppCallsRoute
   '/app/leads': typeof AppLeadsRoute
+  '/app/numbers': typeof AppNumbersRoute
   '/app/onboarding': typeof AppOnboardingRoute
+  '/app/settings': typeof AppSettingsRoute
   '/app/': typeof AppIndexRoute
 }
 export interface FileRoutesByTo {
@@ -96,10 +117,13 @@ export interface FileRoutesByTo {
   '/pricing': typeof PricingRoute
   '/reset-password': typeof ResetPasswordRoute
   '/app/agent': typeof AppAgentRoute
+  '/app/billing': typeof AppBillingRoute
   '/app/business': typeof AppBusinessRoute
   '/app/calls': typeof AppCallsRoute
   '/app/leads': typeof AppLeadsRoute
+  '/app/numbers': typeof AppNumbersRoute
   '/app/onboarding': typeof AppOnboardingRoute
+  '/app/settings': typeof AppSettingsRoute
   '/app': typeof AppIndexRoute
 }
 export interface FileRoutesById {
@@ -110,10 +134,13 @@ export interface FileRoutesById {
   '/pricing': typeof PricingRoute
   '/reset-password': typeof ResetPasswordRoute
   '/app/agent': typeof AppAgentRoute
+  '/app/billing': typeof AppBillingRoute
   '/app/business': typeof AppBusinessRoute
   '/app/calls': typeof AppCallsRoute
   '/app/leads': typeof AppLeadsRoute
+  '/app/numbers': typeof AppNumbersRoute
   '/app/onboarding': typeof AppOnboardingRoute
+  '/app/settings': typeof AppSettingsRoute
   '/app/': typeof AppIndexRoute
 }
 export interface FileRouteTypes {
@@ -125,10 +152,13 @@ export interface FileRouteTypes {
     | '/pricing'
     | '/reset-password'
     | '/app/agent'
+    | '/app/billing'
     | '/app/business'
     | '/app/calls'
     | '/app/leads'
+    | '/app/numbers'
     | '/app/onboarding'
+    | '/app/settings'
     | '/app/'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -137,10 +167,13 @@ export interface FileRouteTypes {
     | '/pricing'
     | '/reset-password'
     | '/app/agent'
+    | '/app/billing'
     | '/app/business'
     | '/app/calls'
     | '/app/leads'
+    | '/app/numbers'
     | '/app/onboarding'
+    | '/app/settings'
     | '/app'
   id:
     | '__root__'
@@ -150,10 +183,13 @@ export interface FileRouteTypes {
     | '/pricing'
     | '/reset-password'
     | '/app/agent'
+    | '/app/billing'
     | '/app/business'
     | '/app/calls'
     | '/app/leads'
+    | '/app/numbers'
     | '/app/onboarding'
+    | '/app/settings'
     | '/app/'
   fileRoutesById: FileRoutesById
 }
@@ -216,6 +252,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppAgentRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/billing': {
+      id: '/app/billing'
+      path: '/billing'
+      fullPath: '/app/billing'
+      preLoaderRoute: typeof AppBillingRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/business': {
       id: '/app/business'
       path: '/business'
@@ -237,6 +280,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppLeadsRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/numbers': {
+      id: '/app/numbers'
+      path: '/numbers'
+      fullPath: '/app/numbers'
+      preLoaderRoute: typeof AppNumbersRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/onboarding': {
       id: '/app/onboarding'
       path: '/onboarding'
@@ -244,24 +294,37 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppOnboardingRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/settings': {
+      id: '/app/settings'
+      path: '/settings'
+      fullPath: '/app/settings'
+      preLoaderRoute: typeof AppSettingsRouteImport
+      parentRoute: typeof AppRoute
+    }
   }
 }
 
 interface AppRouteChildren {
   AppAgentRoute: typeof AppAgentRoute
+  AppBillingRoute: typeof AppBillingRoute
   AppBusinessRoute: typeof AppBusinessRoute
   AppCallsRoute: typeof AppCallsRoute
   AppLeadsRoute: typeof AppLeadsRoute
+  AppNumbersRoute: typeof AppNumbersRoute
   AppOnboardingRoute: typeof AppOnboardingRoute
+  AppSettingsRoute: typeof AppSettingsRoute
   AppIndexRoute: typeof AppIndexRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
   AppAgentRoute: AppAgentRoute,
+  AppBillingRoute: AppBillingRoute,
   AppBusinessRoute: AppBusinessRoute,
   AppCallsRoute: AppCallsRoute,
   AppLeadsRoute: AppLeadsRoute,
+  AppNumbersRoute: AppNumbersRoute,
   AppOnboardingRoute: AppOnboardingRoute,
+  AppSettingsRoute: AppSettingsRoute,
   AppIndexRoute: AppIndexRoute,
 }
 

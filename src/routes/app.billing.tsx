@@ -37,7 +37,7 @@ function BillingPage() {
       />
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard label="Plan" value={sub?.plan ?? "—"} hint={trialEnds ? `Trial ends ${trialEnds.toLocaleDateString()}` : undefined} />
+        <StatCard label="Plan" value={sub?.plan ?? "—"} hint={trialEnds ? `Trial ends ${trialEnds.toLocaleDateString()}` : ""} />
         <StatCard label="Calls" value={calls?.length ?? 0} />
         <StatCard label="Minutes used" value={minutes} />
         <StatCard label="Usage cost" value={`₹${cost.toFixed(2)}`} tone="accent" />

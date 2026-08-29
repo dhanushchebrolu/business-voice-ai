@@ -112,7 +112,10 @@ function AgentPage() {
       })
       .eq("id", agent.id);
     setSaving(false);
-    if (error) return toast.error("Could not save the configuration.");
+    if (error) {
+      toast.error("Could not save the configuration.");
+      return;
+    }
     await qc.invalidateQueries();
     refetchPreview();
     toast.success("Saved. Publish to apply it to live calls.");
@@ -265,7 +268,7 @@ function AgentPage() {
                   max={PACE_MAX}
                   step={0.05}
                   value={[form.speaking_pace]}
-                  onValueChange={([v]) => setForm({ ...form, speaking_pace: v })}
+                  onValueChange={(vals) => setForm({ ...form, speaking_pace: vals[0] ?? 1 })}
                 />
               </FieldRow>
               <label className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2.5">

@@ -57,7 +57,7 @@ function Overview() {
         }
       />
 
-      {trialDays !== null && ws?.subscription?.status === "trialing" ? (
+      {trialDays !== null && ws?.subscription?.status === "trial" ? (
         <div className="flex flex-col gap-2 rounded-lg border border-primary/25 bg-primary/8 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-sm">
             <span className="font-medium">{trialDays} days</span> left in your trial. Your configuration and data are kept
