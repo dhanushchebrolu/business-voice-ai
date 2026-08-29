@@ -15,6 +15,8 @@ import { Route as AuthRouteImport } from './routes/auth'
 import { Route as PricingRouteImport } from './routes/pricing'
 import { Route as ResetPasswordRouteImport } from './routes/reset-password'
 import { Route as AppIndexRouteImport } from './routes/app.index'
+import { Route as AppAgentRouteImport } from './routes/app.agent'
+import { Route as AppBusinessRouteImport } from './routes/app.business'
 import { Route as AppCallsRouteImport } from './routes/app.calls'
 import { Route as AppLeadsRouteImport } from './routes/app.leads'
 import { Route as AppOnboardingRouteImport } from './routes/app.onboarding'
@@ -49,6 +51,16 @@ const AppIndexRoute = AppIndexRouteImport.update({
   path: '/',
   getParentRoute: () => AppRoute,
 } as any)
+const AppAgentRoute = AppAgentRouteImport.update({
+  id: '/agent',
+  path: '/agent',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppBusinessRoute = AppBusinessRouteImport.update({
+  id: '/business',
+  path: '/business',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppCallsRoute = AppCallsRouteImport.update({
   id: '/calls',
   path: '/calls',
@@ -71,6 +83,8 @@ export interface FileRoutesByFullPath {
   '/auth': typeof AuthRoute
   '/pricing': typeof PricingRoute
   '/reset-password': typeof ResetPasswordRoute
+  '/app/agent': typeof AppAgentRoute
+  '/app/business': typeof AppBusinessRoute
   '/app/calls': typeof AppCallsRoute
   '/app/leads': typeof AppLeadsRoute
   '/app/onboarding': typeof AppOnboardingRoute
@@ -81,6 +95,8 @@ export interface FileRoutesByTo {
   '/auth': typeof AuthRoute
   '/pricing': typeof PricingRoute
   '/reset-password': typeof ResetPasswordRoute
+  '/app/agent': typeof AppAgentRoute
+  '/app/business': typeof AppBusinessRoute
   '/app/calls': typeof AppCallsRoute
   '/app/leads': typeof AppLeadsRoute
   '/app/onboarding': typeof AppOnboardingRoute
@@ -93,6 +109,8 @@ export interface FileRoutesById {
   '/auth': typeof AuthRoute
   '/pricing': typeof PricingRoute
   '/reset-password': typeof ResetPasswordRoute
+  '/app/agent': typeof AppAgentRoute
+  '/app/business': typeof AppBusinessRoute
   '/app/calls': typeof AppCallsRoute
   '/app/leads': typeof AppLeadsRoute
   '/app/onboarding': typeof AppOnboardingRoute
@@ -106,6 +124,8 @@ export interface FileRouteTypes {
     | '/auth'
     | '/pricing'
     | '/reset-password'
+    | '/app/agent'
+    | '/app/business'
     | '/app/calls'
     | '/app/leads'
     | '/app/onboarding'
@@ -116,6 +136,8 @@ export interface FileRouteTypes {
     | '/auth'
     | '/pricing'
     | '/reset-password'
+    | '/app/agent'
+    | '/app/business'
     | '/app/calls'
     | '/app/leads'
     | '/app/onboarding'
@@ -127,6 +149,8 @@ export interface FileRouteTypes {
     | '/auth'
     | '/pricing'
     | '/reset-password'
+    | '/app/agent'
+    | '/app/business'
     | '/app/calls'
     | '/app/leads'
     | '/app/onboarding'
@@ -185,6 +209,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppIndexRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/agent': {
+      id: '/app/agent'
+      path: '/agent'
+      fullPath: '/app/agent'
+      preLoaderRoute: typeof AppAgentRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/app/business': {
+      id: '/app/business'
+      path: '/business'
+      fullPath: '/app/business'
+      preLoaderRoute: typeof AppBusinessRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/calls': {
       id: '/app/calls'
       path: '/calls'
@@ -210,6 +248,8 @@ declare module '@tanstack/react-router' {
 }
 
 interface AppRouteChildren {
+  AppAgentRoute: typeof AppAgentRoute
+  AppBusinessRoute: typeof AppBusinessRoute
   AppCallsRoute: typeof AppCallsRoute
   AppLeadsRoute: typeof AppLeadsRoute
   AppOnboardingRoute: typeof AppOnboardingRoute
@@ -217,6 +257,8 @@ interface AppRouteChildren {
 }
 
 const AppRouteChildren: AppRouteChildren = {
+  AppAgentRoute: AppAgentRoute,
+  AppBusinessRoute: AppBusinessRoute,
   AppCallsRoute: AppCallsRoute,
   AppLeadsRoute: AppLeadsRoute,
   AppOnboardingRoute: AppOnboardingRoute,
