@@ -72,7 +72,7 @@ function Pricing() {
         <StatusPill tone="accent">Plans</StatusPill>
         <h1 className="mt-5 text-3xl font-semibold tracking-tight sm:text-4xl">Pay for a receptionist, not a platform</h1>
         <p className="mt-3 max-w-xl text-sm text-muted-foreground">
-          Every plan starts with a 14-day trial. Call minutes beyond your plan are billed from your wallet at your
+          A one-time setup fee activates your workspace. Call minutes beyond your plan are billed from your wallet at your
           workspace rate.
         </p>
 
@@ -101,7 +101,7 @@ function Pricing() {
               </p>
               <Link to="/auth" search={{ mode: "signup", plan: plan.id }} className="mt-5 block">
                 <Button className="w-full" variant={plan.highlighted ? "default" : "secondary"}>
-                  Start 14-day trial
+                  Get started
                 </Button>
               </Link>
               <ul className="mt-6 space-y-2.5">
@@ -117,7 +117,7 @@ function Pricing() {
         </div>
 
         <p className="mt-10 rounded-lg border border-border bg-surface/50 p-4 text-xs text-muted-foreground">
-          Card payments are not switched on for this workspace yet. Trials start immediately and the billing screen will
+          Payments are processed securely by our payment provider. Your dashboard unlocks after the setup payment is confirmed, and the billing screen will
           show a clear “payment provider not connected” state until Razorpay is configured.
         </p>
       </main>

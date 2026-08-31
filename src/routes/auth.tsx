@@ -128,7 +128,7 @@ function AuthPage() {
             answers in eleven Indian languages.
           </p>
         </div>
-        <p className="relative text-xs text-muted-foreground">14-day trial · No card required to start</p>
+        <p className="relative text-xs text-muted-foreground">Secure sign-in · Your workspace is private to your business</p>
       </div>
 
       <div className="flex items-center justify-center px-5 py-12">
@@ -144,7 +144,7 @@ function AuthPage() {
           </h1>
           <p className="mt-1.5 text-sm text-muted-foreground">
             {mode === "signup"
-              ? "Start your 14-day trial. Your workspace is private to your business."
+              ? "Create your workspace. Activation takes a one-time setup payment."
               : mode === "signin"
                 ? "Welcome back. Pick up where your receptionist left off."
                 : "We'll email you a link to set a new password."}
