@@ -248,10 +248,10 @@ export const invoicesQuery = (orgId: string | undefined) =>
     },
   });
 
-export const ACCOUNT_STATUS_LABEL: Record<AccountStatus, { label: string; tone: "live" | "ready" | "idle" | "accent" | "warn" }> = {
-  payment_required: { label: "Payment required", tone: "warn" },
+export const ACCOUNT_STATUS_LABEL: Record<AccountStatus, { label: string; tone: "live" | "ready" | "idle" | "accent" | "error" }> = {
+  payment_required: { label: "Payment required", tone: "error" },
   setup_in_progress: { label: "Setup in progress", tone: "ready" },
   active: { label: "Active", tone: "live" },
-  suspended: { label: "Suspended", tone: "warn" },
+  suspended: { label: "Suspended", tone: "error" },
   cancelled: { label: "Cancelled", tone: "idle" },
 };
