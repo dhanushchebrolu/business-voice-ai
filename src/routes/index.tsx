@@ -67,7 +67,7 @@ function Landing() {
               </Button>
             </Link>
             <Link to="/auth" search={{ mode: "signup" }}>
-              <Button size="sm">Start free trial</Button>
+              <Button size="sm">Get started</Button>
             </Link>
           </nav>
         </div>

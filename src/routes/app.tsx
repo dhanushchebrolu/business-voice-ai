@@ -5,6 +5,7 @@ import { Loader2 } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { workspaceQuery } from "@/lib/workspace";
 import { Shell } from "@/components/app/Shell";
+import { AccountLocked } from "@/components/app/AccountLocked";
 
 export const Route = createFileRoute("/app")({
   head: () => ({
@@ -23,15 +24,18 @@ function AppLayout() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const { data: ws, isLoading } = useQuery(workspaceQuery(user?.id));
 
+  const accountStatus = ws?.organization?.account_status ?? "payment_required";
+  const unlocked = accountStatus === "active" || accountStatus === "setup_in_progress";
+
   useEffect(() => {
     if (!loading && !session) navigate({ to: "/auth" });
   }, [loading, session, navigate]);
 
   useEffect(() => {
-    if (!isLoading && ws && !ws.business && pathname !== "/app/onboarding") {
+    if (!isLoading && ws && unlocked && !ws.business && pathname !== "/app/onboarding") {
       navigate({ to: "/app/onboarding" });
     }
-  }, [isLoading, ws, pathname, navigate]);
+  }, [isLoading, ws, unlocked, pathname, navigate]);
 
   if (loading || (session && isLoading)) {
     return (
@@ -42,6 +46,10 @@ function AppLayout() {
   }
 
   if (!session) return null;
+
+  // Payment gate: the dashboard stays locked until the payment webhook confirms setup.
+  if (ws?.organization && !unlocked) return <AccountLocked status={accountStatus} />;
+
   if (pathname === "/app/onboarding") return <Outlet />;
 
   return (
@@ -50,3 +58,4 @@ function AppLayout() {
     </Shell>
   );
 }
+

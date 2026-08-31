@@ -6,6 +6,7 @@ import { workspaceQuery, callsQuery, leadsQuery, numbersQuery, agentStatusLabel 
 import { PageHeader, StatCard, SectionCard, EmptyState, StatusPill, LoadingState } from "@/components/app/primitives";
 import { getBusinessType } from "@/lib/business-types";
 import { Button } from "@/components/ui/button";
+import { AccountStatusPanel } from "@/components/app/AccountStatusPanel";
 
 export const Route = createFileRoute("/app/")({
   head: () => ({
@@ -32,8 +33,6 @@ function Overview() {
   const activeNumber = numbers?.find((n) => n.status === "active");
   const status = agentStatusLabel(ws?.agent ?? null, Boolean(activeNumber));
   const totalMinutes = Math.round((calls ?? []).reduce((sum, c) => sum + (c.duration_seconds ?? 0), 0) / 60);
-  const trialEnds = ws?.subscription?.trial_ends_at ? new Date(ws.subscription.trial_ends_at) : null;
-  const trialDays = trialEnds ? Math.max(0, Math.ceil((trialEnds.getTime() - Date.now()) / 86400000)) : null;
 
   const setupSteps = [
     { done: Boolean(ws?.business?.description), label: "Describe your business", to: "/app/business" },
@@ -57,19 +56,8 @@ function Overview() {
         }
       />
 
-      {trialDays !== null && ws?.subscription?.status === "trial" ? (
-        <div className="flex flex-col gap-2 rounded-lg border border-primary/25 bg-primary/8 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-          <p className="text-sm">
-            <span className="font-medium">{trialDays} days</span> left in your trial. Your configuration and data are kept
-            when you upgrade.
-          </p>
-          <Link to="/app/billing">
-            <Button size="sm" variant="secondary">
-              View plans
-            </Button>
-          </Link>
-        </div>
-      ) : null}
+      <AccountStatusPanel />
+
 
       {pending.length ? (
         <SectionCard title="Finish your setup" description="Three steps stand between you and answered calls.">

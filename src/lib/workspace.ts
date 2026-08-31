@@ -212,3 +212,46 @@ export function agentStatusLabel(agent: AgentConfig | null, hasNumber: boolean):
   if (hasNumber && agent.status === "live") return { label: "Live", tone: "live" };
   return { label: "Ready — no number", tone: "ready" };
 }
+
+export type PaymentRow = Database["public"]["Tables"]["payments"]["Row"];
+export type PaymentOrderRow = Database["public"]["Tables"]["payment_orders"]["Row"];
+export type InvoiceRow = Database["public"]["Tables"]["invoices"]["Row"];
+export type AccountStatus = Database["public"]["Enums"]["account_status"];
+
+export const paymentsQuery = (orgId: string | undefined) =>
+  queryOptions({
+    queryKey: ["payments", orgId],
+    enabled: Boolean(orgId),
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("payments")
+        .select("*")
+        .eq("organization_id", orgId!)
+        .order("created_at", { ascending: false });
+      if (error) throw error;
+      return data;
+    },
+  });
+
+export const invoicesQuery = (orgId: string | undefined) =>
+  queryOptions({
+    queryKey: ["invoices", orgId],
+    enabled: Boolean(orgId),
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("invoices")
+        .select("*")
+        .eq("organization_id", orgId!)
+        .order("issued_at", { ascending: false });
+      if (error) throw error;
+      return data;
+    },
+  });
+
+export const ACCOUNT_STATUS_LABEL: Record<AccountStatus, { label: string; tone: "live" | "ready" | "idle" | "accent" | "error" }> = {
+  payment_required: { label: "Payment required", tone: "error" },
+  setup_in_progress: { label: "Setup in progress", tone: "ready" },
+  active: { label: "Active", tone: "live" },
+  suspended: { label: "Suspended", tone: "error" },
+  cancelled: { label: "Cancelled", tone: "idle" },
+};
