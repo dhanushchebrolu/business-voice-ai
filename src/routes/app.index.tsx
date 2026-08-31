@@ -6,6 +6,7 @@ import { workspaceQuery, callsQuery, leadsQuery, numbersQuery, agentStatusLabel 
 import { PageHeader, StatCard, SectionCard, EmptyState, StatusPill, LoadingState } from "@/components/app/primitives";
 import { getBusinessType } from "@/lib/business-types";
 import { Button } from "@/components/ui/button";
+import { AccountStatusPanel } from "@/components/app/AccountStatusPanel";
 
 export const Route = createFileRoute("/app/")({
   head: () => ({
@@ -32,8 +33,6 @@ function Overview() {
   const activeNumber = numbers?.find((n) => n.status === "active");
   const status = agentStatusLabel(ws?.agent ?? null, Boolean(activeNumber));
   const totalMinutes = Math.round((calls ?? []).reduce((sum, c) => sum + (c.duration_seconds ?? 0), 0) / 60);
-  const trialEnds = ws?.subscription?.trial_ends_at ? new Date(ws.subscription.trial_ends_at) : null;
-  const trialDays = trialEnds ? Math.max(0, Math.ceil((trialEnds.getTime() - Date.now()) / 86400000)) : null;
 
   const setupSteps = [
     { done: Boolean(ws?.business?.description), label: "Describe your business", to: "/app/business" },
