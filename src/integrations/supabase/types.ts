@@ -479,6 +479,60 @@ export type Database = {
           },
         ]
       }
+      invoices: {
+        Row: {
+          amount: number
+          currency: string
+          id: string
+          issued_at: string
+          line_items: Json
+          number: string
+          organization_id: string
+          paid_at: string | null
+          payment_id: string | null
+          status: string
+        }
+        Insert: {
+          amount: number
+          currency?: string
+          id?: string
+          issued_at?: string
+          line_items?: Json
+          number: string
+          organization_id: string
+          paid_at?: string | null
+          payment_id?: string | null
+          status?: string
+        }
+        Update: {
+          amount?: number
+          currency?: string
+          id?: string
+          issued_at?: string
+          line_items?: Json
+          number?: string
+          organization_id?: string
+          paid_at?: string | null
+          payment_id?: string | null
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "invoices_organization_id_fkey"
+            columns: ["organization_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "invoices_payment_id_fkey"
+            columns: ["payment_id"]
+            isOneToOne: false
+            referencedRelation: "payments"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       knowledge_documents: {
         Row: {
           business_id: string
@@ -687,42 +741,167 @@ export type Database = {
       }
       organizations: {
         Row: {
+          account_status: Database["public"]["Enums"]["account_status"]
           country: string | null
           created_at: string
           currency: string
           id: string
           name: string
+          next_billing_at: string | null
           onboarding_completed: boolean
           owner_id: string
+          setup_paid_at: string | null
           slug: string | null
           timezone: string
           updated_at: string
         }
         Insert: {
+          account_status?: Database["public"]["Enums"]["account_status"]
           country?: string | null
           created_at?: string
           currency?: string
           id?: string
           name: string
+          next_billing_at?: string | null
           onboarding_completed?: boolean
           owner_id: string
+          setup_paid_at?: string | null
           slug?: string | null
           timezone?: string
           updated_at?: string
         }
         Update: {
+          account_status?: Database["public"]["Enums"]["account_status"]
           country?: string | null
           created_at?: string
           currency?: string
           id?: string
           name?: string
+          next_billing_at?: string | null
           onboarding_completed?: boolean
           owner_id?: string
+          setup_paid_at?: string | null
           slug?: string | null
           timezone?: string
           updated_at?: string
         }
         Relationships: []
+      }
+      payment_orders: {
+        Row: {
+          amount: number
+          created_at: string
+          created_by: string | null
+          currency: string
+          id: string
+          notes: Json
+          organization_id: string
+          provider: string
+          provider_order_id: string | null
+          purpose: string
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          amount: number
+          created_at?: string
+          created_by?: string | null
+          currency?: string
+          id?: string
+          notes?: Json
+          organization_id: string
+          provider?: string
+          provider_order_id?: string | null
+          purpose: string
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          amount?: number
+          created_at?: string
+          created_by?: string | null
+          currency?: string
+          id?: string
+          notes?: Json
+          organization_id?: string
+          provider?: string
+          provider_order_id?: string | null
+          purpose?: string
+          status?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "payment_orders_organization_id_fkey"
+            columns: ["organization_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      payments: {
+        Row: {
+          amount: number
+          captured_at: string | null
+          created_at: string
+          currency: string
+          id: string
+          method: string | null
+          order_id: string | null
+          organization_id: string
+          provider: string
+          provider_payment_id: string | null
+          provider_subscription_id: string | null
+          purpose: string
+          status: string
+        }
+        Insert: {
+          amount: number
+          captured_at?: string | null
+          created_at?: string
+          currency?: string
+          id?: string
+          method?: string | null
+          order_id?: string | null
+          organization_id: string
+          provider?: string
+          provider_payment_id?: string | null
+          provider_subscription_id?: string | null
+          purpose: string
+          status: string
+        }
+        Update: {
+          amount?: number
+          captured_at?: string | null
+          created_at?: string
+          currency?: string
+          id?: string
+          method?: string | null
+          order_id?: string | null
+          organization_id?: string
+          provider?: string
+          provider_payment_id?: string | null
+          provider_subscription_id?: string | null
+          purpose?: string
+          status?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "payments_order_id_fkey"
+            columns: ["order_id"]
+            isOneToOne: false
+            referencedRelation: "payment_orders"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "payments_organization_id_fkey"
+            columns: ["organization_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       phone_numbers: {
         Row: {
@@ -793,6 +972,45 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      platform_admins: {
+        Row: {
+          created_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      platform_settings: {
+        Row: {
+          description: string | null
+          is_public: boolean
+          key: string
+          updated_at: string
+          value: Json
+        }
+        Insert: {
+          description?: string | null
+          is_public?: boolean
+          key: string
+          updated_at?: string
+          value: Json
+        }
+        Update: {
+          description?: string | null
+          is_public?: boolean
+          key?: string
+          updated_at?: string
+          value?: Json
+        }
+        Relationships: []
       }
       profiles: {
         Row: {
@@ -1041,6 +1259,39 @@ export type Database = {
           },
         ]
       }
+      webhook_events: {
+        Row: {
+          created_at: string
+          error: string | null
+          event_id: string
+          event_type: string | null
+          id: string
+          payload: Json
+          processed_at: string | null
+          provider: string
+        }
+        Insert: {
+          created_at?: string
+          error?: string | null
+          event_id: string
+          event_type?: string | null
+          id?: string
+          payload: Json
+          processed_at?: string | null
+          provider: string
+        }
+        Update: {
+          created_at?: string
+          error?: string | null
+          event_id?: string
+          event_type?: string | null
+          id?: string
+          payload?: Json
+          processed_at?: string | null
+          provider?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
@@ -1054,8 +1305,15 @@ export type Database = {
         Returns: boolean
       }
       is_org_member: { Args: { _org: string }; Returns: boolean }
+      is_platform_admin: { Args: never; Returns: boolean }
     }
     Enums: {
+      account_status:
+        | "payment_required"
+        | "setup_in_progress"
+        | "active"
+        | "suspended"
+        | "cancelled"
       member_role: "owner" | "admin" | "manager" | "staff" | "viewer"
       subscription_status:
         | "trial"
@@ -1191,6 +1449,13 @@ export type CompositeTypes<
 export const Constants = {
   public: {
     Enums: {
+      account_status: [
+        "payment_required",
+        "setup_in_progress",
+        "active",
+        "suspended",
+        "cancelled",
+      ],
       member_role: ["owner", "admin", "manager", "staff", "viewer"],
       subscription_status: [
         "trial",
