@@ -42,7 +42,7 @@ export const Route = createFileRoute("/api/public/webhooks/razorpay")({
           provider: "razorpay",
           event_id: eventId,
           event_type: event.event ?? null,
-          payload: event as unknown as Record<string, unknown>,
+          payload: JSON.parse(raw),
         });
         if (dedupeError) {
           if (dedupeError.code === "23505") return new Response("ok (duplicate)");
