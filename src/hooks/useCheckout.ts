@@ -35,7 +35,7 @@ function loadCheckoutScript(): Promise<boolean> {
  * Opens the hosted payment sheet for a platform charge. The account is only
  * unlocked once the provider webhook confirms the payment server-side.
  */
-export function useCheckout(context?: { email?: string | null; name?: string | null }) {
+export function useCheckout(context?: { email?: string | null | undefined; name?: string | null | undefined }) {
   const startOrder = useServerFn(createCheckoutOrder);
   const queryClient = useQueryClient();
   const [pending, setPending] = useState<CheckoutPurpose | null>(null);
