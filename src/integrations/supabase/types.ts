@@ -155,6 +155,59 @@ export type Database = {
           },
         ]
       }
+      audit_logs: {
+        Row: {
+          action: string
+          admin_email: string | null
+          admin_user_id: string | null
+          created_at: string
+          entity_id: string | null
+          entity_type: string
+          id: string
+          ip_address: string | null
+          new_value: Json | null
+          old_value: Json | null
+          organization_id: string | null
+          reason: string | null
+        }
+        Insert: {
+          action: string
+          admin_email?: string | null
+          admin_user_id?: string | null
+          created_at?: string
+          entity_id?: string | null
+          entity_type: string
+          id?: string
+          ip_address?: string | null
+          new_value?: Json | null
+          old_value?: Json | null
+          organization_id?: string | null
+          reason?: string | null
+        }
+        Update: {
+          action?: string
+          admin_email?: string | null
+          admin_user_id?: string | null
+          created_at?: string
+          entity_id?: string | null
+          entity_type?: string
+          id?: string
+          ip_address?: string | null
+          new_value?: Json | null
+          old_value?: Json | null
+          organization_id?: string | null
+          reason?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "audit_logs_organization_id_fkey"
+            columns: ["organization_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       business_hours: {
         Row: {
           business_id: string
@@ -704,6 +757,47 @@ export type Database = {
           },
         ]
       }
+      organization_feature_locks: {
+        Row: {
+          created_at: string
+          feature: string
+          id: string
+          locked: boolean
+          note: string | null
+          organization_id: string
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          created_at?: string
+          feature: string
+          id?: string
+          locked?: boolean
+          note?: string | null
+          organization_id: string
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          created_at?: string
+          feature?: string
+          id?: string
+          locked?: boolean
+          note?: string | null
+          organization_id?: string
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "organization_feature_locks_organization_id_fkey"
+            columns: ["organization_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       organization_members: {
         Row: {
           created_at: string
@@ -976,14 +1070,35 @@ export type Database = {
       platform_admins: {
         Row: {
           created_at: string
+          email: string | null
+          id: string
+          is_active: boolean
+          last_login_at: string | null
+          name: string | null
+          role: Database["public"]["Enums"]["platform_role"]
+          updated_at: string
           user_id: string
         }
         Insert: {
           created_at?: string
+          email?: string | null
+          id?: string
+          is_active?: boolean
+          last_login_at?: string | null
+          name?: string | null
+          role?: Database["public"]["Enums"]["platform_role"]
+          updated_at?: string
           user_id: string
         }
         Update: {
           created_at?: string
+          email?: string | null
+          id?: string
+          is_active?: boolean
+          last_login_at?: string | null
+          name?: string | null
+          role?: Database["public"]["Enums"]["platform_role"]
+          updated_at?: string
           user_id?: string
         }
         Relationships: []
@@ -1259,6 +1374,50 @@ export type Database = {
           },
         ]
       }
+      wallet_transactions: {
+        Row: {
+          amount: number
+          created_at: string
+          created_by: string | null
+          currency: string
+          description: string | null
+          id: string
+          kind: string
+          organization_id: string
+          reference: string | null
+        }
+        Insert: {
+          amount: number
+          created_at?: string
+          created_by?: string | null
+          currency?: string
+          description?: string | null
+          id?: string
+          kind: string
+          organization_id: string
+          reference?: string | null
+        }
+        Update: {
+          amount?: number
+          created_at?: string
+          created_by?: string | null
+          currency?: string
+          description?: string | null
+          id?: string
+          kind?: string
+          organization_id?: string
+          reference?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "wallet_transactions_organization_id_fkey"
+            columns: ["organization_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       webhook_events: {
         Row: {
           created_at: string
@@ -1297,6 +1456,10 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      feature_locked: {
+        Args: { _feature: string; _org: string }
+        Returns: boolean
+      }
       has_org_role: {
         Args: {
           _org: string
@@ -1306,6 +1469,11 @@ export type Database = {
       }
       is_org_member: { Args: { _org: string }; Returns: boolean }
       is_platform_admin: { Args: never; Returns: boolean }
+      platform_admin_role: {
+        Args: never
+        Returns: Database["public"]["Enums"]["platform_role"]
+      }
+      wallet_balance: { Args: { _org: string }; Returns: number }
     }
     Enums: {
       account_status:
@@ -1315,6 +1483,12 @@ export type Database = {
         | "suspended"
         | "cancelled"
       member_role: "owner" | "admin" | "manager" | "staff" | "viewer"
+      platform_role:
+        | "super_admin"
+        | "admin"
+        | "support"
+        | "finance"
+        | "operations"
       subscription_status:
         | "trial"
         | "active"
@@ -1457,6 +1631,13 @@ export const Constants = {
         "cancelled",
       ],
       member_role: ["owner", "admin", "manager", "staff", "viewer"],
+      platform_role: [
+        "super_admin",
+        "admin",
+        "support",
+        "finance",
+        "operations",
+      ],
       subscription_status: [
         "trial",
         "active",
