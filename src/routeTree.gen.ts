@@ -27,6 +27,7 @@ import { Route as AppNumbersRouteImport } from './routes/app.numbers'
 import { Route as AppOnboardingRouteImport } from './routes/app.onboarding'
 import { Route as AppSettingsRouteImport } from './routes/app.settings'
 import { Route as AdminCustomersIndexRouteImport } from './routes/admin.customers.index'
+import { Route as AdminCustomersOrgIdRouteImport } from './routes/admin.customers.$orgId'
 import { Route as ApiPublicWebhooksRazorpayRouteImport } from './routes/api/public/webhooks/razorpay'
 
 const IndexRoute = IndexRouteImport.update({
@@ -119,6 +120,11 @@ const AdminCustomersIndexRoute = AdminCustomersIndexRouteImport.update({
   path: '/',
   getParentRoute: () => AdminCustomersRoute,
 } as any)
+const AdminCustomersOrgIdRoute = AdminCustomersOrgIdRouteImport.update({
+  id: '/$orgId',
+  path: '/$orgId',
+  getParentRoute: () => AdminCustomersRoute,
+} as any)
 const ApiPublicWebhooksRazorpayRoute =
   ApiPublicWebhooksRazorpayRouteImport.update({
     id: '/api/public/webhooks/razorpay',
@@ -144,6 +150,7 @@ export interface FileRoutesByFullPath {
   '/app/settings': typeof AppSettingsRoute
   '/admin/': typeof AdminIndexRoute
   '/app/': typeof AppIndexRoute
+  '/admin/customers/$orgId': typeof AdminCustomersOrgIdRoute
   '/admin/customers/': typeof AdminCustomersIndexRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
 }
@@ -162,6 +169,7 @@ export interface FileRoutesByTo {
   '/app/settings': typeof AppSettingsRoute
   '/admin': typeof AdminIndexRoute
   '/app': typeof AppIndexRoute
+  '/admin/customers/$orgId': typeof AdminCustomersOrgIdRoute
   '/admin/customers': typeof AdminCustomersIndexRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
 }
@@ -184,6 +192,7 @@ export interface FileRoutesById {
   '/app/settings': typeof AppSettingsRoute
   '/admin/': typeof AdminIndexRoute
   '/app/': typeof AppIndexRoute
+  '/admin/customers/$orgId': typeof AdminCustomersOrgIdRoute
   '/admin/customers/': typeof AdminCustomersIndexRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
 }
@@ -207,6 +216,7 @@ export interface FileRouteTypes {
     | '/app/settings'
     | '/admin/'
     | '/app/'
+    | '/admin/customers/$orgId'
     | '/admin/customers/'
     | '/api/public/webhooks/razorpay'
   fileRoutesByTo: FileRoutesByTo
@@ -225,6 +235,7 @@ export interface FileRouteTypes {
     | '/app/settings'
     | '/admin'
     | '/app'
+    | '/admin/customers/$orgId'
     | '/admin/customers'
     | '/api/public/webhooks/razorpay'
   id:
@@ -246,6 +257,7 @@ export interface FileRouteTypes {
     | '/app/settings'
     | '/admin/'
     | '/app/'
+    | '/admin/customers/$orgId'
     | '/admin/customers/'
     | '/api/public/webhooks/razorpay'
   fileRoutesById: FileRoutesById
@@ -388,6 +400,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AdminCustomersIndexRouteImport
       parentRoute: typeof AdminCustomersRoute
     }
+    '/admin/customers/$orgId': {
+      id: '/admin/customers/$orgId'
+      path: '/$orgId'
+      fullPath: '/admin/customers/$orgId'
+      preLoaderRoute: typeof AdminCustomersOrgIdRouteImport
+      parentRoute: typeof AdminCustomersRoute
+    }
     '/api/public/webhooks/razorpay': {
       id: '/api/public/webhooks/razorpay'
       path: '/api/public/webhooks/razorpay'
@@ -399,10 +418,12 @@ declare module '@tanstack/react-router' {
 }
 
 interface AdminCustomersRouteChildren {
+  AdminCustomersOrgIdRoute: typeof AdminCustomersOrgIdRoute
   AdminCustomersIndexRoute: typeof AdminCustomersIndexRoute
 }
 
 const AdminCustomersRouteChildren: AdminCustomersRouteChildren = {
+  AdminCustomersOrgIdRoute: AdminCustomersOrgIdRoute,
   AdminCustomersIndexRoute: AdminCustomersIndexRoute,
 }
 
