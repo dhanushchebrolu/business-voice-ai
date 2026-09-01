@@ -24,8 +24,13 @@ function AppLayout() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const { data: ws, isLoading } = useQuery(workspaceQuery(user?.id));
 
+  const { data: locks } = useQuery(featureLocksQuery(ws?.organization?.id));
+
   const accountStatus = ws?.organization?.account_status ?? "payment_required";
-  const unlocked = accountStatus === "active" || accountStatus === "setup_in_progress";
+  // The database resolves the lock (global enforcement switch + per-customer
+  // override + platform default); the browser only reflects that decision.
+  const dashboardLocked = locks?.["dashboard"] !== false;
+  const unlocked = !dashboardLocked || accountStatus === "active" || accountStatus === "setup_in_progress";
 
   useEffect(() => {
     if (!loading && !session) navigate({ to: "/auth" });
