@@ -16,14 +16,14 @@ import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/useAuth";
 import { StatusPill } from "@/components/app/primitives";
 
-const NAV = [
+const NAV: { to: "/admin" | "/admin/customers" | "/admin/pricing" | "/admin/settings" | "/admin/team" | "/admin/audit"; label: string; icon: typeof Users; exact?: boolean }[] = [
   { to: "/admin", label: "Overview", icon: LayoutDashboard, exact: true },
   { to: "/admin/customers", label: "Customers", icon: Users },
   { to: "/admin/pricing", label: "Pricing", icon: IndianRupee },
   { to: "/admin/settings", label: "Platform settings", icon: SlidersHorizontal },
   { to: "/admin/team", label: "Admin team", icon: ShieldCheck },
   { to: "/admin/audit", label: "Audit logs", icon: ScrollText },
-] as const;
+];
 
 export function AdminShell({
   children,
