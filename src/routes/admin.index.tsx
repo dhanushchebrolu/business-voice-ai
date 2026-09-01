@@ -69,7 +69,7 @@ function AdminOverview() {
       <SectionCard
         title="Payment enforcement"
         description="Global switch. When off, every customer uses the product without paying — enforced server-side, no redeploy."
-        actions={<StatusPill tone={enforcement ? "live" : "warning" as never}>{enforcement ? "Enabled" : "Disabled"}</StatusPill>}
+        actions={<StatusPill tone={enforcement ? "live" : "idle"}>{enforcement ? "Enabled" : "Disabled"}</StatusPill>}
       >
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <p className="max-w-2xl text-sm text-muted-foreground">
