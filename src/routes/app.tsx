@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { workspaceQuery } from "@/lib/workspace";
+import { featureLocksQuery } from "@/lib/access";
 import { Shell } from "@/components/app/Shell";
 import { AccountLocked } from "@/components/app/AccountLocked";
 
