@@ -68,7 +68,7 @@ export function CreateClientDialog() {
         data: {
           fullName: form.fullName,
           businessName: form.businessName,
-          businessType: form.businessType || undefined,
+          businessType: form.businessType,
           email: form.email,
           phone: form.phone,
           country: form.country,
@@ -136,7 +136,7 @@ export function CreateClientDialog() {
             >
               <option value="">Not set</option>
               {BUSINESS_TYPES.map((t) => (
-                <option key={t.key} value={t.key}>
+                <option key={t.id} value={t.id}>
                   {t.label}
                 </option>
               ))}
