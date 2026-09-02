@@ -13,6 +13,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ReasonDialog } from "@/components/admin/ReasonDialog";
+import { ClientLifecyclePanel } from "@/components/admin/ClientLifecyclePanel";
+import { ClientAccessPanel } from "@/components/admin/ClientAccessPanel";
+import { CrmPanel } from "@/components/admin/CrmPanel";
+import { PricingOverridePanel } from "@/components/admin/PricingOverridePanel";
+import type { LifecycleStatus } from "@/lib/lifecycle";
 import type { Database } from "@/integrations/supabase/types";
 
 type Status = Database["public"]["Enums"]["account_status"];
@@ -63,6 +68,16 @@ function CustomerDetail() {
         description={`${data.business?.business_type?.replace(/_/g, " ") ?? "No business configured"} · ${org.id}`}
         actions={<StatusPill tone={meta?.tone ?? "idle"}>{meta?.label ?? org.account_status}</StatusPill>}
       />
+
+      <ClientLifecyclePanel
+        orgId={org.id}
+        clientId={(org as { client_id?: string }).client_id ?? org.id.slice(0, 8)}
+        name={org.name}
+        current={((org as { lifecycle_status?: string }).lifecycle_status ?? "lead") as LifecycleStatus}
+        onChanged={invalidate}
+      />
+
+      <ClientAccessPanel orgId={org.id} defaultEmail={(org as { contact_email?: string | null }).contact_email ?? null} />
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard label="Wallet balance" value={formatMoney(data.walletBalance)} tone="accent" />
@@ -137,6 +152,8 @@ function CustomerDetail() {
           <TabsTrigger value="invoices">Invoices</TabsTrigger>
           <TabsTrigger value="calls">Calls</TabsTrigger>
           <TabsTrigger value="team">Team</TabsTrigger>
+          <TabsTrigger value="crm">CRM</TabsTrigger>
+          <TabsTrigger value="pricing">Pricing</TabsTrigger>
           <TabsTrigger value="audit">Audit</TabsTrigger>
         </TabsList>
 
@@ -242,6 +259,19 @@ function CustomerDetail() {
               ))}
             </ul>
           </SectionCard>
+        </TabsContent>
+
+        <TabsContent value="crm" className="mt-4">
+          <CrmPanel
+            orgId={org.id}
+            stage={(org as { crm_stage?: string }).crm_stage ?? "new"}
+            followUpAt={(org as { follow_up_at?: string | null }).follow_up_at ?? null}
+            onChanged={invalidate}
+          />
+        </TabsContent>
+
+        <TabsContent value="pricing" className="mt-4">
+          <PricingOverridePanel orgId={org.id} />
         </TabsContent>
 
         <TabsContent value="audit" className="mt-4">

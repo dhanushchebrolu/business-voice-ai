@@ -14,6 +14,56 @@ export type Database = {
   }
   public: {
     Tables: {
+      admin_support_sessions: {
+        Row: {
+          admin_email: string | null
+          admin_user_id: string
+          ended_at: string | null
+          expires_at: string
+          id: string
+          ip_address: string | null
+          organization_id: string
+          reason: string | null
+          started_at: string
+          token_hash: string
+          user_agent: string | null
+        }
+        Insert: {
+          admin_email?: string | null
+          admin_user_id: string
+          ended_at?: string | null
+          expires_at: string
+          id?: string
+          ip_address?: string | null
+          organization_id: string
+          reason?: string | null
+          started_at?: string
+          token_hash: string
+          user_agent?: string | null
+        }
+        Update: {
+          admin_email?: string | null
+          admin_user_id?: string
+          ended_at?: string | null
+          expires_at?: string
+          id?: string
+          ip_address?: string | null
+          organization_id?: string
+          reason?: string | null
+          started_at?: string
+          token_hash?: string
+          user_agent?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "admin_support_sessions_organization_id_fkey"
+            columns: ["organization_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       agent_configs: {
         Row: {
           active_version: number
@@ -478,6 +528,85 @@ export type Database = {
           },
         ]
       }
+      crm_notes: {
+        Row: {
+          admin_email: string | null
+          admin_user_id: string | null
+          body: string
+          created_at: string
+          follow_up_at: string | null
+          id: string
+          organization_id: string
+        }
+        Insert: {
+          admin_email?: string | null
+          admin_user_id?: string | null
+          body: string
+          created_at?: string
+          follow_up_at?: string | null
+          id?: string
+          organization_id: string
+        }
+        Update: {
+          admin_email?: string | null
+          admin_user_id?: string | null
+          body?: string
+          created_at?: string
+          follow_up_at?: string | null
+          id?: string
+          organization_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "crm_notes_organization_id_fkey"
+            columns: ["organization_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      customer_events: {
+        Row: {
+          actor_email: string | null
+          created_at: string
+          detail: string | null
+          id: string
+          kind: string
+          metadata: Json
+          organization_id: string
+          title: string
+        }
+        Insert: {
+          actor_email?: string | null
+          created_at?: string
+          detail?: string | null
+          id?: string
+          kind: string
+          metadata?: Json
+          organization_id: string
+          title: string
+        }
+        Update: {
+          actor_email?: string | null
+          created_at?: string
+          detail?: string | null
+          id?: string
+          kind?: string
+          metadata?: Json
+          organization_id?: string
+          title?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "customer_events_organization_id_fkey"
+            columns: ["organization_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       faqs: {
         Row: {
           answer: string
@@ -798,6 +927,68 @@ export type Database = {
           },
         ]
       }
+      organization_invitations: {
+        Row: {
+          accepted_at: string | null
+          accepted_by: string | null
+          created_at: string
+          created_by: string | null
+          email: string
+          expires_at: string
+          failed_attempts: number
+          id: string
+          last_sent_at: string | null
+          locked_until: string | null
+          organization_id: string
+          pin_hash: string | null
+          revoked_at: string | null
+          token_hash: string
+          updated_at: string
+        }
+        Insert: {
+          accepted_at?: string | null
+          accepted_by?: string | null
+          created_at?: string
+          created_by?: string | null
+          email: string
+          expires_at: string
+          failed_attempts?: number
+          id?: string
+          last_sent_at?: string | null
+          locked_until?: string | null
+          organization_id: string
+          pin_hash?: string | null
+          revoked_at?: string | null
+          token_hash: string
+          updated_at?: string
+        }
+        Update: {
+          accepted_at?: string | null
+          accepted_by?: string | null
+          created_at?: string
+          created_by?: string | null
+          email?: string
+          expires_at?: string
+          failed_attempts?: number
+          id?: string
+          last_sent_at?: string | null
+          locked_until?: string | null
+          organization_id?: string
+          pin_hash?: string | null
+          revoked_at?: string | null
+          token_hash?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "organization_invitations_organization_id_fkey"
+            columns: ["organization_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       organization_members: {
         Row: {
           created_at: string
@@ -833,51 +1024,161 @@ export type Database = {
           },
         ]
       }
+      organization_pricing_overrides: {
+        Row: {
+          created_at: string
+          customer_amount: number | null
+          id: string
+          key: string
+          note: string | null
+          organization_id: string
+          provider_cost: number | null
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          created_at?: string
+          customer_amount?: number | null
+          id?: string
+          key: string
+          note?: string | null
+          organization_id: string
+          provider_cost?: number | null
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          created_at?: string
+          customer_amount?: number | null
+          id?: string
+          key?: string
+          note?: string | null
+          organization_id?: string
+          provider_cost?: number | null
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "organization_pricing_overrides_organization_id_fkey"
+            columns: ["organization_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       organizations: {
         Row: {
           account_status: Database["public"]["Enums"]["account_status"]
+          activated_at: string | null
+          address: string | null
+          archived_at: string | null
+          assigned_admin_id: string | null
+          business_type: string | null
+          city: string | null
+          client_id: string
+          contact_email: string | null
+          contact_name: string | null
+          contact_phone: string | null
           country: string | null
           created_at: string
+          created_by_admin: string | null
+          crm_stage: string
           currency: string
+          follow_up_at: string | null
+          gst_number: string | null
           id: string
+          industry: string | null
+          internal_notes: string | null
+          last_contacted_at: string | null
+          lifecycle_status: Database["public"]["Enums"]["lifecycle_status"]
           name: string
           next_billing_at: string | null
           onboarding_completed: boolean
           owner_id: string
+          pan_number: string | null
+          provisioned_at: string | null
           setup_paid_at: string | null
           slug: string | null
+          tags: string[]
           timezone: string
           updated_at: string
+          website: string | null
         }
         Insert: {
           account_status?: Database["public"]["Enums"]["account_status"]
+          activated_at?: string | null
+          address?: string | null
+          archived_at?: string | null
+          assigned_admin_id?: string | null
+          business_type?: string | null
+          city?: string | null
+          client_id?: string
+          contact_email?: string | null
+          contact_name?: string | null
+          contact_phone?: string | null
           country?: string | null
           created_at?: string
+          created_by_admin?: string | null
+          crm_stage?: string
           currency?: string
+          follow_up_at?: string | null
+          gst_number?: string | null
           id?: string
+          industry?: string | null
+          internal_notes?: string | null
+          last_contacted_at?: string | null
+          lifecycle_status?: Database["public"]["Enums"]["lifecycle_status"]
           name: string
           next_billing_at?: string | null
           onboarding_completed?: boolean
           owner_id: string
+          pan_number?: string | null
+          provisioned_at?: string | null
           setup_paid_at?: string | null
           slug?: string | null
+          tags?: string[]
           timezone?: string
           updated_at?: string
+          website?: string | null
         }
         Update: {
           account_status?: Database["public"]["Enums"]["account_status"]
+          activated_at?: string | null
+          address?: string | null
+          archived_at?: string | null
+          assigned_admin_id?: string | null
+          business_type?: string | null
+          city?: string | null
+          client_id?: string
+          contact_email?: string | null
+          contact_name?: string | null
+          contact_phone?: string | null
           country?: string | null
           created_at?: string
+          created_by_admin?: string | null
+          crm_stage?: string
           currency?: string
+          follow_up_at?: string | null
+          gst_number?: string | null
           id?: string
+          industry?: string | null
+          internal_notes?: string | null
+          last_contacted_at?: string | null
+          lifecycle_status?: Database["public"]["Enums"]["lifecycle_status"]
           name?: string
           next_billing_at?: string | null
           onboarding_completed?: boolean
           owner_id?: string
+          pan_number?: string | null
+          provisioned_at?: string | null
           setup_paid_at?: string | null
           slug?: string | null
+          tags?: string[]
           timezone?: string
           updated_at?: string
+          website?: string | null
         }
         Relationships: []
       }
@@ -1124,6 +1425,45 @@ export type Database = {
           key?: string
           updated_at?: string
           value?: Json
+        }
+        Relationships: []
+      }
+      pricing_rules: {
+        Row: {
+          created_at: string
+          currency: string
+          customer_amount: number
+          id: string
+          is_active: boolean
+          key: string
+          label: string
+          provider_cost: number
+          unit: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          currency?: string
+          customer_amount?: number
+          id?: string
+          is_active?: boolean
+          key: string
+          label: string
+          provider_cost?: number
+          unit?: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          currency?: string
+          customer_amount?: number
+          id?: string
+          is_active?: boolean
+          key?: string
+          label?: string
+          provider_cost?: number
+          unit?: string
+          updated_at?: string
         }
         Relationships: []
       }
@@ -1456,6 +1796,7 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      customer_rate: { Args: { _key: string; _org: string }; Returns: number }
       feature_locked: {
         Args: { _feature: string; _org: string }
         Returns: boolean
@@ -1482,6 +1823,16 @@ export type Database = {
         | "active"
         | "suspended"
         | "cancelled"
+      lifecycle_status:
+        | "not_provisioned"
+        | "setup_payment_pending"
+        | "setup_paid"
+        | "provisioning"
+        | "ready"
+        | "active"
+        | "suspended"
+        | "cancelled"
+        | "archived"
       member_role: "owner" | "admin" | "manager" | "staff" | "viewer"
       platform_role:
         | "super_admin"
@@ -1629,6 +1980,17 @@ export const Constants = {
         "active",
         "suspended",
         "cancelled",
+      ],
+      lifecycle_status: [
+        "not_provisioned",
+        "setup_payment_pending",
+        "setup_paid",
+        "provisioning",
+        "ready",
+        "active",
+        "suspended",
+        "cancelled",
+        "archived",
       ],
       member_role: ["owner", "admin", "manager", "staff", "viewer"],
       platform_role: [
