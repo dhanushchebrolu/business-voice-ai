@@ -62,23 +62,23 @@ async function recordEvent(
 export interface CreateClientInput {
   fullName: string;
   businessName: string;
-  businessType?: string;
+  businessType?: string | undefined;
   email: string;
-  phone?: string;
-  country?: string;
-  city?: string;
-  address?: string;
-  website?: string;
-  gstNumber?: string;
-  panNumber?: string;
-  industry?: string;
-  plan?: string;
-  setupFee?: number; // paise
-  monthlyFee?: number; // paise
-  numberFee?: number; // paise
-  walletOpeningBalance?: number; // paise
-  notes?: string;
-  internalNotes?: string;
+  phone?: string | undefined;
+  country?: string | undefined;
+  city?: string | undefined;
+  address?: string | undefined;
+  website?: string | undefined;
+  gstNumber?: string | undefined;
+  panNumber?: string | undefined;
+  industry?: string | undefined;
+  plan?: string | undefined;
+  setupFee?: number | undefined; // paise
+  monthlyFee?: number | undefined; // paise
+  numberFee?: number | undefined; // paise
+  walletOpeningBalance?: number | undefined; // paise
+  notes?: string | undefined;
+  internalNotes?: string | undefined;
 }
 
 /**
