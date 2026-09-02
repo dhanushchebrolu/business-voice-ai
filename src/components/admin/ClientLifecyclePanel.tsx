@@ -118,10 +118,7 @@ export function ClientLifecyclePanel({
         description="Opens a read-only view of this customer's workspace for up to 30 minutes. You never see or change their password, and the customer sees a support banner on their dashboard."
         confirmLabel="Start session"
         onConfirm={async (reason) => {
-          const session = await startSupportSession
-            ? await startSupport({ data: { orgId, reason } })
-            : null;
-          if (!session) throw new Error("Could not start the session");
+          const session = await startSupport({ data: { orgId, reason } });
           sessionStorage.setItem("vaani.support", JSON.stringify({ id: session.sessionId, token: session.token }));
           setSupportOpen(false);
           navigate({ to: "/admin/support" });
