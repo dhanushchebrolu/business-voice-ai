@@ -219,7 +219,7 @@ export const updateClientProfile = createServerFn({ method: "POST" })
     if (!Object.keys(patch).length) throw new Error("Nothing to update");
 
     const { data: before } = await supabaseAdmin.from("organizations").select("*").eq("id", data.orgId).maybeSingle();
-    const { error } = await supabaseAdmin.from("organizations").update(patch).eq("id", data.orgId);
+    const { error } = await supabaseAdmin.from("organizations").update(patch as never).eq("id", data.orgId);
     if (error) throw error;
 
     await writeAudit(admin, {
@@ -263,7 +263,7 @@ export const setClientLifecycle = createServerFn({ method: "POST" })
     }
     if (data.status === "archived") patch["archived_at"] = new Date().toISOString();
 
-    const { error } = await supabaseAdmin.from("organizations").update(patch).eq("id", data.orgId);
+    const { error } = await supabaseAdmin.from("organizations").update(patch as never).eq("id", data.orgId);
     if (error) throw error;
 
     await recordEvent(data.orgId, "lifecycle", `Lifecycle → ${data.status}`, data.reason, admin.email);
@@ -487,7 +487,8 @@ export const acceptInvitation = createServerFn({ method: "POST" })
       .from("organizations")
       .select("id, owner_id, created_by_admin, lifecycle_status")
       .eq("id", invite.organization_id)
-      .single();
+      .maybeSingle();
+    if (!org) throw new Error("This workspace no longer exists");
 
     // Hand ownership to the real customer if the record was admin-created.
     if (org.created_by_admin && org.owner_id === org.created_by_admin) {
