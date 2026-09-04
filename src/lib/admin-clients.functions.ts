@@ -4,7 +4,7 @@ import { assertPlatformAdmin, writeAudit, type PlatformAdmin } from "@/lib/platf
 import type { Database } from "@/integrations/supabase/types";
 import type { LifecycleStatus } from "@/lib/lifecycle";
 
-type AccountStatus = Database["public"]["Enums"]["account_status"];
+type EntitlementSource = Database["public"]["Enums"]["entitlement_source"];
 
 const LIFECYCLE_VALUES: LifecycleStatus[] = [
   "not_provisioned",
@@ -17,19 +17,6 @@ const LIFECYCLE_VALUES: LifecycleStatus[] = [
   "cancelled",
   "archived",
 ];
-
-/** Account status implied by a lifecycle move. Keeps the two models consistent. */
-const ACCOUNT_FOR_LIFECYCLE: Partial<Record<LifecycleStatus, AccountStatus>> = {
-  not_provisioned: "payment_required",
-  setup_payment_pending: "payment_required",
-  setup_paid: "setup_in_progress",
-  provisioning: "setup_in_progress",
-  ready: "setup_in_progress",
-  active: "active",
-  suspended: "suspended",
-  cancelled: "cancelled",
-  archived: "cancelled",
-};
 
 async function sha256(value: string) {
   const { createHash } = await import("node:crypto");
@@ -54,9 +41,13 @@ async function recordEvent(
   actorEmail?: string | null,
 ) {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-  await supabaseAdmin
-    .from("customer_events")
-    .insert({ organization_id: orgId, kind, title, detail: detail ?? null, actor_email: actorEmail ?? null });
+  await supabaseAdmin.from("customer_events").insert({
+    organization_id: orgId,
+    kind,
+    title,
+    detail: detail ?? null,
+    actor_email: actorEmail ?? null,
+  });
 }
 
 export interface CreateClientInput {
@@ -173,7 +164,13 @@ export const createClientAccount = createServerFn({ method: "POST" })
       });
     }
 
-    await recordEvent(org.id, "lifecycle", "Client created", `Created by ${admin.email ?? "admin"}`, admin.email);
+    await recordEvent(
+      org.id,
+      "lifecycle",
+      "Client created",
+      `Created by ${admin.email ?? "admin"}`,
+      admin.email,
+    );
     await writeAudit(admin, {
       action: "CREATE_CLIENT",
       entityType: "organization",
@@ -215,11 +212,19 @@ export const updateClientProfile = createServerFn({ method: "POST" })
       "last_contacted_at",
     ];
     const patch: Record<string, string | null> = {};
-    for (const [k, v] of Object.entries(data.patch)) if (allowed.includes(k)) patch[k] = v === "" ? null : v;
+    for (const [k, v] of Object.entries(data.patch))
+      if (allowed.includes(k)) patch[k] = v === "" ? null : v;
     if (!Object.keys(patch).length) throw new Error("Nothing to update");
 
-    const { data: before } = await supabaseAdmin.from("organizations").select("*").eq("id", data.orgId).maybeSingle();
-    const { error } = await supabaseAdmin.from("organizations").update(patch as never).eq("id", data.orgId);
+    const { data: before } = await supabaseAdmin
+      .from("organizations")
+      .select("*")
+      .eq("id", data.orgId)
+      .maybeSingle();
+    const { error } = await supabaseAdmin
+      .from("organizations")
+      .update(patch as never)
+      .eq("id", data.orgId);
     if (error) throw error;
 
     await writeAudit(admin, {
@@ -227,7 +232,9 @@ export const updateClientProfile = createServerFn({ method: "POST" })
       entityType: "organization",
       entityId: data.orgId,
       organizationId: data.orgId,
-      oldValue: before ? Object.fromEntries(Object.keys(patch).map((k) => [k, (before as never)[k]])) : null,
+      oldValue: before
+        ? Object.fromEntries(Object.keys(patch).map((k) => [k, (before as never)[k]]))
+        : null,
       newValue: patch,
       reason: "Client profile updated",
     });
@@ -238,7 +245,8 @@ export const updateClientProfile = createServerFn({ method: "POST" })
 export const setClientLifecycle = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: { orgId: string; status: LifecycleStatus; reason: string }) => {
-    if (!input?.orgId || !LIFECYCLE_VALUES.includes(input.status)) throw new Error("Invalid lifecycle status");
+    if (!input?.orgId || !LIFECYCLE_VALUES.includes(input.status))
+      throw new Error("Invalid lifecycle status");
     if (!input.reason?.trim()) throw new Error("A reason is required");
     return input;
   })
@@ -252,10 +260,7 @@ export const setClientLifecycle = createServerFn({ method: "POST" })
       .eq("id", data.orgId)
       .maybeSingle();
 
-    const patch: Record<string, unknown> = {
-      lifecycle_status: data.status,
-      account_status: ACCOUNT_FOR_LIFECYCLE[data.status] ?? "payment_required",
-    };
+    const patch: Record<string, unknown> = { lifecycle_status: data.status };
     if (data.status === "provisioning") patch["provisioned_at"] = new Date().toISOString();
     if (data.status === "active") {
       patch["activated_at"] = new Date().toISOString();
@@ -263,10 +268,19 @@ export const setClientLifecycle = createServerFn({ method: "POST" })
     }
     if (data.status === "archived") patch["archived_at"] = new Date().toISOString();
 
-    const { error } = await supabaseAdmin.from("organizations").update(patch as never).eq("id", data.orgId);
+    const { error } = await supabaseAdmin
+      .from("organizations")
+      .update(patch as never)
+      .eq("id", data.orgId);
     if (error) throw error;
 
-    await recordEvent(data.orgId, "lifecycle", `Lifecycle → ${data.status}`, data.reason, admin.email);
+    await recordEvent(
+      data.orgId,
+      "lifecycle",
+      `Lifecycle → ${data.status}`,
+      data.reason,
+      admin.email,
+    );
     await writeAudit(admin, {
       action: `LIFECYCLE_${data.status.toUpperCase()}`,
       entityType: "organization",
@@ -311,7 +325,6 @@ export const archiveClient = createServerFn({ method: "POST" })
       .from("organizations")
       .update({
         lifecycle_status: "archived",
-        account_status: "cancelled",
         archived_at: new Date().toISOString(),
       })
       .eq("id", data.orgId);
@@ -337,6 +350,357 @@ export const archiveClient = createServerFn({ method: "POST" })
   });
 
 /* ------------------------------------------------------------------ */
+/* Handover                                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Moves a client from READY to ACTIVE. This is the one place "handover"
+ * happens — it is not a free lifecycle transition (setClientLifecycle can
+ * still be used for corrections, but the UI should route normal handover
+ * through here so the requirements below are always checked).
+ *
+ * Requirements (Phase B brief §26): the workspace must be lifecycle=ready,
+ * and setup must be satisfied — either verified server-side payment
+ * (`setup_paid_at`) or an explicit admin override/exception. A missing
+ * requirement rejects with the real reason and leaves lifecycle unchanged.
+ */
+export const handoverClient = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { orgId: string; reason: string }) => {
+    if (!input?.orgId) throw new Error("orgId is required");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "customers.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+
+    const { data: org } = await supabaseAdmin
+      .from("organizations")
+      .select("lifecycle_status, setup_paid_at, payment_override")
+      .eq("id", data.orgId)
+      .maybeSingle();
+    if (!org) throw new Error("Client not found");
+
+    const reasons: string[] = [];
+    if (org.lifecycle_status !== "ready") {
+      reasons.push(
+        `Lifecycle is "${org.lifecycle_status}", not "ready". Complete provisioning first.`,
+      );
+    }
+    const setupSatisfied = Boolean(org.setup_paid_at) || org.payment_override === true;
+    if (!setupSatisfied) {
+      reasons.push(
+        "Setup payment has not been verified and no admin payment override is set for this customer.",
+      );
+    }
+
+    if (reasons.length) {
+      await writeAudit(admin, {
+        action: "HANDOVER_REJECTED",
+        entityType: "organization",
+        entityId: data.orgId,
+        organizationId: data.orgId,
+        oldValue: org,
+        reason: reasons.join(" "),
+      });
+      throw new Error(reasons.join(" "));
+    }
+
+    const { error } = await supabaseAdmin
+      .from("organizations")
+      .update({
+        lifecycle_status: "active",
+        activated_at: new Date().toISOString(),
+        crm_stage: "customer",
+      })
+      .eq("id", data.orgId);
+    if (error) throw error;
+
+    await recordEvent(
+      data.orgId,
+      "lifecycle",
+      "Handover complete — customer is now ACTIVE",
+      data.reason,
+      admin.email,
+    );
+    await writeAudit(admin, {
+      action: "HANDOVER",
+      entityType: "organization",
+      entityId: data.orgId,
+      organizationId: data.orgId,
+      oldValue: org,
+      newValue: { lifecycle_status: "active" },
+      reason: data.reason,
+    });
+    return { ok: true as const };
+  });
+
+/* ------------------------------------------------------------------ */
+/* Customer-level lock / unlock                                        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Locks an entire customer (all services, including dashboard content)
+ * without touching any data. Implemented as a lifecycle transition to
+ * `suspended` — the existing resolver already treats a suspended lifecycle
+ * as "everything locked" (see feature_locked()), so there is no second
+ * lock mechanism to keep in sync. The prior lifecycle state is stored so
+ * unlockCustomerAccount can restore it rather than guessing.
+ */
+export const lockCustomerAccount = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { orgId: string; reason: string }) => {
+    if (!input?.orgId) throw new Error("orgId is required");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "customers.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+
+    const { data: before } = await supabaseAdmin
+      .from("organizations")
+      .select("lifecycle_status")
+      .eq("id", data.orgId)
+      .maybeSingle();
+    if (!before) throw new Error("Client not found");
+    if (before.lifecycle_status === "suspended") throw new Error("This customer is already locked");
+
+    const { error } = await supabaseAdmin
+      .from("organizations")
+      .update({
+        lifecycle_status: "suspended",
+        pre_suspension_status: before.lifecycle_status,
+        locked_reason: data.reason,
+        locked_at: new Date().toISOString(),
+        locked_by: admin.userId,
+      })
+      .eq("id", data.orgId);
+    if (error) throw error;
+
+    await recordEvent(
+      data.orgId,
+      "lifecycle",
+      "Customer locked by admin",
+      data.reason,
+      admin.email,
+    );
+    await writeAudit(admin, {
+      action: "CUSTOMER_LOCK",
+      entityType: "organization",
+      entityId: data.orgId,
+      organizationId: data.orgId,
+      oldValue: before,
+      newValue: { lifecycle_status: "suspended" },
+      reason: data.reason,
+    });
+    return { ok: true as const };
+  });
+
+/** Restores a customer locked by lockCustomerAccount to their prior lifecycle state. */
+export const unlockCustomerAccount = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { orgId: string; reason: string }) => {
+    if (!input?.orgId) throw new Error("orgId is required");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "customers.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+
+    const { data: before } = await supabaseAdmin
+      .from("organizations")
+      .select("lifecycle_status, pre_suspension_status")
+      .eq("id", data.orgId)
+      .maybeSingle();
+    if (!before) throw new Error("Client not found");
+    if (before.lifecycle_status !== "suspended")
+      throw new Error("This customer is not currently locked");
+
+    // Unlocking does not automatically activate every service — it only
+    // restores the lifecycle stage the customer was at before the lock.
+    // Each individual service must still independently pass entitlement,
+    // billing, configuration and provider checks (feature_locked()).
+    const restored = before.pre_suspension_status ?? "ready";
+
+    const { error } = await supabaseAdmin
+      .from("organizations")
+      .update({
+        lifecycle_status: restored,
+        pre_suspension_status: null,
+        locked_reason: null,
+        locked_at: null,
+        locked_by: null,
+      })
+      .eq("id", data.orgId);
+    if (error) throw error;
+
+    await recordEvent(
+      data.orgId,
+      "lifecycle",
+      "Customer unlocked by admin",
+      data.reason,
+      admin.email,
+    );
+    await writeAudit(admin, {
+      action: "CUSTOMER_UNLOCK",
+      entityType: "organization",
+      entityId: data.orgId,
+      organizationId: data.orgId,
+      oldValue: before,
+      newValue: { lifecycle_status: restored },
+      reason: data.reason,
+    });
+    return { ok: true as const };
+  });
+
+/* ------------------------------------------------------------------ */
+/* Per-customer payment enforcement override                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Overrides the global "Require Customer Payment" switch for exactly one
+ * customer, without affecting any other customer and without fabricating a
+ * payment, subscription or invoice. This is the mechanism behind Phase B
+ * Test L: Customer A stays payment-gated, Customer B follows the override.
+ */
+export const setPaymentOverride = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { orgId: string; override: boolean; reason: string }) => {
+    if (!input?.orgId) throw new Error("orgId is required");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "billing.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+
+    const { data: before } = await supabaseAdmin
+      .from("organizations")
+      .select("payment_override")
+      .eq("id", data.orgId)
+      .maybeSingle();
+    if (!before) throw new Error("Client not found");
+
+    const { error } = await supabaseAdmin
+      .from("organizations")
+      .update({
+        payment_override: data.override,
+        payment_override_reason: data.reason,
+        payment_override_by: admin.userId,
+        payment_override_at: new Date().toISOString(),
+      })
+      .eq("id", data.orgId);
+    if (error) throw error;
+
+    await writeAudit(admin, {
+      action: data.override ? "PAYMENT_OVERRIDE_SET" : "PAYMENT_OVERRIDE_CLEARED",
+      entityType: "organization",
+      entityId: data.orgId,
+      organizationId: data.orgId,
+      oldValue: before,
+      newValue: { payment_override: data.override },
+      reason: data.reason,
+    });
+    return { ok: true as const };
+  });
+
+/* ------------------------------------------------------------------ */
+/* Central entitlement system — admin grants                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Grants a customer access to a feature from a specific source (ADMIN or
+ * SUBSCRIPTION — SYSTEM/TRIAL are reserved for automated code paths, not
+ * this admin action). Never fabricates a payment, invoice or subscription
+ * record: the grant is the record. Multiple sources can be active for the
+ * same feature at once (e.g. an admin grant AND a subscription); revoking
+ * one never touches the other (Test H).
+ */
+export const grantEntitlement = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator(
+    (input: { orgId: string; feature: string; source: EntitlementSource; reason: string }) => {
+      if (!input?.orgId || !input.feature) throw new Error("orgId and feature are required");
+      if (input.source !== "admin" && input.source !== "subscription") {
+        throw new Error("Only admin or subscription grants can be issued from this action");
+      }
+      if (!input.reason?.trim()) throw new Error("A reason is required");
+      return input;
+    },
+  )
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "customers.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+
+    const { error } = await supabaseAdmin.from("organization_entitlements").upsert(
+      {
+        organization_id: data.orgId,
+        feature: data.feature,
+        source: data.source,
+        active: true,
+        reason: data.reason,
+        granted_by: admin.userId,
+        granted_by_email: admin.email,
+        granted_at: new Date().toISOString(),
+        revoked_by: null,
+        revoked_by_email: null,
+        revoked_at: null,
+      },
+      { onConflict: "organization_id,feature,source" },
+    );
+    if (error) throw error;
+
+    await writeAudit(admin, {
+      action: "ENTITLEMENT_GRANT",
+      entityType: "organization_entitlement",
+      organizationId: data.orgId,
+      newValue: { feature: data.feature, source: data.source },
+      reason: data.reason,
+    });
+    return { ok: true as const };
+  });
+
+/** Revokes one entitlement source for one feature. Other sources for the same feature are untouched. */
+export const revokeEntitlement = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator(
+    (input: { orgId: string; feature: string; source: EntitlementSource; reason: string }) => {
+      if (!input?.orgId || !input.feature) throw new Error("orgId and feature are required");
+      if (!input.reason?.trim()) throw new Error("A reason is required");
+      return input;
+    },
+  )
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "customers.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+
+    const { error } = await supabaseAdmin
+      .from("organization_entitlements")
+      .update({
+        active: false,
+        revoked_by: admin.userId,
+        revoked_by_email: admin.email,
+        revoked_at: new Date().toISOString(),
+      })
+      .eq("organization_id", data.orgId)
+      .eq("feature", data.feature)
+      .eq("source", data.source);
+    if (error) throw error;
+
+    await writeAudit(admin, {
+      action: "ENTITLEMENT_REVOKE",
+      entityType: "organization_entitlement",
+      organizationId: data.orgId,
+      newValue: { feature: data.feature, source: data.source, active: false },
+      reason: data.reason,
+    });
+    return { ok: true as const };
+  });
+
+/* ------------------------------------------------------------------ */
 /* Invitations                                                         */
 /* ------------------------------------------------------------------ */
 
@@ -348,7 +712,9 @@ export const listInvitations = createServerFn({ method: "GET" })
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const { data: rows, error } = await supabaseAdmin
       .from("organization_invitations")
-      .select("id, email, expires_at, accepted_at, revoked_at, failed_attempts, locked_until, last_sent_at, created_at")
+      .select(
+        "id, email, expires_at, accepted_at, revoked_at, failed_attempts, locked_until, last_sent_at, created_at",
+      )
       .eq("organization_id", data.orgId)
       .order("created_at", { ascending: false });
     if (error) throw error;
@@ -361,11 +727,13 @@ export const listInvitations = createServerFn({ method: "GET" })
  */
 export const createInvitation = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((input: { orgId: string; email: string; expiresInHours?: number; withPin?: boolean }) => {
-    if (!input?.orgId) throw new Error("orgId is required");
-    if (!input.email?.includes("@")) throw new Error("A valid email is required");
-    return input;
-  })
+  .inputValidator(
+    (input: { orgId: string; email: string; expiresInHours?: number; withPin?: boolean }) => {
+      if (!input?.orgId) throw new Error("orgId is required");
+      if (!input.email?.includes("@")) throw new Error("A valid email is required");
+      return input;
+    },
+  )
   .handler(async ({ data, context }) => {
     const admin = await assertPlatformAdmin(context.supabase, context.userId, "customers.write");
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
@@ -397,7 +765,13 @@ export const createInvitation = createServerFn({ method: "POST" })
       .single();
     if (error) throw error;
 
-    await recordEvent(data.orgId, "access", "Invitation generated", `Sent to ${email}`, admin.email);
+    await recordEvent(
+      data.orgId,
+      "access",
+      "Invitation generated",
+      `Sent to ${email}`,
+      admin.email,
+    );
     await writeAudit(admin, {
       action: "CREATE_INVITATION",
       entityType: "invitation",
@@ -464,11 +838,14 @@ export const acceptInvitation = createServerFn({ method: "POST" })
     if (invite.accepted_at) throw new Error("This invitation has already been used");
     if (new Date(invite.expires_at) < new Date()) throw new Error("This invitation has expired");
     if (invite.locked_until && new Date(invite.locked_until) > new Date()) {
-      throw new Error("Too many failed attempts. Try again later or ask support to reset your access.");
+      throw new Error(
+        "Too many failed attempts. Try again later or ask support to reset your access.",
+      );
     }
 
     const email = ((context.claims["email"] as string | undefined) ?? "").toLowerCase();
-    const pinOk = !invite.pin_hash || (data.pin ? (await sha256(data.pin)) === invite.pin_hash : false);
+    const pinOk =
+      !invite.pin_hash || (data.pin ? (await sha256(data.pin)) === invite.pin_hash : false);
     const emailOk = email && email === invite.email.toLowerCase();
 
     if (!pinOk || !emailOk) {
@@ -477,10 +854,13 @@ export const acceptInvitation = createServerFn({ method: "POST" })
         .from("organization_invitations")
         .update({
           failed_attempts: attempts,
-          locked_until: attempts >= 5 ? new Date(Date.now() + 30 * 60_000).toISOString() : invite.locked_until,
+          locked_until:
+            attempts >= 5 ? new Date(Date.now() + 30 * 60_000).toISOString() : invite.locked_until,
         })
         .eq("id", invite.id);
-      throw new Error(emailOk ? "Incorrect PIN" : "This invitation was issued to a different email address");
+      throw new Error(
+        emailOk ? "Incorrect PIN" : "This invitation was issued to a different email address",
+      );
     }
 
     const { data: org } = await supabaseAdmin
@@ -492,14 +872,20 @@ export const acceptInvitation = createServerFn({ method: "POST" })
 
     // Hand ownership to the real customer if the record was admin-created.
     if (org.created_by_admin && org.owner_id === org.created_by_admin) {
-      await supabaseAdmin.from("organizations").update({ owner_id: context.userId }).eq("id", org.id);
+      await supabaseAdmin
+        .from("organizations")
+        .update({ owner_id: context.userId })
+        .eq("id", org.id);
     }
-    await supabaseAdmin
-      .from("organization_members")
-      .upsert(
-        { organization_id: org.id, user_id: context.userId, role: "owner", invited_email: invite.email },
-        { onConflict: "organization_id,user_id" },
-      );
+    await supabaseAdmin.from("organization_members").upsert(
+      {
+        organization_id: org.id,
+        user_id: context.userId,
+        role: "owner",
+        invited_email: invite.email,
+      },
+      { onConflict: "organization_id,user_id" },
+    );
 
     await supabaseAdmin
       .from("organization_invitations")
@@ -509,7 +895,16 @@ export const acceptInvitation = createServerFn({ method: "POST" })
     if (org.lifecycle_status === "ready") {
       await supabaseAdmin
         .from("organizations")
-        .update({ lifecycle_status: "active", account_status: "active", activated_at: new Date().toISOString() })
+        .update({ lifecycle_status: "active", activated_at: new Date().toISOString() })
+        .eq("id", org.id);
+    } else if (org.lifecycle_status === "not_provisioned") {
+      // The customer has now registered against a provisioned workspace —
+      // move them out of the pre-signup state and into the setup-payment
+      // step. account_status is derived automatically by the database
+      // trigger; this function never writes it directly.
+      await supabaseAdmin
+        .from("organizations")
+        .update({ lifecycle_status: "setup_payment_pending" })
         .eq("id", org.id);
     }
 
@@ -551,7 +946,13 @@ export const startSupportSession = createServerFn({ method: "POST" })
       .single();
     if (error) throw error;
 
-    await recordEvent(data.orgId, "support", "Admin support session started", data.reason, admin.email);
+    await recordEvent(
+      data.orgId,
+      "support",
+      "Admin support session started",
+      data.reason,
+      admin.email,
+    );
     await writeAudit(admin, {
       action: "IMPERSONATE_CLIENT",
       entityType: "support_session",
@@ -614,7 +1015,8 @@ export const getSupportSessionView = createServerFn({ method: "POST" })
     if (!sess || sess.admin_user_id !== admin.userId) throw new Error("Support session not found");
     if (sess.ended_at) throw new Error("This support session has ended");
     if (new Date(sess.expires_at) < new Date()) throw new Error("This support session has expired");
-    if ((await sha256(data.token)) !== sess.token_hash) throw new Error("Invalid support session token");
+    if ((await sha256(data.token)) !== sess.token_hash)
+      throw new Error("Invalid support session token");
 
     const orgId = sess.organization_id;
     const [org, business, numbers, calls, leads, wallet, agent] = await Promise.all([
@@ -683,7 +1085,11 @@ export const addCrmNote = createServerFn({ method: "POST" })
     return input;
   })
   .handler(async ({ data, context }) => {
-    const admin: PlatformAdmin = await assertPlatformAdmin(context.supabase, context.userId, "customers.write");
+    const admin: PlatformAdmin = await assertPlatformAdmin(
+      context.supabase,
+      context.userId,
+      "customers.write",
+    );
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const { error } = await supabaseAdmin.from("crm_notes").insert({
       organization_id: data.orgId,
@@ -694,7 +1100,10 @@ export const addCrmNote = createServerFn({ method: "POST" })
     });
     if (error) throw error;
     if (data.followUpAt) {
-      await supabaseAdmin.from("organizations").update({ follow_up_at: data.followUpAt }).eq("id", data.orgId);
+      await supabaseAdmin
+        .from("organizations")
+        .update({ follow_up_at: data.followUpAt })
+        .eq("id", data.orgId);
     }
     await supabaseAdmin
       .from("organizations")

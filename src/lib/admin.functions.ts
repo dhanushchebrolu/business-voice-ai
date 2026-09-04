@@ -1,11 +1,47 @@
+import { timingSafeEqual } from "crypto";
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
-import { assertPlatformAdmin, capabilitiesFor, writeAudit, type PlatformRole } from "@/lib/platform-admin.server";
+import {
+  assertPlatformAdmin,
+  capabilitiesFor,
+  writeAudit,
+  type PlatformRole,
+} from "@/lib/platform-admin.server";
 import type { Database } from "@/integrations/supabase/types";
+
+/**
+ * The platform-admin bootstrap is closed unless an operator has explicitly set
+ * this secret out-of-band (deploy config / secret manager) and shared it with
+ * whoever should become the first super admin. Its mere presence does not
+ * grant anything — the caller must also supply the matching value.
+ *
+ * This intentionally replaces "first signed-in user with the table empty wins",
+ * which is unsafe in production: any authenticated user (including an ordinary
+ * customer) could otherwise race to claim super admin, and a mistaken
+ * deactivation of every admin would silently reopen the platform to the next
+ * visitor who happened to click bootstrap.
+ */
+function getBootstrapSecret(): string | null {
+  const secret = process.env["PLATFORM_ADMIN_BOOTSTRAP_SECRET"];
+  return secret && secret.length > 0 ? secret : null;
+}
+
+function secretsMatch(provided: string, expected: string): boolean {
+  const a = Buffer.from(provided, "utf8");
+  const b = Buffer.from(expected, "utf8");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
 
 type AccountStatus = Database["public"]["Enums"]["account_status"];
 
-const ACCOUNT_STATUSES: AccountStatus[] = ["payment_required", "setup_in_progress", "active", "suspended", "cancelled"];
+const ACCOUNT_STATUSES: AccountStatus[] = [
+  "payment_required",
+  "setup_in_progress",
+  "active",
+  "suspended",
+  "cancelled",
+];
 
 /** Who am I in the admin plane? Returns null for ordinary customers. */
 export const getAdminSession = createServerFn({ method: "GET" })
@@ -23,7 +59,14 @@ export const getAdminSession = createServerFn({ method: "GET" })
         .from("platform_admins")
         .select("user_id", { count: "exact", head: true })
         .eq("is_active", true);
-      return { admin: null, bootstrapAvailable: (count ?? 0) === 0 };
+      // Bootstrap is only ever offered if BOTH the admin table is empty AND an
+      // operator has configured a bootstrap secret. No secret configured means
+      // the platform stays closed until an admin is provisioned out-of-band
+      // (a controlled migration/script), matching spec §45.
+      return {
+        admin: null,
+        bootstrapAvailable: (count ?? 0) === 0 && getBootstrapSecret() !== null,
+      };
     }
 
     const role = data.role as PlatformRole;
@@ -39,13 +82,29 @@ export const getAdminSession = createServerFn({ method: "GET" })
     };
   });
 
+interface ClaimPlatformAdminInput {
+  bootstrapSecret: string;
+}
+
 /**
- * One-time bootstrap: the very first signed-in user can claim super admin
- * only while no active platform admin exists. After that this always fails.
+ * One-time bootstrap: a signed-in user can claim super admin only while (a)
+ * no active platform admin exists, AND (b) they supply the bootstrap secret
+ * an operator configured out-of-band via PLATFORM_ADMIN_BOOTSTRAP_SECRET.
+ * If no secret is configured, bootstrap is unreachable — an admin must be
+ * provisioned through a controlled migration/script instead. After a first
+ * admin is claimed, this always fails, regardless of the secret.
  */
 export const claimPlatformAdmin = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .handler(async ({ context }) => {
+  .inputValidator((input: ClaimPlatformAdminInput) => {
+    if (!input?.bootstrapSecret) throw new Error("Bootstrap secret is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const expected = getBootstrapSecret();
+    if (!expected) throw new Error("Bootstrap is not enabled for this environment");
+    if (!secretsMatch(data.bootstrapSecret, expected)) throw new Error("Unauthorized");
+
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const { count } = await supabaseAdmin
       .from("platform_admins")
@@ -56,12 +115,25 @@ export const claimPlatformAdmin = createServerFn({ method: "POST" })
     const email = (context.claims["email"] as string | undefined) ?? null;
     const { error } = await supabaseAdmin
       .from("platform_admins")
-      .upsert({ user_id: context.userId, email, role: "super_admin", is_active: true }, { onConflict: "user_id" });
+      .upsert(
+        { user_id: context.userId, email, role: "super_admin", is_active: true },
+        { onConflict: "user_id" },
+      );
     if (error) throw error;
 
     await writeAudit(
-      { userId: context.userId, email, name: null, role: "super_admin", capabilities: capabilitiesFor("super_admin") },
-      { action: "platform_admin.bootstrap", entityType: "platform_admin", entityId: context.userId },
+      {
+        userId: context.userId,
+        email,
+        name: null,
+        role: "super_admin",
+        capabilities: capabilitiesFor("super_admin"),
+      },
+      {
+        action: "platform_admin.bootstrap",
+        entityType: "platform_admin",
+        entityId: context.userId,
+      },
     );
     return { ok: true as const };
   });
@@ -82,7 +154,9 @@ export const getAdminOverview = createServerFn({ method: "GET" })
 
     const startOfDay = new Date();
     startOfDay.setUTCHours(0, 0, 0, 0);
-    const startOfMonth = new Date(Date.UTC(startOfDay.getUTCFullYear(), startOfDay.getUTCMonth(), 1));
+    const startOfMonth = new Date(
+      Date.UTC(startOfDay.getUTCFullYear(), startOfDay.getUTCMonth(), 1),
+    );
 
     const [total, active, paymentRequired, suspended, setupInProgress] = await Promise.all([
       countOrgs(),
@@ -92,14 +166,22 @@ export const getAdminOverview = createServerFn({ method: "GET" })
       countOrgs("setup_in_progress"),
     ]);
 
-    const [numbersRes, agentsRes, callsTodayRes, paymentsRes, settingRes, walletRes] = await Promise.all([
-      supabaseAdmin.from("phone_numbers").select("id, status"),
-      supabaseAdmin.from("agent_configs").select("id, status"),
-      supabaseAdmin.from("call_logs").select("id, direction, duration_seconds").gte("started_at", startOfDay.toISOString()),
-      supabaseAdmin.from("payments").select("amount, status, purpose, captured_at, created_at"),
-      supabaseAdmin.from("platform_settings").select("key, value").eq("key", "billing.payment_required").maybeSingle(),
-      supabaseAdmin.from("wallet_transactions").select("organization_id, amount"),
-    ]);
+    const [numbersRes, agentsRes, callsTodayRes, paymentsRes, settingRes, walletRes] =
+      await Promise.all([
+        supabaseAdmin.from("phone_numbers").select("id, status"),
+        supabaseAdmin.from("agent_configs").select("id, status"),
+        supabaseAdmin
+          .from("call_logs")
+          .select("id, direction, duration_seconds")
+          .gte("started_at", startOfDay.toISOString()),
+        supabaseAdmin.from("payments").select("amount, status, purpose, captured_at, created_at"),
+        supabaseAdmin
+          .from("platform_settings")
+          .select("key, value")
+          .eq("key", "billing.payment_required")
+          .maybeSingle(),
+        supabaseAdmin.from("wallet_transactions").select("organization_id, amount"),
+      ]);
 
     const calls = callsTodayRes.data ?? [];
     const payments = paymentsRes.data ?? [];
@@ -119,7 +201,8 @@ export const getAdminOverview = createServerFn({ method: "GET" })
       },
       agents: {
         total: agentsRes.data?.length ?? 0,
-        live: (agentsRes.data ?? []).filter((a) => a.status === "ready" || a.status === "live").length,
+        live: (agentsRes.data ?? []).filter((a) => a.status === "ready" || a.status === "live")
+          .length,
       },
       callsToday: {
         total: calls.length,
@@ -128,8 +211,12 @@ export const getAdminOverview = createServerFn({ method: "GET" })
         minutes: Math.round(calls.reduce((s, c) => s + (c.duration_seconds ?? 0), 0) / 60),
       },
       revenue: {
-        today: captured.filter((p) => inWindow(p.captured_at ?? p.created_at, startOfDay)).reduce((s, p) => s + p.amount, 0),
-        month: captured.filter((p) => inWindow(p.captured_at ?? p.created_at, startOfMonth)).reduce((s, p) => s + p.amount, 0),
+        today: captured
+          .filter((p) => inWindow(p.captured_at ?? p.created_at, startOfDay))
+          .reduce((s, p) => s + p.amount, 0),
+        month: captured
+          .filter((p) => inWindow(p.captured_at ?? p.created_at, startOfMonth))
+          .reduce((s, p) => s + p.amount, 0),
         allTime: captured.reduce((s, p) => s + p.amount, 0),
         failed: payments.filter((p) => p.status === "failed").length,
       },
@@ -137,7 +224,9 @@ export const getAdminOverview = createServerFn({ method: "GET" })
         totalBalance: [...wallets.values()].reduce((s, v) => s + v, 0),
         negative: [...wallets.values()].filter((v) => v < 0).length,
       },
-      paymentEnforcement: Boolean((settingRes.data?.value as { enabled?: boolean } | null)?.enabled ?? true),
+      paymentEnforcement: Boolean(
+        (settingRes.data?.value as { enabled?: boolean } | null)?.enabled ?? true,
+      ),
     };
   });
 
@@ -215,27 +304,87 @@ export const getCustomerDetail = createServerFn({ method: "GET" })
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const orgId = data.orgId;
 
-    const [org, business, sub, members, numbers, locks, wallet, payments, invoices, calls, agent, audit] = await Promise.all([
+    const [
+      org,
+      business,
+      sub,
+      members,
+      numbers,
+      locks,
+      entitlements,
+      wallet,
+      payments,
+      invoices,
+      calls,
+      agent,
+      audit,
+    ] = await Promise.all([
       supabaseAdmin.from("organizations").select("*").eq("id", orgId).maybeSingle(),
       supabaseAdmin.from("businesses").select("*").eq("organization_id", orgId).maybeSingle(),
       supabaseAdmin.from("subscriptions").select("*").eq("organization_id", orgId).maybeSingle(),
-      supabaseAdmin.from("organization_members").select("user_id, role, created_at").eq("organization_id", orgId),
+      supabaseAdmin
+        .from("organization_members")
+        .select("user_id, role, created_at")
+        .eq("organization_id", orgId),
       supabaseAdmin.from("phone_numbers").select("*").eq("organization_id", orgId),
-      supabaseAdmin.from("organization_feature_locks").select("feature, locked, note, updated_at").eq("organization_id", orgId),
-      supabaseAdmin.from("wallet_transactions").select("*").eq("organization_id", orgId).order("created_at", { ascending: false }).limit(100),
-      supabaseAdmin.from("payments").select("*").eq("organization_id", orgId).order("created_at", { ascending: false }).limit(50),
-      supabaseAdmin.from("invoices").select("*").eq("organization_id", orgId).order("issued_at", { ascending: false }).limit(50),
-      supabaseAdmin.from("call_logs").select("id, direction, status, duration_seconds, started_at").eq("organization_id", orgId).order("started_at", { ascending: false }).limit(25),
+      supabaseAdmin
+        .from("organization_feature_locks")
+        .select("feature, locked, note, updated_at")
+        .eq("organization_id", orgId),
+      supabaseAdmin
+        .from("organization_entitlements")
+        .select("feature, source, active, reason, granted_by_email, granted_at, revoked_at")
+        .eq("organization_id", orgId)
+        .order("granted_at", { ascending: false }),
+      supabaseAdmin
+        .from("wallet_transactions")
+        .select("*")
+        .eq("organization_id", orgId)
+        .order("created_at", { ascending: false })
+        .limit(100),
+      supabaseAdmin
+        .from("payments")
+        .select("*")
+        .eq("organization_id", orgId)
+        .order("created_at", { ascending: false })
+        .limit(50),
+      supabaseAdmin
+        .from("invoices")
+        .select("*")
+        .eq("organization_id", orgId)
+        .order("issued_at", { ascending: false })
+        .limit(50),
+      supabaseAdmin
+        .from("call_logs")
+        .select("id, direction, status, duration_seconds, started_at")
+        .eq("organization_id", orgId)
+        .order("started_at", { ascending: false })
+        .limit(25),
       supabaseAdmin.from("agent_configs").select("*").eq("organization_id", orgId).maybeSingle(),
-      supabaseAdmin.from("audit_logs").select("*").eq("organization_id", orgId).order("created_at", { ascending: false }).limit(50),
+      supabaseAdmin
+        .from("audit_logs")
+        .select("*")
+        .eq("organization_id", orgId)
+        .order("created_at", { ascending: false })
+        .limit(50),
     ]);
 
     if (!org.data) throw new Error("Customer not found");
 
     const memberIds = (members.data ?? []).map((m) => m.user_id);
     const { data: profiles } = memberIds.length
-      ? await supabaseAdmin.from("profiles").select("id, full_name, email, phone").in("id", memberIds)
-      : { data: [] as { id: string; full_name: string | null; email: string | null; phone: string | null }[] };
+      ? await supabaseAdmin
+          .from("profiles")
+          .select("id, full_name, email, phone")
+          .in("id", memberIds)
+      : {
+          data: [] as {
+            id: string;
+            full_name: string | null;
+            email: string | null;
+            phone: string | null;
+          }[],
+        };
 
     return {
       organization: org.data,
@@ -248,6 +397,7 @@ export const getCustomerDetail = createServerFn({ method: "GET" })
       })),
       numbers: numbers.data ?? [],
       locks: locks.data ?? [],
+      entitlements: entitlements.data ?? [],
       wallet: wallet.data ?? [],
       walletBalance: (wallet.data ?? []).reduce((s, t) => s + t.amount, 0),
       payments: payments.data ?? [],
@@ -260,10 +410,12 @@ export const getCustomerDetail = createServerFn({ method: "GET" })
 /** Lock or unlock a single feature for one customer (null clears the override). */
 export const setFeatureLock = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((input: { orgId: string; feature: string; locked: boolean | null; reason?: string }) => {
-    if (!input?.orgId || !input.feature) throw new Error("orgId and feature are required");
-    return input;
-  })
+  .inputValidator(
+    (input: { orgId: string; feature: string; locked: boolean | null; reason?: string }) => {
+      if (!input?.orgId || !input.feature) throw new Error("orgId and feature are required");
+      return input;
+    },
+  )
   .handler(async ({ data, context }) => {
     const admin = await assertPlatformAdmin(context.supabase, context.userId, "settings.write");
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
@@ -298,7 +450,12 @@ export const setFeatureLock = createServerFn({ method: "POST" })
     }
 
     await writeAudit(admin, {
-      action: data.locked === null ? "feature.override_cleared" : data.locked ? "feature.locked" : "feature.unlocked",
+      action:
+        data.locked === null
+          ? "feature.override_cleared"
+          : data.locked
+            ? "feature.locked"
+            : "feature.unlocked",
       entityType: "feature_lock",
       entityId: data.feature,
       organizationId: data.orgId,
@@ -310,48 +467,13 @@ export const setFeatureLock = createServerFn({ method: "POST" })
     return { ok: true as const };
   });
 
-/** Change a customer's account status (suspend, reactivate, etc.). */
-export const setAccountStatus = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
-  .inputValidator((input: { orgId: string; status: AccountStatus; reason: string }) => {
-    if (!input?.orgId || !ACCOUNT_STATUSES.includes(input.status)) throw new Error("Invalid status");
-    if (!input.reason?.trim()) throw new Error("A reason is required");
-    return input;
-  })
-  .handler(async ({ data, context }) => {
-    const admin = await assertPlatformAdmin(context.supabase, context.userId, "customers.write");
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-
-    const { data: previous } = await supabaseAdmin
-      .from("organizations")
-      .select("account_status")
-      .eq("id", data.orgId)
-      .maybeSingle();
-
-    const { error } = await supabaseAdmin
-      .from("organizations")
-      .update({ account_status: data.status })
-      .eq("id", data.orgId);
-    if (error) throw error;
-
-    await writeAudit(admin, {
-      action: "customer.status_changed",
-      entityType: "organization",
-      entityId: data.orgId,
-      organizationId: data.orgId,
-      oldValue: previous,
-      newValue: { account_status: data.status },
-      reason: data.reason,
-    });
-    return { ok: true as const };
-  });
-
 /** Immutable wallet credit/debit. Never edits history. */
 export const adjustWallet = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: { orgId: string; amount: number; kind: string; reason: string }) => {
     if (!input?.orgId) throw new Error("orgId is required");
-    if (!Number.isFinite(input.amount) || input.amount === 0) throw new Error("Amount must be a non-zero number");
+    if (!Number.isFinite(input.amount) || input.amount === 0)
+      throw new Error("Amount must be a non-zero number");
     if (!input.reason?.trim()) throw new Error("A reason is required");
     return input;
   })
@@ -411,7 +533,10 @@ export const updatePlatformSetting = createServerFn({ method: "POST" })
 
     const { error } = await supabaseAdmin
       .from("platform_settings")
-      .upsert({ key: data.key, value: data.value as never, updated_at: new Date().toISOString() }, { onConflict: "key" });
+      .upsert(
+        { key: data.key, value: data.value as never, updated_at: new Date().toISOString() },
+        { onConflict: "key" },
+      );
     if (error) throw error;
 
     await writeAudit(admin, {
@@ -450,18 +575,23 @@ export const listPlatformAdmins = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     await assertPlatformAdmin(context.supabase, context.userId, "customers.read");
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { data, error } = await supabaseAdmin.from("platform_admins").select("*").order("created_at");
+    const { data, error } = await supabaseAdmin
+      .from("platform_admins")
+      .select("*")
+      .order("created_at");
     if (error) throw error;
     return data;
   });
 
 export const upsertPlatformAdmin = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((input: { email: string; role: PlatformRole; isActive: boolean; reason: string }) => {
-    if (!input?.email?.includes("@")) throw new Error("A valid email is required");
-    if (!input.reason?.trim()) throw new Error("A reason is required");
-    return input;
-  })
+  .inputValidator(
+    (input: { email: string; role: PlatformRole; isActive: boolean; reason: string }) => {
+      if (!input?.email?.includes("@")) throw new Error("A valid email is required");
+      if (!input.reason?.trim()) throw new Error("A reason is required");
+      return input;
+    },
+  )
   .handler(async ({ data, context }) => {
     const admin = await assertPlatformAdmin(context.supabase, context.userId, "admins.write");
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");

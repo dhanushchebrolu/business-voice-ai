@@ -1,6 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { PhoneCall, Languages, ShieldCheck, GitBranch, Gauge, ArrowRight } from "lucide-react";
 import { Logo, StatusPill } from "@/components/app/primitives";
+import { PublicNav } from "@/components/app/PublicNav";
 import { Button } from "@/components/ui/button";
 import { LANGUAGES } from "@/lib/voices";
 
@@ -16,7 +17,8 @@ export const Route = createFileRoute("/")({
       { property: "og:title", content: "Vaani — AI phone receptionist for Indian businesses" },
       {
         property: "og:description",
-        content: "Your business details become a voice agent that answers calls, quotes your prices and captures leads.",
+        content:
+          "Your business details become a voice agent that answers calls, quotes your prices and captures leads.",
       },
     ],
   }),
@@ -57,19 +59,7 @@ function Landing() {
       <header className="sticky top-0 z-30 border-b border-border bg-background/85 backdrop-blur">
         <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-5">
           <Logo />
-          <nav className="flex items-center gap-2">
-            <Link to="/pricing" className="rounded-md px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground">
-              Pricing
-            </Link>
-            <Link to="/auth">
-              <Button size="sm" variant="ghost">
-                Sign in
-              </Button>
-            </Link>
-            <Link to="/auth" search={{ mode: "signup" }}>
-              <Button size="sm">Get started</Button>
-            </Link>
-          </nav>
+          <PublicNav />
         </div>
       </header>
 
@@ -81,8 +71,9 @@ function Landing() {
             A receptionist that knows your business by heart.
           </h1>
           <p className="mt-5 max-w-xl text-base text-muted-foreground sm:text-lg">
-            Fill in your hours, services, prices and rules. Vaani turns them into a phone agent that answers your
-            customers in their language — and logs every call, transcript and lead in your dashboard.
+            Fill in your hours, services, prices and rules. Vaani turns them into a phone agent that
+            answers your customers in their language — and logs every call, transcript and lead in
+            your dashboard.
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-3">
             <Link to="/auth" search={{ mode: "signup" }}>
@@ -98,7 +89,10 @@ function Landing() {
           </div>
           <div className="mt-10 flex flex-wrap gap-1.5">
             {LANGUAGES.map((l) => (
-              <span key={l.code} className="rounded-full border border-border bg-surface px-2.5 py-1 text-xs text-muted-foreground">
+              <span
+                key={l.code}
+                className="rounded-full border border-border bg-surface px-2.5 py-1 text-xs text-muted-foreground"
+              >
                 {l.native}
               </span>
             ))}
@@ -107,7 +101,9 @@ function Landing() {
       </section>
 
       <section className="mx-auto max-w-6xl px-5 py-16">
-        <h2 className="text-sm font-semibold uppercase tracking-widest text-muted-foreground">What you get</h2>
+        <h2 className="text-sm font-semibold uppercase tracking-widest text-muted-foreground">
+          What you get
+        </h2>
         <div className="mt-6 grid gap-px overflow-hidden rounded-lg border border-border bg-border sm:grid-cols-2 lg:grid-cols-3">
           {FEATURES.map((f) => (
             <div key={f.title} className="bg-card p-6">
@@ -118,9 +114,14 @@ function Landing() {
           ))}
           <div className="flex flex-col justify-between bg-card p-6">
             <p className="text-sm leading-relaxed text-muted-foreground">
-              Bring your own telephony or use a number we provision for you. Everything else is already wired.
+              Bring your own telephony or use a number we provision for you. Everything else is
+              already wired.
             </p>
-            <Link to="/auth" search={{ mode: "signup" }} className="mt-6 inline-flex items-center gap-1.5 text-sm font-medium text-primary">
+            <Link
+              to="/auth"
+              search={{ mode: "signup" }}
+              className="mt-6 inline-flex items-center gap-1.5 text-sm font-medium text-primary"
+            >
               Get started <ArrowRight className="size-3.5" />
             </Link>
           </div>
@@ -132,8 +133,8 @@ function Landing() {
           <div>
             <h2 className="text-2xl font-semibold tracking-tight">How a call actually works</h2>
             <p className="mt-3 text-sm text-muted-foreground">
-              You never write a prompt. Your structured business data is compiled server-side into the agent's
-              instructions and published as a version.
+              You never write a prompt. Your structured business data is compiled server-side into
+              the agent's instructions and published as a version.
             </p>
           </div>
           <ol className="space-y-3">
@@ -145,7 +146,10 @@ function Landing() {
               "Speech synthesis replies in your chosen voice",
               "Transcript, summary and lead land in your dashboard",
             ].map((step, i) => (
-              <li key={step} className="flex items-start gap-3 rounded-md border border-border bg-card px-4 py-3">
+              <li
+                key={step}
+                className="flex items-start gap-3 rounded-md border border-border bg-card px-4 py-3"
+              >
                 <span className="mt-0.5 grid size-5 shrink-0 place-items-center rounded bg-primary/15 text-[11px] font-semibold text-primary tabular">
                   {i + 1}
                 </span>

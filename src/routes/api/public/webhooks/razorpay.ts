@@ -24,7 +24,10 @@ export const Route = createFileRoute("/api/public/webhooks/razorpay")({
 
         let event: {
           event?: string;
-          payload?: { payment?: { entity?: Record<string, unknown> } };
+          payload?: {
+            payment?: { entity?: Record<string, unknown> };
+            refund?: { entity?: Record<string, unknown> };
+          };
         };
         try {
           event = JSON.parse(raw);
@@ -63,7 +66,10 @@ export const Route = createFileRoute("/api/public/webhooks/razorpay")({
               }
             | undefined;
 
-          if ((event.event === "payment.captured" || event.event === "order.paid") && entity?.order_id) {
+          if (
+            (event.event === "payment.captured" || event.event === "order.paid") &&
+            entity?.order_id
+          ) {
             const { data: order } = await supabaseAdmin
               .from("payment_orders")
               .select("id, organization_id, purpose, amount, currency")
@@ -91,7 +97,10 @@ export const Route = createFileRoute("/api/public/webhooks/razorpay")({
                 .select("id")
                 .maybeSingle();
 
-              await supabaseAdmin.from("payment_orders").update({ status: "paid" }).eq("id", order.id);
+              await supabaseAdmin
+                .from("payment_orders")
+                .update({ status: "paid" })
+                .eq("id", order.id);
 
               await supabaseAdmin.from("invoices").insert({
                 organization_id: order.organization_id,
@@ -105,24 +114,64 @@ export const Route = createFileRoute("/api/public/webhooks/razorpay")({
               });
 
               if (order.purpose === "setup_fee") {
+                // Only advance lifecycle forward — never regress an
+                // already-further-along customer (e.g. a stray retry).
+                const { data: current } = await supabaseAdmin
+                  .from("organizations")
+                  .select("lifecycle_status")
+                  .eq("id", order.organization_id)
+                  .maybeSingle();
+                const shouldAdvance =
+                  current &&
+                  (current.lifecycle_status === "not_provisioned" ||
+                    current.lifecycle_status === "setup_payment_pending");
                 await supabaseAdmin
                   .from("organizations")
-                  .update({ account_status: "setup_in_progress", setup_paid_at: new Date().toISOString() })
+                  .update(
+                    shouldAdvance
+                      ? {
+                          setup_paid_at: new Date().toISOString(),
+                          lifecycle_status: "setup_paid" as const,
+                        }
+                      : { setup_paid_at: new Date().toISOString() },
+                  )
                   .eq("id", order.organization_id);
               }
               if (order.purpose === "monthly_plan") {
+                // Recurring billing does not move the onboarding lifecycle —
+                // it only extends the next billing date. account_status is
+                // derived from lifecycle_status by a database trigger, so it
+                // is intentionally not written here.
                 const next = new Date();
                 next.setMonth(next.getMonth() + 1);
                 await supabaseAdmin
                   .from("organizations")
-                  .update({ account_status: "active", next_billing_at: next.toISOString() })
+                  .update({ next_billing_at: next.toISOString() })
                   .eq("id", order.organization_id);
               }
             }
           }
 
           if (event.event === "payment.failed" && entity?.order_id) {
-            await supabaseAdmin.from("payment_orders").update({ status: "failed" }).eq("provider_order_id", entity.order_id);
+            await supabaseAdmin
+              .from("payment_orders")
+              .update({ status: "failed" })
+              .eq("provider_order_id", entity.order_id);
+          }
+
+          if (event.event === "refund.processed" || event.event === "refund.failed") {
+            const refundEntity = event.payload?.refund?.entity as
+              { id?: string; status?: string } | undefined;
+            if (refundEntity?.id) {
+              await supabaseAdmin
+                .from("refunds")
+                .update({
+                  status: event.event === "refund.processed" ? "processed" : "failed",
+                  processed_at:
+                    event.event === "refund.processed" ? new Date().toISOString() : null,
+                })
+                .eq("provider_refund_id", refundEntity.id);
+            }
           }
 
           await supabaseAdmin

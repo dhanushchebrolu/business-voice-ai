@@ -70,7 +70,9 @@ export async function createRazorpayOrder(input: {
   return (await res.json()) as RazorpayOrder;
 }
 
-export async function fetchRazorpayPayment(paymentId: string): Promise<Record<string, unknown> | null> {
+export async function fetchRazorpayPayment(
+  paymentId: string,
+): Promise<Record<string, unknown> | null> {
   const creds = getRazorpayCredentials();
   if (!creds) return null;
   const res = await fetch(`https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}`, {
@@ -78,6 +80,52 @@ export async function fetchRazorpayPayment(paymentId: string): Promise<Record<st
   });
   if (!res.ok) return null;
   return (await res.json()) as Record<string, unknown>;
+}
+
+export interface RazorpayRefund {
+  id: string;
+  payment_id: string;
+  amount: number;
+  currency: string;
+  status: string; // "pending" | "processed" | "failed" per Razorpay's docs
+}
+
+/**
+ * Creates a refund against a captured payment. Razorpay's refund-creation
+ * call is synchronous for the create step, but settlement can still be
+ * asynchronous ("pending" for non-instant methods) — the caller must not
+ * treat a successful API call as a guarantee the money moved; only a
+ * "processed" status (here, or later via the refund.processed webhook) is
+ * that confirmation.
+ */
+export async function createRazorpayRefund(input: {
+  paymentId: string;
+  amount: number;
+  notes: Record<string, string>;
+  idempotencyKey: string;
+}): Promise<RazorpayRefund> {
+  const creds = getRazorpayCredentials();
+  if (!creds) throw new Error("PAYMENTS_NOT_CONFIGURED");
+
+  const res = await fetch(
+    `https://api.razorpay.com/v1/payments/${encodeURIComponent(input.paymentId)}/refund`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: authHeader(creds),
+        "Content-Type": "application/json",
+        "X-Razorpay-Idempotency-Key": input.idempotencyKey,
+      },
+      body: JSON.stringify({ amount: input.amount, notes: input.notes }),
+    },
+  );
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    console.error("razorpay:create_refund_failed", res.status, detail.slice(0, 500));
+    throw new Error("PAYMENT_PROVIDER_ERROR");
+  }
+  return (await res.json()) as RazorpayRefund;
 }
 
 /** Timing-safe HMAC-SHA256 hex comparison used for webhook + checkout signatures. */

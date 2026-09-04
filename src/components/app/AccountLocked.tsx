@@ -3,7 +3,7 @@ import { Lock, ShieldCheck, PhoneCall, MessageSquare, Bot, LogOut } from "lucide
 import { useAuth } from "@/hooks/useAuth";
 import { useCheckout } from "@/hooks/useCheckout";
 import { pricingQuery, formatMoney } from "@/lib/pricing";
-import { ACCOUNT_STATUS_LABEL, type AccountStatus } from "@/lib/workspace";
+import { LIFECYCLE, type LifecycleStatus } from "@/lib/lifecycle";
 import { Logo, StatusPill } from "./primitives";
 import { Button } from "@/components/ui/button";
 import { useNavigate } from "@tanstack/react-router";
@@ -15,18 +15,31 @@ const INCLUDED = [
   { icon: ShieldCheck, label: "Calls, transcripts, leads and analytics" },
 ];
 
-export function AccountLocked({ status }: { status: AccountStatus }) {
+export function AccountLocked({
+  lifecycle,
+  clientId,
+  name,
+}: {
+  lifecycle: LifecycleStatus;
+  clientId: string;
+  name: string;
+}) {
   const { user, signOut } = useAuth();
   const navigate = useNavigate();
   const { data: pricing } = useQuery(pricingQuery());
-  const { pay, pending } = useCheckout({ email: user?.email, name: user?.user_metadata?.["full_name"] as string });
+  const { pay, pending } = useCheckout({
+    email: user?.email,
+    name: user?.user_metadata?.["full_name"] as string,
+  });
 
   const setup = pricing?.["pricing.setup_fee"];
   const monthly = pricing?.["pricing.monthly_plan"];
   const phone = pricing?.["pricing.phone_service_fee"];
-  const meta = ACCOUNT_STATUS_LABEL[status];
+  const meta = LIFECYCLE[lifecycle];
 
-  const suspended = status === "suspended" || status === "cancelled";
+  const suspended =
+    lifecycle === "suspended" || lifecycle === "cancelled" || lifecycle === "archived";
+  const paymentPending = lifecycle === "not_provisioned" || lifecycle === "setup_payment_pending";
 
   return (
     <div className="flex min-h-screen flex-col bg-background">
@@ -57,48 +70,70 @@ export function AccountLocked({ status }: { status: AccountStatus }) {
           </div>
 
           <h1 className="mt-5 text-2xl font-semibold tracking-tight">
-            {suspended ? "Your workspace is on hold" : "Activate your workspace"}
+            {suspended ? "Your workspace is on hold" : `Welcome to Vaani, ${name}`}
           </h1>
+          <p className="mt-1 text-xs text-muted-foreground">Client ID: {clientId}</p>
           <p className="mt-2 max-w-xl text-sm text-muted-foreground">
             {suspended
-              ? "Your account is currently suspended. Settle the outstanding amount to restore access — your configuration and data are preserved."
-              : "Your dashboard unlocks as soon as the one-time setup payment is confirmed by our payment provider. Nothing is activated before that."}
+              ? "Your account is currently suspended. Your configuration and data are preserved — contact us to restore access."
+              : "Your production services activate once the one-time setup payment is confirmed by our payment provider. Nothing is activated before that."}
           </p>
 
-          <div className="mt-6 grid gap-3 sm:grid-cols-2">
-            <div className="rounded-lg border border-primary/25 bg-primary/8 p-4">
-              <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                {setup?.label ?? "Setup & configuration"}
-              </p>
-              <p className="mt-1 text-2xl font-semibold tabular">{formatMoney(setup?.amount, setup?.currency)}</p>
-              <p className="mt-1 text-xs text-muted-foreground">One-time, due now</p>
+          {paymentPending ? (
+            <div className="mt-6 grid gap-3 sm:grid-cols-2">
+              <div className="rounded-lg border border-primary/25 bg-primary/8 p-4">
+                <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                  {setup?.label ?? "Setup & configuration"}
+                </p>
+                <p className="mt-1 text-2xl font-semibold tabular">
+                  {formatMoney(setup?.amount, setup?.currency)}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">One-time, due now</p>
+              </div>
+              <div className="rounded-lg border border-border p-4">
+                <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                  Then monthly
+                </p>
+                <p className="mt-1 text-2xl font-semibold tabular">
+                  {formatMoney(monthly?.amount, monthly?.currency)}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Phone &amp; AI Voice Service {formatMoney(phone?.amount, phone?.currency)}/month,
+                  billed separately
+                </p>
+              </div>
             </div>
-            <div className="rounded-lg border border-border p-4">
-              <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Then monthly</p>
-              <p className="mt-1 text-2xl font-semibold tabular">{formatMoney(monthly?.amount, monthly?.currency)}</p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                Phone &amp; AI Voice Service {formatMoney(phone?.amount, phone?.currency)}/month, billed separately
-              </p>
-            </div>
-          </div>
+          ) : null}
 
           <ul className="mt-6 grid gap-2.5 sm:grid-cols-2">
             {INCLUDED.map((item) => (
-              <li key={item.label} className="flex items-start gap-2.5 text-sm text-muted-foreground">
+              <li
+                key={item.label}
+                className="flex items-start gap-2.5 text-sm text-muted-foreground"
+              >
                 <item.icon className="mt-0.5 size-4 shrink-0 text-primary" />
                 {item.label}
               </li>
             ))}
           </ul>
 
-          <div className="mt-7 flex flex-col gap-3 sm:flex-row sm:items-center">
-            <Button size="lg" disabled={pending !== null || !setup} onClick={() => pay("setup_fee")}>
-              {pending === "setup_fee" ? "Opening secure checkout…" : `Pay ${formatMoney(setup?.amount, setup?.currency)} setup fee`}
-            </Button>
-            <p className="text-xs text-muted-foreground">
-              Payments are processed securely. Access is granted only after server-side verification.
-            </p>
-          </div>
+          {paymentPending ? (
+            <div className="mt-7 flex flex-col gap-3 sm:flex-row sm:items-center">
+              <Button
+                size="lg"
+                disabled={pending !== null || !setup}
+                onClick={() => pay("setup_fee")}
+              >
+                {pending === "setup_fee"
+                  ? "Opening secure checkout…"
+                  : `Pay ${formatMoney(setup?.amount, setup?.currency)} setup fee`}
+              </Button>
+              <p className="text-xs text-muted-foreground">
+                Payments are processed securely. Access is granted only after server-side
+                verification.
+              </p>
+            </div>
+          ) : null}
         </div>
       </main>
     </div>

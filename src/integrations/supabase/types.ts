@@ -886,6 +886,62 @@ export type Database = {
           },
         ]
       }
+      organization_entitlements: {
+        Row: {
+          active: boolean
+          feature: string
+          granted_at: string
+          granted_by: string | null
+          granted_by_email: string | null
+          id: string
+          organization_id: string
+          reason: string | null
+          revoked_at: string | null
+          revoked_by: string | null
+          revoked_by_email: string | null
+          source: Database["public"]["Enums"]["entitlement_source"]
+          updated_at: string
+        }
+        Insert: {
+          active?: boolean
+          feature: string
+          granted_at?: string
+          granted_by?: string | null
+          granted_by_email?: string | null
+          id?: string
+          organization_id: string
+          reason?: string | null
+          revoked_at?: string | null
+          revoked_by?: string | null
+          revoked_by_email?: string | null
+          source: Database["public"]["Enums"]["entitlement_source"]
+          updated_at?: string
+        }
+        Update: {
+          active?: boolean
+          feature?: string
+          granted_at?: string
+          granted_by?: string | null
+          granted_by_email?: string | null
+          id?: string
+          organization_id?: string
+          reason?: string | null
+          revoked_at?: string | null
+          revoked_by?: string | null
+          revoked_by_email?: string | null
+          source?: Database["public"]["Enums"]["entitlement_source"]
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "organization_entitlements_organization_id_fkey"
+            columns: ["organization_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       organization_feature_locks: {
         Row: {
           created_at: string
@@ -1093,11 +1149,19 @@ export type Database = {
           internal_notes: string | null
           last_contacted_at: string | null
           lifecycle_status: Database["public"]["Enums"]["lifecycle_status"]
+          locked_at: string | null
+          locked_by: string | null
+          locked_reason: string | null
           name: string
           next_billing_at: string | null
           onboarding_completed: boolean
           owner_id: string
           pan_number: string | null
+          payment_override: boolean
+          payment_override_at: string | null
+          payment_override_by: string | null
+          payment_override_reason: string | null
+          pre_suspension_status: Database["public"]["Enums"]["lifecycle_status"] | null
           provisioned_at: string | null
           setup_paid_at: string | null
           slug: string | null
@@ -1130,11 +1194,19 @@ export type Database = {
           internal_notes?: string | null
           last_contacted_at?: string | null
           lifecycle_status?: Database["public"]["Enums"]["lifecycle_status"]
+          locked_at?: string | null
+          locked_by?: string | null
+          locked_reason?: string | null
           name: string
           next_billing_at?: string | null
           onboarding_completed?: boolean
           owner_id: string
           pan_number?: string | null
+          payment_override?: boolean
+          payment_override_at?: string | null
+          payment_override_by?: string | null
+          payment_override_reason?: string | null
+          pre_suspension_status?: Database["public"]["Enums"]["lifecycle_status"] | null
           provisioned_at?: string | null
           setup_paid_at?: string | null
           slug?: string | null
@@ -1167,11 +1239,19 @@ export type Database = {
           internal_notes?: string | null
           last_contacted_at?: string | null
           lifecycle_status?: Database["public"]["Enums"]["lifecycle_status"]
+          locked_at?: string | null
+          locked_by?: string | null
+          locked_reason?: string | null
           name?: string
           next_billing_at?: string | null
           onboarding_completed?: boolean
           owner_id?: string
           pan_number?: string | null
+          payment_override?: boolean
+          payment_override_at?: string | null
+          payment_override_by?: string | null
+          payment_override_reason?: string | null
+          pre_suspension_status?: Database["public"]["Enums"]["lifecycle_status"] | null
           provisioned_at?: string | null
           setup_paid_at?: string | null
           slug?: string | null
@@ -1466,6 +1546,72 @@ export type Database = {
           updated_at?: string
         }
         Relationships: []
+      }
+      refunds: {
+        Row: {
+          amount: number
+          created_at: string
+          currency: string
+          id: string
+          organization_id: string
+          payment_id: string
+          processed_at: string | null
+          provider: string
+          provider_refund_id: string | null
+          reason: string | null
+          requested_by: string | null
+          requested_by_email: string | null
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          amount: number
+          created_at?: string
+          currency?: string
+          id?: string
+          organization_id: string
+          payment_id: string
+          processed_at?: string | null
+          provider?: string
+          provider_refund_id?: string | null
+          reason?: string | null
+          requested_by?: string | null
+          requested_by_email?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          amount?: number
+          created_at?: string
+          currency?: string
+          id?: string
+          organization_id?: string
+          payment_id?: string
+          processed_at?: string | null
+          provider?: string
+          provider_refund_id?: string | null
+          reason?: string | null
+          requested_by?: string | null
+          requested_by_email?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "refunds_organization_id_fkey"
+            columns: ["organization_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "refunds_payment_id_fkey"
+            columns: ["payment_id"]
+            isOneToOne: false
+            referencedRelation: "payments"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       profiles: {
         Row: {
@@ -1823,6 +1969,7 @@ export type Database = {
         | "active"
         | "suspended"
         | "cancelled"
+      entitlement_source: "admin" | "subscription" | "trial" | "system"
       lifecycle_status:
         | "not_provisioned"
         | "setup_payment_pending"
@@ -1981,6 +2128,7 @@ export const Constants = {
         "suspended",
         "cancelled",
       ],
+      entitlement_source: ["admin", "subscription", "trial", "system"],
       lifecycle_status: [
         "not_provisioned",
         "setup_payment_pending",

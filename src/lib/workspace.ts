@@ -191,9 +191,11 @@ export const usageQuery = (organizationId: string | undefined) =>
     queryKey: ["usage", organizationId],
     enabled: Boolean(organizationId),
     queryFn: async () => {
+      // Customer-safe column list only — never select provider_cost here.
+      // Provider cost/margin must never reach a customer-facing response (spec §27/§73/§98).
       const { data, error } = await supabase
         .from("usage_records")
-        .select("*")
+        .select("id, organization_id, call_id, kind, provider, quantity, unit, billable_cost, occurred_at")
         .eq("organization_id", organizationId!)
         .order("occurred_at", { ascending: false })
         .limit(500);

@@ -7,6 +7,10 @@ import {
   SlidersHorizontal,
   ScrollText,
   ShieldCheck,
+  Receipt,
+  Wallet,
+  RotateCcw,
+  TrendingUp,
   Menu,
   X,
   LogOut,
@@ -16,9 +20,28 @@ import { Button } from "@/components/ui/button";
 import { useAuth } from "@/hooks/useAuth";
 import { StatusPill } from "@/components/app/primitives";
 
-const NAV: { to: "/admin" | "/admin/customers" | "/admin/pricing" | "/admin/settings" | "/admin/team" | "/admin/audit"; label: string; icon: typeof Users; exact?: boolean }[] = [
+const NAV: {
+  to:
+    | "/admin"
+    | "/admin/customers"
+    | "/admin/billing"
+    | "/admin/wallets"
+    | "/admin/refunds"
+    | "/admin/margins"
+    | "/admin/pricing"
+    | "/admin/settings"
+    | "/admin/team"
+    | "/admin/audit";
+  label: string;
+  icon: typeof Users;
+  exact?: boolean;
+}[] = [
   { to: "/admin", label: "Overview", icon: LayoutDashboard, exact: true },
   { to: "/admin/customers", label: "Customers", icon: Users },
+  { to: "/admin/billing", label: "Billing", icon: Receipt },
+  { to: "/admin/wallets", label: "Wallets", icon: Wallet },
+  { to: "/admin/refunds", label: "Refunds", icon: RotateCcw },
+  { to: "/admin/margins", label: "Profit & margin", icon: TrendingUp },
   { to: "/admin/pricing", label: "Pricing", icon: IndianRupee },
   { to: "/admin/settings", label: "Platform settings", icon: SlidersHorizontal },
   { to: "/admin/team", label: "Admin team", icon: ShieldCheck },
@@ -50,7 +73,9 @@ export function AdminShell({
             onClick={() => setOpen(false)}
             className={cn(
               "flex items-center gap-2.5 rounded-md px-3 py-2 text-sm transition-colors",
-              active ? "bg-primary/12 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground",
+              active
+                ? "bg-primary/12 text-primary"
+                : "text-muted-foreground hover:bg-muted hover:text-foreground",
             )}
           >
             <item.icon className="size-4" />
@@ -65,10 +90,14 @@ export function AdminShell({
     <div className="flex min-h-screen bg-background">
       <aside className="hidden w-60 shrink-0 flex-col border-r border-border lg:flex">
         <div className="flex h-14 items-center gap-2 border-b border-border px-4">
-          <span className="grid size-7 place-items-center rounded-md bg-foreground text-background text-[13px] font-bold">V</span>
+          <span className="grid size-7 place-items-center rounded-md bg-foreground text-background text-[13px] font-bold">
+            V
+          </span>
           <div className="leading-tight">
             <p className="text-[13px] font-semibold">Vaani Control</p>
-            <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Platform admin</p>
+            <p className="text-[10px] uppercase tracking-wider text-muted-foreground">
+              Platform admin
+            </p>
           </div>
         </div>
         {nav}
