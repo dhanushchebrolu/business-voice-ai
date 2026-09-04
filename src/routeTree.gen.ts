@@ -41,6 +41,7 @@ import { Route as AdminCustomersIndexRouteImport } from './routes/admin.customer
 import { Route as AdminCustomersOrgIdRouteImport } from './routes/admin.customers.$orgId'
 import { Route as ApiPublicWebhooksRazorpayRouteImport } from './routes/api/public/webhooks/razorpay'
 import { Route as ApiPublicWebhooksTelephonyRouteImport } from './routes/api/public/webhooks/telephony'
+import { Route as ApiPublicWebhooksExotelMediaTokenRouteImport } from './routes/api/public/webhooks/exotel.media-token'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -204,6 +205,12 @@ const ApiPublicWebhooksTelephonyRoute =
     path: '/api/public/webhooks/telephony',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicWebhooksExotelMediaTokenRoute =
+  ApiPublicWebhooksExotelMediaTokenRouteImport.update({
+    id: '/api/public/webhooks/exotel/media-token',
+    path: '/api/public/webhooks/exotel/media-token',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -238,6 +245,7 @@ export interface FileRoutesByFullPath {
   '/admin/customers/': typeof AdminCustomersIndexRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
+  '/api/public/webhooks/exotel/media-token': typeof ApiPublicWebhooksExotelMediaTokenRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -269,6 +277,7 @@ export interface FileRoutesByTo {
   '/admin/customers': typeof AdminCustomersIndexRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
+  '/api/public/webhooks/exotel/media-token': typeof ApiPublicWebhooksExotelMediaTokenRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -304,6 +313,7 @@ export interface FileRoutesById {
   '/admin/customers/': typeof AdminCustomersIndexRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
+  '/api/public/webhooks/exotel/media-token': typeof ApiPublicWebhooksExotelMediaTokenRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -340,6 +350,7 @@ export interface FileRouteTypes {
     | '/admin/customers/'
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/telephony'
+    | '/api/public/webhooks/exotel/media-token'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -371,6 +382,7 @@ export interface FileRouteTypes {
     | '/admin/customers'
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/telephony'
+    | '/api/public/webhooks/exotel/media-token'
   id:
     | '__root__'
     | '/'
@@ -405,6 +417,7 @@ export interface FileRouteTypes {
     | '/admin/customers/'
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/telephony'
+    | '/api/public/webhooks/exotel/media-token'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -416,6 +429,7 @@ export interface RootRouteChildren {
   ResetPasswordRoute: typeof ResetPasswordRoute
   ApiPublicWebhooksRazorpayRoute: typeof ApiPublicWebhooksRazorpayRoute
   ApiPublicWebhooksTelephonyRoute: typeof ApiPublicWebhooksTelephonyRoute
+  ApiPublicWebhooksExotelMediaTokenRoute: typeof ApiPublicWebhooksExotelMediaTokenRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -644,6 +658,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicWebhooksTelephonyRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/webhooks/exotel/media-token': {
+      id: '/api/public/webhooks/exotel/media-token'
+      path: '/api/public/webhooks/exotel/media-token'
+      fullPath: '/api/public/webhooks/exotel/media-token'
+      preLoaderRoute: typeof ApiPublicWebhooksExotelMediaTokenRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -730,6 +751,8 @@ const rootRouteChildren: RootRouteChildren = {
   ResetPasswordRoute: ResetPasswordRoute,
   ApiPublicWebhooksRazorpayRoute: ApiPublicWebhooksRazorpayRoute,
   ApiPublicWebhooksTelephonyRoute: ApiPublicWebhooksTelephonyRoute,
+  ApiPublicWebhooksExotelMediaTokenRoute:
+    ApiPublicWebhooksExotelMediaTokenRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

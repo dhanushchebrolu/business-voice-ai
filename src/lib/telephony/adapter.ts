@@ -80,8 +80,20 @@ export interface TelephonyProviderAdapter {
   releaseNumber(providerNumberId: string): Promise<void>;
   initiateOutboundCall(input: InitiateOutboundCallInput): Promise<InitiatedCall>;
 
-  /** Timing-safe signature check. Must be called before the payload is trusted. */
-  verifyWebhookSignature(rawBody: string, headers: Record<string, string | null>): boolean;
+  /**
+   * Timing-safe signature/authenticity check. Must be called before the
+   * payload is trusted. `url` is optional and exists only because not
+   * every provider signs webhooks via a header the way Razorpay/the
+   * generic adapter do — Exotel's documented model instead compares a
+   * shared verify-token value the admin configures, which Exotel is only
+   * confirmed to carry as a URL query parameter (see the Phase D.1
+   * report §8/§verification-notes). Header-based adapters simply ignore it.
+   */
+  verifyWebhookSignature(
+    rawBody: string,
+    headers: Record<string, string | null>,
+    url?: URL,
+  ): boolean;
   /** Returns null for an event this adapter does not recognize (never throws on unknown shapes). */
   normalizeWebhookEvent(
     rawBody: string,

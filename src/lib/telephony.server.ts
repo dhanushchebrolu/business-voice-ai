@@ -10,6 +10,7 @@
 
 import { GenericTelephonyAdapter } from "./telephony/generic-provider";
 import { MockTelephonyAdapter } from "./telephony/mock-provider";
+import { ExotelTelephonyAdapter } from "./telephony/exotel-provider";
 import type { TelephonyProviderAdapter } from "./telephony/adapter";
 
 export interface TelephonyProviderDef {
@@ -22,7 +23,18 @@ export interface TelephonyProviderDef {
 
 export const TELEPHONY_PROVIDERS: TelephonyProviderDef[] = [
   { id: "sarvam", label: "Sarvam rented number", requiredSecrets: ["SARVAM_TELEPHONY_ACCOUNT"], supportsPurchase: true },
-  { id: "exotel", label: "Exotel", requiredSecrets: ["EXOTEL_SID", "EXOTEL_TOKEN"], supportsPurchase: true },
+  // Phase D.1: corrected from supportsPurchase:true — Exotel has no
+  // confirmed public self-service number-purchase API; numbers are
+  // acquired through the account/sales process, then attached (see
+  // exotel-provider.ts's provisionNumber). requiredSecrets corrected from
+  // 2 to 3 values — Exotel's REST auth is Account SID + API Key + API
+  // Token, not SID + a single token (see PHASE_D1_EXOTEL_FINAL_REPORT.md §5).
+  {
+    id: "exotel",
+    label: "Exotel",
+    requiredSecrets: ["EXOTEL_SID", "EXOTEL_API_KEY", "EXOTEL_TOKEN"],
+    supportsPurchase: false,
+  },
   { id: "twilio", label: "Twilio", requiredSecrets: ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"], supportsPurchase: true },
   { id: "smartflo", label: "Tata Smartflo", requiredSecrets: ["SMARTFLO_TOKEN"], supportsPurchase: false },
   { id: "vobiz", label: "Vobiz", requiredSecrets: ["VOBIZ_API_KEY"], supportsPurchase: false },
@@ -65,6 +77,27 @@ export function getTelephonyAdapter(providerId: string): TelephonyProviderAdapte
   if (!def) return null;
   const status = providerStatus().find((p) => p.id === providerId);
   if (!status?.configured) return null;
+
+  // Exotel's real credential/auth shape (SID + API key + API token, and a
+  // "verify token" comparison instead of HMAC — see exotel-provider.ts)
+  // doesn't fit GenericTelephonyAdapter's single-apiKey/HMAC assumption,
+  // so it gets its own dedicated construction branch rather than being
+  // forced through the generic path.
+  if (providerId === "exotel") {
+    const accountSid = process.env["EXOTEL_SID"];
+    const apiKey = process.env["EXOTEL_API_KEY"];
+    const apiToken = process.env["EXOTEL_TOKEN"];
+    const webhookVerifyToken = process.env["EXOTEL_WEBHOOK_SECRET"];
+    const subdomain = process.env["EXOTEL_SUBDOMAIN"] ?? "api.exotel.com";
+    if (!accountSid || !apiKey || !apiToken || !webhookVerifyToken) return null;
+    return new ExotelTelephonyAdapter({
+      accountSid,
+      apiKey,
+      apiToken,
+      subdomain,
+      webhookVerifyToken,
+    });
+  }
 
   const baseUrl = providerBaseUrl(providerId);
   const apiKey = process.env[def.requiredSecrets[0]!];

@@ -42,7 +42,7 @@ export const Route = createFileRoute("/api/public/webhooks/telephony")({
           headers[key.toLowerCase()] = value;
         });
 
-        if (!adapter.verifyWebhookSignature(raw, headers)) {
+        if (!adapter.verifyWebhookSignature(raw, headers, url)) {
           return new Response("Invalid signature", { status: 401 });
         }
 

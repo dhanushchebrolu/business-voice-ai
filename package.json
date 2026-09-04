@@ -10,7 +10,7 @@
     "preview": "vite preview",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "test": "node --test src/**/*.test.ts"
+    "test": "node --test"
   },
   "overrides": {
     "rolldown": "1.2.1"

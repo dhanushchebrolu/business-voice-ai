@@ -2,6 +2,7 @@ import "./lib/error-capture";
 
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
+import { handleExotelMediaUpgrade } from "./lib/telephony/exotel-media-route.server";
 
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
@@ -47,6 +48,18 @@ function isH3SwallowedErrorBody(body: string): boolean {
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
     try {
+      // Phase D.1: Exotel's Voicebot Applet is the WebSocket *client* — it
+      // connects to us. TanStack Start's route convention has no WebSocket
+      // support (verified: neither @tanstack/react-start nor
+      // @tanstack/start-server-core reference "websocket" anywhere in their
+      // source), so this one path is intercepted here, at the raw
+      // Cloudflare Workers fetch handler, before TanStack Start's own
+      // request handling — see exotel-media-route.server.ts and
+      // PHASE_D1_EXOTEL_FINAL_REPORT.md §16 for why this is the correct
+      // and, on this deployment target, sufficient place to do it.
+      const mediaUpgrade = await handleExotelMediaUpgrade(request);
+      if (mediaUpgrade) return mediaUpgrade;
+
       const handler = await getServerEntry();
       const response = await handler.fetch(request, env, ctx);
       return await normalizeCatastrophicSsrResponse(response);
