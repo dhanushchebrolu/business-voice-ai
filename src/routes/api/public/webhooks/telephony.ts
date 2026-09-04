@@ -6,6 +6,7 @@ import {
   TERMINAL_CALL_STATUSES,
 } from "@/lib/telephony-guard.server";
 import { routeToAgentRuntime } from "@/lib/telephony-runtime";
+import { terminateRuntimeSession } from "@/lib/voice-runtime.server";
 import type { NormalizedCallEvent } from "@/lib/telephony/adapter";
 
 /**
@@ -165,10 +166,13 @@ async function processTelephonyEvent(providerId: string, event: NormalizedCallEv
       vaaniE164: phoneNumber.e164,
       callerE164: event.fromE164 ?? null,
       direction: "inbound",
+      provider: providerId,
+      providerCallId: event.providerCallId,
     });
   }
 
   if (TERMINAL_CALL_STATUSES.includes(event.status)) {
+    await terminateRuntimeSession(call.id, `call ended: ${event.status}`);
     await finalizeCallBilling(call, event.durationSeconds ?? 0);
   }
 }
@@ -180,6 +184,9 @@ async function applyCallEvent(
     organization_id: string;
     direction: string;
     answered_at: string | null;
+    phone_number_id: string | null;
+    provider: string;
+    provider_call_id: string | null;
   },
   event: NormalizedCallEvent,
 ) {
@@ -208,7 +215,48 @@ async function applyCallEvent(
     .eq("id", call.id);
   if (error) throw error;
 
+  // The very first webhook event for a call can arrive already "answered"
+  // (handled in processTelephonyEvent's new-call branch below), but the
+  // common case is ringing -> answered as two separate events on an
+  // already-existing row — this is that second path into the runtime.
+  // startRuntimeSession is idempotent per call_id, so both paths converging
+  // here is safe.
+  if (
+    call.direction === "inbound" &&
+    call.phone_number_id &&
+    (event.status === "answered" || event.status === "in_progress")
+  ) {
+    const { data: phoneNumber } = await supabaseAdmin
+      .from("phone_numbers")
+      .select("*")
+      .eq("id", call.phone_number_id)
+      .maybeSingle();
+    // Re-check entitlement at handoff time (defense in depth, spec §14) —
+    // a lock/suspension applied after the call started must still prevent
+    // the paid AI runtime from starting.
+    if (phoneNumber) {
+      const gate = await checkTelephonyAccess(call.organization_id, phoneNumber.id, "inbound");
+      if (gate.allowed) {
+        await routeToAgentRuntime({
+          callId: call.id,
+          organizationId: call.organization_id,
+          businessId: phoneNumber.business_id,
+          agentConfigId: phoneNumber.agent_config_id,
+          phoneNumberId: phoneNumber.id,
+          vaaniE164: phoneNumber.e164,
+          callerE164: event.fromE164 ?? null,
+          direction: "inbound",
+          provider: call.provider,
+          providerCallId: call.provider_call_id,
+        });
+      } else {
+        console.error("telephony:runtime_blocked_by_gate", call.id, gate.reason);
+      }
+    }
+  }
+
   if (TERMINAL_CALL_STATUSES.includes(event.status)) {
+    await terminateRuntimeSession(call.id, `call ended: ${event.status}`);
     await finalizeCallBilling(
       {
         id: call.id,

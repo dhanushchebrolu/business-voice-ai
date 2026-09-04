@@ -208,4 +208,17 @@ export class GenericTelephonyAdapter implements TelephonyProviderAdapter {
       raw: body,
     };
   }
+
+  /**
+   * No provider's real media-streaming protocol (Twilio Media Streams,
+   * Exotel voicebot streaming, etc.) is implemented here — none is
+   * configured with real credentials in this environment, and each has a
+   * distinct, proprietary framing that would need to be verified against
+   * that provider's live account to implement correctly. Returning `null`
+   * is the honest state: this provider has no live audio path yet. See the
+   * Phase E report's "Known limitations" for the concrete next step.
+   */
+  async openMediaBridge() {
+    return null;
+  }
 }

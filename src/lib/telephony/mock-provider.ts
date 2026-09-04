@@ -85,6 +85,11 @@ export class MockTelephonyAdapter implements TelephonyProviderAdapter {
       raw: { ...body, mock: true },
     };
   }
+
+  /** The mock provider has no real media transport — it exists to test call control, not audio. */
+  async openMediaBridge() {
+    return null;
+  }
 }
 
 /** Signs a payload the same way the mock adapter's verifier expects — test/dev only. */

@@ -14,6 +14,8 @@
  * never returned to a caller or serialized into a client-visible response.
  */
 
+import type { AudioMediaBridge } from "./audio-bridge";
+
 export interface ProvisionNumberInput {
   country: string;
   prefix?: string | undefined;
@@ -85,6 +87,17 @@ export interface TelephonyProviderAdapter {
     rawBody: string,
     headers: Record<string, string | null>,
   ): NormalizedCallEvent | null;
+
+  /**
+   * Opens the live audio channel for an answered call (Phase E). Optional
+   * because this is call-*media* transport, a different capability from
+   * everything above (call *control*) — a provider can be fully wired for
+   * dialing/webhooks and still not implement this. Returning `null` (or
+   * omitting the method) means "no live audio path for this call," which
+   * the voice runtime treats as a normal, non-fatal reason not to start —
+   * never as a crash. See ./audio-bridge.ts.
+   */
+  openMediaBridge?(providerCallId: string): Promise<AudioMediaBridge | null>;
 }
 
 export class TelephonyAdapterError extends Error {
