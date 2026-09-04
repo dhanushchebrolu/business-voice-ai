@@ -2,7 +2,15 @@
  * Telephony provider abstraction. Each provider must be configured with
  * server-side credentials before numbers can be searched or provisioned.
  * Nothing here fabricates inventory or pricing.
+ *
+ * `getTelephonyAdapter()` below is the ONE place the rest of the codebase
+ * asks for a live `TelephonyProviderAdapter` (see ./telephony/adapter.ts).
+ * Nothing else may import a provider SDK or call a provider's API directly.
  */
+
+import { GenericTelephonyAdapter } from "./telephony/generic-provider";
+import { MockTelephonyAdapter } from "./telephony/mock-provider";
+import type { TelephonyProviderAdapter } from "./telephony/adapter";
 
 export interface TelephonyProviderDef {
   id: string;
@@ -34,4 +42,40 @@ export function providerStatus() {
 
 export function anyProviderConfigured(): boolean {
   return providerStatus().some((p) => p.configured);
+}
+
+/** Base REST URL for a generically-adapted provider's API. */
+function providerBaseUrl(providerId: string): string | undefined {
+  return process.env[`${providerId.toUpperCase()}_BASE_URL`];
+}
+
+/**
+ * Resolves a live adapter for a provider ID, or null if that provider is
+ * not configured. The mock adapter is only ever reachable when an operator
+ * has explicitly set TELEPHONY_ALLOW_MOCK=true (never on by default, never
+ * silently substituted for a misconfigured real provider) — see
+ * ./telephony/mock-provider.ts.
+ */
+export function getTelephonyAdapter(providerId: string): TelephonyProviderAdapter | null {
+  if (providerId === "mock") {
+    return process.env["TELEPHONY_ALLOW_MOCK"] === "true" ? new MockTelephonyAdapter() : null;
+  }
+
+  const def = TELEPHONY_PROVIDERS.find((p) => p.id === providerId);
+  if (!def) return null;
+  const status = providerStatus().find((p) => p.id === providerId);
+  if (!status?.configured) return null;
+
+  const baseUrl = providerBaseUrl(providerId);
+  const apiKey = process.env[def.requiredSecrets[0]!];
+  const webhookSecret = process.env[`${providerId.toUpperCase()}_WEBHOOK_SECRET`];
+  if (!baseUrl || !apiKey || !webhookSecret) return null;
+
+  return new GenericTelephonyAdapter({
+    id: providerId,
+    supportsPurchase: def.supportsPurchase,
+    baseUrl,
+    apiKey,
+    webhookSecret,
+  });
 }

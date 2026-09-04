@@ -11,6 +11,37 @@ export type FaqRow = Database["public"]["Tables"]["faqs"]["Row"];
 export type RuleRow = Database["public"]["Tables"]["business_rules"]["Row"];
 export type HoursRow = Database["public"]["Tables"]["business_hours"]["Row"];
 export type CallRow = Database["public"]["Tables"]["call_logs"]["Row"];
+/** The subset of call_logs a customer is actually allowed to select (see the Phase D migration's column grant). */
+export type CustomerCallRow = Pick<
+  CallRow,
+  | "id"
+  | "organization_id"
+  | "business_id"
+  | "phone_number_id"
+  | "provider"
+  | "provider_call_id"
+  | "direction"
+  | "caller_number"
+  | "caller_name"
+  | "destination_number"
+  | "status"
+  | "outcome"
+  | "language"
+  | "duration_seconds"
+  | "agent_version"
+  | "recording_url"
+  | "transcript"
+  | "summary"
+  | "lead_score"
+  | "customer_charge"
+  | "currency"
+  | "started_at"
+  | "answered_at"
+  | "ended_at"
+  | "failure_reason"
+  | "created_at"
+  | "updated_at"
+>;
 export type LeadRow = Database["public"]["Tables"]["leads"]["Row"];
 export type PhoneNumberRow = Database["public"]["Tables"]["phone_numbers"]["Row"];
 export type KnowledgeRow = Database["public"]["Tables"]["knowledge_documents"]["Row"];
@@ -144,10 +175,17 @@ export const callsQuery = (organizationId: string | undefined) =>
   queryOptions({
     queryKey: ["calls", organizationId],
     enabled: Boolean(organizationId),
-    queryFn: async () => {
+    queryFn: async (): Promise<CustomerCallRow[]> => {
+      // Customer-safe column list only — provider_cost/gross_profit/
+      // provider_metadata must never reach a customer (Phase D, mirrors the
+      // Phase A usage_records fix). The database also enforces this via a
+      // column-level grant, but a stray `select("*")` here would still fail
+      // loudly against that grant rather than silently leaking anything.
       const { data, error } = await supabase
         .from("call_logs")
-        .select("*")
+        .select(
+          "id, organization_id, business_id, phone_number_id, provider, provider_call_id, direction, caller_number, caller_name, destination_number, status, outcome, language, duration_seconds, agent_version, recording_url, transcript, summary, lead_score, customer_charge, currency, started_at, answered_at, ended_at, failure_reason, created_at, updated_at",
+        )
         .eq("organization_id", organizationId!)
         .order("started_at", { ascending: false })
         .limit(200);

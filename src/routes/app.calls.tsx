@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { PhoneCall, Search } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
-import { workspaceQuery, callsQuery, type CallRow } from "@/lib/workspace";
+import { workspaceQuery, callsQuery, type CustomerCallRow } from "@/lib/workspace";
 import { PageHeader, EmptyState, LoadingState, StatusPill, SectionCard } from "@/components/app/primitives";
 import { languageLabel } from "@/lib/voices";
 import { Input } from "@/components/ui/input";
@@ -27,7 +27,7 @@ function CallsPage() {
   const { data: ws } = useQuery(workspaceQuery(user?.id));
   const { data: calls, isLoading } = useQuery(callsQuery(ws?.organization?.id));
   const [q, setQ] = useState("");
-  const [selected, setSelected] = useState<CallRow | null>(null);
+  const [selected, setSelected] = useState<CustomerCallRow | null>(null);
 
   const filtered = useMemo(() => {
     const term = q.trim().toLowerCase();

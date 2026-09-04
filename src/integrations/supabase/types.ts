@@ -443,66 +443,97 @@ export type Database = {
       call_logs: {
         Row: {
           agent_version: number | null
+          answered_at: string | null
           business_id: string | null
           caller_name: string | null
           caller_number: string | null
           created_at: string
+          customer_charge: number
+          currency: string
+          destination_number: string | null
           direction: string
           duration_seconds: number
           ended_at: string | null
+          failure_reason: string | null
+          gross_profit: number | null
           id: string
           language: string | null
           lead_score: string | null
           organization_id: string
           outcome: string | null
           phone_number_id: string | null
+          provider: string
+          provider_call_id: string | null
+          provider_cost: number
+          provider_metadata: Json
           recording_url: string | null
           started_at: string
           status: string
           summary: string | null
           transcript: Json | null
+          updated_at: string
         }
         Insert: {
           agent_version?: number | null
+          answered_at?: string | null
           business_id?: string | null
           caller_name?: string | null
           caller_number?: string | null
           created_at?: string
+          customer_charge?: number
+          currency?: string
+          destination_number?: string | null
           direction?: string
           duration_seconds?: number
           ended_at?: string | null
+          failure_reason?: string | null
           id?: string
           language?: string | null
           lead_score?: string | null
           organization_id: string
           outcome?: string | null
           phone_number_id?: string | null
+          provider?: string
+          provider_call_id?: string | null
+          provider_cost?: number
+          provider_metadata?: Json
           recording_url?: string | null
           started_at?: string
           status?: string
           summary?: string | null
           transcript?: Json | null
+          updated_at?: string
         }
         Update: {
           agent_version?: number | null
+          answered_at?: string | null
           business_id?: string | null
           caller_name?: string | null
           caller_number?: string | null
           created_at?: string
+          customer_charge?: number
+          currency?: string
+          destination_number?: string | null
           direction?: string
           duration_seconds?: number
           ended_at?: string | null
+          failure_reason?: string | null
           id?: string
           language?: string | null
           lead_score?: string | null
           organization_id?: string
           outcome?: string | null
           phone_number_id?: string | null
+          provider?: string
+          provider_call_id?: string | null
+          provider_cost?: number
+          provider_metadata?: Json
           recording_url?: string | null
           started_at?: string
           status?: string
           summary?: string | null
           transcript?: Json | null
+          updated_at?: string
         }
         Relationships: [
           {
@@ -1380,51 +1411,82 @@ export type Database = {
       }
       phone_numbers: {
         Row: {
+          agent_config_id: string | null
           business_id: string | null
           connection_id: string | null
           country: string
           created_at: string
+          display_number: string | null
           e164: string
           id: string
           inbound_enabled: boolean
+          metadata: Json
           monthly_price: number | null
           organization_id: string
           outbound_enabled: boolean
           provider: string
+          provider_number_id: string | null
+          provisioned_by: string | null
+          purchased_at: string | null
+          released_at: string | null
           status: string
+          suspended_reason: string | null
           updated_at: string
         }
         Insert: {
+          agent_config_id?: string | null
           business_id?: string | null
           connection_id?: string | null
           country?: string
           created_at?: string
+          display_number?: string | null
           e164: string
           id?: string
           inbound_enabled?: boolean
+          metadata?: Json
           monthly_price?: number | null
           organization_id: string
           outbound_enabled?: boolean
           provider?: string
+          provider_number_id?: string | null
+          provisioned_by?: string | null
+          purchased_at?: string | null
+          released_at?: string | null
           status?: string
+          suspended_reason?: string | null
           updated_at?: string
         }
         Update: {
+          agent_config_id?: string | null
           business_id?: string | null
           connection_id?: string | null
           country?: string
           created_at?: string
+          display_number?: string | null
           e164?: string
           id?: string
           inbound_enabled?: boolean
+          metadata?: Json
           monthly_price?: number | null
           organization_id?: string
           outbound_enabled?: boolean
           provider?: string
+          provider_number_id?: string | null
+          provisioned_by?: string | null
+          purchased_at?: string | null
+          released_at?: string | null
           status?: string
+          suspended_reason?: string | null
           updated_at?: string
         }
         Relationships: [
+          {
+            foreignKeyName: "phone_numbers_agent_config_id_fkey"
+            columns: ["agent_config_id"]
+            isOneToOne: false
+            referencedRelation: "agent_configs"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "phone_numbers_business_id_fkey"
             columns: ["business_id"]
@@ -1943,8 +2005,21 @@ export type Database = {
     }
     Functions: {
       customer_rate: { Args: { _key: string; _org: string }; Returns: number }
+      debit_wallet_for_call: {
+        Args: {
+          _amount: number
+          _call_id: string
+          _description: string
+          _org: string
+        }
+        Returns: { already_applied: boolean; applied: boolean; balance: number }[]
+      }
       feature_locked: {
         Args: { _feature: string; _org: string }
+        Returns: boolean
+      }
+      wallet_can_afford: {
+        Args: { _amount: number; _org: string }
         Returns: boolean
       }
       has_org_role: {

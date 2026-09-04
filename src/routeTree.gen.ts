@@ -18,8 +18,10 @@ import { Route as ResetPasswordRouteImport } from './routes/reset-password'
 import { Route as AdminIndexRouteImport } from './routes/admin.index'
 import { Route as AdminAuditRouteImport } from './routes/admin.audit'
 import { Route as AdminBillingRouteImport } from './routes/admin.billing'
+import { Route as AdminCallsRouteImport } from './routes/admin.calls'
 import { Route as AdminCustomersRouteImport } from './routes/admin.customers'
 import { Route as AdminMarginsRouteImport } from './routes/admin.margins'
+import { Route as AdminNumbersRouteImport } from './routes/admin.numbers'
 import { Route as AdminPricingRouteImport } from './routes/admin.pricing'
 import { Route as AdminRefundsRouteImport } from './routes/admin.refunds'
 import { Route as AdminSettingsRouteImport } from './routes/admin.settings'
@@ -38,6 +40,7 @@ import { Route as AppSettingsRouteImport } from './routes/app.settings'
 import { Route as AdminCustomersIndexRouteImport } from './routes/admin.customers.index'
 import { Route as AdminCustomersOrgIdRouteImport } from './routes/admin.customers.$orgId'
 import { Route as ApiPublicWebhooksRazorpayRouteImport } from './routes/api/public/webhooks/razorpay'
+import { Route as ApiPublicWebhooksTelephonyRouteImport } from './routes/api/public/webhooks/telephony'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -84,6 +87,11 @@ const AdminBillingRoute = AdminBillingRouteImport.update({
   path: '/billing',
   getParentRoute: () => AdminRoute,
 } as any)
+const AdminCallsRoute = AdminCallsRouteImport.update({
+  id: '/calls',
+  path: '/calls',
+  getParentRoute: () => AdminRoute,
+} as any)
 const AdminCustomersRoute = AdminCustomersRouteImport.update({
   id: '/customers',
   path: '/customers',
@@ -92,6 +100,11 @@ const AdminCustomersRoute = AdminCustomersRouteImport.update({
 const AdminMarginsRoute = AdminMarginsRouteImport.update({
   id: '/margins',
   path: '/margins',
+  getParentRoute: () => AdminRoute,
+} as any)
+const AdminNumbersRoute = AdminNumbersRouteImport.update({
+  id: '/numbers',
+  path: '/numbers',
   getParentRoute: () => AdminRoute,
 } as any)
 const AdminPricingRoute = AdminPricingRouteImport.update({
@@ -185,6 +198,12 @@ const ApiPublicWebhooksRazorpayRoute =
     path: '/api/public/webhooks/razorpay',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicWebhooksTelephonyRoute =
+  ApiPublicWebhooksTelephonyRouteImport.update({
+    id: '/api/public/webhooks/telephony',
+    path: '/api/public/webhooks/telephony',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -195,8 +214,10 @@ export interface FileRoutesByFullPath {
   '/reset-password': typeof ResetPasswordRoute
   '/admin/audit': typeof AdminAuditRoute
   '/admin/billing': typeof AdminBillingRoute
+  '/admin/calls': typeof AdminCallsRoute
   '/admin/customers': typeof AdminCustomersRouteWithChildren
   '/admin/margins': typeof AdminMarginsRoute
+  '/admin/numbers': typeof AdminNumbersRoute
   '/admin/pricing': typeof AdminPricingRoute
   '/admin/refunds': typeof AdminRefundsRoute
   '/admin/settings': typeof AdminSettingsRoute
@@ -216,6 +237,7 @@ export interface FileRoutesByFullPath {
   '/admin/customers/$orgId': typeof AdminCustomersOrgIdRoute
   '/admin/customers/': typeof AdminCustomersIndexRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
+  '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -224,7 +246,9 @@ export interface FileRoutesByTo {
   '/reset-password': typeof ResetPasswordRoute
   '/admin/audit': typeof AdminAuditRoute
   '/admin/billing': typeof AdminBillingRoute
+  '/admin/calls': typeof AdminCallsRoute
   '/admin/margins': typeof AdminMarginsRoute
+  '/admin/numbers': typeof AdminNumbersRoute
   '/admin/pricing': typeof AdminPricingRoute
   '/admin/refunds': typeof AdminRefundsRoute
   '/admin/settings': typeof AdminSettingsRoute
@@ -244,6 +268,7 @@ export interface FileRoutesByTo {
   '/admin/customers/$orgId': typeof AdminCustomersOrgIdRoute
   '/admin/customers': typeof AdminCustomersIndexRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
+  '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -255,8 +280,10 @@ export interface FileRoutesById {
   '/reset-password': typeof ResetPasswordRoute
   '/admin/audit': typeof AdminAuditRoute
   '/admin/billing': typeof AdminBillingRoute
+  '/admin/calls': typeof AdminCallsRoute
   '/admin/customers': typeof AdminCustomersRouteWithChildren
   '/admin/margins': typeof AdminMarginsRoute
+  '/admin/numbers': typeof AdminNumbersRoute
   '/admin/pricing': typeof AdminPricingRoute
   '/admin/refunds': typeof AdminRefundsRoute
   '/admin/settings': typeof AdminSettingsRoute
@@ -276,6 +303,7 @@ export interface FileRoutesById {
   '/admin/customers/$orgId': typeof AdminCustomersOrgIdRoute
   '/admin/customers/': typeof AdminCustomersIndexRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
+  '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -288,8 +316,10 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/admin/audit'
     | '/admin/billing'
+    | '/admin/calls'
     | '/admin/customers'
     | '/admin/margins'
+    | '/admin/numbers'
     | '/admin/pricing'
     | '/admin/refunds'
     | '/admin/settings'
@@ -309,6 +339,7 @@ export interface FileRouteTypes {
     | '/admin/customers/$orgId'
     | '/admin/customers/'
     | '/api/public/webhooks/razorpay'
+    | '/api/public/webhooks/telephony'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -317,7 +348,9 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/admin/audit'
     | '/admin/billing'
+    | '/admin/calls'
     | '/admin/margins'
+    | '/admin/numbers'
     | '/admin/pricing'
     | '/admin/refunds'
     | '/admin/settings'
@@ -337,6 +370,7 @@ export interface FileRouteTypes {
     | '/admin/customers/$orgId'
     | '/admin/customers'
     | '/api/public/webhooks/razorpay'
+    | '/api/public/webhooks/telephony'
   id:
     | '__root__'
     | '/'
@@ -347,8 +381,10 @@ export interface FileRouteTypes {
     | '/reset-password'
     | '/admin/audit'
     | '/admin/billing'
+    | '/admin/calls'
     | '/admin/customers'
     | '/admin/margins'
+    | '/admin/numbers'
     | '/admin/pricing'
     | '/admin/refunds'
     | '/admin/settings'
@@ -368,6 +404,7 @@ export interface FileRouteTypes {
     | '/admin/customers/$orgId'
     | '/admin/customers/'
     | '/api/public/webhooks/razorpay'
+    | '/api/public/webhooks/telephony'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -378,6 +415,7 @@ export interface RootRouteChildren {
   PricingRoute: typeof PricingRoute
   ResetPasswordRoute: typeof ResetPasswordRoute
   ApiPublicWebhooksRazorpayRoute: typeof ApiPublicWebhooksRazorpayRoute
+  ApiPublicWebhooksTelephonyRoute: typeof ApiPublicWebhooksTelephonyRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -445,6 +483,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AdminBillingRouteImport
       parentRoute: typeof AdminRoute
     }
+    '/admin/calls': {
+      id: '/admin/calls'
+      path: '/calls'
+      fullPath: '/admin/calls'
+      preLoaderRoute: typeof AdminCallsRouteImport
+      parentRoute: typeof AdminRoute
+    }
     '/admin/customers': {
       id: '/admin/customers'
       path: '/customers'
@@ -457,6 +502,13 @@ declare module '@tanstack/react-router' {
       path: '/margins'
       fullPath: '/admin/margins'
       preLoaderRoute: typeof AdminMarginsRouteImport
+      parentRoute: typeof AdminRoute
+    }
+    '/admin/numbers': {
+      id: '/admin/numbers'
+      path: '/numbers'
+      fullPath: '/admin/numbers'
+      preLoaderRoute: typeof AdminNumbersRouteImport
       parentRoute: typeof AdminRoute
     }
     '/admin/pricing': {
@@ -585,6 +637,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicWebhooksRazorpayRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/webhooks/telephony': {
+      id: '/api/public/webhooks/telephony'
+      path: '/api/public/webhooks/telephony'
+      fullPath: '/api/public/webhooks/telephony'
+      preLoaderRoute: typeof ApiPublicWebhooksTelephonyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -605,8 +664,10 @@ const AdminCustomersRouteWithChildren = AdminCustomersRoute._addFileChildren(
 interface AdminRouteChildren {
   AdminAuditRoute: typeof AdminAuditRoute
   AdminBillingRoute: typeof AdminBillingRoute
+  AdminCallsRoute: typeof AdminCallsRoute
   AdminCustomersRoute: typeof AdminCustomersRouteWithChildren
   AdminMarginsRoute: typeof AdminMarginsRoute
+  AdminNumbersRoute: typeof AdminNumbersRoute
   AdminPricingRoute: typeof AdminPricingRoute
   AdminRefundsRoute: typeof AdminRefundsRoute
   AdminSettingsRoute: typeof AdminSettingsRoute
@@ -619,8 +680,10 @@ interface AdminRouteChildren {
 const AdminRouteChildren: AdminRouteChildren = {
   AdminAuditRoute: AdminAuditRoute,
   AdminBillingRoute: AdminBillingRoute,
+  AdminCallsRoute: AdminCallsRoute,
   AdminCustomersRoute: AdminCustomersRouteWithChildren,
   AdminMarginsRoute: AdminMarginsRoute,
+  AdminNumbersRoute: AdminNumbersRoute,
   AdminPricingRoute: AdminPricingRoute,
   AdminRefundsRoute: AdminRefundsRoute,
   AdminSettingsRoute: AdminSettingsRoute,
@@ -666,6 +729,7 @@ const rootRouteChildren: RootRouteChildren = {
   PricingRoute: PricingRoute,
   ResetPasswordRoute: ResetPasswordRoute,
   ApiPublicWebhooksRazorpayRoute: ApiPublicWebhooksRazorpayRoute,
+  ApiPublicWebhooksTelephonyRoute: ApiPublicWebhooksTelephonyRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

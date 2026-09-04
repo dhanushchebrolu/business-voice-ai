@@ -14,6 +14,8 @@ import {
   Menu,
   X,
   LogOut,
+  Phone,
+  PhoneCall,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -24,6 +26,8 @@ const NAV: {
   to:
     | "/admin"
     | "/admin/customers"
+    | "/admin/numbers"
+    | "/admin/calls"
     | "/admin/billing"
     | "/admin/wallets"
     | "/admin/refunds"
@@ -38,6 +42,8 @@ const NAV: {
 }[] = [
   { to: "/admin", label: "Overview", icon: LayoutDashboard, exact: true },
   { to: "/admin/customers", label: "Customers", icon: Users },
+  { to: "/admin/numbers", label: "Phone numbers", icon: Phone },
+  { to: "/admin/calls", label: "Calls", icon: PhoneCall },
   { to: "/admin/billing", label: "Billing", icon: Receipt },
   { to: "/admin/wallets", label: "Wallets", icon: Wallet },
   { to: "/admin/refunds", label: "Refunds", icon: RotateCcw },
