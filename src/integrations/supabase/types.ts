@@ -1789,6 +1789,27 @@ export type Database = {
         }
         Relationships: []
       }
+      public_assistant_rate_limits: {
+        Row: {
+          client_key: string
+          request_count: number
+          updated_at: string
+          window_start: string
+        }
+        Insert: {
+          client_key: string
+          request_count?: number
+          updated_at?: string
+          window_start: string
+        }
+        Update: {
+          client_key?: string
+          request_count?: number
+          updated_at?: string
+          window_start?: string
+        }
+        Relationships: []
+      }
       services: {
         Row: {
           attributes: Json
@@ -2109,6 +2130,10 @@ export type Database = {
           _roles: Database["public"]["Enums"]["member_role"][]
         }
         Returns: boolean
+      }
+      increment_rate_limit: {
+        Args: { _key: string; _window_start: string }
+        Returns: number
       }
       is_org_member: { Args: { _org: string }; Returns: boolean }
       is_platform_admin: { Args: never; Returns: boolean }

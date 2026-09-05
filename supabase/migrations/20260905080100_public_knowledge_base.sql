@@ -7,7 +7,10 @@
 
 CREATE TABLE IF NOT EXISTS public.public_knowledge_base (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  title text NOT NULL,
+  -- Unique so the starter seed below (and any future seeding) can be
+  -- genuinely idempotent via ON CONFLICT (title); also reasonable content
+  -- hygiene for a marketing knowledge base (no duplicate-titled entries).
+  title text NOT NULL UNIQUE,
   content text NOT NULL,
   category text,
   is_active boolean NOT NULL DEFAULT true,
@@ -38,6 +41,8 @@ CREATE TRIGGER trg_public_knowledge_base_updated BEFORE UPDATE ON public.public_
 
 -- Seed a small set of accurate starter entries so the assistant has
 -- something real to answer from immediately. All admin-editable afterwards.
+-- Genuinely idempotent: title is UNIQUE (see column above), so re-running
+-- this block never creates duplicate rows.
 INSERT INTO public.public_knowledge_base (title, content, category, sort_order) VALUES
   (
     'What Vaani is',
@@ -69,4 +74,4 @@ INSERT INTO public.public_knowledge_base (title, content, category, sort_order) 
     'Getting started means creating an account, and a Vaani team member provisions and activates the workspace as part of onboarding after the setup payment. To talk to the team first, use the "Book a demo" option.',
     'onboarding', 6
   )
-ON CONFLICT DO NOTHING;
+ON CONFLICT (title) DO NOTHING;

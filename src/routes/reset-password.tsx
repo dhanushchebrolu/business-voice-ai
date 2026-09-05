@@ -1,5 +1,5 @@
 import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
@@ -27,16 +27,15 @@ function ResetPassword() {
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [busy, setBusy] = useState(false);
-  const [linkInvalid, setLinkInvalid] = useState(false);
   const navigate = useNavigate();
 
-  useEffect(() => {
-    // The reset link establishes a recovery session via the URL hash. If
-    // there is none once auth has finished loading, the link is invalid or
-    // has already expired — say so rather than letting updateUser fail
-    // silently with an opaque error.
-    if (!loading && !session) setLinkInvalid(true);
-  }, [loading, session]);
+  // The reset link establishes a recovery session via the URL hash. Derived
+  // fresh on every render (never a one-way latch) so that if the recovery
+  // session lands a moment after the first `loading:false` tick, the form
+  // correctly appears instead of staying stuck on a stale "invalid" state.
+  // If there is still no session once auth has finished loading, the link
+  // is genuinely invalid or has already expired.
+  const linkInvalid = !loading && !session;
 
   const mismatch = confirmPassword.length > 0 && password !== confirmPassword;
 

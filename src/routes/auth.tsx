@@ -75,9 +75,19 @@ function AuthPage() {
   useEffect(() => {
     if (loading || !session || !user) return;
     let cancelled = false;
-    resolvePostAuthDestination(user.id).then((dest) => {
-      if (!cancelled) navigate({ to: dest });
-    });
+    resolvePostAuthDestination(user.id)
+      .then((dest) => {
+        if (!cancelled) navigate({ to: dest });
+      })
+      .catch((error) => {
+        // Never leave the visitor stuck: on failure, just stay on this page
+        // (the sign-in form below is still fully usable) instead of hanging
+        // in a state with no visible way forward.
+        console.error("auth:resolve_destination_failed", error);
+        if (!cancelled) {
+          toast.error("Could not load your account. Please try again or reload the page.");
+        }
+      });
     return () => {
       cancelled = true;
     };
