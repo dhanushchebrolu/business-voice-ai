@@ -4,6 +4,7 @@ import {
   Link,
   createRootRouteWithContext,
   useRouter,
+  useRouterState,
   HeadContent,
   Scripts,
 } from "@tanstack/react-router";
@@ -13,6 +14,7 @@ import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 import { AuthProvider } from "@/hooks/useAuth";
 import { Toaster } from "@/components/ui/sonner";
+import { PublicAssistantWidget } from "@/components/app/PublicAssistantWidget";
 
 function NotFoundComponent() {
   return (
@@ -121,12 +123,18 @@ function RootShell({ children }: { children: ReactNode }) {
 
 function RootComponent() {
   const { queryClient } = Route.useRouteContext();
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  // The public assistant is marketing-site surface only — the customer
+  // dashboard and platform admin console have their own tools (and the
+  // admin console gets a dedicated preview of this same assistant).
+  const showPublicAssistant = !pathname.startsWith("/app") && !pathname.startsWith("/admin");
 
   return (
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
         {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
         <Outlet />
+        {showPublicAssistant ? <PublicAssistantWidget /> : null}
         <Toaster position="top-right" />
       </AuthProvider>
     </QueryClientProvider>

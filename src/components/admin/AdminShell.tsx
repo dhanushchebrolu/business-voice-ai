@@ -16,6 +16,7 @@ import {
   LogOut,
   Phone,
   PhoneCall,
+  Bot,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -34,6 +35,7 @@ const NAV: {
     | "/admin/margins"
     | "/admin/pricing"
     | "/admin/settings"
+    | "/admin/website-ai"
     | "/admin/team"
     | "/admin/audit";
   label: string;
@@ -50,6 +52,7 @@ const NAV: {
   { to: "/admin/margins", label: "Profit & margin", icon: TrendingUp },
   { to: "/admin/pricing", label: "Pricing", icon: IndianRupee },
   { to: "/admin/settings", label: "Platform settings", icon: SlidersHorizontal },
+  { to: "/admin/website-ai", label: "Website AI", icon: Bot },
   { to: "/admin/team", label: "Admin team", icon: ShieldCheck },
   { to: "/admin/audit", label: "Audit logs", icon: ScrollText },
 ];

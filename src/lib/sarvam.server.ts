@@ -27,7 +27,8 @@ export class ProviderError extends Error {
 
 function apiKey(): string {
   const key = process.env["SARVAM_API_KEY"];
-  if (!key) throw new ProviderError("The AI voice provider is not configured for this workspace.", 503);
+  if (!key)
+    throw new ProviderError("The AI voice provider is not configured for this workspace.", 503);
   return key;
 }
 
@@ -49,9 +50,19 @@ async function call<T>(path: string, body: unknown): Promise<T> {
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     if (res.status === 401 || res.status === 403)
-      throw new ProviderError("The AI voice provider rejected the platform credentials.", res.status);
-    if (res.status === 429) throw new ProviderError("The AI voice provider is rate limiting requests. Try again shortly.", 429);
-    throw new ProviderError(`AI voice provider error (${res.status}). ${text.slice(0, 180)}`, res.status);
+      throw new ProviderError(
+        "The AI voice provider rejected the platform credentials.",
+        res.status,
+      );
+    if (res.status === 429)
+      throw new ProviderError(
+        "The AI voice provider is rate limiting requests. Try again shortly.",
+        429,
+      );
+    throw new ProviderError(
+      `AI voice provider error (${res.status}). ${text.slice(0, 180)}`,
+      res.status,
+    );
   }
   return (await res.json()) as T;
 }
@@ -67,7 +78,9 @@ export const sarvam = {
   },
 
   /** Conversational turn used by the in-dashboard test console. */
-  async runConversation(messages: ChatMessage[]): Promise<{ reply: string; usage: { input_tokens: number; output_tokens: number } }> {
+  async runConversation(
+    messages: ChatMessage[],
+  ): Promise<{ reply: string; usage: { input_tokens: number; output_tokens: number } }> {
     const data = await call<{
       choices: { message: { content: string } }[];
       usage?: { prompt_tokens?: number; completion_tokens?: number };
@@ -87,7 +100,12 @@ export const sarvam = {
   },
 
   /** Bulbul v3 speech synthesis. Returns base64 wav chunks. */
-  async generateSpeech(input: { text: string; speaker: string; language: string; pace: number }): Promise<string> {
+  async generateSpeech(input: {
+    text: string;
+    speaker: string;
+    language: string;
+    pace: number;
+  }): Promise<string> {
     const data = await call<{ audios: string[] }>("/text-to-speech", {
       text: input.text.slice(0, 480),
       target_language_code: input.language,
@@ -98,6 +116,48 @@ export const sarvam = {
     const audio = data.audios?.[0];
     if (!audio) throw new ProviderError("The provider returned no audio for this voice.", 502);
     return audio;
+  },
+
+  /**
+   * Saaras batch speech-to-text. Used by the public voice assistant (a
+   * turn-based "record, transcribe, respond, speak" flow — not the
+   * continuous telephony media stream, which uses the separate realtime
+   * WebSocket client in sarvam-realtime.server.ts). Sarvam's REST STT
+   * endpoint takes multipart/form-data, unlike the JSON endpoints above.
+   */
+  async speechToText(input: {
+    audio: Blob;
+    languageCode?: string;
+  }): Promise<{ transcript: string }> {
+    const form = new FormData();
+    form.append("file", input.audio, "audio.webm");
+    form.append("model", SARVAM_MODELS.stt);
+    if (input.languageCode) form.append("language_code", input.languageCode);
+
+    let res: Response;
+    try {
+      res = await fetch(`${BASE_URL}/speech-to-text`, {
+        method: "POST",
+        headers: { "api-subscription-key": apiKey() },
+        body: form,
+      });
+    } catch {
+      throw new ProviderError("Could not reach the AI voice provider. Please retry.", 503);
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      if (res.status === 401 || res.status === 403)
+        throw new ProviderError(
+          "The AI voice provider rejected the platform credentials.",
+          res.status,
+        );
+      throw new ProviderError(
+        `AI voice provider error (${res.status}). ${text.slice(0, 180)}`,
+        res.status,
+      );
+    }
+    const data = (await res.json()) as { transcript?: string };
+    return { transcript: data.transcript?.trim() ?? "" };
   },
 
   /**

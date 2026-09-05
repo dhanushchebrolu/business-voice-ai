@@ -10,11 +10,15 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as AccountRouteImport } from './routes/account'
 import { Route as AdminRouteImport } from './routes/admin'
 import { Route as AppRouteImport } from './routes/app'
 import { Route as AuthRouteImport } from './routes/auth'
+import { Route as ContactRouteImport } from './routes/contact'
 import { Route as PricingRouteImport } from './routes/pricing'
 import { Route as ResetPasswordRouteImport } from './routes/reset-password'
+import { Route as AccountIndexRouteImport } from './routes/account.index'
+import { Route as AccountSettingsRouteImport } from './routes/account.settings'
 import { Route as AdminIndexRouteImport } from './routes/admin.index'
 import { Route as AdminAuditRouteImport } from './routes/admin.audit'
 import { Route as AdminBillingRouteImport } from './routes/admin.billing'
@@ -28,6 +32,7 @@ import { Route as AdminSettingsRouteImport } from './routes/admin.settings'
 import { Route as AdminSupportRouteImport } from './routes/admin.support'
 import { Route as AdminTeamRouteImport } from './routes/admin.team'
 import { Route as AdminWalletsRouteImport } from './routes/admin.wallets'
+import { Route as AdminWebsiteAiRouteImport } from './routes/admin.website-ai'
 import { Route as AppIndexRouteImport } from './routes/app.index'
 import { Route as AppAgentRouteImport } from './routes/app.agent'
 import { Route as AppBillingRouteImport } from './routes/app.billing'
@@ -37,6 +42,7 @@ import { Route as AppLeadsRouteImport } from './routes/app.leads'
 import { Route as AppNumbersRouteImport } from './routes/app.numbers'
 import { Route as AppOnboardingRouteImport } from './routes/app.onboarding'
 import { Route as AppSettingsRouteImport } from './routes/app.settings'
+import { Route as AuthCallbackRouteImport } from './routes/auth.callback'
 import { Route as AdminCustomersIndexRouteImport } from './routes/admin.customers.index'
 import { Route as AdminCustomersOrgIdRouteImport } from './routes/admin.customers.$orgId'
 import { Route as ApiPublicWebhooksRazorpayRouteImport } from './routes/api/public/webhooks/razorpay'
@@ -46,6 +52,11 @@ import { Route as ApiPublicWebhooksExotelMediaTokenRouteImport } from './routes/
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AccountRoute = AccountRouteImport.update({
+  id: '/account',
+  path: '/account',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AdminRoute = AdminRouteImport.update({
@@ -63,6 +74,11 @@ const AuthRoute = AuthRouteImport.update({
   path: '/auth',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ContactRoute = ContactRouteImport.update({
+  id: '/contact',
+  path: '/contact',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const PricingRoute = PricingRouteImport.update({
   id: '/pricing',
   path: '/pricing',
@@ -72,6 +88,16 @@ const ResetPasswordRoute = ResetPasswordRouteImport.update({
   id: '/reset-password',
   path: '/reset-password',
   getParentRoute: () => rootRouteImport,
+} as any)
+const AccountIndexRoute = AccountIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => AccountRoute,
+} as any)
+const AccountSettingsRoute = AccountSettingsRouteImport.update({
+  id: '/settings',
+  path: '/settings',
+  getParentRoute: () => AccountRoute,
 } as any)
 const AdminIndexRoute = AdminIndexRouteImport.update({
   id: '/',
@@ -138,6 +164,11 @@ const AdminWalletsRoute = AdminWalletsRouteImport.update({
   path: '/wallets',
   getParentRoute: () => AdminRoute,
 } as any)
+const AdminWebsiteAiRoute = AdminWebsiteAiRouteImport.update({
+  id: '/website-ai',
+  path: '/website-ai',
+  getParentRoute: () => AdminRoute,
+} as any)
 const AppIndexRoute = AppIndexRouteImport.update({
   id: '/',
   path: '/',
@@ -183,6 +214,11 @@ const AppSettingsRoute = AppSettingsRouteImport.update({
   path: '/settings',
   getParentRoute: () => AppRoute,
 } as any)
+const AuthCallbackRoute = AuthCallbackRouteImport.update({
+  id: '/callback',
+  path: '/callback',
+  getParentRoute: () => AuthRoute,
+} as any)
 const AdminCustomersIndexRoute = AdminCustomersIndexRouteImport.update({
   id: '/',
   path: '/',
@@ -214,11 +250,14 @@ const ApiPublicWebhooksExotelMediaTokenRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/account': typeof AccountRouteWithChildren
   '/admin': typeof AdminRouteWithChildren
   '/app': typeof AppRouteWithChildren
-  '/auth': typeof AuthRoute
+  '/auth': typeof AuthRouteWithChildren
+  '/contact': typeof ContactRoute
   '/pricing': typeof PricingRoute
   '/reset-password': typeof ResetPasswordRoute
+  '/account/settings': typeof AccountSettingsRoute
   '/admin/audit': typeof AdminAuditRoute
   '/admin/billing': typeof AdminBillingRoute
   '/admin/calls': typeof AdminCallsRoute
@@ -231,6 +270,7 @@ export interface FileRoutesByFullPath {
   '/admin/support': typeof AdminSupportRoute
   '/admin/team': typeof AdminTeamRoute
   '/admin/wallets': typeof AdminWalletsRoute
+  '/admin/website-ai': typeof AdminWebsiteAiRoute
   '/app/agent': typeof AppAgentRoute
   '/app/billing': typeof AppBillingRoute
   '/app/business': typeof AppBusinessRoute
@@ -239,6 +279,8 @@ export interface FileRoutesByFullPath {
   '/app/numbers': typeof AppNumbersRoute
   '/app/onboarding': typeof AppOnboardingRoute
   '/app/settings': typeof AppSettingsRoute
+  '/auth/callback': typeof AuthCallbackRoute
+  '/account/': typeof AccountIndexRoute
   '/admin/': typeof AdminIndexRoute
   '/app/': typeof AppIndexRoute
   '/admin/customers/$orgId': typeof AdminCustomersOrgIdRoute
@@ -249,9 +291,11 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/auth': typeof AuthRoute
+  '/auth': typeof AuthRouteWithChildren
+  '/contact': typeof ContactRoute
   '/pricing': typeof PricingRoute
   '/reset-password': typeof ResetPasswordRoute
+  '/account/settings': typeof AccountSettingsRoute
   '/admin/audit': typeof AdminAuditRoute
   '/admin/billing': typeof AdminBillingRoute
   '/admin/calls': typeof AdminCallsRoute
@@ -263,6 +307,7 @@ export interface FileRoutesByTo {
   '/admin/support': typeof AdminSupportRoute
   '/admin/team': typeof AdminTeamRoute
   '/admin/wallets': typeof AdminWalletsRoute
+  '/admin/website-ai': typeof AdminWebsiteAiRoute
   '/app/agent': typeof AppAgentRoute
   '/app/billing': typeof AppBillingRoute
   '/app/business': typeof AppBusinessRoute
@@ -271,6 +316,8 @@ export interface FileRoutesByTo {
   '/app/numbers': typeof AppNumbersRoute
   '/app/onboarding': typeof AppOnboardingRoute
   '/app/settings': typeof AppSettingsRoute
+  '/auth/callback': typeof AuthCallbackRoute
+  '/account': typeof AccountIndexRoute
   '/admin': typeof AdminIndexRoute
   '/app': typeof AppIndexRoute
   '/admin/customers/$orgId': typeof AdminCustomersOrgIdRoute
@@ -282,11 +329,14 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/account': typeof AccountRouteWithChildren
   '/admin': typeof AdminRouteWithChildren
   '/app': typeof AppRouteWithChildren
-  '/auth': typeof AuthRoute
+  '/auth': typeof AuthRouteWithChildren
+  '/contact': typeof ContactRoute
   '/pricing': typeof PricingRoute
   '/reset-password': typeof ResetPasswordRoute
+  '/account/settings': typeof AccountSettingsRoute
   '/admin/audit': typeof AdminAuditRoute
   '/admin/billing': typeof AdminBillingRoute
   '/admin/calls': typeof AdminCallsRoute
@@ -299,6 +349,7 @@ export interface FileRoutesById {
   '/admin/support': typeof AdminSupportRoute
   '/admin/team': typeof AdminTeamRoute
   '/admin/wallets': typeof AdminWalletsRoute
+  '/admin/website-ai': typeof AdminWebsiteAiRoute
   '/app/agent': typeof AppAgentRoute
   '/app/billing': typeof AppBillingRoute
   '/app/business': typeof AppBusinessRoute
@@ -307,6 +358,8 @@ export interface FileRoutesById {
   '/app/numbers': typeof AppNumbersRoute
   '/app/onboarding': typeof AppOnboardingRoute
   '/app/settings': typeof AppSettingsRoute
+  '/auth/callback': typeof AuthCallbackRoute
+  '/account/': typeof AccountIndexRoute
   '/admin/': typeof AdminIndexRoute
   '/app/': typeof AppIndexRoute
   '/admin/customers/$orgId': typeof AdminCustomersOrgIdRoute
@@ -319,11 +372,14 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/account'
     | '/admin'
     | '/app'
     | '/auth'
+    | '/contact'
     | '/pricing'
     | '/reset-password'
+    | '/account/settings'
     | '/admin/audit'
     | '/admin/billing'
     | '/admin/calls'
@@ -336,6 +392,7 @@ export interface FileRouteTypes {
     | '/admin/support'
     | '/admin/team'
     | '/admin/wallets'
+    | '/admin/website-ai'
     | '/app/agent'
     | '/app/billing'
     | '/app/business'
@@ -344,6 +401,8 @@ export interface FileRouteTypes {
     | '/app/numbers'
     | '/app/onboarding'
     | '/app/settings'
+    | '/auth/callback'
+    | '/account/'
     | '/admin/'
     | '/app/'
     | '/admin/customers/$orgId'
@@ -355,8 +414,10 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/auth'
+    | '/contact'
     | '/pricing'
     | '/reset-password'
+    | '/account/settings'
     | '/admin/audit'
     | '/admin/billing'
     | '/admin/calls'
@@ -368,6 +429,7 @@ export interface FileRouteTypes {
     | '/admin/support'
     | '/admin/team'
     | '/admin/wallets'
+    | '/admin/website-ai'
     | '/app/agent'
     | '/app/billing'
     | '/app/business'
@@ -376,6 +438,8 @@ export interface FileRouteTypes {
     | '/app/numbers'
     | '/app/onboarding'
     | '/app/settings'
+    | '/auth/callback'
+    | '/account'
     | '/admin'
     | '/app'
     | '/admin/customers/$orgId'
@@ -386,11 +450,14 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/account'
     | '/admin'
     | '/app'
     | '/auth'
+    | '/contact'
     | '/pricing'
     | '/reset-password'
+    | '/account/settings'
     | '/admin/audit'
     | '/admin/billing'
     | '/admin/calls'
@@ -403,6 +470,7 @@ export interface FileRouteTypes {
     | '/admin/support'
     | '/admin/team'
     | '/admin/wallets'
+    | '/admin/website-ai'
     | '/app/agent'
     | '/app/billing'
     | '/app/business'
@@ -411,6 +479,8 @@ export interface FileRouteTypes {
     | '/app/numbers'
     | '/app/onboarding'
     | '/app/settings'
+    | '/auth/callback'
+    | '/account/'
     | '/admin/'
     | '/app/'
     | '/admin/customers/$orgId'
@@ -422,9 +492,11 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  AccountRoute: typeof AccountRouteWithChildren
   AdminRoute: typeof AdminRouteWithChildren
   AppRoute: typeof AppRouteWithChildren
-  AuthRoute: typeof AuthRoute
+  AuthRoute: typeof AuthRouteWithChildren
+  ContactRoute: typeof ContactRoute
   PricingRoute: typeof PricingRoute
   ResetPasswordRoute: typeof ResetPasswordRoute
   ApiPublicWebhooksRazorpayRoute: typeof ApiPublicWebhooksRazorpayRoute
@@ -439,6 +511,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/account': {
+      id: '/account'
+      path: '/account'
+      fullPath: '/account'
+      preLoaderRoute: typeof AccountRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/admin': {
@@ -462,6 +541,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/contact': {
+      id: '/contact'
+      path: '/contact'
+      fullPath: '/contact'
+      preLoaderRoute: typeof ContactRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/pricing': {
       id: '/pricing'
       path: '/pricing'
@@ -475,6 +561,20 @@ declare module '@tanstack/react-router' {
       fullPath: '/reset-password'
       preLoaderRoute: typeof ResetPasswordRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/account/': {
+      id: '/account/'
+      path: '/'
+      fullPath: '/account/'
+      preLoaderRoute: typeof AccountIndexRouteImport
+      parentRoute: typeof AccountRoute
+    }
+    '/account/settings': {
+      id: '/account/settings'
+      path: '/settings'
+      fullPath: '/account/settings'
+      preLoaderRoute: typeof AccountSettingsRouteImport
+      parentRoute: typeof AccountRoute
     }
     '/admin/': {
       id: '/admin/'
@@ -567,6 +667,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AdminWalletsRouteImport
       parentRoute: typeof AdminRoute
     }
+    '/admin/website-ai': {
+      id: '/admin/website-ai'
+      path: '/website-ai'
+      fullPath: '/admin/website-ai'
+      preLoaderRoute: typeof AdminWebsiteAiRouteImport
+      parentRoute: typeof AdminRoute
+    }
     '/app/': {
       id: '/app/'
       path: '/'
@@ -630,6 +737,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppSettingsRouteImport
       parentRoute: typeof AppRoute
     }
+    '/auth/callback': {
+      id: '/auth/callback'
+      path: '/callback'
+      fullPath: '/auth/callback'
+      preLoaderRoute: typeof AuthCallbackRouteImport
+      parentRoute: typeof AuthRoute
+    }
     '/admin/customers/': {
       id: '/admin/customers/'
       path: '/'
@@ -668,6 +782,19 @@ declare module '@tanstack/react-router' {
   }
 }
 
+interface AccountRouteChildren {
+  AccountSettingsRoute: typeof AccountSettingsRoute
+  AccountIndexRoute: typeof AccountIndexRoute
+}
+
+const AccountRouteChildren: AccountRouteChildren = {
+  AccountSettingsRoute: AccountSettingsRoute,
+  AccountIndexRoute: AccountIndexRoute,
+}
+
+const AccountRouteWithChildren =
+  AccountRoute._addFileChildren(AccountRouteChildren)
+
 interface AdminCustomersRouteChildren {
   AdminCustomersOrgIdRoute: typeof AdminCustomersOrgIdRoute
   AdminCustomersIndexRoute: typeof AdminCustomersIndexRoute
@@ -695,6 +822,7 @@ interface AdminRouteChildren {
   AdminSupportRoute: typeof AdminSupportRoute
   AdminTeamRoute: typeof AdminTeamRoute
   AdminWalletsRoute: typeof AdminWalletsRoute
+  AdminWebsiteAiRoute: typeof AdminWebsiteAiRoute
   AdminIndexRoute: typeof AdminIndexRoute
 }
 
@@ -711,6 +839,7 @@ const AdminRouteChildren: AdminRouteChildren = {
   AdminSupportRoute: AdminSupportRoute,
   AdminTeamRoute: AdminTeamRoute,
   AdminWalletsRoute: AdminWalletsRoute,
+  AdminWebsiteAiRoute: AdminWebsiteAiRoute,
   AdminIndexRoute: AdminIndexRoute,
 }
 
@@ -742,11 +871,23 @@ const AppRouteChildren: AppRouteChildren = {
 
 const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)
 
+interface AuthRouteChildren {
+  AuthCallbackRoute: typeof AuthCallbackRoute
+}
+
+const AuthRouteChildren: AuthRouteChildren = {
+  AuthCallbackRoute: AuthCallbackRoute,
+}
+
+const AuthRouteWithChildren = AuthRoute._addFileChildren(AuthRouteChildren)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  AccountRoute: AccountRouteWithChildren,
   AdminRoute: AdminRouteWithChildren,
   AppRoute: AppRouteWithChildren,
-  AuthRoute: AuthRoute,
+  AuthRoute: AuthRouteWithChildren,
+  ContactRoute: ContactRoute,
   PricingRoute: PricingRoute,
   ResetPasswordRoute: ResetPasswordRoute,
   ApiPublicWebhooksRazorpayRoute: ApiPublicWebhooksRazorpayRoute,

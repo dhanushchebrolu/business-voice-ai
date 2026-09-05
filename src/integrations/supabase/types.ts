@@ -1683,7 +1683,11 @@ export type Database = {
           email: string | null
           full_name: string | null
           id: string
+          notify_call_summaries: boolean
+          notify_email: boolean
           phone: string | null
+          preferred_language: string | null
+          timezone: string
           updated_at: string
         }
         Insert: {
@@ -1693,7 +1697,11 @@ export type Database = {
           email?: string | null
           full_name?: string | null
           id: string
+          notify_call_summaries?: boolean
+          notify_email?: boolean
           phone?: string | null
+          preferred_language?: string | null
+          timezone?: string
           updated_at?: string
         }
         Update: {
@@ -1703,7 +1711,80 @@ export type Database = {
           email?: string | null
           full_name?: string | null
           id?: string
+          notify_call_summaries?: boolean
+          notify_email?: boolean
           phone?: string | null
+          preferred_language?: string | null
+          timezone?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      demo_requests: {
+        Row: {
+          business_name: string | null
+          created_at: string
+          email: string
+          id: string
+          message: string | null
+          name: string
+          phone: string | null
+          status: string
+        }
+        Insert: {
+          business_name?: string | null
+          created_at?: string
+          email: string
+          id?: string
+          message?: string | null
+          name: string
+          phone?: string | null
+          status?: string
+        }
+        Update: {
+          business_name?: string | null
+          created_at?: string
+          email?: string
+          id?: string
+          message?: string | null
+          name?: string
+          phone?: string | null
+          status?: string
+        }
+        Relationships: []
+      }
+      public_knowledge_base: {
+        Row: {
+          category: string | null
+          content: string
+          created_at: string
+          created_by: string | null
+          id: string
+          is_active: boolean
+          sort_order: number
+          title: string
+          updated_at: string
+        }
+        Insert: {
+          category?: string | null
+          content: string
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          is_active?: boolean
+          sort_order?: number
+          title: string
+          updated_at?: string
+        }
+        Update: {
+          category?: string | null
+          content?: string
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          is_active?: boolean
+          sort_order?: number
+          title?: string
           updated_at?: string
         }
         Relationships: []
