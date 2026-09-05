@@ -16,6 +16,10 @@ dist-ssr
 .nitro
 *.local
 
+# Environment configuration — real values live only on disk, never in git.
+# .env.example documents variable names with placeholders only.
+.env
+
 # Wrangler / Cloudflare
 .wrangler/
 .dev.vars
