@@ -45,33 +45,33 @@ CREATE TRIGGER trg_public_knowledge_base_updated BEFORE UPDATE ON public.public_
 -- this block never creates duplicate rows.
 INSERT INTO public.public_knowledge_base (title, content, category, sort_order) VALUES
   (
-    'What Vaani is',
-    'Vaani is an AI phone receptionist for Indian businesses. It answers every inbound call using the business''s own hours, services, prices, FAQs and rules — nothing is invented. It also logs every call, transcript and captured lead in a dashboard.',
+    'What Klyro AI is',
+    'Klyro AI is an AI phone receptionist for Indian businesses. It answers every inbound call using the business''s own hours, services, prices, FAQs and rules — nothing is invented. It also logs every call, transcript and captured lead in a dashboard.',
     'overview', 1
   ),
   (
     'Supported languages',
-    'Vaani answers calls in eleven Indian languages, including English, Hindi, Telugu, Tamil and Bengali, with natural voices and per-language greetings.',
+    'Klyro AI answers calls in eleven Indian languages, including English, Hindi, Telugu, Tamil and Bengali, with natural voices and per-language greetings.',
     'features', 2
   ),
   (
     'How a call works',
-    'A customer dials the business number, the call is streamed to Vaani''s voice runtime, speech is recognised in the caller''s language, the business''s published agent version answers using their own data, the reply is spoken back, and a transcript, summary and lead are saved to the dashboard.',
+    'A customer dials the business number, the call is streamed to Klyro AI''s voice runtime, speech is recognised in the caller''s language, the business''s published agent version answers using their own data, the reply is spoken back, and a transcript, summary and lead are saved to the dashboard.',
     'features', 3
   ),
   (
     'Business use cases',
-    'Vaani suits any business that takes phone calls it cannot always answer immediately — clinics, salons, restaurants, service providers and retail — to quote prices, answer FAQs, take messages and capture leads around the clock.',
+    'Klyro AI suits any business that takes phone calls it cannot always answer immediately — clinics, salons, restaurants, service providers and retail — to quote prices, answer FAQs, take messages and capture leads around the clock.',
     'use_cases', 4
   ),
   (
     'Phone numbers and telephony',
-    'A business can bring its own telephony number or have one provisioned through Vaani, depending on the connected provider. Vaani handles the call routing, billing and receptionist logic once a number is connected.',
+    'A business can bring its own telephony number or have one provisioned through Klyro AI, depending on the connected provider. Klyro AI handles the call routing, billing and receptionist logic once a number is connected.',
     'setup', 5
   ),
   (
     'Getting started',
-    'Getting started means creating an account, and a Vaani team member provisions and activates the workspace as part of onboarding after the setup payment. To talk to the team first, use the "Book a demo" option.',
+    'Getting started means creating an account, and a Klyro AI team member provisions and activates the workspace as part of onboarding after the setup payment. To talk to the team first, use the "Book a demo" option.',
     'onboarding', 6
   )
 ON CONFLICT (title) DO NOTHING;
