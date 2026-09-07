@@ -4,6 +4,7 @@ import { z } from "zod";
 import { buildAgentInstructions, validateAgentConfig } from "./agent-instructions";
 import { loadSnapshot, requireBusinessAccess } from "./agent-service.server";
 import { sarvam, ProviderError } from "./sarvam.server";
+import { assertFeatureUnlocked } from "./feature-gate.server.ts";
 
 export const getProviderStatus = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
@@ -14,21 +15,44 @@ export const getProviderStatus = createServerFn({ method: "GET" })
     telephony: "not_connected" as const,
   }));
 
+// previewAgentConfig, testAgentText and synthesizeVoicePreview are
+// deliberately NOT feature-gated: they configure and preview an agent
+// (read-only or sandboxed, never touch agent_versions/agent_configs'
+// active/published state) rather than activating or running the voice
+// receptionist for real callers — a customer mid-setup, before any
+// payment, must still be able to prepare their agent. The actual gated
+// actions are publishAgentVersion/rollbackAgentVersion (activation, below)
+// and the real call path (checkTelephonyAccess in telephony-guard.server.ts,
+// unchanged by this file).
 export const previewAgentConfig = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((d: unknown) => z.object({ businessId: z.string().uuid() }).parse(d))
   .handler(async ({ data, context }) => {
     const snapshot = await loadSnapshot(context.supabase, data.businessId);
-    return { instructions: buildAgentInstructions(snapshot), issues: validateAgentConfig(snapshot) };
+    return {
+      instructions: buildAgentInstructions(snapshot),
+      issues: validateAgentConfig(snapshot),
+    };
   });
 
 export const publishAgentVersion = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((d: unknown) =>
-    z.object({ businessId: z.string().uuid(), changeNote: z.string().max(300).optional() }).parse(d),
+    z
+      .object({ businessId: z.string().uuid(), changeNote: z.string().max(300).optional() })
+      .parse(d),
   )
   .handler(async ({ data, context }) => {
     const { organizationId } = await requireBusinessAccess(context.supabase, data.businessId);
+    // Publishing makes this version the one a real call uses (per the
+    // "voice" feature's own description: "Publishing and running the
+    // voice receptionist") — this is activation, not configuration, so it
+    // must independently enforce the canonical feature gate server-side.
+    // organizationId above is resolved from the businessId's row via the
+    // caller's RLS-scoped client, never from a client-supplied org id, so
+    // a customer cannot name another tenant's organization to bypass this.
+    await assertFeatureUnlocked(organizationId, "voice");
+
     const snapshot = await loadSnapshot(context.supabase, data.businessId);
     const issues = validateAgentConfig(snapshot);
     if (issues.length) return { ok: false as const, issues };
@@ -76,9 +100,16 @@ export const publishAgentVersion = createServerFn({ method: "POST" })
 
 export const rollbackAgentVersion = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((d: unknown) => z.object({ businessId: z.string().uuid(), version: z.number().int() }).parse(d))
+  .inputValidator((d: unknown) =>
+    z.object({ businessId: z.string().uuid(), version: z.number().int() }).parse(d),
+  )
   .handler(async ({ data, context }) => {
-    await requireBusinessAccess(context.supabase, data.businessId);
+    const { organizationId } = await requireBusinessAccess(context.supabase, data.businessId);
+    // Rollback re-activates a previous version the same way publish does
+    // (agent_versions.status + agent_configs.active_version) — same gate,
+    // same reasoning as publishAgentVersion above.
+    await assertFeatureUnlocked(organizationId, "voice");
+
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const { data: target } = await supabaseAdmin
       .from("agent_versions")
@@ -87,13 +118,19 @@ export const rollbackAgentVersion = createServerFn({ method: "POST" })
       .eq("version", data.version)
       .maybeSingle();
     if (!target) throw new Error("That version no longer exists.");
-    await supabaseAdmin.from("agent_versions").update({ status: "archived" }).eq("business_id", data.businessId);
+    await supabaseAdmin
+      .from("agent_versions")
+      .update({ status: "archived" })
+      .eq("business_id", data.businessId);
     await supabaseAdmin
       .from("agent_versions")
       .update({ status: "active" })
       .eq("business_id", data.businessId)
       .eq("version", data.version);
-    await supabaseAdmin.from("agent_configs").update({ active_version: data.version }).eq("business_id", data.businessId);
+    await supabaseAdmin
+      .from("agent_configs")
+      .update({ active_version: data.version })
+      .eq("business_id", data.businessId);
     return { ok: true as const, version: data.version };
   });
 
@@ -103,7 +140,9 @@ export const testAgentText = createServerFn({ method: "POST" })
     z
       .object({
         businessId: z.string().uuid(),
-        history: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string().max(2000) })).max(24),
+        history: z
+          .array(z.object({ role: z.enum(["user", "assistant"]), content: z.string().max(2000) }))
+          .max(24),
       })
       .parse(d),
   )
@@ -124,7 +163,10 @@ export const testAgentText = createServerFn({ method: "POST" })
         language: snapshot.agent.primary_language,
       };
     } catch (error) {
-      const message = error instanceof ProviderError ? error.message : "The assistant could not respond. Please retry.";
+      const message =
+        error instanceof ProviderError
+          ? error.message
+          : "The assistant could not respond. Please retry.";
       return { ok: false as const, error: message, latencyMs: Date.now() - started };
     }
   });
@@ -151,7 +193,8 @@ export const synthesizeVoicePreview = createServerFn({ method: "POST" })
       });
       return { ok: true as const, audioBase64: audio };
     } catch (error) {
-      const message = error instanceof ProviderError ? error.message : "Voice preview failed. Please retry.";
+      const message =
+        error instanceof ProviderError ? error.message : "Voice preview failed. Please retry.";
       return { ok: false as const, error: message };
     }
   });

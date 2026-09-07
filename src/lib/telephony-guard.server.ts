@@ -1,5 +1,6 @@
 import type { Database } from "@/integrations/supabase/types";
 import type { NormalizedCallStatus } from "./telephony/adapter";
+import { checkFeatureAccess } from "./feature-gate.server.ts";
 
 /**
  * Shared server-only telephony authorization, call-state-machine and
@@ -39,20 +40,16 @@ export async function checkTelephonyAccess(
   phoneNumberId: string,
   direction: CallDirection,
 ): Promise<TelephonyGateResult> {
-  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-
-  const { data: locked, error: lockError } = await supabaseAdmin.rpc("feature_locked", {
-    _org: orgId,
-    _feature: "phone",
-  });
-  if (lockError)
+  const featureGate = await checkFeatureAccess(orgId, "phone");
+  if (!featureGate.allowed) {
     return {
       allowed: false,
-      reason: "Could not evaluate telephony entitlement.",
+      reason: featureGate.reason ?? "Telephony is locked for this customer.",
       phoneNumber: null,
     };
-  if (locked)
-    return { allowed: false, reason: "Telephony is locked for this customer.", phoneNumber: null };
+  }
+
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
   const { data: number } = await supabaseAdmin
     .from("phone_numbers")
