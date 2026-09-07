@@ -4,7 +4,15 @@ import { useMemo, useState } from "react";
 import { PhoneCall, Search } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { workspaceQuery, callsQuery, type CustomerCallRow } from "@/lib/workspace";
-import { PageHeader, EmptyState, LoadingState, StatusPill, SectionCard } from "@/components/app/primitives";
+import {
+  PageHeader,
+  EmptyState,
+  LoadingState,
+  StatusPill,
+  SectionCard,
+} from "@/components/app/primitives";
+import { ServiceLocked } from "@/components/app/ServiceLocked";
+import { featureLocksQuery } from "@/lib/access";
 import { languageLabel } from "@/lib/voices";
 import { Input } from "@/components/ui/input";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -26,6 +34,9 @@ function CallsPage() {
   const { user } = useAuth();
   const { data: ws } = useQuery(workspaceQuery(user?.id));
   const { data: calls, isLoading } = useQuery(callsQuery(ws?.organization?.id));
+  const { data: locks } = useQuery(featureLocksQuery(ws?.organization?.id));
+  const phoneLocked = locks?.["phone"] === true;
+  const lifecycle = ws?.organization?.lifecycle_status ?? "not_provisioned";
   const [q, setQ] = useState("");
   const [selected, setSelected] = useState<CustomerCallRow | null>(null);
 
@@ -33,7 +44,9 @@ function CallsPage() {
     const term = q.trim().toLowerCase();
     if (!term) return calls ?? [];
     return (calls ?? []).filter((c) =>
-      [c.caller_number, c.caller_name, c.summary, c.outcome].some((v) => v?.toLowerCase().includes(term)),
+      [c.caller_number, c.caller_name, c.summary, c.outcome].some((v) =>
+        v?.toLowerCase().includes(term),
+      ),
     );
   }, [calls, q]);
 
@@ -47,15 +60,25 @@ function CallsPage() {
         actions={
           <div className="relative">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-            <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search calls" className="h-9 w-56 pl-8" />
+            <Input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Search calls"
+              className="h-9 w-56 pl-8"
+            />
           </div>
         }
       />
 
+      {phoneLocked ? <ServiceLocked feature="phone" lifecycle={lifecycle} compact /> : null}
+
       {isLoading ? (
         <LoadingState label="Loading calls" />
       ) : filtered.length ? (
-        <SectionCard title={`${filtered.length} calls`} description="Select a call to read the transcript.">
+        <SectionCard
+          title={`${filtered.length} calls`}
+          description="Select a call to read the transcript."
+        >
           <div className="-mx-5 overflow-x-auto">
             <table className="w-full min-w-[720px] text-sm">
               <thead>
@@ -77,16 +100,31 @@ function CallsPage() {
                   >
                     <td className="px-5 py-2.5">
                       <p className="font-medium">{call.caller_number ?? "Unknown"}</p>
-                      <p className="truncate text-xs text-muted-foreground">{call.summary ?? "No summary"}</p>
+                      <p className="truncate text-xs text-muted-foreground">
+                        {call.summary ?? "No summary"}
+                      </p>
                     </td>
                     <td className="px-3 py-2.5 text-xs text-muted-foreground tabular">
                       {new Date(call.started_at).toLocaleString()}
                     </td>
-                    <td className="px-3 py-2.5 tabular text-xs">{formatDuration(call.duration_seconds)}</td>
-                    <td className="px-3 py-2.5 text-xs">{call.language ? languageLabel(call.language) : "—"}</td>
+                    <td className="px-3 py-2.5 tabular text-xs">
+                      {formatDuration(call.duration_seconds)}
+                    </td>
+                    <td className="px-3 py-2.5 text-xs">
+                      {call.language ? languageLabel(call.language) : "—"}
+                    </td>
                     <td className="px-3 py-2.5 text-xs">{call.outcome ?? "—"}</td>
                     <td className="px-5 py-2.5">
-                      <StatusPill tone={call.status === "completed" ? "live" : call.status === "failed" ? "error" : "idle"} dot={false}>
+                      <StatusPill
+                        tone={
+                          call.status === "completed"
+                            ? "live"
+                            : call.status === "failed"
+                              ? "error"
+                              : "idle"
+                        }
+                        dot={false}
+                      >
                         {call.status}
                       </StatusPill>
                     </td>
@@ -119,14 +157,22 @@ function CallsPage() {
                 <Meta label="Started" value={new Date(selected.started_at).toLocaleString()} />
                 <Meta label="Duration" value={formatDuration(selected.duration_seconds)} />
                 <Meta label="Direction" value={selected.direction} />
-                <Meta label="Language" value={selected.language ? languageLabel(selected.language) : "—"} />
+                <Meta
+                  label="Language"
+                  value={selected.language ? languageLabel(selected.language) : "—"}
+                />
                 <Meta label="Outcome" value={selected.outcome ?? "—"} />
-                <Meta label="Agent version" value={selected.agent_version ? `v${selected.agent_version}` : "—"} />
+                <Meta
+                  label="Agent version"
+                  value={selected.agent_version ? `v${selected.agent_version}` : "—"}
+                />
               </dl>
 
               {selected.summary ? (
                 <div className="rounded-md border border-border bg-surface/50 p-3 text-sm">
-                  <p className="mb-1 text-[11px] uppercase tracking-wider text-muted-foreground">Summary</p>
+                  <p className="mb-1 text-[11px] uppercase tracking-wider text-muted-foreground">
+                    Summary
+                  </p>
                   {selected.summary}
                 </div>
               ) : null}
@@ -138,7 +184,9 @@ function CallsPage() {
               ) : null}
 
               <div>
-                <p className="mb-2 text-[11px] uppercase tracking-wider text-muted-foreground">Transcript</p>
+                <p className="mb-2 text-[11px] uppercase tracking-wider text-muted-foreground">
+                  Transcript
+                </p>
                 {turns.length ? (
                   <div className="space-y-2">
                     {turns.map((turn, i) => (
@@ -151,7 +199,9 @@ function CallsPage() {
                     ))}
                   </div>
                 ) : (
-                  <p className="text-sm text-muted-foreground">No transcript was stored for this call.</p>
+                  <p className="text-sm text-muted-foreground">
+                    No transcript was stored for this call.
+                  </p>
                 )}
               </div>
             </div>
