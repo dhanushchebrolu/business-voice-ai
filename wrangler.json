@@ -1,0 +1,16 @@
+{
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CALL_SESSION",
+        "class_name": "CallSessionDurableObject"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1-call-session",
+      "new_sqlite_classes": ["CallSessionDurableObject"]
+    }
+  ]
+}

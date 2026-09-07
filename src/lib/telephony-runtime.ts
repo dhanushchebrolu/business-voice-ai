@@ -24,6 +24,11 @@
 
 import { checkTelephonyAccess } from "./telephony-guard.server";
 import { getTelephonyAdapter } from "./telephony.server";
+import { getCallSessionStub } from "./telephony/cloudflare-env.server";
+import type {
+  StartRuntimeRpcInput,
+  AgentRuntimeRpcResult,
+} from "./telephony/call-session-durable-object.server";
 
 export interface AgentRuntimeHandoffInput {
   callId: string;
@@ -89,13 +94,6 @@ export async function routeToAgentRuntime(
     if (!adapter) {
       return { handled: false, note: `${input.provider} is not connected.` };
     }
-    const bridge = (await adapter.openMediaBridge?.(input.providerCallId)) ?? null;
-    if (!bridge) {
-      return {
-        handled: false,
-        note: `${input.provider} does not expose a live audio channel yet — the runtime cannot start without one. See PHASE_E_FINAL_REPORT.md "Known limitations".`,
-      };
-    }
 
     const businessId = await resolveBusinessId(input.organizationId, input.businessId);
     if (!businessId) {
@@ -144,6 +142,47 @@ export async function routeToAgentRuntime(
       businessName = snapshot.business.name;
     }
 
+    const rpcInput: StartRuntimeRpcInput = {
+      callId: input.callId,
+      organizationId: input.organizationId,
+      businessId,
+      agentConfigId: input.agentConfigId,
+      agentVersion,
+      instructions,
+      snapshotAgent: agentSnapshotAgent,
+      businessName,
+      providerCallId: input.providerCallId,
+    };
+
+    // Production path: the Exotel media bridge and the Sarvam voice runtime
+    // both live inside the CallSessionDurableObject now (see E1 in the
+    // production audit — a plain Worker cannot durably hold either across
+    // the two independent requests involved: this webhook, and Exotel's own
+    // WebSocket connect). When the CALL_SESSION binding isn't configured
+    // (local dev, tests), fall back to the exact pre-existing in-process
+    // behavior below — correct there because everything runs in one process.
+    const doStub = getCallSessionStub();
+    if (doStub) {
+      const response = await doStub.fetch("https://call-session/internal/start-runtime", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(rpcInput),
+      });
+      if (!response.ok) {
+        console.error("telephony:runtime_do_rpc_failed", input.callId, response.status);
+        return { handled: false, note: "The voice runtime coordinator returned an error." };
+      }
+      return (await response.json()) as AgentRuntimeRpcResult;
+    }
+
+    const bridge = (await adapter.openMediaBridge?.(input.providerCallId)) ?? null;
+    if (!bridge) {
+      return {
+        handled: false,
+        note: `${input.provider} does not expose a live audio channel yet — the runtime cannot start without one. See PHASE_E_FINAL_REPORT.md "Known limitations".`,
+      };
+    }
+
     const { startRuntimeSession } = await import("./voice-runtime.server");
     const handle = await startRuntimeSession({
       callId: input.callId,
@@ -171,4 +210,40 @@ export async function routeToAgentRuntime(
     console.error("telephony:runtime_handoff_failed", input.callId, (err as Error).message);
     return { handled: false, note: "An unexpected error occurred starting the voice runtime." };
   }
+}
+
+/**
+ * Ends the voice runtime for a call, if one is running. Used by the
+ * telephony webhook whenever a call reaches a terminal status.
+ *
+ * Routes through the same CallSessionDurableObject as routeToAgentRuntime
+ * when available (production) so termination always reaches the correct
+ * session regardless of which Worker isolate this webhook request landed
+ * on — the exact cross-isolate gap identified as E1 in the production
+ * audit (a session started by one request could previously be silently
+ * unreachable from a later, separate request's termination call). Falls
+ * back to calling voice-runtime.server.ts directly when no CALL_SESSION
+ * binding is configured (local dev, tests) — correct there because
+ * everything runs in one process.
+ */
+export async function terminateAgentRuntime(callId: string, reason: string): Promise<void> {
+  const doStub = getCallSessionStub();
+  if (doStub) {
+    try {
+      const response = await doStub.fetch("https://call-session/internal/terminate-runtime", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ callId, reason }),
+      });
+      if (!response.ok) {
+        console.error("telephony:terminate_do_rpc_failed", callId, response.status);
+      }
+    } catch (err) {
+      console.error("telephony:terminate_do_rpc_error", callId, (err as Error).message);
+    }
+    return;
+  }
+
+  const { terminateRuntimeSession } = await import("./voice-runtime.server");
+  await terminateRuntimeSession(callId, reason);
 }

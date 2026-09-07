@@ -5,8 +5,7 @@ import {
   finalizeCallBilling,
   TERMINAL_CALL_STATUSES,
 } from "@/lib/telephony-guard.server";
-import { routeToAgentRuntime } from "@/lib/telephony-runtime";
-import { terminateRuntimeSession } from "@/lib/voice-runtime.server";
+import { routeToAgentRuntime, terminateAgentRuntime } from "@/lib/telephony-runtime";
 import type { NormalizedCallEvent } from "@/lib/telephony/adapter";
 
 /**
@@ -172,7 +171,7 @@ async function processTelephonyEvent(providerId: string, event: NormalizedCallEv
   }
 
   if (TERMINAL_CALL_STATUSES.includes(event.status)) {
-    await terminateRuntimeSession(call.id, `call ended: ${event.status}`);
+    await terminateAgentRuntime(call.id, `call ended: ${event.status}`);
     await finalizeCallBilling(call, event.durationSeconds ?? 0);
   }
 }
@@ -256,7 +255,7 @@ async function applyCallEvent(
   }
 
   if (TERMINAL_CALL_STATUSES.includes(event.status)) {
-    await terminateRuntimeSession(call.id, `call ended: ${event.status}`);
+    await terminateAgentRuntime(call.id, `call ended: ${event.status}`);
     await finalizeCallBilling(
       {
         id: call.id,

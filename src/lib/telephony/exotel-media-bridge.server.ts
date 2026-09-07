@@ -56,15 +56,31 @@ export class ExotelMediaBridge implements AudioMediaBridge {
   private closed = false;
   private readonly startedAt = Date.now();
 
+  private readonly onRelease: (providerCallId: string) => void;
+
   /**
    * `initialStreamSid` is a placeholder (the caller passes providerCallId)
    * used only until the real `stream_sid` arrives on the "start" event —
    * see handleRawMessage's "start" case, which overwrites `this.streamSid`.
+   *
+   * `onRelease` defaults to the module-level, in-process registry's
+   * `releaseMediaSession` (the pre-existing behavior, used when this bridge
+   * is constructed outside a Durable Object — e.g. local dev without the
+   * CALL_SESSION binding). `CallSessionDurableObject` passes its own
+   * instance-scoped release method instead, since its claim/release state is
+   * Durable-Object-instance state, not this module's — see
+   * call-session-durable-object.server.ts.
    */
-  constructor(socket: ExotelSocketLike, initialStreamSid: string, providerCallId: string) {
+  constructor(
+    socket: ExotelSocketLike,
+    initialStreamSid: string,
+    providerCallId: string,
+    onRelease: (providerCallId: string) => void = releaseMediaSession,
+  ) {
     this.socket = socket;
     this.streamSid = initialStreamSid;
     this.providerCallId = providerCallId;
+    this.onRelease = onRelease;
 
     socket.addEventListener("message", (ev) => this.handleRawMessage(ev.data));
     socket.addEventListener("close", (ev) => this.handleClose(`ws closed (${ev.code})`));
@@ -180,7 +196,7 @@ export class ExotelMediaBridge implements AudioMediaBridge {
   private handleClose(reason: string) {
     if (this.closed) return;
     this.closed = true;
-    releaseMediaSession(this.providerCallId);
+    this.onRelease(this.providerCallId);
     for (const handler of this.closeHandlers) handler(reason);
   }
 
