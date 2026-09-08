@@ -95,3 +95,48 @@ test("getTelephonyAdapter('sarvam'): does not fall through to the generic REST/H
     },
   );
 });
+
+test("getTelephonyAdapter('sarvam'): SARVAM_ORG_ID/SARVAM_WORKSPACE_ID are optional — the adapter still constructs without them (webhook processing needs neither)", () => {
+  withEnv(
+    { SARVAM_API_KEY: "sk_live_example", SARVAM_ORG_ID: undefined, SARVAM_WORKSPACE_ID: undefined },
+    () => {
+      const adapter = getTelephonyAdapter("sarvam");
+      assert.ok(adapter instanceof SarvamTelephonyAdapter);
+    },
+  );
+});
+
+test("getTelephonyAdapter('sarvam'): SARVAM_ORG_ID/SARVAM_WORKSPACE_ID, when set, actually reach the adapter's config", async () => {
+  // withEnv itself is synchronous — the adapter's constructor captures
+  // orgId/workspaceId into its own config by value at construction time
+  // (synchronously, inside withEnv's callback), so the async assertion
+  // below is deliberately run AFTER withEnv has already restored the
+  // environment — it doesn't need the env vars live, only the adapter
+  // instance that already captured them.
+  let adapter!: SarvamTelephonyAdapter;
+  withEnv(
+    { SARVAM_API_KEY: "sk_live_example", SARVAM_ORG_ID: "org_1", SARVAM_WORKSPACE_ID: "ws_1" },
+    () => {
+      adapter = getTelephonyAdapter("sarvam") as SarvamTelephonyAdapter;
+    },
+  );
+  assert.ok(adapter instanceof SarvamTelephonyAdapter);
+  // With org/workspace configured, createInboundDeployment must fail for
+  // the "not implemented" reason, not the "not configured" one — proving
+  // the env vars actually reached the adapter's config.
+  await assert.rejects(
+    () =>
+      adapter.createInboundDeployment({
+        name: "n",
+        appId: "a",
+        appVersion: 1,
+        connectionId: "c",
+        phoneNumbers: ["+911111111111"],
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /not implemented/i);
+      return true;
+    },
+  );
+});

@@ -82,6 +82,8 @@ export type Database = {
           organization_id: string
           persona: string
           primary_language: string
+          sarvam_app_id: string | null
+          sarvam_app_version: number | null
           speaking_pace: number
           status: string
           transfer_number: string | null
@@ -105,6 +107,8 @@ export type Database = {
           organization_id: string
           persona?: string
           primary_language?: string
+          sarvam_app_id?: string | null
+          sarvam_app_version?: number | null
           speaking_pace?: number
           status?: string
           transfer_number?: string | null
@@ -128,6 +132,8 @@ export type Database = {
           organization_id?: string
           persona?: string
           primary_language?: string
+          sarvam_app_id?: string | null
+          sarvam_app_version?: number | null
           speaking_pace?: number
           status?: string
           transfer_number?: string | null
@@ -1425,6 +1431,7 @@ export type Database = {
           organization_id: string
           outbound_enabled: boolean
           provider: string
+          provider_deployment_id: string | null
           provider_number_id: string | null
           provisioned_by: string | null
           purchased_at: string | null
@@ -1448,6 +1455,7 @@ export type Database = {
           organization_id: string
           outbound_enabled?: boolean
           provider?: string
+          provider_deployment_id?: string | null
           provider_number_id?: string | null
           provisioned_by?: string | null
           purchased_at?: string | null
@@ -1471,6 +1479,7 @@ export type Database = {
           organization_id?: string
           outbound_enabled?: boolean
           provider?: string
+          provider_deployment_id?: string | null
           provider_number_id?: string | null
           provisioned_by?: string | null
           purchased_at?: string | null
@@ -1935,6 +1944,7 @@ export type Database = {
           last_error: string | null
           organization_id: string
           provider: string
+          provider_connection_id: string | null
           status: string
           updated_at: string
         }
@@ -1946,6 +1956,7 @@ export type Database = {
           last_error?: string | null
           organization_id: string
           provider: string
+          provider_connection_id?: string | null
           status?: string
           updated_at?: string
         }
@@ -1957,6 +1968,7 @@ export type Database = {
           last_error?: string | null
           organization_id?: string
           provider?: string
+          provider_connection_id?: string | null
           status?: string
           updated_at?: string
         }

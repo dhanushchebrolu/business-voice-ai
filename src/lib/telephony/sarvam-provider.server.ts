@@ -76,6 +76,48 @@ import {
 
 export interface SarvamTelephonyConfig {
   apiKey: string;
+  /**
+   * Sarvam org/workspace scope, read from SARVAM_ORG_ID/SARVAM_WORKSPACE_ID
+   * when present. Optional here — the webhook-processing path
+   * (verifyWebhookSignature/normalizeWebhookEvent) needs neither, so their
+   * absence must never break that already-working path. Only
+   * createInboundDeployment (and, eventually, campaign/instant-outbound
+   * calls) require them, and check for them explicitly at call time.
+   */
+  orgId?: string | undefined;
+  workspaceId?: string | undefined;
+}
+
+/**
+ * Request/response shapes for POST .../deployments, as supplied and
+ * cross-checked against this session's independently-verified inbound
+ * webhook payload fields (app_id, deployment_id, etc. match exactly) — see
+ * the module doc's VERIFICATION STATUS section. The endpoint itself
+ * (path, method, and critically the X-API-Key auth header) has NOT been
+ * independently fetched or empirically confirmed by this session; treat
+ * this shape as PARTIALLY VERIFIED, not proven, until a real request
+ * succeeds against it.
+ */
+export interface CreateInboundDeploymentInput {
+  name: string;
+  description?: string | undefined;
+  appId: string;
+  appVersion: number;
+  connectionId: string;
+  /** E.164 numbers this deployment routes to the agent. */
+  phoneNumbers: string[];
+  inboundConfig?:
+    | {
+        startTime: string;
+        endTime: string;
+        allowedDays: string[];
+        timezone: string;
+      }
+    | undefined;
+}
+
+export interface CreatedDeployment {
+  deploymentId: string;
 }
 
 /**
@@ -225,6 +267,41 @@ export class SarvamTelephonyAdapter implements TelephonyProviderAdapter {
   async initiateOutboundCall(_input: InitiateOutboundCallInput): Promise<InitiatedCall> {
     throw new TelephonyAdapterError(
       "Sarvam outbound dialing is not implemented here: outbound calls on Sarvam are campaign/instant-outbound-shaped, not a single 'dial and get a call ID back' REST call, and neither the campaign-creation nor instant-outbound-creation request schema has been verified against Sarvam's official documentation (including whether/how a Klyro client-reference can be attached to a recipient). Confirm the real request shape before implementing — do not guess it.",
+      501,
+    );
+  }
+
+  /**
+   * Creates a Sarvam inbound deployment (routes a phone number to a Voice
+   * Agent). NOT IMPLEMENTED — deliberately fails closed rather than
+   * guessing, for two independent, stacked reasons that must BOTH resolve
+   * before this can call Sarvam for real:
+   *
+   *   1. The `X-API-Key` header shown in the Voice Agents management API
+   *      reference has not been empirically confirmed against a live
+   *      response — this session has no SARVAM_API_KEY and no network path
+   *      to apps.sarvam.ai from its sandbox (confirmed blocked at the
+   *      proxy level, independent of credentials).
+   *   2. Even with (1) resolved, this method has never actually issued the
+   *      request — nothing here should be trusted as "implemented" until
+   *      it has been exercised against a real response, success or error.
+   *
+   * Callers (sarvam-admin.functions.ts's createSarvamInboundDeployment) are
+   * expected to perform ALL of their own validation (tenant ownership,
+   * that the referenced agent/connection/numbers are actually mapped)
+   * before ever reaching this call, so that everything up to the Sarvam
+   * request itself is real, tested, working code — only the actual network
+   * call is gated.
+   */
+  async createInboundDeployment(_input: CreateInboundDeploymentInput): Promise<CreatedDeployment> {
+    if (!this.config.orgId || !this.config.workspaceId) {
+      throw new TelephonyAdapterError(
+        "Sarvam inbound deployment creation requires SARVAM_ORG_ID and SARVAM_WORKSPACE_ID to be configured, in addition to SARVAM_API_KEY.",
+        503,
+      );
+    }
+    throw new TelephonyAdapterError(
+      "Sarvam inbound deployment creation is not implemented: the X-API-Key authentication mechanism documented for this endpoint has not been empirically verified against a live apps.sarvam.ai response in this environment (no live credentials, and apps.sarvam.ai is network-unreachable from this sandbox regardless). Verify a real request/response first — do not fake a successful deployment.",
       501,
     );
   }

@@ -274,3 +274,42 @@ test("id/supportsPurchase reflect the verified Sarvam capability, and no live me
   assert.equal(adapter.supportsPurchase, true);
   assert.equal("openMediaBridge" in adapter, false);
 });
+
+test("createInboundDeployment: rejects with a distinct error when orgId/workspaceId are not configured, before ever attempting a request", async () => {
+  const adapter = new SarvamTelephonyAdapter(config); // no orgId/workspaceId
+  await assert.rejects(
+    () =>
+      adapter.createInboundDeployment({
+        name: "test-deployment",
+        appId: "app_1",
+        appVersion: 1,
+        connectionId: "conn_1",
+        phoneNumbers: ["+912222222222"],
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof TelephonyAdapterError);
+      assert.match(err.message, /SARVAM_ORG_ID and SARVAM_WORKSPACE_ID/);
+      return true;
+    },
+  );
+});
+
+test("createInboundDeployment: fails closed (does not fake success) even once orgId/workspaceId are configured — the auth mechanism is unverified", async () => {
+  const adapter = new SarvamTelephonyAdapter({ ...config, orgId: "org_1", workspaceId: "ws_1" });
+  await assert.rejects(
+    () =>
+      adapter.createInboundDeployment({
+        name: "test-deployment",
+        appId: "app_1",
+        appVersion: 1,
+        connectionId: "conn_1",
+        phoneNumbers: ["+912222222222"],
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof TelephonyAdapterError);
+      assert.match(err.message, /not implemented/i);
+      assert.match(err.message, /X-API-Key/);
+      return true;
+    },
+  );
+});

@@ -116,7 +116,16 @@ export function getTelephonyAdapter(providerId: string): TelephonyProviderAdapte
   if (providerId === "sarvam") {
     const apiKey = process.env["SARVAM_API_KEY"];
     if (!apiKey) return null;
-    return new SarvamTelephonyAdapter({ apiKey });
+    // SARVAM_ORG_ID/SARVAM_WORKSPACE_ID are optional here on purpose: the
+    // webhook-processing path (verifyWebhookSignature/normalizeWebhookEvent)
+    // needs neither, so their absence must never break that already-working
+    // path. Only createInboundDeployment requires them, and checks for them
+    // explicitly at call time (see sarvam-provider.server.ts).
+    return new SarvamTelephonyAdapter({
+      apiKey,
+      orgId: process.env["SARVAM_ORG_ID"],
+      workspaceId: process.env["SARVAM_WORKSPACE_ID"],
+    });
   }
 
   // Exotel's real credential/auth shape (SID + API key + API token, and a
