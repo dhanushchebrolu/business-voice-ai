@@ -6,7 +6,7 @@ import type {
   ProvisionNumberInput,
   ProvisionedNumber,
   TelephonyProviderAdapter,
-} from "./adapter";
+} from "./adapter.ts";
 
 /**
  * Deterministic, entirely local test provider. It never calls a network,

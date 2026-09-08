@@ -53,6 +53,14 @@ export type NormalizedCallStatus =
   | "no_answer"
   | "cancelled";
 
+/** One turn of a conversation transcript, when the provider's own runtime produced the whole call. */
+export interface CallTranscriptTurn {
+  role: "agent" | "user";
+  text: string;
+  /** Native-script text alongside the English transcription, when the provider supplies both (e.g. Sarvam's `indic_text`). */
+  indicText?: string | undefined;
+}
+
 /** A provider's webhook event, translated into Vaani's internal shape. */
 export interface NormalizedCallEvent {
   /** Uniquely identifies this specific event for idempotency, if the provider sends one. */
@@ -68,6 +76,49 @@ export interface NormalizedCallEvent {
   recordingUrl?: string | null | undefined;
   failureReason?: string | null | undefined;
   occurredAt: string;
+  /**
+   * Ordered conversation transcript, when the provider's own runtime handled
+   * the entire call end-to-end (STT/LLM/TTS) rather than Klyro bridging live
+   * audio itself — e.g. a Sarvam Voice Agents `interaction_transcript`.
+   * Optional and additive: providers that still require Klyro to run its own
+   * runtime (and therefore build the transcript locally, as the pre-Sarvam
+   * Exotel path did) simply never set this.
+   */
+  transcript?: CallTranscriptTurn[] | undefined;
+  /**
+   * Per-call variables the agent runtime captured or was given, when the
+   * provider exposes them (e.g. Sarvam's `final_agent_variables` /
+   * `output_agent_variables`). Same trust level as `raw` — never shown to a
+   * customer directly, service-role-only on the way into storage.
+   */
+  agentVariables?: Record<string, unknown> | undefined;
+  /**
+   * Provider-side identifiers for a deployment/campaign-shaped integration
+   * (e.g. Sarvam's `deployment_id` for an inbound number-to-agent routing,
+   * `campaign_id`/`attempt_id` for an outbound campaign attempt) — distinct
+   * from `providerCallId` (Sarvam's `interaction_id`). Kept for audit and
+   * operational correlation only; never used, alone or together, to decide
+   * which Klyro organization an event belongs to — see `clientReference`.
+   */
+  providerDeploymentId?: string | undefined;
+  providerCampaignId?: string | undefined;
+  providerAttemptId?: string | undefined;
+  /**
+   * A caller-supplied reference the provider echoes back on the event (e.g.
+   * a candidate value from Sarvam's `user_identifier` or `metadata` fields
+   * on an outbound campaign attempt — the exact field Klyro should populate
+   * at campaign-creation time is not yet verified against Sarvam's real
+   * campaign-submission API, so this is populated defensively from whichever
+   * candidate field is present, never assumed).
+   *
+   * This value must ONLY ever be used to look up a Klyro-owned record (e.g.
+   * a `call_logs` row Klyro itself created before submitting the outbound
+   * attempt) that already carries the true `organization_id` — it must NEVER
+   * be trusted as, decoded into, or used to construct an organization/tenant
+   * identifier directly. If no Klyro-owned record matches it, the event is
+   * unattributable and must be dropped, never guessed.
+   */
+  clientReference?: string | undefined;
   /** Raw provider payload, kept for audit/debugging — never shown to a customer. */
   raw: Record<string, unknown>;
 }

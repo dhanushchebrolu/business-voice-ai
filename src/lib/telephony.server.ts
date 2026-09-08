@@ -8,10 +8,11 @@
  * Nothing else may import a provider SDK or call a provider's API directly.
  */
 
-import { GenericTelephonyAdapter } from "./telephony/generic-provider";
-import { MockTelephonyAdapter } from "./telephony/mock-provider";
-import { ExotelTelephonyAdapter } from "./telephony/exotel-provider";
-import type { TelephonyProviderAdapter } from "./telephony/adapter";
+import { GenericTelephonyAdapter } from "./telephony/generic-provider.ts";
+import { MockTelephonyAdapter } from "./telephony/mock-provider.ts";
+import { ExotelTelephonyAdapter } from "./telephony/exotel-provider.ts";
+import { SarvamTelephonyAdapter } from "./telephony/sarvam-provider.server.ts";
+import type { TelephonyProviderAdapter } from "./telephony/adapter.ts";
 
 export interface TelephonyProviderDef {
   id: string;
@@ -22,7 +23,22 @@ export interface TelephonyProviderDef {
 }
 
 export const TELEPHONY_PROVIDERS: TelephonyProviderDef[] = [
-  { id: "sarvam", label: "Sarvam rented number", requiredSecrets: ["SARVAM_TELEPHONY_ACCOUNT"], supportsPurchase: true },
+  // Sarvam-managed telephony (Sarvam Voice Agents): verified that the same
+  // api-subscription-key mechanism sarvam.server.ts already uses for
+  // chat/STT/TTS covers this surface too, so this reuses SARVAM_API_KEY —
+  // no second "account"/workspace credential is required or introduced (see
+  // the Exotel-to-Sarvam migration report). SARVAM_TELEPHONY_ACCOUNT, which
+  // this entry previously required, is removed: it was never wired to a
+  // real, verified Sarvam credential (see sarvam-provider.server.ts's
+  // module doc). supportsPurchase reflects that Sarvam rents/manages numbers
+  // directly (verified) — the adapter's provisionNumber itself still throws
+  // until the exact rental endpoint is verified against Sarvam's docs.
+  {
+    id: "sarvam",
+    label: "Sarvam Voice Agents",
+    requiredSecrets: ["SARVAM_API_KEY"],
+    supportsPurchase: true,
+  },
   // Phase D.1: corrected from supportsPurchase:true — Exotel has no
   // confirmed public self-service number-purchase API; numbers are
   // acquired through the account/sales process, then attached (see
@@ -35,8 +51,18 @@ export const TELEPHONY_PROVIDERS: TelephonyProviderDef[] = [
     requiredSecrets: ["EXOTEL_SID", "EXOTEL_API_KEY", "EXOTEL_TOKEN"],
     supportsPurchase: false,
   },
-  { id: "twilio", label: "Twilio", requiredSecrets: ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"], supportsPurchase: true },
-  { id: "smartflo", label: "Tata Smartflo", requiredSecrets: ["SMARTFLO_TOKEN"], supportsPurchase: false },
+  {
+    id: "twilio",
+    label: "Twilio",
+    requiredSecrets: ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN"],
+    supportsPurchase: true,
+  },
+  {
+    id: "smartflo",
+    label: "Tata Smartflo",
+    requiredSecrets: ["SMARTFLO_TOKEN"],
+    supportsPurchase: false,
+  },
   { id: "vobiz", label: "Vobiz", requiredSecrets: ["VOBIZ_API_KEY"], supportsPurchase: false },
   { id: "pulse", label: "Pulse", requiredSecrets: ["PULSE_API_KEY"], supportsPurchase: false },
   { id: "intalk", label: "Intalk", requiredSecrets: ["INTALK_API_KEY"], supportsPurchase: false },
@@ -77,6 +103,21 @@ export function getTelephonyAdapter(providerId: string): TelephonyProviderAdapte
   if (!def) return null;
   const status = providerStatus().find((p) => p.id === providerId);
   if (!status?.configured) return null;
+
+  // Sarvam gets its own dedicated branch rather than the generic REST/HMAC
+  // path below: the generic adapter's assumed request/response shapes and
+  // webhook envelope were never verified against Sarvam's real API (see
+  // sarvam-provider.server.ts's module doc), so forcing "sarvam" through it
+  // would silently call invented endpoints. SARVAM_BASE_URL/
+  // SARVAM_WEBHOOK_SECRET are deliberately not read here — the adapter
+  // doesn't use them yet (its webhook verification fails closed until the
+  // real mechanism is confirmed), and reading unused env vars would just
+  // invent configuration that does nothing.
+  if (providerId === "sarvam") {
+    const apiKey = process.env["SARVAM_API_KEY"];
+    if (!apiKey) return null;
+    return new SarvamTelephonyAdapter({ apiKey });
+  }
 
   // Exotel's real credential/auth shape (SID + API key + API token, and a
   // "verify token" comparison instead of HMAC — see exotel-provider.ts)
