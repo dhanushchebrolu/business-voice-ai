@@ -38,6 +38,7 @@ import { Route as AppAgentRouteImport } from './routes/app.agent'
 import { Route as AppBillingRouteImport } from './routes/app.billing'
 import { Route as AppBusinessRouteImport } from './routes/app.business'
 import { Route as AppCallsRouteImport } from './routes/app.calls'
+import { Route as AppKnowledgeRouteImport } from './routes/app.knowledge'
 import { Route as AppLeadsRouteImport } from './routes/app.leads'
 import { Route as AppNumbersRouteImport } from './routes/app.numbers'
 import { Route as AppOnboardingRouteImport } from './routes/app.onboarding'
@@ -194,6 +195,11 @@ const AppCallsRoute = AppCallsRouteImport.update({
   path: '/calls',
   getParentRoute: () => AppRoute,
 } as any)
+const AppKnowledgeRoute = AppKnowledgeRouteImport.update({
+  id: '/knowledge',
+  path: '/knowledge',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppLeadsRoute = AppLeadsRouteImport.update({
   id: '/leads',
   path: '/leads',
@@ -275,6 +281,7 @@ export interface FileRoutesByFullPath {
   '/app/billing': typeof AppBillingRoute
   '/app/business': typeof AppBusinessRoute
   '/app/calls': typeof AppCallsRoute
+  '/app/knowledge': typeof AppKnowledgeRoute
   '/app/leads': typeof AppLeadsRoute
   '/app/numbers': typeof AppNumbersRoute
   '/app/onboarding': typeof AppOnboardingRoute
@@ -312,6 +319,7 @@ export interface FileRoutesByTo {
   '/app/billing': typeof AppBillingRoute
   '/app/business': typeof AppBusinessRoute
   '/app/calls': typeof AppCallsRoute
+  '/app/knowledge': typeof AppKnowledgeRoute
   '/app/leads': typeof AppLeadsRoute
   '/app/numbers': typeof AppNumbersRoute
   '/app/onboarding': typeof AppOnboardingRoute
@@ -354,6 +362,7 @@ export interface FileRoutesById {
   '/app/billing': typeof AppBillingRoute
   '/app/business': typeof AppBusinessRoute
   '/app/calls': typeof AppCallsRoute
+  '/app/knowledge': typeof AppKnowledgeRoute
   '/app/leads': typeof AppLeadsRoute
   '/app/numbers': typeof AppNumbersRoute
   '/app/onboarding': typeof AppOnboardingRoute
@@ -397,6 +406,7 @@ export interface FileRouteTypes {
     | '/app/billing'
     | '/app/business'
     | '/app/calls'
+    | '/app/knowledge'
     | '/app/leads'
     | '/app/numbers'
     | '/app/onboarding'
@@ -434,6 +444,7 @@ export interface FileRouteTypes {
     | '/app/billing'
     | '/app/business'
     | '/app/calls'
+    | '/app/knowledge'
     | '/app/leads'
     | '/app/numbers'
     | '/app/onboarding'
@@ -475,6 +486,7 @@ export interface FileRouteTypes {
     | '/app/billing'
     | '/app/business'
     | '/app/calls'
+    | '/app/knowledge'
     | '/app/leads'
     | '/app/numbers'
     | '/app/onboarding'
@@ -709,6 +721,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppCallsRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/knowledge': {
+      id: '/app/knowledge'
+      path: '/knowledge'
+      fullPath: '/app/knowledge'
+      preLoaderRoute: typeof AppKnowledgeRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/leads': {
       id: '/app/leads'
       path: '/leads'
@@ -850,6 +869,7 @@ interface AppRouteChildren {
   AppBillingRoute: typeof AppBillingRoute
   AppBusinessRoute: typeof AppBusinessRoute
   AppCallsRoute: typeof AppCallsRoute
+  AppKnowledgeRoute: typeof AppKnowledgeRoute
   AppLeadsRoute: typeof AppLeadsRoute
   AppNumbersRoute: typeof AppNumbersRoute
   AppOnboardingRoute: typeof AppOnboardingRoute
@@ -862,6 +882,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppBillingRoute: AppBillingRoute,
   AppBusinessRoute: AppBusinessRoute,
   AppCallsRoute: AppCallsRoute,
+  AppKnowledgeRoute: AppKnowledgeRoute,
   AppLeadsRoute: AppLeadsRoute,
   AppNumbersRoute: AppNumbersRoute,
   AppOnboardingRoute: AppOnboardingRoute,

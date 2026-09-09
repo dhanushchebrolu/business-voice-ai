@@ -326,6 +326,7 @@ export const getCustomerDetail = createServerFn({ method: "GET" })
       agent,
       lastPublish,
       audit,
+      knowledge,
     ] = await Promise.all([
       supabaseAdmin.from("organizations").select("*").eq("id", orgId).maybeSingle(),
       supabaseAdmin.from("businesses").select("*").eq("organization_id", orgId).maybeSingle(),
@@ -395,6 +396,15 @@ export const getCustomerDetail = createServerFn({ method: "GET" })
         .eq("organization_id", orgId)
         .order("created_at", { ascending: false })
         .limit(50),
+      // Phase 4: read-only summary for the Customer 360 Knowledge tab.
+      // Reuses knowledge_documents (source_type=category, status=enable/
+      // disable) — the same tenant-scoped table the customer-facing
+      // /app/knowledge route writes to. Never touches public_knowledge_base.
+      supabaseAdmin
+        .from("knowledge_documents")
+        .select("id, title, source_type, status, updated_at")
+        .eq("organization_id", orgId)
+        .order("updated_at", { ascending: false }),
     ]);
 
     if (!org.data) throw new Error("Customer not found");
@@ -444,6 +454,7 @@ export const getCustomerDetail = createServerFn({ method: "GET" })
       },
       lastPublish: lastPublish.data ?? null,
       audit: audit.data ?? [],
+      knowledge: knowledge.data ?? [],
     };
   });
 

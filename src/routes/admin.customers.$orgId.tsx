@@ -19,6 +19,11 @@ import {
 import { PLATFORM_FEATURES } from "@/lib/features";
 import { formatMoney } from "@/lib/pricing";
 import { ACCOUNT_STATUS_LABEL, agentStatusLabel, type AccountStatus } from "@/lib/workspace";
+import {
+  KNOWLEDGE_CATEGORIES,
+  knowledgeCategoryLabel,
+  isKnowledgeEnabled,
+} from "@/lib/knowledge-categories";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -485,6 +490,7 @@ function CustomerDetail() {
           <TabsTrigger value="invoices">Invoices</TabsTrigger>
           <TabsTrigger value="calls">Calls</TabsTrigger>
           <TabsTrigger value="team">Team</TabsTrigger>
+          <TabsTrigger value="knowledge">Knowledge</TabsTrigger>
           <TabsTrigger value="crm">CRM</TabsTrigger>
           <TabsTrigger value="pricing">Pricing</TabsTrigger>
           <TabsTrigger value="audit">Audit</TabsTrigger>
@@ -632,6 +638,55 @@ function CustomerDetail() {
                 </li>
               ))}
             </ul>
+          </SectionCard>
+        </TabsContent>
+
+        <TabsContent value="knowledge" className="mt-4">
+          <SectionCard
+            title="Knowledge base"
+            description="Read-only summary of what this customer has added via /app/knowledge. Reuses knowledge_documents — the same tenant-scoped table, never public_knowledge_base."
+          >
+            {data.knowledge.length ? (
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  {KNOWLEDGE_CATEGORIES.map((c) => {
+                    const rows = data.knowledge.filter((k) => k.source_type === c.value);
+                    return (
+                      <StatCard
+                        key={c.value}
+                        label={c.label}
+                        value={rows.length}
+                        hint={`${rows.filter((k) => isKnowledgeEnabled(k.status)).length} enabled`}
+                      />
+                    );
+                  })}
+                </div>
+                <ul className="divide-y divide-border">
+                  {data.knowledge.slice(0, 20).map((k) => (
+                    <li
+                      key={k.id}
+                      className="flex items-center justify-between gap-3 py-2.5 text-sm"
+                    >
+                      <div>
+                        <p className="font-medium">{k.title}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {knowledgeCategoryLabel(k.source_type)} · updated{" "}
+                          {new Date(k.updated_at).toLocaleDateString()}
+                        </p>
+                      </div>
+                      <StatusPill tone={isKnowledgeEnabled(k.status) ? "live" : "idle"}>
+                        {isKnowledgeEnabled(k.status) ? "Enabled" : "Disabled"}
+                      </StatusPill>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : (
+              <EmptyState
+                title="No knowledge base entries"
+                description="This customer has not added any staff, policy, appointment or custom knowledge yet."
+              />
+            )}
           </SectionCard>
         </TabsContent>
 

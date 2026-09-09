@@ -63,6 +63,7 @@ describe("getCustomerDetail — every query is tenant-scoped to the requested or
     "agent_configs",
     "agent_versions",
     "audit_logs",
+    "knowledge_documents",
   ];
 
   for (const table of scopedTables) {
