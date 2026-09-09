@@ -2,6 +2,22 @@ import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { assertPlatformAdmin, writeAudit } from "@/lib/platform-admin.server";
 import { getTelephonyAdapter } from "@/lib/telephony.server";
+import { SarvamTelephonyAdapter } from "@/lib/telephony/sarvam-provider.server";
+import type { Json } from "@/integrations/supabase/types";
+
+/**
+ * A Sarvam campaign's raw response body, as passed through to the admin
+ * caller for now (no Klyro-side campaign schema exists yet — out of scope
+ * for this phase). Cast from Record<string, unknown> to Json at the
+ * boundary: it always originates from a real, already-JSON-parsed HTTP
+ * response body (see sarvam-api-client.server.ts), so this is a type-level
+ * bridge, not a data-shape assumption — createServerFn's serialization
+ * validator requires a concrete JSON-compatible type, and `unknown` values
+ * inside a plain object do not satisfy it.
+ */
+function toJson(value: Record<string, unknown>): Json {
+  return value as unknown as Json;
+}
 
 /**
  * Admin-only Sarvam provider-mapping control plane (V1 manual-onboarding
@@ -11,10 +27,11 @@ import { getTelephonyAdapter } from "@/lib/telephony.server";
  * Sarvam app/agent creation, connection creation, and managed-number
  * rental are manual steps performed in Sarvam's own dashboard — no public
  * API was found for any of them, and none is guessed here. What these
- * three functions automate is everything AFTER that manual step: recording
- * the resulting Sarvam identifiers against Klyro's own records (this file),
- * and — once Sarvam's management-API auth is empirically verified —
- * calling Sarvam to actually create the inbound deployment.
+ * functions automate is everything AFTER that manual step: recording the
+ * resulting Sarvam identifiers against Klyro's own records, and calling
+ * Sarvam's management APIs (deployments, campaigns) to act on them — each
+ * such call is a real HTTP request (see sarvam-provider.server.ts /
+ * sarvam-api-client.server.ts for verification status), never faked.
  *
  * Every mutation here goes through assertPlatformAdmin and is audited,
  * exactly like telephony-admin.functions.ts. Customers never reach these
@@ -193,11 +210,11 @@ interface CreateSarvamInboundDeploymentInput {
 /**
  * Validates and attempts to create a Sarvam inbound deployment for one or
  * more Klyro phone numbers. All validation below runs — and is fully real,
- * tested, working code — regardless of whether the actual Sarvam API call
- * at the end can succeed. It cannot yet: see
- * SarvamTelephonyAdapter.createInboundDeployment's doc for exactly why
- * (X-API-Key auth unverified against a live response; apps.sarvam.ai
- * unreachable from this environment). This function does not fake success
+ * tested, working code — before the actual Sarvam API call at the end,
+ * which is now a real HTTP request (see SarvamTelephonyAdapter
+ * .createInboundDeployment's doc for its verification status: code exists
+ * and sends a real request, but has never been exercised against a live
+ * Sarvam response in this environment). This function does not fake success
  * — it propagates that adapter's error rather than writing
  * provider_deployment_id or an audit record for something that didn't
  * happen.
@@ -272,25 +289,15 @@ export const createSarvamInboundDeployment = createServerFn({ method: "POST" })
 
     const adapter = getTelephonyAdapter("sarvam");
     if (!adapter) throw new Error("Sarvam is not connected. Configure SARVAM_API_KEY first.");
-    // createInboundDeployment is Sarvam-specific — not part of the shared
-    // TelephonyProviderAdapter interface (deployments are a Sarvam Voice
-    // Agents concept, not a general telephony-adapter one) — so it's typed
-    // as an intersection here rather than widening the shared interface.
-    const sarvamAdapter = adapter as typeof adapter & {
-      createInboundDeployment(input: {
-        name: string;
-        appId: string;
-        appVersion: number;
-        connectionId: string;
-        phoneNumbers: string[];
-      }): Promise<{ deploymentId: string }>;
-    };
+    if (!(adapter instanceof SarvamTelephonyAdapter))
+      throw new Error("Unexpected adapter type for provider 'sarvam'.");
 
-    // This call is expected to throw today — see this function's own doc
-    // comment and SarvamTelephonyAdapter.createInboundDeployment's. No
-    // provider_deployment_id write and no audit entry happen unless it
-    // genuinely succeeds; nothing below this line is reachable yet.
-    const created = await sarvamAdapter.createInboundDeployment({
+    // This call is a real HTTP request against Sarvam's documented
+    // deployment-creation endpoint — see SarvamTelephonyAdapter
+    // .createInboundDeployment's doc comment for its verification status.
+    // No provider_deployment_id write and no audit entry happen unless it
+    // genuinely succeeds.
+    const created = await adapter.createInboundDeployment({
       name: data.name,
       appId: agentConfig.sarvam_app_id,
       appVersion: agentConfig.sarvam_app_version,
@@ -314,4 +321,172 @@ export const createSarvamInboundDeployment = createServerFn({ method: "POST" })
     });
 
     return { ok: true as const, deploymentId: created.deploymentId };
+  });
+
+/* ------------------------------------------------------------------ */
+/* 4. Sarvam inbound deployment update                                  */
+/* ------------------------------------------------------------------ */
+
+interface UpdateSarvamInboundDeploymentInput {
+  /** The Klyro phone numbers already sharing the deployment being updated — identifies it. */
+  phoneNumberIds: string[];
+  name?: string;
+  description?: string;
+  reason: string;
+}
+
+/**
+ * Updates an existing Sarvam inbound deployment's name/description. The
+ * deployment being updated is derived server-side from the phone numbers
+ * that already carry its provider_deployment_id — never taken as a raw ID
+ * from client input — so tenant ownership falls out of the same
+ * organization/consistency checks used by createSarvamInboundDeployment.
+ * Membership (which numbers belong to the deployment) is not changed here —
+ * out of scope for this phase, same as campaigns having no UI yet.
+ */
+export const updateSarvamInboundDeployment = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: UpdateSarvamInboundDeploymentInput) => {
+    if (!input?.phoneNumberIds?.length) throw new Error("At least one phoneNumberId is required");
+    if (!input.name?.trim() && !input.description?.trim())
+      throw new Error("At least one of name or description must be provided");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+
+    const { data: numbers, error: numbersError } = await supabaseAdmin
+      .from("phone_numbers")
+      .select("id, organization_id, provider_deployment_id")
+      .in("id", data.phoneNumberIds);
+    if (numbersError) throw numbersError;
+    if (!numbers || numbers.length !== data.phoneNumberIds.length)
+      throw new Error("One or more phone numbers were not found.");
+
+    const orgIds = new Set(numbers.map((n) => n.organization_id));
+    if (orgIds.size > 1)
+      throw new Error("All phone numbers in one deployment must belong to the same organization.");
+    const deploymentIds = new Set(numbers.map((n) => n.provider_deployment_id));
+    if (deploymentIds.size > 1 || numbers.some((n) => !n.provider_deployment_id))
+      throw new Error("These phone numbers do not all share the same existing Sarvam deployment.");
+
+    const organizationId = numbers[0]!.organization_id;
+    const deploymentId = numbers[0]!.provider_deployment_id!;
+
+    const adapter = getTelephonyAdapter("sarvam");
+    if (!adapter) throw new Error("Sarvam is not connected. Configure SARVAM_API_KEY first.");
+    if (!(adapter instanceof SarvamTelephonyAdapter))
+      throw new Error("Unexpected adapter type for provider 'sarvam'.");
+
+    // Real HTTP PATCH request — see SarvamTelephonyAdapter
+    // .updateInboundDeployment's doc comment for its verification status.
+    const updated = await adapter.updateInboundDeployment(deploymentId, {
+      name: data.name?.trim() || undefined,
+      description: data.description?.trim() || undefined,
+    });
+
+    await writeAudit(admin, {
+      action: "SARVAM_DEPLOYMENT_UPDATED",
+      entityType: "phone_number",
+      entityId: data.phoneNumberIds[0] ?? null,
+      organizationId,
+      newValue: {
+        deployment_id: updated.deploymentId,
+        name: data.name,
+        description: data.description,
+      },
+      reason: data.reason,
+    });
+
+    return { ok: true as const, deploymentId: updated.deploymentId };
+  });
+
+/* ------------------------------------------------------------------ */
+/* 5. Sarvam campaigns — adapter/server boundary only (no UI this phase) */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Campaigns are a Sarvam org/workspace-wide concept with no Klyro-side
+ * table or per-customer ownership model yet (out of scope for this phase —
+ * "implement only the provider adapter/server boundary"), so these three
+ * functions are platform-admin-gated only, with no per-organization tenant
+ * check to perform (there is no Klyro-owned campaign record to check
+ * ownership against). Every call is a real HTTP request against Sarvam's
+ * documented campaigns endpoints — see SarvamTelephonyAdapter's doc comment
+ * for verification status.
+ */
+export const listSarvamCampaigns = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    await assertPlatformAdmin(context.supabase, context.userId);
+    const adapter = getTelephonyAdapter("sarvam");
+    if (!adapter) throw new Error("Sarvam is not connected. Configure SARVAM_API_KEY first.");
+    if (!(adapter instanceof SarvamTelephonyAdapter))
+      throw new Error("Unexpected adapter type for provider 'sarvam'.");
+    const campaigns = await adapter.listCampaigns();
+    return {
+      campaigns: campaigns.map((c) => ({ campaignId: c.campaignId, raw: toJson(c.raw) })),
+    };
+  });
+
+interface GetSarvamCampaignInput {
+  campaignId: string;
+}
+
+export const getSarvamCampaign = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: GetSarvamCampaignInput) => {
+    if (!input?.campaignId?.trim()) throw new Error("campaignId is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    await assertPlatformAdmin(context.supabase, context.userId);
+    const adapter = getTelephonyAdapter("sarvam");
+    if (!adapter) throw new Error("Sarvam is not connected. Configure SARVAM_API_KEY first.");
+    if (!(adapter instanceof SarvamTelephonyAdapter))
+      throw new Error("Unexpected adapter type for provider 'sarvam'.");
+    const campaign = await adapter.getCampaign(data.campaignId);
+    return { campaignId: campaign.campaignId, raw: toJson(campaign.raw) };
+  });
+
+interface UpdateSarvamCampaignInput {
+  campaignId: string;
+  name?: string;
+  status?: string;
+  reason: string;
+}
+
+export const updateSarvamCampaign = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: UpdateSarvamCampaignInput) => {
+    if (!input?.campaignId?.trim()) throw new Error("campaignId is required");
+    if (!input.name?.trim() && !input.status?.trim())
+      throw new Error("At least one of name or status must be provided");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
+    const adapter = getTelephonyAdapter("sarvam");
+    if (!adapter) throw new Error("Sarvam is not connected. Configure SARVAM_API_KEY first.");
+    if (!(adapter instanceof SarvamTelephonyAdapter))
+      throw new Error("Unexpected adapter type for provider 'sarvam'.");
+
+    const updated = await adapter.updateCampaign(data.campaignId, {
+      name: data.name?.trim() || undefined,
+      status: data.status?.trim() || undefined,
+    });
+
+    await writeAudit(admin, {
+      action: "SARVAM_CAMPAIGN_UPDATED",
+      entityType: "sarvam_campaign",
+      entityId: data.campaignId,
+      organizationId: null,
+      newValue: { name: data.name, status: data.status },
+      reason: data.reason,
+    });
+
+    return { ok: true as const, campaignId: updated.campaignId };
   });

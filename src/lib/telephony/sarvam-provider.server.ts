@@ -9,6 +9,20 @@ import {
   type ProvisionedNumber,
   type TelephonyProviderAdapter,
 } from "./adapter.ts";
+import {
+  createDeployment as apiCreateDeployment,
+  createInstantOutbound as apiCreateInstantOutbound,
+  getCampaign as apiGetCampaign,
+  listCampaigns as apiListCampaigns,
+  updateCampaign as apiUpdateCampaign,
+  updateDeployment as apiUpdateDeployment,
+  type CreateInstantOutboundInput,
+  type InstantOutboundResult,
+  type SarvamApiClientConfig,
+  type SarvamCampaign,
+  type UpdateCampaignInput,
+  type UpdateDeploymentInput,
+} from "./sarvam-api-client.server.ts";
 
 /**
  * Sarvam-managed-telephony adapter — Sarvam Voice Agents.
@@ -43,16 +57,34 @@ import {
  *     too. No second credential is introduced; see telephony.server.ts's
  *     `sarvam` branch, which reuses `SARVAM_API_KEY`.
  *
+ * MANAGEMENT API CALLS — code exists and constructs a real HTTP request
+ * against the endpoint paths supplied directly in this conversation as
+ * already-verified/documented API contracts, using sarvam-api-client.server.ts
+ * (see that file's own module doc for exactly which parts of each request/
+ * response shape are verified vs. best-effort). Per explicit instruction,
+ * NONE of these has ever been exercised against a live Sarvam response in
+ * this environment (no live SARVAM_API_KEY has been available, and
+ * apps.sarvam.ai is network-unreachable from this sandbox independent of
+ * credentials) — "code exists and sends a request" is NOT the same claim as
+ * "confirmed working," and no deployment/campaign/interaction ID is ever
+ * fabricated when the call fails or is unreachable:
+ *   - createInboundDeployment / updateInboundDeployment — POST/PATCH
+ *     .../deployments.
+ *   - listCampaigns / getCampaign / updateCampaign — GET/GET/PATCH
+ *     .../campaigns (only the GET list path itself was given verbatim as a
+ *     read-only test target; the id-scoped and PATCH paths follow the same
+ *     convention, not independently confirmed).
+ *   - createInstantOutbound — POST .../outbounds. interaction_id is NOT
+ *     confirmed to be returned synchronously; callers must handle its
+ *     absence and rely on the webhook (or the existing clientReference
+ *     fallback) to learn it.
+ *
  * NOT verified, and deliberately NOT implemented (each throws or fails
  * closed with an explicit message rather than guessing):
  *   - Voice Agent create/update endpoint (request path, method, body).
  *   - Phone-number rental/provisioning endpoint.
- *   - Inbound deployment create/update endpoint (routing a number to an
- *     agent).
- *   - Outbound campaign creation endpoint/request body — including,
- *     critically, which field (if any) lets Klyro attach its own
- *     client-reference to a recipient so it round-trips on the webhook.
- *   - Instant-outbound call creation endpoint/request body.
+ *   - Campaign *creation* (only list/get/update are implemented — creation
+ *     was explicitly out of scope for this phase).
  *   - The webhook authentication/signature mechanism itself — Sarvam's docs
  *     were not reachable to confirm a header name or algorithm, so
  *     `verifyWebhookSignature` below FAILS CLOSED (always rejects) until a
@@ -86,6 +118,8 @@ export interface SarvamTelephonyConfig {
    */
   orgId?: string | undefined;
   workspaceId?: string | undefined;
+  /** Injectable for tests — passed straight through to sarvam-api-client.server.ts. Defaults to global fetch. */
+  fetchImpl?: typeof fetch | undefined;
 }
 
 /**
@@ -266,44 +300,92 @@ export class SarvamTelephonyAdapter implements TelephonyProviderAdapter {
 
   async initiateOutboundCall(_input: InitiateOutboundCallInput): Promise<InitiatedCall> {
     throw new TelephonyAdapterError(
-      "Sarvam outbound dialing is not implemented here: outbound calls on Sarvam are campaign/instant-outbound-shaped, not a single 'dial and get a call ID back' REST call, and neither the campaign-creation nor instant-outbound-creation request schema has been verified against Sarvam's official documentation (including whether/how a Klyro client-reference can be attached to a recipient). Confirm the real request shape before implementing — do not guess it.",
+      "Sarvam outbound dialing does not fit this shared interface: outbound calls on Sarvam are campaign/instant-outbound-shaped, not a single 'dial and get a call ID back' REST call, and InitiatedCall.providerCallId is non-optional while Sarvam's instant-outbound response is not confirmed to return interaction_id synchronously. Use createInstantOutbound (Sarvam-specific, below) instead of this shared method.",
       501,
     );
   }
 
+  /** Scopes the Voice Agents management API client config, or fails closed if org/workspace isn't configured. */
+  private managementApiConfig(): SarvamApiClientConfig {
+    if (!this.config.orgId || !this.config.workspaceId) {
+      throw new TelephonyAdapterError(
+        "This operation requires SARVAM_ORG_ID and SARVAM_WORKSPACE_ID to be configured, in addition to SARVAM_API_KEY.",
+        503,
+      );
+    }
+    return {
+      apiKey: this.config.apiKey,
+      orgId: this.config.orgId,
+      workspaceId: this.config.workspaceId,
+      fetchImpl: this.config.fetchImpl,
+    };
+  }
+
   /**
    * Creates a Sarvam inbound deployment (routes a phone number to a Voice
-   * Agent). NOT IMPLEMENTED — deliberately fails closed rather than
-   * guessing, for two independent, stacked reasons that must BOTH resolve
-   * before this can call Sarvam for real:
-   *
-   *   1. The `X-API-Key` header shown in the Voice Agents management API
-   *      reference has not been empirically confirmed against a live
-   *      response — this session has no SARVAM_API_KEY and no network path
-   *      to apps.sarvam.ai from its sandbox (confirmed blocked at the
-   *      proxy level, independent of credentials).
-   *   2. Even with (1) resolved, this method has never actually issued the
-   *      request — nothing here should be trusted as "implemented" until
-   *      it has been exercised against a real response, success or error.
+   * Agent). Sends a real POST request via sarvam-api-client.server.ts — see
+   * that file's and this module's doc comments for exactly which parts of
+   * the request/response shape are verified vs. best-effort. This has never
+   * been exercised against a live Sarvam response in this environment (no
+   * live SARVAM_API_KEY has been available, and apps.sarvam.ai is
+   * network-unreachable from this sandbox independent of credentials) — if
+   * it fails here, that failure is real and propagated, never swallowed
+   * into a fake success.
    *
    * Callers (sarvam-admin.functions.ts's createSarvamInboundDeployment) are
    * expected to perform ALL of their own validation (tenant ownership,
    * that the referenced agent/connection/numbers are actually mapped)
-   * before ever reaching this call, so that everything up to the Sarvam
-   * request itself is real, tested, working code — only the actual network
-   * call is gated.
+   * before ever reaching this call.
    */
-  async createInboundDeployment(_input: CreateInboundDeploymentInput): Promise<CreatedDeployment> {
-    if (!this.config.orgId || !this.config.workspaceId) {
-      throw new TelephonyAdapterError(
-        "Sarvam inbound deployment creation requires SARVAM_ORG_ID and SARVAM_WORKSPACE_ID to be configured, in addition to SARVAM_API_KEY.",
-        503,
-      );
-    }
-    throw new TelephonyAdapterError(
-      "Sarvam inbound deployment creation is not implemented: the X-API-Key authentication mechanism documented for this endpoint has not been empirically verified against a live apps.sarvam.ai response in this environment (no live credentials, and apps.sarvam.ai is network-unreachable from this sandbox regardless). Verify a real request/response first — do not fake a successful deployment.",
-      501,
-    );
+  async createInboundDeployment(input: CreateInboundDeploymentInput): Promise<CreatedDeployment> {
+    const result = await apiCreateDeployment(this.managementApiConfig(), input);
+    return { deploymentId: result.deploymentId };
+  }
+
+  /**
+   * Updates an existing Sarvam inbound deployment (e.g. its phone-number set
+   * or inbound schedule). Same verification status as createInboundDeployment
+   * above — a real PATCH request, never exercised against a live response.
+   */
+  async updateInboundDeployment(
+    deploymentId: string,
+    input: UpdateDeploymentInput,
+  ): Promise<CreatedDeployment> {
+    const result = await apiUpdateDeployment(this.managementApiConfig(), deploymentId, input);
+    return { deploymentId: result.deploymentId };
+  }
+
+  /**
+   * Campaign adapter/server boundary only (per instruction — no campaign UI
+   * this phase). Same verification status as the deployment methods: real
+   * requests, never exercised live. listCampaigns/getCampaign use the
+   * verified GET .../campaigns path family; updateCampaign's PATCH path and
+   * body are the same convention, not independently confirmed.
+   */
+  async listCampaigns(): Promise<SarvamCampaign[]> {
+    const result = await apiListCampaigns(this.managementApiConfig());
+    return result.campaigns;
+  }
+
+  async getCampaign(campaignId: string): Promise<SarvamCampaign> {
+    return apiGetCampaign(this.managementApiConfig(), campaignId);
+  }
+
+  async updateCampaign(campaignId: string, input: UpdateCampaignInput): Promise<SarvamCampaign> {
+    return apiUpdateCampaign(this.managementApiConfig(), campaignId, input);
+  }
+
+  /**
+   * Sarvam-specific instant-outbound call creation — see initiateOutboundCall
+   * above for why this is a dedicated method rather than an implementation
+   * of the shared TelephonyProviderAdapter method. interaction_id is NOT
+   * confirmed to be returned synchronously (module doc) — callers MUST
+   * handle `result.interactionId === undefined` and rely on the webhook (or
+   * the existing clientReference fallback) to learn it later, never invent
+   * a placeholder.
+   */
+  async createInstantOutbound(input: CreateInstantOutboundInput): Promise<InstantOutboundResult> {
+    return apiCreateInstantOutbound(this.managementApiConfig(), input);
   }
 
   /**

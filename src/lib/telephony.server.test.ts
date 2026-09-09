@@ -121,22 +121,33 @@ test("getTelephonyAdapter('sarvam'): SARVAM_ORG_ID/SARVAM_WORKSPACE_ID, when set
     },
   );
   assert.ok(adapter instanceof SarvamTelephonyAdapter);
-  // With org/workspace configured, createInboundDeployment must fail for
-  // the "not implemented" reason, not the "not configured" one — proving
-  // the env vars actually reached the adapter's config.
-  await assert.rejects(
-    () =>
-      adapter.createInboundDeployment({
-        name: "n",
-        appId: "a",
-        appVersion: 1,
-        connectionId: "c",
-        phoneNumbers: ["+911111111111"],
-      }),
-    (err: unknown) => {
-      assert.ok(err instanceof Error);
-      assert.match(err.message, /not implemented/i);
-      return true;
-    },
-  );
+
+  // With org/workspace configured, createInboundDeployment must actually
+  // attempt a request (using the org_1/ws_1 it captured) rather than
+  // rejecting with the "not configured" error — proving the env vars
+  // reached the adapter's config. The global fetch is swapped out for the
+  // duration of this call only, so this stays a deterministic unit test
+  // rather than a real network call to apps.sarvam.ai.
+  const originalFetch = globalThis.fetch;
+  let calledUrl: string | undefined;
+  globalThis.fetch = (async (url: string | URL) => {
+    calledUrl = String(url);
+    return new Response(JSON.stringify({ deployment_id: "dep_1" }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const result = await adapter.createInboundDeployment({
+      name: "n",
+      appId: "a",
+      appVersion: 1,
+      connectionId: "c",
+      phoneNumbers: ["+911111111111"],
+    });
+    assert.equal(result.deploymentId, "dep_1");
+    assert.equal(
+      calledUrl,
+      "https://apps.sarvam.ai/api/app-authoring/v1/orgs/org_1/workspaces/ws_1/deployments",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

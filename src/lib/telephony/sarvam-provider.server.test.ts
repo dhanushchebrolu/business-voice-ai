@@ -294,8 +294,48 @@ test("createInboundDeployment: rejects with a distinct error when orgId/workspac
   );
 });
 
-test("createInboundDeployment: fails closed (does not fake success) even once orgId/workspaceId are configured — the auth mechanism is unverified", async () => {
-  const adapter = new SarvamTelephonyAdapter({ ...config, orgId: "org_1", workspaceId: "ws_1" });
+test("updateInboundDeployment, listCampaigns, getCampaign, updateCampaign and createInstantOutbound: reject with the same 'not configured' error as createInboundDeployment when orgId/workspaceId are missing", async () => {
+  const adapter = new SarvamTelephonyAdapter(config); // no orgId/workspaceId
+  const notConfigured = (err: unknown) => {
+    assert.ok(err instanceof TelephonyAdapterError);
+    assert.match(err.message, /SARVAM_ORG_ID and SARVAM_WORKSPACE_ID/);
+    return true;
+  };
+  await assert.rejects(
+    () => adapter.updateInboundDeployment("dep_1", { name: "x" }),
+    notConfigured,
+  );
+  await assert.rejects(() => adapter.listCampaigns(), notConfigured);
+  await assert.rejects(() => adapter.getCampaign("camp_1"), notConfigured);
+  await assert.rejects(() => adapter.updateCampaign("camp_1", { name: "x" }), notConfigured);
+  await assert.rejects(
+    () =>
+      adapter.createInstantOutbound({
+        appId: "app_1",
+        appVersion: 1,
+        connectionId: "conn_1",
+        toE164: "+919876543210",
+      }),
+    notConfigured,
+  );
+});
+
+test("createInboundDeployment: once orgId/workspaceId are configured, issues a real request via the injected fetchImpl and never fakes success on failure", async () => {
+  let calledUrl: string | undefined;
+  let calledInit: RequestInit | undefined;
+  const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+    calledUrl = String(url);
+    calledInit = init;
+    return new Response(JSON.stringify({ message: "invalid connection_id" }), { status: 400 });
+  }) as typeof fetch;
+
+  const adapter = new SarvamTelephonyAdapter({
+    ...config,
+    orgId: "org_1",
+    workspaceId: "ws_1",
+    fetchImpl,
+  });
+
   await assert.rejects(
     () =>
       adapter.createInboundDeployment({
@@ -307,9 +347,40 @@ test("createInboundDeployment: fails closed (does not fake success) even once or
       }),
     (err: unknown) => {
       assert.ok(err instanceof TelephonyAdapterError);
-      assert.match(err.message, /not implemented/i);
-      assert.match(err.message, /X-API-Key/);
+      assert.equal(err.status, 400);
       return true;
     },
   );
+
+  assert.equal(
+    calledUrl,
+    "https://apps.sarvam.ai/api/app-authoring/v1/orgs/org_1/workspaces/ws_1/deployments",
+  );
+  assert.equal(calledInit?.method, "POST");
+  const headers = calledInit?.headers as Record<string, string>;
+  assert.equal(headers["X-API-Key"], "sk_test_key");
+  const body = JSON.parse(calledInit?.body as string);
+  assert.equal(body.app_id, "app_1");
+  assert.equal(body.connection_id, "conn_1");
+});
+
+test("createInboundDeployment: on a genuinely successful response, returns the real deploymentId — never fabricated", async () => {
+  const fetchImpl = (async () =>
+    new Response(JSON.stringify({ deployment_id: "dep_real_123" }), {
+      status: 200,
+    })) as typeof fetch;
+  const adapter = new SarvamTelephonyAdapter({
+    ...config,
+    orgId: "org_1",
+    workspaceId: "ws_1",
+    fetchImpl,
+  });
+  const result = await adapter.createInboundDeployment({
+    name: "test-deployment",
+    appId: "app_1",
+    appVersion: 1,
+    connectionId: "conn_1",
+    phoneNumbers: ["+912222222222"],
+  });
+  assert.equal(result.deploymentId, "dep_real_123");
 });
