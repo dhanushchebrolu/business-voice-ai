@@ -101,6 +101,45 @@ describe("checkProvisioningReadiness — structural checks (query shape / no fak
     assert.match(block, /overall:\s*"blocked"/);
     assert.match(block, /status:\s*"fail"/);
   });
+
+  test("the webhook/connection check is real data from telephony_connections (status/last_error), never a fabricated HEALTHY", () => {
+    assert.match(src, /\.from\("telephony_connections"\)/);
+    assert.match(src, /select\("provider, status, last_error"\)/);
+    const connectionBlockIdx = src.indexOf('key: "connection"');
+    assert.ok(connectionBlockIdx > 0, "expected a distinct connection check block");
+  });
+
+  test("the connection check is warning-only — never a hard fail, so it cannot block handover on its own", () => {
+    const startIdx = src.indexOf("let connectionCheck: ProvisioningCheck;");
+    const endIdx = src.indexOf("checks.push(connectionCheck);");
+    assert.ok(startIdx > -1 && endIdx > startIdx);
+    const block = src.slice(startIdx, endIdx);
+    assert.doesNotMatch(block, /"fail"/);
+  });
+
+  test("billing check flags a negative wallet balance (a real signal), warning-only", () => {
+    const billingIdx = src.indexOf('key: "billing"');
+    assert.ok(billingIdx > -1);
+    const block = src.slice(billingIdx, billingIdx + 400);
+    assert.match(block, /walletBalance < 0/);
+    assert.doesNotMatch(block, /"fail"/);
+  });
+
+  test("wallet check reuses the same admin-configured thresholds admin.settings.tsx already exposes, not a new constant", () => {
+    assert.match(src, /billing\.low_balance_threshold/);
+    assert.match(src, /billing\.critical_balance_threshold/);
+    const startIdx = src.indexOf("let walletCheck: ProvisioningCheck;");
+    const endIdx = src.indexOf("checks.push(walletCheck);");
+    assert.ok(startIdx > -1 && endIdx > startIdx);
+    assert.doesNotMatch(src.slice(startIdx, endIdx), /"fail"/);
+  });
+
+  test("wallet balance for the health checks is a real, unbounded sum over wallet_transactions for this org — not fabricated", () => {
+    const idx = src.indexOf('.from("wallet_transactions")');
+    assert.ok(idx > -1);
+    const block = src.slice(idx, idx + 200);
+    assert.match(block, /eq\("organization_id", orgId\)/);
+  });
 });
 
 const adminClientsSrc = readFileSync(

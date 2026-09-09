@@ -175,5 +175,105 @@ export async function checkProvisioningReadiness(orgId: string): Promise<Provisi
         : "No active Sarvam number is missing a deployment mapping.",
   });
 
+  // "Webhook" health has no real per-organization delivery signal yet
+  // (webhook_events has no organization_id column — see the Phase 2
+  // architecture review). The honest proxy available today is the
+  // registered provider connection's own status/last_error
+  // (telephony_connections), which is real data, not invented. Warning
+  // only — never claimed HEALTHY without actually checking it, and never a
+  // hard block since it isn't a structural provisioning gap.
+  const providers = [...new Set((numbers ?? []).map((n) => n.provider))];
+  let connectionCheck: ProvisioningCheck;
+  if (providers.length === 0) {
+    connectionCheck = {
+      key: "connection",
+      label: "Webhook / connection",
+      status: "warning",
+      detail: "No phone number is assigned yet, so no provider connection to check.",
+    };
+  } else {
+    const { data: connections } = await supabaseAdmin
+      .from("telephony_connections")
+      .select("provider, status, last_error")
+      .eq("organization_id", orgId)
+      .in("provider", providers);
+    const unhealthy = (connections ?? []).filter((c) => c.status !== "connected" || c.last_error);
+    const missing = providers.filter((p) => !(connections ?? []).some((c) => c.provider === p));
+    const problems = [
+      ...unhealthy.map((c) => `${c.provider}: ${c.last_error ?? `status is "${c.status}"`}`),
+      ...missing.map((p) => `${p}: no connection record`),
+    ];
+    connectionCheck = {
+      key: "connection",
+      label: "Webhook / connection",
+      status: problems.length > 0 ? "warning" : "pass",
+      detail:
+        problems.length > 0
+          ? `Provider connection issue(s): ${problems.join("; ")}.`
+          : "Every provider this customer uses has a connected telephony_connections record.",
+    };
+  }
+  checks.push(connectionCheck);
+
+  // Wallet/billing health: real signals from wallet_transactions, never
+  // fabricated. Two distinct concerns, both warning-only (operational
+  // health, not a structural provisioning gap): "billing" flags a balance
+  // that has gone negative (something charged more than it should have);
+  // "wallet" flags running low, using the same admin-configured thresholds
+  // admin.settings.tsx already exposes (billing.low_balance_threshold /
+  // billing.critical_balance_threshold) rather than a new constant.
+  const { data: walletRows } = await supabaseAdmin
+    .from("wallet_transactions")
+    .select("amount")
+    .eq("organization_id", orgId);
+  const walletBalance = (walletRows ?? []).reduce((s, t) => s + t.amount, 0);
+
+  checks.push({
+    key: "billing",
+    label: "Billing",
+    status: walletBalance < 0 ? "warning" : "pass",
+    detail:
+      walletBalance < 0
+        ? `Wallet balance is negative (₹${(walletBalance / 100).toFixed(2)}) — review recent charges.`
+        : "Wallet balance is not negative.",
+  });
+
+  const { data: thresholdSettings } = await supabaseAdmin
+    .from("platform_settings")
+    .select("key, value")
+    .in("key", ["billing.low_balance_threshold", "billing.critical_balance_threshold"]);
+  const thresholdMap = new Map(
+    (thresholdSettings ?? []).map((s) => [s.key, (s.value as { amount?: number } | null)?.amount]),
+  );
+  const criticalThreshold = thresholdMap.get("billing.critical_balance_threshold");
+  const lowThreshold = thresholdMap.get("billing.low_balance_threshold");
+  let walletCheck: ProvisioningCheck;
+  if (typeof criticalThreshold === "number" && walletBalance <= criticalThreshold) {
+    walletCheck = {
+      key: "wallet",
+      label: "Wallet balance",
+      status: "warning",
+      detail: `Wallet balance (₹${(walletBalance / 100).toFixed(2)}) is at or below the critical threshold.`,
+    };
+  } else if (typeof lowThreshold === "number" && walletBalance <= lowThreshold) {
+    walletCheck = {
+      key: "wallet",
+      label: "Wallet balance",
+      status: "warning",
+      detail: `Wallet balance (₹${(walletBalance / 100).toFixed(2)}) is at or below the low-balance threshold.`,
+    };
+  } else {
+    walletCheck = {
+      key: "wallet",
+      label: "Wallet balance",
+      status: "pass",
+      detail:
+        typeof lowThreshold === "number"
+          ? `Wallet balance (₹${(walletBalance / 100).toFixed(2)}) is above the low-balance threshold.`
+          : "No low-balance threshold is configured; balance is not negative.",
+    };
+  }
+  checks.push(walletCheck);
+
   return { overall: computeOverallReadiness(checks), checks };
 }
