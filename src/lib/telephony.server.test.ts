@@ -96,6 +96,56 @@ test("getTelephonyAdapter('sarvam'): does not fall through to the generic REST/H
   );
 });
 
+test("getTelephonyAdapter('sarvam'): SARVAM_BASE_URL is read by nothing — Sarvam's endpoints are hardcoded, not configurable", () => {
+  // Distinguishes SARVAM_BASE_URL (still unused) from SARVAM_WEBHOOK_SECRET
+  // (Phase 5 — now actually wired, see the next test): setting only
+  // SARVAM_BASE_URL must not change createInboundDeployment's target host.
+  let adapter!: SarvamTelephonyAdapter;
+  withEnv({ SARVAM_API_KEY: "sk_live_example", SARVAM_BASE_URL: "https://example.invalid" }, () => {
+    adapter = getTelephonyAdapter("sarvam") as SarvamTelephonyAdapter;
+  });
+  assert.ok(adapter instanceof SarvamTelephonyAdapter);
+  assert.equal(
+    adapter.verifyWebhookSignature(
+      "",
+      {},
+      new URL("https://vaani.app/api/public/webhooks/telephony?provider=sarvam&verify_token=x"),
+    ),
+    false,
+    "no webhook secret was configured, so the request must still be rejected",
+  );
+});
+
+test("getTelephonyAdapter('sarvam'): SARVAM_WEBHOOK_SECRET (Phase 5), when set, actually reaches the adapter's verify_token check", () => {
+  let adapter!: SarvamTelephonyAdapter;
+  withEnv(
+    { SARVAM_API_KEY: "sk_live_example", SARVAM_WEBHOOK_SECRET: "sarvam-shared-secret" },
+    () => {
+      adapter = getTelephonyAdapter("sarvam") as SarvamTelephonyAdapter;
+    },
+  );
+  assert.ok(adapter instanceof SarvamTelephonyAdapter);
+  assert.equal(
+    adapter.verifyWebhookSignature(
+      "",
+      {},
+      new URL(
+        "https://vaani.app/api/public/webhooks/telephony?provider=sarvam&verify_token=sarvam-shared-secret",
+      ),
+    ),
+    true,
+    "the env var must reach the adapter's config, not just be read and discarded",
+  );
+  assert.equal(
+    adapter.verifyWebhookSignature(
+      "",
+      {},
+      new URL("https://vaani.app/api/public/webhooks/telephony?provider=sarvam&verify_token=wrong"),
+    ),
+    false,
+  );
+});
+
 test("getTelephonyAdapter('sarvam'): SARVAM_ORG_ID/SARVAM_WORKSPACE_ID are optional — the adapter still constructs without them (webhook processing needs neither)", () => {
   withEnv(
     { SARVAM_API_KEY: "sk_live_example", SARVAM_ORG_ID: undefined, SARVAM_WORKSPACE_ID: undefined },

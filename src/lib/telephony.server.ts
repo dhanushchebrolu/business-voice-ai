@@ -108,11 +108,10 @@ export function getTelephonyAdapter(providerId: string): TelephonyProviderAdapte
   // path below: the generic adapter's assumed request/response shapes and
   // webhook envelope were never verified against Sarvam's real API (see
   // sarvam-provider.server.ts's module doc), so forcing "sarvam" through it
-  // would silently call invented endpoints. SARVAM_BASE_URL/
-  // SARVAM_WEBHOOK_SECRET are deliberately not read here — the adapter
-  // doesn't use them yet (its webhook verification fails closed until the
-  // real mechanism is confirmed), and reading unused env vars would just
-  // invent configuration that does nothing.
+  // would silently call invented endpoints. SARVAM_BASE_URL is deliberately
+  // not read here — nothing in this adapter uses a configurable base URL
+  // (its endpoints are hardcoded in sarvam-api-client.server.ts), so reading
+  // it would just invent configuration that does nothing.
   if (providerId === "sarvam") {
     const apiKey = process.env["SARVAM_API_KEY"];
     if (!apiKey) return null;
@@ -121,10 +120,17 @@ export function getTelephonyAdapter(providerId: string): TelephonyProviderAdapte
     // needs neither, so their absence must never break that already-working
     // path. Only createInboundDeployment requires them, and checks for them
     // explicitly at call time (see sarvam-provider.server.ts).
+    //
+    // SARVAM_WEBHOOK_SECRET (Phase 5) is likewise optional: when unset,
+    // verifyWebhookSignature keeps failing closed exactly as before — it
+    // only enables the additional Klyro-controlled `verify_token`
+    // defense-in-depth check (see that method's doc comment for exactly
+    // what it does and does not prove).
     return new SarvamTelephonyAdapter({
       apiKey,
       orgId: process.env["SARVAM_ORG_ID"],
       workspaceId: process.env["SARVAM_WORKSPACE_ID"],
+      webhookSecret: process.env["SARVAM_WEBHOOK_SECRET"],
     });
   }
 

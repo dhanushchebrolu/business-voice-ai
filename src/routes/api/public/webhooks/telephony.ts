@@ -151,10 +151,45 @@ async function processTelephonyEvent(providerId: string, event: NormalizedCallEv
     .from("phone_numbers")
     .select("*")
     .eq("e164", vaaniNumber)
+    .eq("provider", providerId)
     .eq("status", "active")
     .maybeSingle();
   if (!phoneNumber) {
     console.error("telephony:webhook_unknown_number", vaaniNumber);
+    return;
+  }
+
+  // Reassignment safety (spec Phase 5 §8): the lookup above only proves
+  // which organization owns this number RIGHT NOW — it says nothing about
+  // which organization owned it when this specific interaction actually
+  // happened. A number can be reassigned (to a different customer, or to a
+  // recreated Sarvam deployment) between when a call started and when its
+  // one-shot completion webhook arrives. When the provider tells us which
+  // deployment handled the call (event.providerDeploymentId) and Klyro has
+  // a deployment on file for the currently-active row
+  // (phoneNumber.provider_deployment_id), the two must agree; a mismatch
+  // means this is a stale event from a deployment that is no longer this
+  // number's active mapping, and it must never be attributed to whichever
+  // organization happens to own the number today. There is deliberately no
+  // attempt to instead attribute it to the correct (old) organization —
+  // nothing in the current schema records historical (organization,
+  // deployment) assignments over time, so recovering the true owner would
+  // be a guess, not a lookup. The event is dropped (logged, not retried as
+  // an error — a stale event is not a processing failure) rather than
+  // guessed. Providers/events that don't carry a deployment id (or a number
+  // not yet deployment-mapped) are unaffected — this only ever narrows an
+  // already-successful e164 match, never blocks one that has nothing to
+  // cross-check.
+  if (
+    event.providerDeploymentId &&
+    phoneNumber.provider_deployment_id &&
+    event.providerDeploymentId !== phoneNumber.provider_deployment_id
+  ) {
+    console.error(
+      "telephony:webhook_stale_deployment_mismatch",
+      vaaniNumber,
+      event.providerDeploymentId,
+    );
     return;
   }
 

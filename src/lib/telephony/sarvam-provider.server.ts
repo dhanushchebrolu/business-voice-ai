@@ -23,6 +23,7 @@ import {
   type UpdateCampaignInput,
   type UpdateDeploymentInput,
 } from "./sarvam-api-client.server.ts";
+import { constantTimeEquals } from "../constant-time-equals.server.ts";
 
 /**
  * Sarvam-managed-telephony adapter — Sarvam Voice Agents.
@@ -86,11 +87,21 @@ import {
  *   - Campaign *creation* (only list/get/update are implemented — creation
  *     was explicitly out of scope for this phase).
  *   - The webhook authentication/signature mechanism itself — Sarvam's docs
- *     were not reachable to confirm a header name or algorithm, so
- *     `verifyWebhookSignature` below FAILS CLOSED (always rejects) until a
- *     real mechanism is confirmed and implemented. This is a deliberate
- *     safety choice, not an oversight: accepting an unverified webhook as
- *     authentic would be worse than rejecting a real one.
+ *     were not reachable to confirm a header name or algorithm (re-confirmed
+ *     during Phase 5: a live fetch to docs.sarvam.ai from this environment
+ *     still returns EGRESS_BLOCKED), so `verifyWebhookSignature` below FAILS
+ *     CLOSED against Sarvam's own mechanism (SARVAM_WEBHOOK_AUTH_VERIFIED
+ *     stays false) until a real mechanism is confirmed and implemented. This
+ *     is a deliberate safety choice, not an oversight: accepting an
+ *     unverified webhook as authentic would be worse than rejecting a real
+ *     one. Phase 5 adds one optional, strictly weaker defense-in-depth layer
+ *     on top: when an operator configures SARVAM_WEBHOOK_SECRET, the request
+ *     is also accepted if it carries a matching `verify_token` query
+ *     parameter — a Klyro-generated shared secret embedded in the exact
+ *     webhook URL Klyro configures into the Sarvam deployment, mirroring the
+ *     existing Exotel `verify_token` mechanism (exotel-provider.ts). This
+ *     proves the caller knows Klyro's private URL, not that Sarvam's servers
+ *     produced the request — see verifyWebhookSignature's own doc comment.
  *
  * Two further inferences made here are heuristic, not verified, and are
  * called out at their point of use below: (1) the exact string values
@@ -118,6 +129,14 @@ export interface SarvamTelephonyConfig {
    */
   orgId?: string | undefined;
   workspaceId?: string | undefined;
+  /**
+   * Optional Klyro-generated shared secret for the defense-in-depth
+   * `verify_token` query-parameter check described in the module doc. Unset
+   * by default (matching every environment before Phase 5) — when absent,
+   * `verifyWebhookSignature` behaves exactly as before: fails closed
+   * unconditionally.
+   */
+  webhookSecret?: string | undefined;
   /** Injectable for tests — passed straight through to sarvam-api-client.server.ts. Defaults to global fetch. */
   fetchImpl?: typeof fetch | undefined;
 }
@@ -174,6 +193,31 @@ function isNonEmptyString(v: unknown): v is string {
   return typeof v === "string" && v.length > 0;
 }
 
+/**
+ * Loose E.164 shape check (leading +, country code, 7-15 digits total) —
+ * good enough to reject an obviously malformed phone-number field (spec
+ * Phase 5 §5: "Reject malformed phone numbers") without pretending to
+ * validate real dialability. A field that fails this check is treated as
+ * absent (undefined) rather than passed through: the webhook route's
+ * existing "unknown number" fallback then drops the event safely instead of
+ * attempting a lookup with garbage input.
+ */
+const E164_RE = /^\+[1-9]\d{6,14}$/;
+function isPlausibleE164(v: unknown): v is string {
+  return typeof v === "string" && E164_RE.test(v);
+}
+
+/**
+ * Caps on transcript size (spec Phase 5 §5: "Limit transcript/metadata
+ * sizes if appropriate to prevent abuse"). Generous enough for any
+ * realistic call (a 2000-turn/20000-char-per-turn conversation is already
+ * far longer than any real phone call), so no legitimate transcript is
+ * truncated in practice — this exists only to bound how much an
+ * unauthenticated-until-verified payload can force into call_logs.transcript.
+ */
+const MAX_TRANSCRIPT_TURNS = 2000;
+const MAX_TRANSCRIPT_TEXT_LENGTH = 20000;
+
 function asPlainObject(v: unknown): Record<string, unknown> | undefined {
   return v && typeof v === "object" && !Array.isArray(v)
     ? (v as Record<string, unknown>)
@@ -200,6 +244,7 @@ function parseTranscript(raw: unknown): CallTranscriptTurn[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   const turns: CallTranscriptTurn[] = [];
   for (const entry of raw) {
+    if (turns.length >= MAX_TRANSCRIPT_TURNS) break;
     const obj = asPlainObject(entry);
     if (!obj) continue;
     const role = obj["role"];
@@ -207,7 +252,13 @@ function parseTranscript(raw: unknown): CallTranscriptTurn[] | undefined {
     if (role !== "agent" && role !== "user") continue;
     if (!isNonEmptyString(text)) continue;
     const indicText = obj["indic_text"];
-    turns.push({ role, text, indicText: isNonEmptyString(indicText) ? indicText : undefined });
+    turns.push({
+      role,
+      text: text.slice(0, MAX_TRANSCRIPT_TEXT_LENGTH),
+      indicText: isNonEmptyString(indicText)
+        ? indicText.slice(0, MAX_TRANSCRIPT_TEXT_LENGTH)
+        : undefined,
+    });
   }
   return turns;
 }
@@ -389,17 +440,34 @@ export class SarvamTelephonyAdapter implements TelephonyProviderAdapter {
   }
 
   /**
-   * FAILS CLOSED: Sarvam's webhook authentication/signature mechanism is
-   * unverified in this environment (see the module doc above), so every
-   * request is rejected until this is replaced with a real check against
-   * the documented mechanism. This is intentional — see
-   * SARVAM_WEBHOOK_AUTH_VERIFIED.
+   * FAILS CLOSED against Sarvam's own webhook authentication/signature
+   * mechanism, which is unverified in this environment (see the module doc
+   * above) — SARVAM_WEBHOOK_AUTH_VERIFIED stays false and this path is
+   * never satisfied by anything in the request alone.
+   *
+   * Phase 5 defense-in-depth (optional, off unless configured): when
+   * `this.config.webhookSecret` is set, a request whose `verify_token`
+   * query parameter matches it (constant-time compare) is also accepted.
+   * This is NOT Sarvam proving authenticity — it is Klyro's own shared
+   * secret, embedded in the exact webhook URL an operator configures into
+   * the Sarvam deployment (identical in spirit to Exotel's `verify_token`
+   * mechanism in exotel-provider.ts). It stops an arbitrary internet caller
+   * from posting fabricated call events, but it does not cryptographically
+   * prove the request came from Sarvam's servers the way a real HMAC would.
+   * Until Sarvam's own mechanism is confirmed, an operator who wants any
+   * webhook authentication at all for Sarvam must configure
+   * SARVAM_WEBHOOK_SECRET; leaving it unset keeps this method rejecting
+   * every request, exactly as before Phase 5.
    */
   verifyWebhookSignature(
     _rawBody: string,
     _headers: Record<string, string | null>,
-    _url?: URL,
+    url?: URL,
   ): boolean {
+    if (this.config.webhookSecret) {
+      const provided = url?.searchParams.get("verify_token");
+      if (provided && constantTimeEquals(provided, this.config.webhookSecret)) return true;
+    }
     return SARVAM_WEBHOOK_AUTH_VERIFIED;
   }
 
@@ -440,9 +508,9 @@ export class SarvamTelephonyAdapter implements TelephonyProviderAdapter {
         providerCallId: interactionId,
         status,
         direction: "outbound",
-        vaaniE164: isNonEmptyString(agentPhoneNumber) ? agentPhoneNumber : undefined,
-        fromE164: isNonEmptyString(agentPhoneNumber) ? agentPhoneNumber : undefined,
-        toE164: isNonEmptyString(userPhoneNumber) ? userPhoneNumber : undefined,
+        vaaniE164: isPlausibleE164(agentPhoneNumber) ? agentPhoneNumber : undefined,
+        fromE164: isPlausibleE164(agentPhoneNumber) ? agentPhoneNumber : undefined,
+        toE164: isPlausibleE164(userPhoneNumber) ? userPhoneNumber : undefined,
         durationSeconds,
         recordingUrl: null,
         failureReason: isNonEmptyString(fields["failure_reason"]) ? fields["failure_reason"] : null,
@@ -477,9 +545,9 @@ export class SarvamTelephonyAdapter implements TelephonyProviderAdapter {
       providerCallId: interactionId,
       status: "completed",
       direction: "inbound",
-      vaaniE164: isNonEmptyString(agentPhoneNumber) ? agentPhoneNumber : undefined,
-      fromE164: isNonEmptyString(userPhoneNumber) ? userPhoneNumber : undefined,
-      toE164: isNonEmptyString(agentPhoneNumber) ? agentPhoneNumber : undefined,
+      vaaniE164: isPlausibleE164(agentPhoneNumber) ? agentPhoneNumber : undefined,
+      fromE164: isPlausibleE164(userPhoneNumber) ? userPhoneNumber : undefined,
+      toE164: isPlausibleE164(agentPhoneNumber) ? agentPhoneNumber : undefined,
       durationSeconds,
       recordingUrl: null,
       failureReason: null,

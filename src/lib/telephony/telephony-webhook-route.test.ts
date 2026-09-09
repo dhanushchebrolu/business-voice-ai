@@ -124,6 +124,43 @@ describe("telephony webhook route — outbound tenant correlation (Sarvam additi
   });
 });
 
+describe("telephony webhook route — reassignment safety (Phase 5 §8)", () => {
+  test("the inbound phone_numbers lookup is scoped by provider, not just e164+active", () => {
+    const idx = routeSrc.indexOf('.from("phone_numbers")');
+    assert.ok(idx > -1);
+    const block = routeSrc.slice(idx, idx + 250);
+    assert.match(block, /\.eq\("e164", vaaniNumber\)/);
+    assert.match(block, /\.eq\("provider", providerId\)/);
+    assert.match(block, /\.eq\("status", "active"\)/);
+  });
+
+  test("a mismatched event.providerDeploymentId vs phoneNumber.provider_deployment_id is dropped before checkTelephonyAccess/call_logs insert are ever reached", () => {
+    const lookupIdx = routeSrc.indexOf('.from("phone_numbers")');
+    const mismatchIdx = routeSrc.indexOf("telephony:webhook_stale_deployment_mismatch");
+    const gateIdx = routeSrc.indexOf("checkTelephonyAccess(phoneNumber.organization_id");
+    const insertIdx = routeSrc.indexOf('.from("call_logs")\n    .insert(');
+    assert.ok(lookupIdx > -1 && mismatchIdx > -1 && gateIdx > -1 && insertIdx > -1);
+    assert.ok(lookupIdx < mismatchIdx && mismatchIdx < gateIdx && gateIdx < insertIdx);
+  });
+
+  test("the mismatch check compares Klyro's own on-file mapping, never trusts the event alone, and requires both sides present before blocking", () => {
+    const idx = routeSrc.indexOf("telephony:webhook_stale_deployment_mismatch");
+    const block = routeSrc.slice(Math.max(0, idx - 500), idx);
+    assert.match(block, /event\.providerDeploymentId\s*&&/);
+    assert.match(block, /phoneNumber\.provider_deployment_id\s*&&/);
+    assert.match(block, /event\.providerDeploymentId\s*!==\s*phoneNumber\.provider_deployment_id/);
+  });
+
+  test("does not attempt to attribute a mismatched event to any organization other than the currently-active one — it only ever returns (drops), never a second lookup/insert", () => {
+    const startIdx = routeSrc.indexOf("telephony:webhook_stale_deployment_mismatch");
+    const blockEnd = routeSrc.indexOf("const gate = await checkTelephonyAccess", startIdx);
+    const block = routeSrc.slice(startIdx, blockEnd);
+    assert.doesNotMatch(block, /\.insert\(/);
+    assert.doesNotMatch(block, /\.from\("phone_numbers"\)/);
+    assert.match(block, /return;/);
+  });
+});
+
 describe("telephony webhook route — billing/entitlement reuse (requirement E: do not rewrite)", () => {
   test("still imports and calls the exact existing telephony-guard.server functions, not a parallel implementation", () => {
     assert.match(
