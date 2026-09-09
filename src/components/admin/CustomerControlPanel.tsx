@@ -1,17 +1,52 @@
 import { useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
 import { toast } from "sonner";
-import { Lock, Unlock, ShieldOff, ShieldCheck, Handshake } from "lucide-react";
+import {
+  Lock,
+  Unlock,
+  ShieldOff,
+  ShieldCheck,
+  Handshake,
+  Check,
+  AlertTriangle,
+  X,
+} from "lucide-react";
 import {
   lockCustomerAccount,
   unlockCustomerAccount,
   setPaymentOverride,
   handoverClient,
 } from "@/lib/admin-clients.functions";
+import type { ProvisioningReadiness } from "@/lib/provisioning-health.server";
 import { SectionCard, StatusPill } from "@/components/app/primitives";
 import { Button } from "@/components/ui/button";
 import { ReasonDialog } from "@/components/admin/ReasonDialog";
 import type { LifecycleStatus } from "@/lib/lifecycle";
+
+const CHECK_ICON = {
+  pass: <Check className="size-3.5 text-emerald-600" />,
+  warning: <AlertTriangle className="size-3.5 text-amber-600" />,
+  fail: <X className="size-3.5 text-destructive" />,
+};
+
+/** The same readiness checks handoverClient enforces server-side — shown here so admins see why before they try. */
+function ReadinessChecklist({ readiness }: { readiness: ProvisioningReadiness }) {
+  return (
+    <div className="mt-3 space-y-1.5 rounded-md border p-3">
+      <div className="mb-1 text-xs font-medium text-muted-foreground">
+        Activation readiness — {readiness.overall}
+      </div>
+      {readiness.checks.map((check) => (
+        <div key={check.key} className="flex items-start gap-2 text-xs">
+          {CHECK_ICON[check.status]}
+          <div>
+            <span className="font-medium">{check.label}:</span> {check.detail}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 /**
  * Customer-level controls that are each a DIFFERENT concept from a per-feature
@@ -30,11 +65,13 @@ export function CustomerControlPanel({
   orgId,
   lifecycle,
   paymentOverride,
+  readiness,
   onChanged,
 }: {
   orgId: string;
   lifecycle: LifecycleStatus;
   paymentOverride: boolean;
+  readiness: ProvisioningReadiness | null;
   onChanged: () => Promise<void> | void;
 }) {
   const lock = useServerFn(lockCustomerAccount);
@@ -133,6 +170,8 @@ export function CustomerControlPanel({
           </Button>
         )}
       </div>
+
+      {lifecycle === "ready" && readiness ? <ReadinessChecklist readiness={readiness} /> : null}
 
       <ReasonDialog
         open={action !== null}

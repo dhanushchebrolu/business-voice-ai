@@ -33,6 +33,8 @@ const empty = {
   gstNumber: "",
   panNumber: "",
   industry: "",
+  timezone: "Asia/Kolkata",
+  currency: "INR",
   plan: "starter",
   setupFee: "",
   monthlyFee: "",
@@ -78,6 +80,8 @@ export function CreateClientDialog() {
           gstNumber: form.gstNumber,
           panNumber: form.panNumber,
           industry: form.industry,
+          timezone: form.timezone,
+          currency: form.currency,
           plan: form.plan,
           setupFee: rupeesToPaise(form.setupFee),
           monthlyFee: rupeesToPaise(form.monthlyFee),
@@ -117,8 +121,8 @@ export function CreateClientDialog() {
         <DialogHeader>
           <DialogTitle>Create client</DialogTitle>
           <DialogDescription>
-            A permanent Client ID (VAA-000000) is generated automatically. The workspace stays unprovisioned until you
-            explicitly move it through the lifecycle.
+            A permanent Client ID (VAA-000000) is generated automatically. The workspace stays
+            unprovisioned until you explicitly move it through the lifecycle.
           </DialogDescription>
         </DialogHeader>
 
@@ -147,10 +151,15 @@ export function CreateClientDialog() {
           {field("country", "Country")}
           <div className="sm:col-span-2">{field("address", "Address")}</div>
           {field("website", "Website")}
+          {field("timezone", "Timezone")}
+          {field("currency", "Currency")}
           {field("plan", "Plan")}
           {field("gstNumber", "GSTIN")}
           {field("panNumber", "PAN")}
-          {field("setupFee", "Setup fee (₹)", { inputMode: "decimal", placeholder: "leave blank for platform default" })}
+          {field("setupFee", "Setup fee (₹)", {
+            inputMode: "decimal",
+            placeholder: "leave blank for platform default",
+          })}
           {field("monthlyFee", "Monthly fee (₹)", { inputMode: "decimal" })}
           {field("numberFee", "Number fee (₹/month)", { inputMode: "decimal" })}
           {field("walletOpeningBalance", "Wallet opening balance (₹)", { inputMode: "decimal" })}
@@ -159,7 +168,9 @@ export function CreateClientDialog() {
             <Textarea rows={2} value={form.notes} onChange={set("notes")} />
           </div>
           <div className="space-y-1.5 sm:col-span-2">
-            <Label className="text-xs text-muted-foreground">Internal admin notes (never shown to the customer)</Label>
+            <Label className="text-xs text-muted-foreground">
+              Internal admin notes (never shown to the customer)
+            </Label>
             <Textarea rows={2} value={form.internalNotes} onChange={set("internalNotes")} />
           </div>
         </div>

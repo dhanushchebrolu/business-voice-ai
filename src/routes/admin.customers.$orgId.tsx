@@ -5,6 +5,7 @@ import { useState } from "react";
 import { ArrowLeft, Lock, Unlock, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import { getCustomerDetail, setFeatureLock, adjustWallet } from "@/lib/admin.functions";
+import { getProvisioningReadiness } from "@/lib/admin-clients.functions";
 import {
   PageHeader,
   SectionCard,
@@ -36,6 +37,7 @@ export const Route = createFileRoute("/admin/customers/$orgId")({
 function CustomerDetail() {
   const { orgId } = Route.useParams();
   const fetchDetail = useServerFn(getCustomerDetail);
+  const fetchReadiness = useServerFn(getProvisioningReadiness);
   const saveLock = useServerFn(setFeatureLock);
   const saveWallet = useServerFn(adjustWallet);
   const queryClient = useQueryClient();
@@ -53,6 +55,11 @@ function CustomerDetail() {
     queryFn: () => fetchDetail({ data: { orgId } }),
   });
 
+  const { data: readiness } = useQuery({
+    queryKey: ["admin-customer-readiness", orgId],
+    queryFn: () => fetchReadiness({ data: { orgId } }),
+  });
+
   if (isLoading) return <LoadingState label="Loading customer" />;
   if (error || !data)
     return (
@@ -68,6 +75,7 @@ function CustomerDetail() {
 
   const invalidate = async () => {
     await queryClient.invalidateQueries({ queryKey: ["admin-customer", orgId] });
+    await queryClient.invalidateQueries({ queryKey: ["admin-customer-readiness", orgId] });
     await queryClient.invalidateQueries({ queryKey: ["admin-customers"] });
   };
 
@@ -111,6 +119,7 @@ function CustomerDetail() {
             "not_provisioned") as LifecycleStatus
         }
         paymentOverride={Boolean((org as { payment_override?: boolean }).payment_override)}
+        readiness={readiness ?? null}
         onChanged={invalidate}
       />
 
