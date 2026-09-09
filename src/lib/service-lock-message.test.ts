@@ -142,8 +142,18 @@ describe("route wiring — voice/phone locks are actually surfaced", () => {
     assert.match(src, /featureLocksQuery/);
     assert.match(src, /locks\?\.\["voice"\]/);
     assert.match(src, /<ServiceLocked feature="voice"/);
-    // Publish and Restore must be disabled when locked...
-    assert.match(src, /onClick=\{doPublish\}\s+disabled=\{publishing \|\| voiceLocked\}/);
+    // Publish (now a two-step confirm-then-publish flow — Phase 3) and
+    // Restore must be disabled when locked. The trigger button that opens
+    // the publish confirmation dialog carries the same disabled condition
+    // as before; doPublish itself is only reachable from inside that dialog.
+    assert.match(
+      src,
+      /onClick=\{\(\) => \{\s*\n\s*setPublishError\(null\);\s*\n\s*setPublishConfirmOpen\(true\);\s*\n\s*\}\}\s*\n\s*disabled=\{publishing \|\| voiceLocked\}/,
+    );
+    assert.match(
+      src,
+      /onClick=\{\(e\) => \{\s*\n\s*e\.preventDefault\(\);\s*\n\s*void doPublish\(\);/,
+    );
     assert.match(
       src,
       /disabled=\{voiceLocked\}[\s\S]{0,120}onClick=\{async \(\) => \{\s*\n\s*await rollback/,

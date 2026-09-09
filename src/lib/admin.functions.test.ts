@@ -33,7 +33,11 @@ describe("getCustomerDetail — platform-admin gate runs before any DB read", ()
     const adminIdx = fnSrc.indexOf(adminCallText);
     assert.ok(adminIdx > -1);
     const beforeGate = fnSrc.slice(0, adminIdx);
-    assert.equal(beforeGate.includes(".from("), false, "must not touch the database before the admin gate");
+    assert.equal(
+      beforeGate.includes(".from("),
+      false,
+      "must not touch the database before the admin gate",
+    );
   });
 });
 
@@ -112,7 +116,7 @@ describe("getCustomerDetail — Phase 2 additions are real, not fabricated", () 
     const idx = fnSrc.indexOf('.from("agent_versions")');
     assert.ok(idx > -1);
     const block = fnSrc.slice(idx, idx + 200);
-    assert.match(block, /select\("version, created_at"\)/);
+    assert.match(block, /select\("version, created_at, change_note"\)/);
     assert.match(block, /eq\("status", "active"\)/);
   });
 
@@ -128,15 +132,13 @@ describe("getCustomerDetail — Phase 2 additions are real, not fabricated", () 
 describe("Customer 360 route reuses getProfitAnalytics for finance instead of re-deriving revenue/margin", () => {
   test("admin.customers.$orgId.tsx imports and calls getProfitAnalytics, not a new finance computation", () => {
     const routeSrc = readFileSync(
-      join(
-        dirname(fileURLToPath(import.meta.url)),
-        "..",
-        "routes",
-        "admin.customers.$orgId.tsx",
-      ),
+      join(dirname(fileURLToPath(import.meta.url)), "..", "routes", "admin.customers.$orgId.tsx"),
       "utf8",
     );
-    assert.match(routeSrc, /import \{ getProfitAnalytics \} from "@\/lib\/admin-finance\.functions"/);
+    assert.match(
+      routeSrc,
+      /import \{ getProfitAnalytics \} from "@\/lib\/admin-finance\.functions"/,
+    );
     assert.match(routeSrc, /profit\?\.rows\.find\(\(r\) => r\.orgId === org\.id\)/);
   });
 });

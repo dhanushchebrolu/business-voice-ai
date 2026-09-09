@@ -266,13 +266,18 @@ function CustomerDetail() {
                 <dt className="text-xs text-muted-foreground">Active version</dt>
                 <dd>{data.agent.active_version || "Not published"}</dd>
               </div>
-              <div>
+              <div className="col-span-2">
                 <dt className="text-xs text-muted-foreground">Last publish</dt>
                 <dd>
                   {data.lastPublish
                     ? `v${data.lastPublish.version} · ${new Date(data.lastPublish.created_at).toLocaleString()}`
                     : "Never published"}
                 </dd>
+                {data.lastPublish?.change_note ? (
+                  <dd className="mt-0.5 text-xs text-muted-foreground">
+                    {data.lastPublish.change_note}
+                  </dd>
+                ) : null}
               </div>
               <div>
                 <dt className="text-xs text-muted-foreground">Sarvam app ID</dt>

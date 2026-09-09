@@ -385,7 +385,7 @@ export const getCustomerDetail = createServerFn({ method: "GET" })
       supabaseAdmin.from("agent_configs").select("*").eq("organization_id", orgId).maybeSingle(),
       supabaseAdmin
         .from("agent_versions")
-        .select("version, created_at")
+        .select("version, created_at, change_note")
         .eq("organization_id", orgId)
         .eq("status", "active")
         .maybeSingle(),

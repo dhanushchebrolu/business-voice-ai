@@ -6,7 +6,7 @@ import { toast } from "sonner";
 import { Loader2, Rocket, Send } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
-import { workspaceQuery, versionsQuery } from "@/lib/workspace";
+import { workspaceQuery, versionsQuery, numbersQuery } from "@/lib/workspace";
 import { LANGUAGES, VOICES, PACE_MIN, PACE_MAX } from "@/lib/voices";
 import { PERSONAS, CAPABILITIES } from "@/lib/business-types";
 import {
@@ -33,6 +33,16 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 export const Route = createFileRoute("/app/agent")({
   head: () => ({
@@ -57,6 +67,8 @@ function AgentPage() {
   const agent = ws?.agent ?? null;
   const { data: versions } = useQuery(versionsQuery(business?.id));
   const { data: locks } = useQuery(featureLocksQuery(ws?.organization?.id));
+  const { data: numbers } = useQuery(numbersQuery(ws?.organization?.id));
+  const agentNumber = numbers?.find((n) => n.agent_config_id === agent?.id) ?? null;
   // Mirrors the same lock feature_locked("voice") checks server-side before
   // publish/rollback (see agent.functions.ts's assertFeatureUnlocked) — this
   // only decides what the button/banner show, never whether the request is
@@ -97,6 +109,8 @@ function AgentPage() {
   });
   const [saving, setSaving] = useState(false);
   const [publishing, setPublishing] = useState(false);
+  const [publishConfirmOpen, setPublishConfirmOpen] = useState(false);
+  const [publishError, setPublishError] = useState<string | null>(null);
   const [chat, setChat] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
   const [message, setMessage] = useState("");
   const [thinking, setThinking] = useState(false);
@@ -157,18 +171,30 @@ function AgentPage() {
   async function doPublish() {
     if (!business) return;
     setPublishing(true);
+    setPublishError(null);
     try {
       const result = await publish({
         data: { businessId: business.id, changeNote: "Configuration updated" },
       });
       if (!result.ok) {
-        toast.error(result.issues[0]?.message ?? "Fix the configuration issues before publishing.");
+        // Sarvam sync failures surface here too (agent.functions.ts returns
+        // them as an issue rather than throwing) — the previous published
+        // version is guaranteed untouched either way.
+        const message =
+          result.issues[0]?.message ?? "Fix the configuration issues before publishing.";
+        setPublishError(message);
+        toast.error(message);
         return;
       }
-      toast.success(`Version ${result.version} published.`);
+      setPublishConfirmOpen(false);
+      toast.success(
+        `Version ${result.version} published. Your previous version stays available to roll back to.`,
+      );
       await qc.invalidateQueries();
     } catch {
-      toast.error("Publishing failed. Please retry.");
+      const message = "Publishing failed. Your previous published version remains active.";
+      setPublishError(message);
+      toast.error(message);
     } finally {
       setPublishing(false);
     }
@@ -192,6 +218,14 @@ function AgentPage() {
   }
 
   const issues = previewData?.issues ?? [];
+  const publishStatus: { label: string; tone: "live" | "ready" | "idle" | "error" } = publishing
+    ? { label: "Publishing…", tone: "ready" }
+    : publishError
+      ? { label: "Publish failed", tone: "error" }
+      : agent?.active_version
+        ? { label: "Published", tone: "live" }
+        : { label: "Draft", tone: "idle" };
+  const nextVersion = (versions?.[0]?.version ?? 0) + 1;
 
   return (
     <div className="space-y-6">
@@ -203,15 +237,19 @@ function AgentPage() {
             <StatusPill tone={providerStatus?.ai === "connected" ? "live" : "idle"}>
               {providerStatus?.ai === "connected" ? "AI connected" : "AI not connected"}
             </StatusPill>
+            <StatusPill tone={publishStatus.tone}>{publishStatus.label}</StatusPill>
             <Button size="sm" variant="secondary" onClick={save} disabled={saving}>
               {saving ? <Loader2 className="mr-2 size-3.5 animate-spin" /> : null}Save draft
             </Button>
-            <Button size="sm" onClick={doPublish} disabled={publishing || voiceLocked}>
-              {publishing ? (
-                <Loader2 className="mr-2 size-3.5 animate-spin" />
-              ) : (
-                <Rocket className="mr-1.5 size-3.5" />
-              )}
+            <Button
+              size="sm"
+              onClick={() => {
+                setPublishError(null);
+                setPublishConfirmOpen(true);
+              }}
+              disabled={publishing || voiceLocked}
+            >
+              <Rocket className="mr-1.5 size-3.5" />
               Publish
             </Button>
           </>
@@ -510,6 +548,61 @@ function AgentPage() {
           </SectionCard>
         </TabsContent>
       </Tabs>
+
+      <AlertDialog
+        open={publishConfirmOpen}
+        onOpenChange={(open) => !publishing && setPublishConfirmOpen(open)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Publish this configuration?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This creates version {nextVersion} and makes it the one real calls use immediately.
+              Your current published version stays available to roll back to if anything goes wrong.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-2 rounded-md border border-border bg-surface/40 p-3 text-sm">
+            <dt className="text-xs text-muted-foreground">Agent</dt>
+            <dd className="text-right">{form.agent_name || "—"}</dd>
+            <dt className="text-xs text-muted-foreground">Version</dt>
+            <dd className="text-right">v{nextVersion}</dd>
+            <dt className="text-xs text-muted-foreground">Language</dt>
+            <dd className="text-right">
+              {LANGUAGES.find((l) => l.code === form.primary_language)?.label ??
+                form.primary_language}
+              {form.multilingual ? " (auto-detect)" : ""}
+            </dd>
+            <dt className="text-xs text-muted-foreground">Voice</dt>
+            <dd className="text-right">
+              {VOICES.find((v) => v.id === form.voice_id)?.name ?? form.voice_id}
+            </dd>
+            <dt className="text-xs text-muted-foreground">Phone</dt>
+            <dd className="text-right">
+              {agentNumber?.display_number ?? agentNumber?.e164 ?? "Not assigned yet"}
+            </dd>
+            <dt className="text-xs text-muted-foreground">Deployment</dt>
+            <dd className="text-right">
+              {agentNumber?.provider === "sarvam" && agentNumber.provider_deployment_id
+                ? "Active — will be kept in sync"
+                : "None"}
+            </dd>
+          </dl>
+          {publishError ? <p className="text-sm text-destructive">{publishError}</p> : null}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={publishing}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={publishing}
+              onClick={(e) => {
+                e.preventDefault();
+                void doPublish();
+              }}
+            >
+              {publishing ? <Loader2 className="mr-2 size-3.5 animate-spin" /> : null}
+              {publishing ? "Publishing…" : "Publish"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
