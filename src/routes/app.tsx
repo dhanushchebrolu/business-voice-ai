@@ -52,10 +52,10 @@ function AppLayout() {
   // A signed-in user with no workspace at all has an account but no admin
   // has created a customer for them yet — a real, expected state now that
   // signup no longer auto-provisions a workspace. /app is customer-only
-  // functionality, so they're sent to the normal authenticated site instead
-  // of being stranded here; NoWorkspace.tsx renders their status there.
+  // functionality, so they're sent back to the public website instead of
+  // being stranded here — authentication is not workspace provisioning.
   useEffect(() => {
-    if (!loading && session && !isLoading && !org) navigate({ to: "/account" });
+    if (!loading && session && !isLoading && !org) navigate({ to: "/" });
   }, [loading, session, isLoading, org, navigate]);
 
   useEffect(() => {
