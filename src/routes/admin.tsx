@@ -61,16 +61,21 @@ function AdminLayout() {
           <span className="mx-auto grid size-10 place-items-center rounded-lg border border-border bg-muted">
             <ShieldAlert className="size-4 text-muted-foreground" />
           </span>
-          <h1 className="mt-4 text-lg font-semibold">Platform administration</h1>
+          <h1 className="mt-4 text-lg font-semibold">
+            {data?.bootstrapAvailable
+              ? "Initialize platform administrator"
+              : "Platform administration"}
+          </h1>
           <p className="mt-2 text-sm text-muted-foreground">
-            This area is restricted to Vaani platform administrators. Your customer account role
-            does not grant access here.
+            {data?.bootstrapAvailable
+              ? "No platform administrator exists yet. Enter the bootstrap secret to claim super admin for this account."
+              : "This area is restricted to Vaani platform administrators. Your customer account role does not grant access here."}
           </p>
           {data?.bootstrapAvailable ? (
             <div className="mt-5 space-y-2 text-left">
               <p className="text-xs text-muted-foreground">
-                First-time setup. Enter the bootstrap secret an operator configured for this
-                environment.
+                This one-time setup is only available while no platform administrator has been
+                configured. Enter the bootstrap secret an operator set for this environment.
               </p>
               <Input
                 type="password"

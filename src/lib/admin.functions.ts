@@ -93,6 +93,12 @@ interface ClaimPlatformAdminInput {
  * If no secret is configured, bootstrap is unreachable — an admin must be
  * provisioned through a controlled migration/script instead. After a first
  * admin is claimed, this always fails, regardless of the secret.
+ *
+ * The identity/secret checks happen here; the "is the table still empty"
+ * check and the insert itself happen together, atomically, inside
+ * bootstrap_first_platform_admin (see its migration) — a single
+ * advisory-lock-serialized transaction, so two different users racing this
+ * endpoint with the correct secret can never both become the first admin.
  */
 export const claimPlatformAdmin = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
@@ -106,20 +112,13 @@ export const claimPlatformAdmin = createServerFn({ method: "POST" })
     if (!secretsMatch(data.bootstrapSecret, expected)) throw new Error("Unauthorized");
 
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { count } = await supabaseAdmin
-      .from("platform_admins")
-      .select("user_id", { count: "exact", head: true })
-      .eq("is_active", true);
-    if ((count ?? 0) > 0) throw new Error("Platform administration is already configured");
-
     const email = (context.claims["email"] as string | undefined) ?? null;
-    const { error } = await supabaseAdmin
-      .from("platform_admins")
-      .upsert(
-        { user_id: context.userId, email, role: "super_admin", is_active: true },
-        { onConflict: "user_id" },
-      );
+    const { data: claimed, error } = await supabaseAdmin.rpc("bootstrap_first_platform_admin", {
+      p_user_id: context.userId,
+      p_email: email,
+    });
     if (error) throw error;
+    if (!claimed) throw new Error("Platform administration is already configured");
 
     await writeAudit(
       {
