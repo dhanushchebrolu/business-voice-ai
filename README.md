@@ -3796,7 +3796,7 @@ The biggest architectural mistake would be building a beautiful dashboard first 
 
 [6]: https://docs.sarvam.ai/api/getting-started/models/bulbul?utm_source=chatgpt.com "Bulbul | Sarvam API Docs"
 
-This is api key sk_ojd2cojj_dsn0akg1s7SukXh0p0cJSEG4 and make sure u store it in backend
+Store all provider API credentials exclusively in secure server-side environment variables or deployment secrets. Never commit credentials to source control.
 
 make sure u build like with premuim uiux, it must not look like ai generated
 

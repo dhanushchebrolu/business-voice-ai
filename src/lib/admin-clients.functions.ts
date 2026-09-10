@@ -63,6 +63,8 @@ export interface CreateClientInput {
   gstNumber?: string | undefined;
   panNumber?: string | undefined;
   industry?: string | undefined;
+  timezone?: string | undefined;
+  currency?: string | undefined;
   plan?: string | undefined;
   setupFee?: number | undefined; // paise
   monthlyFee?: number | undefined; // paise
@@ -120,6 +122,8 @@ export const createClientAccount = createServerFn({ method: "POST" })
         gst_number: data.gstNumber?.trim() || null,
         pan_number: data.panNumber?.trim() || null,
         internal_notes: data.internalNotes?.trim() || null,
+        timezone: data.timezone?.trim() || "Asia/Kolkata",
+        currency: data.currency?.trim() || "INR",
       })
       .select("id, client_id, name")
       .single();
@@ -359,10 +363,14 @@ export const archiveClient = createServerFn({ method: "POST" })
  * still be used for corrections, but the UI should route normal handover
  * through here so the requirements below are always checked).
  *
- * Requirements (Phase B brief §26): the workspace must be lifecycle=ready,
- * and setup must be satisfied — either verified server-side payment
- * (`setup_paid_at`) or an explicit admin override/exception. A missing
- * requirement rejects with the real reason and leaves lifecycle unchanged.
+ * Requirements: the workspace must be lifecycle=ready, and
+ * checkProvisioningReadiness(orgId) (provisioning-health.server.ts) must not
+ * report any "fail" check — membership, lock state, setup payment (verified
+ * or admin-overridden), service entitlement, an active phone number, and a
+ * published agent. This is the same check the admin UI shows proactively
+ * before handover is attempted, so nothing here is a surprise. A missing
+ * requirement rejects with the real reason(s) and leaves lifecycle unchanged
+ * — never a blind set to "active".
  */
 export const handoverClient = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
@@ -374,6 +382,7 @@ export const handoverClient = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     const admin = await assertPlatformAdmin(context.supabase, context.userId, "customers.write");
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { checkProvisioningReadiness } = await import("@/lib/provisioning-health.server");
 
     const { data: org } = await supabaseAdmin
       .from("organizations")
@@ -388,11 +397,10 @@ export const handoverClient = createServerFn({ method: "POST" })
         `Lifecycle is "${org.lifecycle_status}", not "ready". Complete provisioning first.`,
       );
     }
-    const setupSatisfied = Boolean(org.setup_paid_at) || org.payment_override === true;
-    if (!setupSatisfied) {
-      reasons.push(
-        "Setup payment has not been verified and no admin payment override is set for this customer.",
-      );
+
+    const readiness = await checkProvisioningReadiness(data.orgId);
+    for (const check of readiness.checks) {
+      if (check.status === "fail") reasons.push(check.detail);
     }
 
     if (reasons.length) {
@@ -434,6 +442,23 @@ export const handoverClient = createServerFn({ method: "POST" })
       reason: data.reason,
     });
     return { ok: true as const };
+  });
+
+/**
+ * Read-only view of the same checks handoverClient enforces, so the admin
+ * UI can show what's blocking activation before anyone attempts the
+ * handover — never claims a check passed without actually running it.
+ */
+export const getProvisioningReadiness = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { orgId: string }) => {
+    if (!input?.orgId) throw new Error("orgId is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    await assertPlatformAdmin(context.supabase, context.userId, "customers.read");
+    const { checkProvisioningReadiness } = await import("@/lib/provisioning-health.server");
+    return checkProvisioningReadiness(data.orgId);
   });
 
 /* ------------------------------------------------------------------ */

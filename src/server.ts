@@ -3,6 +3,20 @@ import "./lib/error-capture";
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
 import { handleExotelMediaUpgrade } from "./lib/telephony/exotel-media-route.server";
+import {
+  CALL_SESSION_COORDINATOR_NAME,
+  type CloudflareEnv,
+} from "./lib/telephony/cloudflare-env.server";
+
+// The CallSessionDurableObject class itself is exported to the Cloudflare
+// Worker entrypoint from ../exports.cloudflare.ts (Nitro's documented
+// mechanism for this — see that file's comment for why it can't be
+// re-exported from here: this file is bundled as a lazily-loaded SSR
+// chunk, not Nitro's actual `main` entry module, so a normal `export`
+// here never reaches the entry Wrangler resolves Durable Object class
+// names against).
+
+const MEDIA_STREAM_PATH = "/api/public/media-stream/exotel";
 
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
@@ -57,8 +71,32 @@ export default {
       // request handling — see exotel-media-route.server.ts and
       // PHASE_D1_EXOTEL_FINAL_REPORT.md §16 for why this is the correct
       // and, on this deployment target, sufficient place to do it.
-      const mediaUpgrade = await handleExotelMediaUpgrade(request);
-      if (mediaUpgrade) return mediaUpgrade;
+      //
+      // Production audit finding E1: accepting and holding this WebSocket
+      // directly in this ambient fetch handler is not durable on Cloudflare
+      // Workers (no guarantee this isolate keeps running, or that a later,
+      // separate webhook request lands here to terminate it correctly) —
+      // see call-session-durable-object.server.ts. When the CALL_SESSION
+      // Durable Object binding is configured, forward the upgrade request
+      // to it unconditionally so it — not this ambient handler — accepts
+      // and durably owns the WebSocket for the life of the call. Fall back
+      // to the original in-process handling only when the binding isn't
+      // configured (local `vite dev`, where there is no cross-isolate risk
+      // in the first place, since it's a single process).
+      const url = new URL(request.url);
+      if (
+        url.pathname === MEDIA_STREAM_PATH &&
+        (request.headers.get("upgrade") ?? "").toLowerCase() === "websocket"
+      ) {
+        const cfEnv = env as CloudflareEnv | null | undefined;
+        const namespace = cfEnv?.CALL_SESSION;
+        if (namespace) {
+          const stub = namespace.get(namespace.idFromName(CALL_SESSION_COORDINATOR_NAME));
+          return await stub.fetch(request);
+        }
+        const mediaUpgrade = await handleExotelMediaUpgrade(request);
+        if (mediaUpgrade) return mediaUpgrade;
+      }
 
       const handler = await getServerEntry();
       const response = await handler.fetch(request, env, ctx);

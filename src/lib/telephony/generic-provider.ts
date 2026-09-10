@@ -8,7 +8,7 @@ import {
   type ProvisionNumberInput,
   type ProvisionedNumber,
   type TelephonyProviderAdapter,
-} from "./adapter";
+} from "./adapter.ts";
 
 /**
  * Generic REST + HMAC-signed-webhook adapter, parameterized per provider by

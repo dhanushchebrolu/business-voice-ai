@@ -5,6 +5,8 @@ import { useState } from "react";
 import { ArrowLeft, Lock, Unlock, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import { getCustomerDetail, setFeatureLock, adjustWallet } from "@/lib/admin.functions";
+import { getProvisioningReadiness } from "@/lib/admin-clients.functions";
+import { getProfitAnalytics } from "@/lib/admin-finance.functions";
 import {
   PageHeader,
   SectionCard,
@@ -16,7 +18,12 @@ import {
 } from "@/components/app/primitives";
 import { PLATFORM_FEATURES } from "@/lib/features";
 import { formatMoney } from "@/lib/pricing";
-import { ACCOUNT_STATUS_LABEL, type AccountStatus } from "@/lib/workspace";
+import { ACCOUNT_STATUS_LABEL, agentStatusLabel, type AccountStatus } from "@/lib/workspace";
+import {
+  KNOWLEDGE_CATEGORIES,
+  knowledgeCategoryLabel,
+  isKnowledgeEnabled,
+} from "@/lib/knowledge-categories";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -28,6 +35,17 @@ import { EntitlementsPanel } from "@/components/admin/EntitlementsPanel";
 import { CrmPanel } from "@/components/admin/CrmPanel";
 import { PricingOverridePanel } from "@/components/admin/PricingOverridePanel";
 import type { LifecycleStatus } from "@/lib/lifecycle";
+import type { ProvisioningCheckStatus } from "@/lib/provisioning-health.server";
+
+/** Maps a Phase 1 readiness check's pass/warning/fail onto the HEALTHY/WARNING/BLOCKED vocabulary this page shows admins — same three states, no new health model. */
+const HEALTH_LABEL: Record<
+  ProvisioningCheckStatus,
+  { label: string; tone: "live" | "ready" | "error" }
+> = {
+  pass: { label: "Healthy", tone: "live" },
+  warning: { label: "Warning", tone: "ready" },
+  fail: { label: "Blocked", tone: "error" },
+};
 
 export const Route = createFileRoute("/admin/customers/$orgId")({
   component: CustomerDetail,
@@ -36,6 +54,8 @@ export const Route = createFileRoute("/admin/customers/$orgId")({
 function CustomerDetail() {
   const { orgId } = Route.useParams();
   const fetchDetail = useServerFn(getCustomerDetail);
+  const fetchReadiness = useServerFn(getProvisioningReadiness);
+  const fetchProfit = useServerFn(getProfitAnalytics);
   const saveLock = useServerFn(setFeatureLock);
   const saveWallet = useServerFn(adjustWallet);
   const queryClient = useQueryClient();
@@ -53,6 +73,19 @@ function CustomerDetail() {
     queryFn: () => fetchDetail({ data: { orgId } }),
   });
 
+  const { data: readiness } = useQuery({
+    queryKey: ["admin-customer-readiness", orgId],
+    queryFn: () => fetchReadiness({ data: { orgId } }),
+  });
+
+  // getProfitAnalytics is the existing, platform-wide margin computation
+  // (admin-finance.functions.ts) — reused as-is and filtered to this one
+  // org rather than re-deriving revenue/provider-cost/margin here.
+  const { data: profit } = useQuery({
+    queryKey: ["admin-profit-analytics"],
+    queryFn: () => fetchProfit(),
+  });
+
   if (isLoading) return <LoadingState label="Loading customer" />;
   if (error || !data)
     return (
@@ -65,10 +98,18 @@ function CustomerDetail() {
   const org = data.organization;
   const meta = ACCOUNT_STATUS_LABEL[org.account_status as AccountStatus];
   const lockMap = new Map(data.locks.map((l) => [l.feature, l.locked]));
+  const financeRow = profit?.rows.find((r) => r.orgId === org.id) ?? null;
+  const walletCredits = data.wallet.filter((t) => t.amount > 0).reduce((s, t) => s + t.amount, 0);
+  const walletDebits = data.wallet.filter((t) => t.amount < 0).reduce((s, t) => s + t.amount, 0);
+  const walletCheck = readiness?.checks.find((c) => c.key === "wallet") ?? null;
+  const lastActivity = data.calls[0]?.started_at ?? data.audit[0]?.created_at ?? null;
+  const hasActivePhoneNumber = data.numbers.some((n) => n.status === "active");
 
   const invalidate = async () => {
     await queryClient.invalidateQueries({ queryKey: ["admin-customer", orgId] });
+    await queryClient.invalidateQueries({ queryKey: ["admin-customer-readiness", orgId] });
     await queryClient.invalidateQueries({ queryKey: ["admin-customers"] });
+    await queryClient.invalidateQueries({ queryKey: ["admin-profit-analytics"] });
   };
 
   return (
@@ -88,6 +129,94 @@ function CustomerDetail() {
           <StatusPill tone={meta?.tone ?? "idle"}>{meta?.label ?? org.account_status}</StatusPill>
         }
       />
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <SectionCard title="Customer" description="Contact and account identity.">
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+            <div>
+              <dt className="text-xs text-muted-foreground">Customer ID</dt>
+              <dd className="font-mono text-xs">{org.client_id ?? org.id}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted-foreground">Contact person</dt>
+              <dd>{org.contact_name ?? "—"}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted-foreground">Contact email</dt>
+              <dd className="truncate">{org.contact_email ?? "—"}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted-foreground">Contact phone</dt>
+              <dd>{org.contact_phone ?? "—"}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted-foreground">Industry</dt>
+              <dd>{org.industry ?? "—"}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted-foreground">Website</dt>
+              <dd className="truncate">{org.website ?? "—"}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted-foreground">Timezone</dt>
+              <dd>{org.timezone}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted-foreground">Currency</dt>
+              <dd>{org.currency}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted-foreground">Created</dt>
+              <dd>{new Date(org.created_at).toLocaleDateString()}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted-foreground">Last activity</dt>
+              <dd>{lastActivity ? new Date(lastActivity).toLocaleString() : "No activity yet"}</dd>
+            </div>
+          </dl>
+        </SectionCard>
+
+        <SectionCard
+          title="Health"
+          description="Every row below reflects a real check that just ran — never a fabricated status."
+          actions={
+            readiness ? (
+              <StatusPill
+                tone={
+                  readiness.overall === "healthy"
+                    ? "live"
+                    : readiness.overall === "warning"
+                      ? "ready"
+                      : "error"
+                }
+              >
+                {readiness.overall}
+              </StatusPill>
+            ) : null
+          }
+        >
+          {readiness ? (
+            <ul className="divide-y divide-border">
+              {readiness.checks.map((check) => (
+                <li
+                  key={check.key}
+                  className="flex items-center justify-between gap-3 py-2 text-sm"
+                >
+                  <div>
+                    <p className="font-medium">{check.label}</p>
+                    <p className="text-xs text-muted-foreground">{check.detail}</p>
+                  </div>
+                  <StatusPill tone={HEALTH_LABEL[check.status].tone}>
+                    {HEALTH_LABEL[check.status].label}
+                  </StatusPill>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <LoadingState label="Running health checks" />
+          )}
+        </SectionCard>
+      </div>
 
       <ClientLifecyclePanel
         orgId={org.id}
@@ -111,6 +240,7 @@ function CustomerDetail() {
             "not_provisioned") as LifecycleStatus
         }
         paymentOverride={Boolean((org as { payment_override?: boolean }).payment_override)}
+        readiness={readiness ?? null}
         onChanged={invalidate}
       />
 
@@ -119,6 +249,169 @@ function CustomerDetail() {
         entitlements={data.entitlements ?? []}
         onChanged={invalidate}
       />
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <SectionCard title="Agent" description="Voice agent configuration and publish state.">
+          {data.agent ? (
+            <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+              <div>
+                <dt className="text-xs text-muted-foreground">Agent name</dt>
+                <dd>{data.agent.agent_name ?? "—"}</dd>
+              </div>
+              <div>
+                <dt className="text-xs text-muted-foreground">Status</dt>
+                <dd>
+                  {(() => {
+                    const s = agentStatusLabel(data.agent, hasActivePhoneNumber);
+                    return <StatusPill tone={s.tone}>{s.label}</StatusPill>;
+                  })()}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-xs text-muted-foreground">Active version</dt>
+                <dd>{data.agent.active_version || "Not published"}</dd>
+              </div>
+              <div className="col-span-2">
+                <dt className="text-xs text-muted-foreground">Last publish</dt>
+                <dd>
+                  {data.lastPublish
+                    ? `v${data.lastPublish.version} · ${new Date(data.lastPublish.created_at).toLocaleString()}`
+                    : "Never published"}
+                </dd>
+                {data.lastPublish?.change_note ? (
+                  <dd className="mt-0.5 text-xs text-muted-foreground">
+                    {data.lastPublish.change_note}
+                  </dd>
+                ) : null}
+              </div>
+              <div>
+                <dt className="text-xs text-muted-foreground">Sarvam app ID</dt>
+                <dd className="font-mono text-xs">{data.agent.sarvam_app_id ?? "Not mapped"}</dd>
+              </div>
+              <div>
+                <dt className="text-xs text-muted-foreground">Sarvam app version</dt>
+                <dd>{data.agent.sarvam_app_version ?? "—"}</dd>
+              </div>
+            </dl>
+          ) : (
+            <EmptyState
+              title="No agent configured"
+              description="This customer has not set up an agent yet."
+            />
+          )}
+        </SectionCard>
+
+        <SectionCard
+          title="Phone"
+          description="Assigned numbers and provider mapping (admin-only fields shown)."
+        >
+          {data.numbers.length ? (
+            <ul className="divide-y divide-border">
+              {data.numbers.map((n) => (
+                <li key={n.id} className="space-y-1.5 py-2.5 text-sm">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="font-mono">{n.display_number ?? n.e164}</span>
+                    <StatusPill
+                      tone={
+                        n.status === "active" ? "live" : n.status === "suspended" ? "error" : "idle"
+                      }
+                    >
+                      {n.status}
+                    </StatusPill>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {n.provider}
+                    {n.provider_number_id ? ` · ${n.provider_number_id}` : ""}
+                    {n.provider_deployment_id ? ` · deployment ${n.provider_deployment_id}` : ""}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Inbound {n.inbound_enabled ? "on" : "off"} · Outbound{" "}
+                    {n.outbound_enabled ? "on" : "off"}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <EmptyState
+              title="No phone number"
+              description="No number has been assigned to this customer yet."
+            />
+          )}
+        </SectionCard>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-3">
+        <SectionCard title="Wallet">
+          <div className="space-y-2 text-sm">
+            <StatCard label="Balance" value={formatMoney(data.walletBalance)} tone="accent" />
+            <div className="grid grid-cols-2 gap-2">
+              <StatCard label="Credits" value={formatMoney(walletCredits)} />
+              <StatCard label="Debits" value={formatMoney(Math.abs(walletDebits))} />
+            </div>
+            {walletCheck && walletCheck.status !== "pass" ? (
+              <p className="text-xs text-warning">{walletCheck.detail}</p>
+            ) : null}
+          </div>
+        </SectionCard>
+
+        <SectionCard title="Usage">
+          <div className="grid grid-cols-2 gap-2 text-sm">
+            <StatCard label="Calls today" value={data.usage.callsToday} />
+            <StatCard label="Calls this month" value={data.usage.callsThisMonth} />
+            <StatCard label="Minutes today" value={data.usage.minutesToday} />
+            <StatCard label="Minutes this month" value={data.usage.minutesThisMonth} />
+          </div>
+        </SectionCard>
+
+        <SectionCard title="Finance" description="Provider cost and margin — admin-only.">
+          {financeRow ? (
+            <div className="grid grid-cols-2 gap-2 text-sm">
+              <StatCard label="Revenue" value={formatMoney(financeRow.revenue)} tone="accent" />
+              <StatCard label="Provider cost" value={formatMoney(financeRow.providerCost)} />
+              <StatCard label="Gross profit" value={formatMoney(financeRow.grossProfit)} />
+              <StatCard
+                label="Margin"
+                value={financeRow.marginPct === null ? "—" : `${financeRow.marginPct.toFixed(1)}%`}
+              />
+            </div>
+          ) : (
+            <LoadingState label="Loading finance" />
+          )}
+        </SectionCard>
+      </div>
+
+      <SectionCard title="Recent calls" description="The latest handled calls, admin view.">
+        {data.calls.length ? (
+          <ul className="divide-y divide-border">
+            {data.calls.slice(0, 5).map((c) => (
+              <li key={c.id} className="flex items-center justify-between gap-3 py-2.5 text-sm">
+                <div>
+                  <p className="capitalize">
+                    {c.direction} · {c.caller_number ?? "—"} → {c.destination_number ?? "—"}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {c.outcome ?? c.status}
+                    {c.failure_reason ? ` · ${c.failure_reason}` : ""}
+                  </p>
+                </div>
+                <div className="text-right">
+                  <p className="tabular text-xs text-muted-foreground">
+                    {new Date(c.started_at).toLocaleString()}
+                  </p>
+                  <p className="tabular text-xs">
+                    {Math.round((c.duration_seconds ?? 0) / 60)} min
+                  </p>
+                </div>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <EmptyState
+            title="No calls yet"
+            description="Calls appear once the receptionist starts handling traffic."
+          />
+        )}
+      </SectionCard>
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard label="Wallet balance" value={formatMoney(data.walletBalance)} tone="accent" />
@@ -197,6 +490,7 @@ function CustomerDetail() {
           <TabsTrigger value="invoices">Invoices</TabsTrigger>
           <TabsTrigger value="calls">Calls</TabsTrigger>
           <TabsTrigger value="team">Team</TabsTrigger>
+          <TabsTrigger value="knowledge">Knowledge</TabsTrigger>
           <TabsTrigger value="crm">CRM</TabsTrigger>
           <TabsTrigger value="pricing">Pricing</TabsTrigger>
           <TabsTrigger value="audit">Audit</TabsTrigger>
@@ -344,6 +638,55 @@ function CustomerDetail() {
                 </li>
               ))}
             </ul>
+          </SectionCard>
+        </TabsContent>
+
+        <TabsContent value="knowledge" className="mt-4">
+          <SectionCard
+            title="Knowledge base"
+            description="Read-only summary of what this customer has added via /app/knowledge. Reuses knowledge_documents — the same tenant-scoped table, never public_knowledge_base."
+          >
+            {data.knowledge.length ? (
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                  {KNOWLEDGE_CATEGORIES.map((c) => {
+                    const rows = data.knowledge.filter((k) => k.source_type === c.value);
+                    return (
+                      <StatCard
+                        key={c.value}
+                        label={c.label}
+                        value={rows.length}
+                        hint={`${rows.filter((k) => isKnowledgeEnabled(k.status)).length} enabled`}
+                      />
+                    );
+                  })}
+                </div>
+                <ul className="divide-y divide-border">
+                  {data.knowledge.slice(0, 20).map((k) => (
+                    <li
+                      key={k.id}
+                      className="flex items-center justify-between gap-3 py-2.5 text-sm"
+                    >
+                      <div>
+                        <p className="font-medium">{k.title}</p>
+                        <p className="text-xs text-muted-foreground">
+                          {knowledgeCategoryLabel(k.source_type)} · updated{" "}
+                          {new Date(k.updated_at).toLocaleDateString()}
+                        </p>
+                      </div>
+                      <StatusPill tone={isKnowledgeEnabled(k.status) ? "live" : "idle"}>
+                        {isKnowledgeEnabled(k.status) ? "Enabled" : "Disabled"}
+                      </StatusPill>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : (
+              <EmptyState
+                title="No knowledge base entries"
+                description="This customer has not added any staff, policy, appointment or custom knowledge yet."
+              />
+            )}
           </SectionCard>
         </TabsContent>
 

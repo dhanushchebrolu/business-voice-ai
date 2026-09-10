@@ -6,8 +6,22 @@ import { useAuth } from "@/hooks/useAuth";
 import { workspaceQuery, leadsQuery } from "@/lib/workspace";
 import { supabase } from "@/integrations/supabase/client";
 import { getBusinessType } from "@/lib/business-types";
-import { PageHeader, EmptyState, LoadingState, SectionCard, StatusPill } from "@/components/app/primitives";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  PageHeader,
+  EmptyState,
+  LoadingState,
+  SectionCard,
+  StatusPill,
+} from "@/components/app/primitives";
+import { ServiceLocked } from "@/components/app/ServiceLocked";
+import { featureLocksQuery } from "@/lib/access";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
 const STATUSES = ["new", "contacted", "qualified", "won", "lost"];
 
@@ -15,7 +29,10 @@ export const Route = createFileRoute("/app/leads")({
   head: () => ({
     meta: [
       { title: "Leads — Vaani" },
-      { name: "description", content: "Contacts your AI receptionist captured from inbound calls." },
+      {
+        name: "description",
+        content: "Contacts your AI receptionist captured from inbound calls.",
+      },
       { name: "robots", content: "noindex" },
     ],
   }),
@@ -27,6 +44,9 @@ function LeadsPage() {
   const qc = useQueryClient();
   const { data: ws } = useQuery(workspaceQuery(user?.id));
   const { data: leads, isLoading } = useQuery(leadsQuery(ws?.organization?.id));
+  const { data: locks } = useQuery(featureLocksQuery(ws?.organization?.id));
+  const phoneLocked = locks?.["phone"] === true;
+  const lifecycle = ws?.organization?.lifecycle_status ?? "not_provisioned";
   const type = getBusinessType(ws?.business?.business_type);
 
   async function updateStatus(id: string, status: string) {
@@ -44,6 +64,8 @@ function LeadsPage() {
         title={type.customerLabel}
         description="Contacts captured by the receptionist during calls. Update status as your team follows up."
       />
+
+      {phoneLocked ? <ServiceLocked feature="phone" lifecycle={lifecycle} compact /> : null}
 
       {isLoading ? (
         <LoadingState label="Loading contacts" />
@@ -65,10 +87,19 @@ function LeadsPage() {
                 {leads.map((lead) => (
                   <tr key={lead.id} className="border-b border-border/60">
                     <td className="px-5 py-2.5 font-medium">{lead.name ?? "Unnamed"}</td>
-                    <td className="px-3 py-2.5 text-muted-foreground">{lead.phone ?? lead.email ?? "—"}</td>
-                    <td className="max-w-[240px] truncate px-3 py-2.5 text-muted-foreground">{lead.asked_about ?? "—"}</td>
+                    <td className="px-3 py-2.5 text-muted-foreground">
+                      {lead.phone ?? lead.email ?? "—"}
+                    </td>
+                    <td className="max-w-[240px] truncate px-3 py-2.5 text-muted-foreground">
+                      {lead.asked_about ?? "—"}
+                    </td>
                     <td className="px-3 py-2.5">
-                      <StatusPill tone={lead.score === "hot" ? "accent" : lead.score === "warm" ? "ready" : "idle"} dot={false}>
+                      <StatusPill
+                        tone={
+                          lead.score === "hot" ? "accent" : lead.score === "warm" ? "ready" : "idle"
+                        }
+                        dot={false}
+                      >
                         {lead.score}
                       </StatusPill>
                     </td>

@@ -7,7 +7,6 @@ import { workspaceQuery } from "@/lib/workspace";
 import { featureLocksQuery } from "@/lib/access";
 import { Shell } from "@/components/app/Shell";
 import { AccountLocked } from "@/components/app/AccountLocked";
-import { NoWorkspace } from "@/components/app/NoWorkspace";
 
 export const Route = createFileRoute("/app")({
   head: () => ({
@@ -50,13 +49,29 @@ function AppLayout() {
     if (!loading && !session) navigate({ to: "/auth" });
   }, [loading, session, navigate]);
 
+  // A signed-in user with no workspace at all has an account but no admin
+  // has created a customer for them yet — a real, expected state now that
+  // signup no longer auto-provisions a workspace. /app is customer-only
+  // functionality, so they're sent to the normal authenticated site instead
+  // of being stranded here; NoWorkspace.tsx renders their status there.
   useEffect(() => {
-    if (!isLoading && ws && !showLockedScreen && !ws.business && pathname !== "/app/onboarding") {
+    if (!loading && session && !isLoading && !org) navigate({ to: "/account" });
+  }, [loading, session, isLoading, org, navigate]);
+
+  useEffect(() => {
+    if (
+      !isLoading &&
+      ws &&
+      org &&
+      !showLockedScreen &&
+      !ws.business &&
+      pathname !== "/app/onboarding"
+    ) {
       navigate({ to: "/app/onboarding" });
     }
-  }, [isLoading, ws, showLockedScreen, pathname, navigate]);
+  }, [isLoading, ws, org, showLockedScreen, pathname, navigate]);
 
-  if (loading || (session && isLoading)) {
+  if (loading || (session && isLoading) || (session && !isLoading && !org)) {
     return (
       <div className="flex min-h-screen items-center justify-center gap-2 text-sm text-muted-foreground">
         <Loader2 className="size-4 animate-spin" /> Loading your workspace…
@@ -65,15 +80,6 @@ function AppLayout() {
   }
 
   if (!session) return null;
-
-  // A signed-in user with no workspace at all: they have an account but no
-  // admin has created a customer for them yet. This is a real, expected
-  // state now that signup no longer auto-provisions a workspace (Phase B
-  // §1) — distinct from a provisioned-but-unpaid workspace, which shows
-  // AccountLocked instead.
-  if (!org) {
-    return <NoWorkspace />;
-  }
 
   // The dashboard itself is still "access" even in this state — it shows the
   // setup/payment or suspended view rather than a blank or missing page.

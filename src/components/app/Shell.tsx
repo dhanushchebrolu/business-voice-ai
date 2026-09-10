@@ -10,6 +10,7 @@ import {
   Wallet,
   Settings,
   Building2,
+  BookOpen,
   Menu,
   X,
   LogOut,
@@ -29,7 +30,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 
-const NAV: { group: string; items: { to: string; label: string; icon: React.ComponentType<{ className?: string }> }[] }[] = [
+const NAV: {
+  group: string;
+  items: { to: string; label: string; icon: React.ComponentType<{ className?: string }> }[];
+}[] = [
   {
     group: "Workspace",
     items: [
@@ -42,6 +46,7 @@ const NAV: { group: string; items: { to: string; label: string; icon: React.Comp
     group: "Configure",
     items: [
       { to: "/app/business", label: "Business", icon: Building2 },
+      { to: "/app/knowledge", label: "Knowledge base", icon: BookOpen },
       { to: "/app/agent", label: "AI Receptionist", icon: Bot },
       { to: "/app/numbers", label: "Phone numbers", icon: Hash },
     ],
@@ -63,7 +68,10 @@ export function Shell({ children }: { children: ReactNode }) {
   const { data: ws } = useQuery(workspaceQuery(user?.id));
   const { data: numbers } = useQuery(numbersQuery(ws?.organization?.id));
 
-  const status = agentStatusLabel(ws?.agent ?? null, Boolean(numbers?.some((n) => n.status === "active")));
+  const status = agentStatusLabel(
+    ws?.agent ?? null,
+    Boolean(numbers?.some((n) => n.status === "active")),
+  );
 
   return (
     <div className="flex min-h-screen bg-background">
@@ -77,7 +85,11 @@ export function Shell({ children }: { children: ReactNode }) {
           <Link to="/app" onClick={() => setOpen(false)}>
             <Logo />
           </Link>
-          <button className="lg:hidden" onClick={() => setOpen(false)} aria-label="Close navigation">
+          <button
+            className="lg:hidden"
+            onClick={() => setOpen(false)}
+            aria-label="Close navigation"
+          >
             <X className="size-4 text-muted-foreground" />
           </button>
         </div>
@@ -90,7 +102,8 @@ export function Shell({ children }: { children: ReactNode }) {
               </p>
               <ul className="space-y-0.5">
                 {group.items.map((item) => {
-                  const active = item.to === "/app" ? pathname === "/app" : pathname.startsWith(item.to);
+                  const active =
+                    item.to === "/app" ? pathname === "/app" : pathname.startsWith(item.to);
                   return (
                     <li key={item.to}>
                       <Link
@@ -117,7 +130,9 @@ export function Shell({ children }: { children: ReactNode }) {
         <div className="border-t border-sidebar-border p-3">
           <div className="rounded-md border border-sidebar-border bg-sidebar-accent/40 p-3">
             <div className="flex items-center justify-between">
-              <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Receptionist</span>
+              <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                Receptionist
+              </span>
               <StatusPill tone={status.tone}>{status.label}</StatusPill>
             </div>
             <Link to="/app/agent" className="mt-2.5 block">
@@ -130,7 +145,11 @@ export function Shell({ children }: { children: ReactNode }) {
       </aside>
 
       {open ? (
-        <div className="fixed inset-0 z-30 bg-black/60 lg:hidden" onClick={() => setOpen(false)} aria-hidden />
+        <div
+          className="fixed inset-0 z-30 bg-black/60 lg:hidden"
+          onClick={() => setOpen(false)}
+          aria-hidden
+        />
       ) : null}
 
       <div className="flex min-w-0 flex-1 flex-col lg:pl-[250px]">
@@ -139,7 +158,9 @@ export function Shell({ children }: { children: ReactNode }) {
             <Menu className="size-5" />
           </button>
           <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-medium">{ws?.business?.name ?? ws?.organization?.name ?? "Your workspace"}</p>
+            <p className="truncate text-sm font-medium">
+              {ws?.business?.name ?? ws?.organization?.name ?? "Your workspace"}
+            </p>
           </div>
           <StatusPill tone={status.tone} className="hidden sm:inline-flex">
             {status.label}
@@ -159,8 +180,12 @@ export function Shell({ children }: { children: ReactNode }) {
                 {user?.email}
               </DropdownMenuLabel>
               <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={() => navigate({ to: "/app/settings" })}>Settings</DropdownMenuItem>
-              <DropdownMenuItem onClick={() => navigate({ to: "/app/billing" })}>Usage & billing</DropdownMenuItem>
+              <DropdownMenuItem onClick={() => navigate({ to: "/app/settings" })}>
+                Settings
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => navigate({ to: "/app/billing" })}>
+                Usage & billing
+              </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem
                 onClick={async () => {

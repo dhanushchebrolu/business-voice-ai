@@ -81,9 +81,9 @@ function Landing() {
                 Create your workspace <ArrowRight className="ml-1.5 size-4" />
               </Button>
             </Link>
-            <Link to="/pricing">
+            <Link to="/contact">
               <Button size="lg" variant="outline">
-                See pricing
+                Book a demo
               </Button>
             </Link>
           </div>

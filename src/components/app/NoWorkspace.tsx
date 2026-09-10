@@ -1,49 +1,42 @@
-import { useNavigate } from "@tanstack/react-router";
-import { LogOut } from "lucide-react";
-import { useAuth } from "@/hooks/useAuth";
-import { Logo } from "./primitives";
+import { Link } from "@tanstack/react-router";
+import { Building2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { SectionCard } from "./primitives";
 
 /**
- * Shown when a signed-in user has an account but no organization has been
- * provisioned for them. This is expected and not an error: workspaces are
- * created only when a Vaani admin creates a customer and sends an
- * invitation (Phase B §1/§2) — signing up on its own never creates one.
+ * Status banner shown to a signed-in user who has an account but no
+ * organization has been provisioned for them. This is expected and not an
+ * error: workspaces are created only when a Vaani admin creates a customer
+ * and sends an invitation — signing up on its own never creates one.
+ *
+ * This used to be a full-page takeover that blocked the entire site for
+ * these users. It is now a section rendered inside the normal authenticated
+ * site (/account) — the guard still exists (customer-only functionality
+ * under /app still requires a real organization), it just no longer strands
+ * the user on a dead end.
  */
 export function NoWorkspace() {
-  const { user, signOut } = useAuth();
-  const navigate = useNavigate();
-
   return (
-    <div className="flex min-h-screen flex-col bg-background">
-      <header className="flex h-14 items-center justify-between border-b border-border px-4 lg:px-8">
-        <Logo />
-        <div className="flex items-center gap-3">
-          <span className="hidden text-xs text-muted-foreground sm:inline">{user?.email}</span>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={async () => {
-              await signOut();
-              navigate({ to: "/auth" });
-            }}
-          >
-            <LogOut className="mr-1.5 size-3.5" /> Sign out
-          </Button>
+    <SectionCard
+      title="Workspace status"
+      description="Your account is signed in, but no Vaani workspace has been set up for you yet."
+    >
+      <div className="flex flex-col items-start gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-start gap-3">
+          <span className="mt-0.5 grid size-9 shrink-0 place-items-center rounded-lg border border-border bg-muted">
+            <Building2 className="size-4 text-muted-foreground" />
+          </span>
+          <p className="max-w-md text-sm text-muted-foreground">
+            Your workspace hasn't been provisioned yet. The Vaani team sets this up once onboarding
+            begins — until then you can still manage your profile and settings here.
+          </p>
         </div>
-      </header>
-
-      <main className="mx-auto flex w-full max-w-lg flex-1 flex-col items-center justify-center px-4 py-12 text-center">
-        <h1 className="text-2xl font-semibold tracking-tight">No workspace yet</h1>
-        <p className="mt-2 text-sm text-muted-foreground">
-          Your account is signed in, but no Vaani workspace has been set up for you yet. If you're
-          expecting access, reach out to your Vaani contact — workspaces are created by our team
-          once onboarding begins.
-        </p>
-        <Button className="mt-6" variant="outline" onClick={() => navigate({ to: "/" })}>
-          Back to vaani.ai
-        </Button>
-      </main>
-    </div>
+        <Link to="/contact">
+          <Button size="sm" variant="secondary">
+            Talk to the Vaani team
+          </Button>
+        </Link>
+      </div>
+    </SectionCard>
   );
 }

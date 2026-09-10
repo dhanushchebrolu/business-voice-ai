@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { mintMediaSessionToken } from "@/lib/telephony/media-session-token";
+import { constantTimeEquals } from "@/lib/constant-time-equals.server";
 
 /**
  * Optional endpoint for an Exotel call-flow's Passthru applet step to call
@@ -31,8 +32,17 @@ export const Route = createFileRoute("/api/public/webhooks/exotel/media-token")(
         // Authenticated the same way the Exotel status webhook is (spec:
         // Exotel does not sign requests; a shared value configured in the
         // call-flow is the documented mechanism — see exotel-provider.ts).
+        // Constant-time comparison (matching exotel-provider.ts's
+        // verifyWebhookSignature — see the audit finding M1): a plain
+        // `!==` on a shared secret is a timing side-channel. Buffer length
+        // is checked before calling timingSafeEqual, which throws on
+        // mismatched lengths rather than returning false — never let a
+        // differently-sized token turn into an unhandled exception, and
+        // never log or echo either value.
         const provided = url.searchParams.get("verify_token");
-        if (provided !== secret) return new Response("Unauthorized", { status: 401 });
+        if (!provided || !constantTimeEquals(provided, secret)) {
+          return new Response("Unauthorized", { status: 401 });
+        }
 
         const callSid = url.searchParams.get("CallSid") ?? url.searchParams.get("call_sid");
         if (!callSid) return new Response(JSON.stringify({ token: null }), { status: 200 });

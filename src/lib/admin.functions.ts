@@ -304,6 +304,12 @@ export const getCustomerDetail = createServerFn({ method: "GET" })
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const orgId = data.orgId;
 
+    const startOfDay = new Date();
+    startOfDay.setUTCHours(0, 0, 0, 0);
+    const startOfMonth = new Date(
+      Date.UTC(startOfDay.getUTCFullYear(), startOfDay.getUTCMonth(), 1),
+    );
+
     const [
       org,
       business,
@@ -316,8 +322,11 @@ export const getCustomerDetail = createServerFn({ method: "GET" })
       payments,
       invoices,
       calls,
+      callsThisMonth,
       agent,
+      lastPublish,
       audit,
+      knowledge,
     ] = await Promise.all([
       supabaseAdmin.from("organizations").select("*").eq("id", orgId).maybeSingle(),
       supabaseAdmin.from("businesses").select("*").eq("organization_id", orgId).maybeSingle(),
@@ -354,22 +363,56 @@ export const getCustomerDetail = createServerFn({ method: "GET" })
         .eq("organization_id", orgId)
         .order("issued_at", { ascending: false })
         .limit(50),
+      // Admin-only page (service_role): unlike the customer-facing call_logs
+      // grant, this can safely include customer_charge/provider_cost so the
+      // Overview/Calls views can show real per-call economics to admins.
       supabaseAdmin
         .from("call_logs")
-        .select("id, direction, status, duration_seconds, started_at")
+        .select(
+          "id, direction, status, outcome, duration_seconds, started_at, caller_number, destination_number, customer_charge, provider_cost, currency, failure_reason",
+        )
         .eq("organization_id", orgId)
         .order("started_at", { ascending: false })
         .limit(25),
+      // Separate, lightweight, month-scoped query for the Usage card — same
+      // startOfDay/startOfMonth pattern already used by getAdminOverview,
+      // reused here per-organization instead of platform-wide.
+      supabaseAdmin
+        .from("call_logs")
+        .select("direction, duration_seconds, started_at")
+        .eq("organization_id", orgId)
+        .gte("started_at", startOfMonth.toISOString())
+        .limit(5000),
       supabaseAdmin.from("agent_configs").select("*").eq("organization_id", orgId).maybeSingle(),
+      supabaseAdmin
+        .from("agent_versions")
+        .select("version, created_at, change_note")
+        .eq("organization_id", orgId)
+        .eq("status", "active")
+        .maybeSingle(),
       supabaseAdmin
         .from("audit_logs")
         .select("*")
         .eq("organization_id", orgId)
         .order("created_at", { ascending: false })
         .limit(50),
+      // Phase 4: read-only summary for the Customer 360 Knowledge tab.
+      // Reuses knowledge_documents (source_type=category, status=enable/
+      // disable) — the same tenant-scoped table the customer-facing
+      // /app/knowledge route writes to. Never touches public_knowledge_base.
+      supabaseAdmin
+        .from("knowledge_documents")
+        .select("id, title, source_type, status, updated_at")
+        .eq("organization_id", orgId)
+        .order("updated_at", { ascending: false }),
     ]);
 
     if (!org.data) throw new Error("Customer not found");
+
+    const monthCalls = callsThisMonth.data ?? [];
+    const todayCalls = monthCalls.filter((c) => c.started_at >= startOfDay.toISOString());
+    const minutesOf = (rows: { duration_seconds: number | null }[]) =>
+      Math.round(rows.reduce((s, c) => s + (c.duration_seconds ?? 0), 0) / 60);
 
     const memberIds = (members.data ?? []).map((m) => m.user_id);
     const { data: profiles } = memberIds.length
@@ -403,7 +446,15 @@ export const getCustomerDetail = createServerFn({ method: "GET" })
       payments: payments.data ?? [],
       invoices: invoices.data ?? [],
       calls: calls.data ?? [],
+      usage: {
+        callsToday: todayCalls.length,
+        callsThisMonth: monthCalls.length,
+        minutesToday: minutesOf(todayCalls),
+        minutesThisMonth: minutesOf(monthCalls),
+      },
+      lastPublish: lastPublish.data ?? null,
       audit: audit.data ?? [],
+      knowledge: knowledge.data ?? [],
     };
   });
 

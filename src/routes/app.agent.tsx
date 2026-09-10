@@ -6,25 +6,53 @@ import { toast } from "sonner";
 import { Loader2, Rocket, Send } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
-import { workspaceQuery, versionsQuery } from "@/lib/workspace";
+import { workspaceQuery, versionsQuery, numbersQuery } from "@/lib/workspace";
 import { LANGUAGES, VOICES, PACE_MIN, PACE_MAX } from "@/lib/voices";
 import { PERSONAS, CAPABILITIES } from "@/lib/business-types";
-import { previewAgentConfig, publishAgentVersion, rollbackAgentVersion, testAgentText, getProviderStatus } from "@/lib/agent.functions";
+import {
+  previewAgentConfig,
+  publishAgentVersion,
+  rollbackAgentVersion,
+  testAgentText,
+  getProviderStatus,
+} from "@/lib/agent.functions";
 import { PageHeader, SectionCard, LoadingState, StatusPill } from "@/components/app/primitives";
+import { ServiceLocked } from "@/components/app/ServiceLocked";
+import { featureLocksQuery } from "@/lib/access";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Slider } from "@/components/ui/slider";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 export const Route = createFileRoute("/app/agent")({
   head: () => ({
     meta: [
       { title: "AI receptionist — Vaani" },
-      { name: "description", content: "Configure persona, voice, language and behaviour, then publish a new agent version." },
+      {
+        name: "description",
+        content:
+          "Configure persona, voice, language and behaviour, then publish a new agent version.",
+      },
       { name: "robots", content: "noindex" },
     ],
   }),
@@ -38,6 +66,17 @@ function AgentPage() {
   const business = ws?.business ?? null;
   const agent = ws?.agent ?? null;
   const { data: versions } = useQuery(versionsQuery(business?.id));
+  const { data: locks } = useQuery(featureLocksQuery(ws?.organization?.id));
+  const { data: numbers } = useQuery(numbersQuery(ws?.organization?.id));
+  const agentNumber = numbers?.find((n) => n.agent_config_id === agent?.id) ?? null;
+  // Mirrors the same lock feature_locked("voice") checks server-side before
+  // publish/rollback (see agent.functions.ts's assertFeatureUnlocked) — this
+  // only decides what the button/banner show, never whether the request is
+  // actually allowed. Configuration (save draft, test, preview) stays
+  // available regardless: only publishing/rolling back an agent version is
+  // gated, matching agent.functions.ts's own configuration/activation split.
+  const voiceLocked = locks?.["voice"] === true;
+  const lifecycle = ws?.organization?.lifecycle_status ?? "not_provisioned";
 
   const provider = useServerFn(getProviderStatus);
   const preview = useServerFn(previewAgentConfig);
@@ -45,7 +84,10 @@ function AgentPage() {
   const rollback = useServerFn(rollbackAgentVersion);
   const testText = useServerFn(testAgentText);
 
-  const { data: providerStatus } = useQuery({ queryKey: ["provider-status"], queryFn: () => provider({}) });
+  const { data: providerStatus } = useQuery({
+    queryKey: ["provider-status"],
+    queryFn: () => provider({}),
+  });
   const { data: previewData, refetch: refetchPreview } = useQuery({
     queryKey: ["agent-preview", business?.id],
     enabled: Boolean(business?.id),
@@ -67,6 +109,8 @@ function AgentPage() {
   });
   const [saving, setSaving] = useState(false);
   const [publishing, setPublishing] = useState(false);
+  const [publishConfirmOpen, setPublishConfirmOpen] = useState(false);
+  const [publishError, setPublishError] = useState<string | null>(null);
   const [chat, setChat] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
   const [message, setMessage] = useState("");
   const [thinking, setThinking] = useState(false);
@@ -108,7 +152,10 @@ function AgentPage() {
         transfer_number: form.transfer_number || null,
         custom_personality: form.custom_personality || null,
         capabilities: form.capabilities,
-        greetings: { ...(agent.greetings as Record<string, string>), [form.primary_language]: form.greeting },
+        greetings: {
+          ...(agent.greetings as Record<string, string>),
+          [form.primary_language]: form.greeting,
+        },
       })
       .eq("id", agent.id);
     setSaving(false);
@@ -124,16 +171,30 @@ function AgentPage() {
   async function doPublish() {
     if (!business) return;
     setPublishing(true);
+    setPublishError(null);
     try {
-      const result = await publish({ data: { businessId: business.id, changeNote: "Configuration updated" } });
+      const result = await publish({
+        data: { businessId: business.id, changeNote: "Configuration updated" },
+      });
       if (!result.ok) {
-        toast.error(result.issues[0]?.message ?? "Fix the configuration issues before publishing.");
+        // Sarvam sync failures surface here too (agent.functions.ts returns
+        // them as an issue rather than throwing) — the previous published
+        // version is guaranteed untouched either way.
+        const message =
+          result.issues[0]?.message ?? "Fix the configuration issues before publishing.";
+        setPublishError(message);
+        toast.error(message);
         return;
       }
-      toast.success(`Version ${result.version} published.`);
+      setPublishConfirmOpen(false);
+      toast.success(
+        `Version ${result.version} published. Your previous version stays available to roll back to.`,
+      );
       await qc.invalidateQueries();
     } catch {
-      toast.error("Publishing failed. Please retry.");
+      const message = "Publishing failed. Your previous published version remains active.";
+      setPublishError(message);
+      toast.error(message);
     } finally {
       setPublishing(false);
     }
@@ -157,6 +218,14 @@ function AgentPage() {
   }
 
   const issues = previewData?.issues ?? [];
+  const publishStatus: { label: string; tone: "live" | "ready" | "idle" | "error" } = publishing
+    ? { label: "Publishing…", tone: "ready" }
+    : publishError
+      ? { label: "Publish failed", tone: "error" }
+      : agent?.active_version
+        ? { label: "Published", tone: "live" }
+        : { label: "Draft", tone: "idle" };
+  const nextVersion = (versions?.[0]?.version ?? 0) + 1;
 
   return (
     <div className="space-y-6">
@@ -168,15 +237,26 @@ function AgentPage() {
             <StatusPill tone={providerStatus?.ai === "connected" ? "live" : "idle"}>
               {providerStatus?.ai === "connected" ? "AI connected" : "AI not connected"}
             </StatusPill>
+            <StatusPill tone={publishStatus.tone}>{publishStatus.label}</StatusPill>
             <Button size="sm" variant="secondary" onClick={save} disabled={saving}>
               {saving ? <Loader2 className="mr-2 size-3.5 animate-spin" /> : null}Save draft
             </Button>
-            <Button size="sm" onClick={doPublish} disabled={publishing}>
-              {publishing ? <Loader2 className="mr-2 size-3.5 animate-spin" /> : <Rocket className="mr-1.5 size-3.5" />}Publish
+            <Button
+              size="sm"
+              onClick={() => {
+                setPublishError(null);
+                setPublishConfirmOpen(true);
+              }}
+              disabled={publishing || voiceLocked}
+            >
+              <Rocket className="mr-1.5 size-3.5" />
+              Publish
             </Button>
           </>
         }
       />
+
+      {voiceLocked ? <ServiceLocked feature="voice" lifecycle={lifecycle} compact /> : null}
 
       {issues.length ? (
         <div className="rounded-lg border border-warning/30 bg-warning/8 px-4 py-3 text-sm">
@@ -202,10 +282,16 @@ function AgentPage() {
           <SectionCard title="Identity" description="How the receptionist introduces itself.">
             <div className="space-y-4">
               <FieldRow label="Agent name">
-                <Input value={form.agent_name} onChange={(e) => setForm({ ...form, agent_name: e.target.value })} />
+                <Input
+                  value={form.agent_name}
+                  onChange={(e) => setForm({ ...form, agent_name: e.target.value })}
+                />
               </FieldRow>
               <FieldRow label="Persona">
-                <Select value={form.persona} onValueChange={(v) => setForm({ ...form, persona: v })}>
+                <Select
+                  value={form.persona}
+                  onValueChange={(v) => setForm({ ...form, persona: v })}
+                >
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
@@ -219,7 +305,11 @@ function AgentPage() {
                 </Select>
               </FieldRow>
               <FieldRow label="Greeting">
-                <Textarea rows={3} value={form.greeting} onChange={(e) => setForm({ ...form, greeting: e.target.value })} />
+                <Textarea
+                  rows={3}
+                  value={form.greeting}
+                  onChange={(e) => setForm({ ...form, greeting: e.target.value })}
+                />
               </FieldRow>
               <FieldRow label="Extra personality notes">
                 <Textarea
@@ -232,10 +322,16 @@ function AgentPage() {
             </div>
           </SectionCard>
 
-          <SectionCard title="Voice & language" description="Speech is produced by Sarvam's Bulbul voices.">
+          <SectionCard
+            title="Voice & language"
+            description="Speech is produced by Sarvam's Bulbul voices."
+          >
             <div className="space-y-4">
               <FieldRow label="Primary language">
-                <Select value={form.primary_language} onValueChange={(v) => setForm({ ...form, primary_language: v })}>
+                <Select
+                  value={form.primary_language}
+                  onValueChange={(v) => setForm({ ...form, primary_language: v })}
+                >
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
@@ -249,7 +345,10 @@ function AgentPage() {
                 </Select>
               </FieldRow>
               <FieldRow label="Voice">
-                <Select value={form.voice_id} onValueChange={(v) => setForm({ ...form, voice_id: v })}>
+                <Select
+                  value={form.voice_id}
+                  onValueChange={(v) => setForm({ ...form, voice_id: v })}
+                >
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
@@ -274,33 +373,49 @@ function AgentPage() {
               <label className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2.5">
                 <span className="text-sm">
                   Switch language automatically
-                  <span className="block text-xs text-muted-foreground">Replies in whichever language the caller uses.</span>
+                  <span className="block text-xs text-muted-foreground">
+                    Replies in whichever language the caller uses.
+                  </span>
                 </span>
-                <Switch checked={form.multilingual} onCheckedChange={(v) => setForm({ ...form, multilingual: v })} />
+                <Switch
+                  checked={form.multilingual}
+                  onCheckedChange={(v) => setForm({ ...form, multilingual: v })}
+                />
               </label>
             </div>
           </SectionCard>
         </TabsContent>
 
         <TabsContent value="behaviour" className="mt-4 grid gap-4 lg:grid-cols-2">
-          <SectionCard title="Capabilities" description="What the receptionist is allowed to do on a call.">
+          <SectionCard
+            title="Capabilities"
+            description="What the receptionist is allowed to do on a call."
+          >
             <ul className="space-y-2">
               {CAPABILITIES.map((cap) => (
-                <li key={cap.id} className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2.5">
+                <li
+                  key={cap.id}
+                  className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2.5"
+                >
                   <span className="text-sm">
                     {cap.label}
                     <span className="block text-xs text-muted-foreground">{cap.description}</span>
                   </span>
                   <Switch
                     checked={Boolean(form.capabilities[cap.id])}
-                    onCheckedChange={(v) => setForm({ ...form, capabilities: { ...form.capabilities, [cap.id]: v } })}
+                    onCheckedChange={(v) =>
+                      setForm({ ...form, capabilities: { ...form.capabilities, [cap.id]: v } })
+                    }
                   />
                 </li>
               ))}
             </ul>
           </SectionCard>
 
-          <SectionCard title="Escalation & after hours" description="What happens when the agent cannot help.">
+          <SectionCard
+            title="Escalation & after hours"
+            description="What happens when the agent cannot help."
+          >
             <div className="space-y-4">
               <FieldRow label="Transfer number">
                 <Input
@@ -310,7 +425,10 @@ function AgentPage() {
                 />
               </FieldRow>
               <FieldRow label="After-hours behaviour">
-                <Select value={form.after_hours_behavior} onValueChange={(v) => setForm({ ...form, after_hours_behavior: v })}>
+                <Select
+                  value={form.after_hours_behavior}
+                  onValueChange={(v) => setForm({ ...form, after_hours_behavior: v })}
+                >
                   <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
@@ -342,7 +460,10 @@ function AgentPage() {
         </TabsContent>
 
         <TabsContent value="test" className="mt-4">
-          <SectionCard title="Test conversation" description="Talk to the agent in text using your current published grounding.">
+          <SectionCard
+            title="Test conversation"
+            description="Talk to the agent in text using your current published grounding."
+          >
             <div className="space-y-3">
               <div className="max-h-[360px] space-y-2 overflow-y-auto">
                 {chat.length ? (
@@ -350,7 +471,9 @@ function AgentPage() {
                     <div
                       key={i}
                       className={`max-w-[85%] rounded-lg px-3 py-2 text-sm ${
-                        turn.role === "user" ? "ml-auto bg-primary/12" : "border border-border bg-surface/60"
+                        turn.role === "user"
+                          ? "ml-auto bg-primary/12"
+                          : "border border-border bg-surface/60"
                       }`}
                     >
                       {turn.content}
@@ -361,7 +484,9 @@ function AgentPage() {
                     Ask something a real caller would ask — pricing, hours, or availability.
                   </p>
                 )}
-                {thinking ? <p className="text-xs text-muted-foreground">Agent is replying…</p> : null}
+                {thinking ? (
+                  <p className="text-xs text-muted-foreground">Agent is replying…</p>
+                ) : null}
               </div>
               <div className="flex gap-2">
                 <Input
@@ -379,7 +504,10 @@ function AgentPage() {
         </TabsContent>
 
         <TabsContent value="versions" className="mt-4">
-          <SectionCard title="Published versions" description="Roll back instantly if a change causes problems.">
+          <SectionCard
+            title="Published versions"
+            description="Roll back instantly if a change causes problems."
+          >
             <ul className="divide-y divide-border">
               {versions?.length ? (
                 versions.map((v) => (
@@ -401,6 +529,7 @@ function AgentPage() {
                       <Button
                         size="sm"
                         variant="ghost"
+                        disabled={voiceLocked}
                         onClick={async () => {
                           await rollback({ data: { businessId: business.id, version: v.version } });
                           await qc.invalidateQueries();
@@ -419,6 +548,61 @@ function AgentPage() {
           </SectionCard>
         </TabsContent>
       </Tabs>
+
+      <AlertDialog
+        open={publishConfirmOpen}
+        onOpenChange={(open) => !publishing && setPublishConfirmOpen(open)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Publish this configuration?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This creates version {nextVersion} and makes it the one real calls use immediately.
+              Your current published version stays available to roll back to if anything goes wrong.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-2 rounded-md border border-border bg-surface/40 p-3 text-sm">
+            <dt className="text-xs text-muted-foreground">Agent</dt>
+            <dd className="text-right">{form.agent_name || "—"}</dd>
+            <dt className="text-xs text-muted-foreground">Version</dt>
+            <dd className="text-right">v{nextVersion}</dd>
+            <dt className="text-xs text-muted-foreground">Language</dt>
+            <dd className="text-right">
+              {LANGUAGES.find((l) => l.code === form.primary_language)?.label ??
+                form.primary_language}
+              {form.multilingual ? " (auto-detect)" : ""}
+            </dd>
+            <dt className="text-xs text-muted-foreground">Voice</dt>
+            <dd className="text-right">
+              {VOICES.find((v) => v.id === form.voice_id)?.name ?? form.voice_id}
+            </dd>
+            <dt className="text-xs text-muted-foreground">Phone</dt>
+            <dd className="text-right">
+              {agentNumber?.display_number ?? agentNumber?.e164 ?? "Not assigned yet"}
+            </dd>
+            <dt className="text-xs text-muted-foreground">Deployment</dt>
+            <dd className="text-right">
+              {agentNumber?.provider === "sarvam" && agentNumber.provider_deployment_id
+                ? "Active — will be kept in sync"
+                : "None"}
+            </dd>
+          </dl>
+          {publishError ? <p className="text-sm text-destructive">{publishError}</p> : null}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={publishing}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={publishing}
+              onClick={(e) => {
+                e.preventDefault();
+                void doPublish();
+              }}
+            >
+              {publishing ? <Loader2 className="mr-2 size-3.5 animate-spin" /> : null}
+              {publishing ? "Publishing…" : "Publish"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
