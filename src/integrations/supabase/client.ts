@@ -39,9 +39,13 @@ function createSupabaseClient() {
       ...(!SUPABASE_URL ? ['SUPABASE_URL'] : []),
       ...(!SUPABASE_PUBLISHABLE_KEY ? ['SUPABASE_PUBLISHABLE_KEY'] : []),
     ];
-    const message = `Missing Supabase environment variable(s): ${missing.join(', ')}. Connect Supabase in Lovable Cloud.`;
-    console.error(`[Supabase] ${message}`);
-    throw new Error(message);
+    // Variable NAMES only, never values, and never in the user-facing
+    // message — this Error's .message can end up in a toast (see auth.tsx's
+    // catch blocks) or any other caller that displays error.message
+    // directly, so it must never name a platform (Lovable Cloud or
+    // otherwise) or leak configuration detail to an end user.
+    console.error(`[Supabase] Missing environment variable(s): ${missing.join(", ")}`);
+    throw new Error("Application configuration is incomplete.");
   }
 
   return createClient<Database>(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {

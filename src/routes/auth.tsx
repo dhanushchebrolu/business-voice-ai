@@ -27,7 +27,7 @@ export const Route = createFileRoute("/auth")({
       { title: "Sign in — Vaani" },
       {
         name: "description",
-        content: "Sign in or create your Vaani workspace to configure your AI phone receptionist.",
+        content: "Sign in or create your Vaani account to configure your AI phone receptionist.",
       },
       { property: "og:title", content: "Sign in — Vaani" },
       { property: "og:description", content: "Access your AI receptionist dashboard." },
@@ -356,14 +356,14 @@ function AuthPage() {
 
           <h1 className="text-xl font-semibold tracking-tight">
             {mode === "signup"
-              ? "Create your workspace"
+              ? "Create your account"
               : mode === "signin"
                 ? "Sign in"
                 : "Reset your password"}
           </h1>
           <p className="mt-1.5 text-sm text-muted-foreground">
             {mode === "signup"
-              ? "Create your workspace. Activation takes a one-time setup payment."
+              ? "Tell us about your business. We'll set up your receptionist once your workspace is ready."
               : mode === "signin"
                 ? "Welcome back. Pick up where your receptionist left off."
                 : "We'll email you a link to set a new password."}
@@ -467,7 +467,7 @@ function AuthPage() {
             >
               {busy ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
               {mode === "signup"
-                ? "Create workspace"
+                ? "Create account"
                 : mode === "signin"
                   ? "Sign in"
                   : "Send reset link"}
@@ -498,7 +498,7 @@ function AuthPage() {
                     className="text-primary hover:underline"
                     onClick={() => setMode("signup")}
                   >
-                    Create a workspace
+                    Create an account
                   </button>
                 </p>
               </>

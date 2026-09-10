@@ -38,9 +38,11 @@ function createSupabaseAdminClient() {
       ...(!SUPABASE_URL ? ['SUPABASE_URL'] : []),
       ...(!SUPABASE_SERVICE_ROLE_KEY ? ['SUPABASE_SERVICE_ROLE_KEY'] : []),
     ];
-    const message = `Missing Supabase environment variable(s): ${missing.join(', ')}. Connect Supabase in Lovable Cloud.`;
-    console.error(`[Supabase] ${message}`);
-    throw new Error(message);
+    // Variable NAMES only, never values, and never in the user-facing
+    // message — server-only, but still never names a platform or leaks
+    // configuration detail into whatever surfaces this Error's .message.
+    console.error(`[Supabase] Missing environment variable(s): ${missing.join(", ")}`);
+    throw new Error("Application configuration is incomplete.");
   }
 
   return createClient<Database>(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {

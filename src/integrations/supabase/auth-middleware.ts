@@ -41,9 +41,11 @@ export const requireSupabaseAuth = createMiddleware({ type: 'function' }).server
         ...(!SUPABASE_URL ? ['SUPABASE_URL'] : []),
         ...(!SUPABASE_PUBLISHABLE_KEY ? ['SUPABASE_PUBLISHABLE_KEY'] : []),
       ];
-      const message = `Missing Supabase environment variable(s): ${missing.join(', ')}. Connect Supabase in Lovable Cloud.`;
-      console.error(`[Supabase] ${message}`);
-      throw new Error(message);
+      // Variable NAMES only, never values, and never in the user-facing
+      // message — this middleware guards every server function, so this
+      // Error's .message can reach any caller's toast/error display.
+      console.error(`[Supabase] Missing environment variable(s): ${missing.join(", ")}`);
+      throw new Error("Application configuration is incomplete.");
     }
     
     const request = getRequest();
