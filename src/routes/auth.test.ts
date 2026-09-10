@@ -1,6 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -19,8 +19,16 @@ import { dirname, join } from "node:path";
  *      "Create a workspace", which contradicted the actual (correct)
  *      behavior and read as if signup itself provisions a customer.
  *   3. Every successful auth path (signup with an immediate session, signin,
- *      OTP verification, Google OAuth) routes through the single
- *      resolvePostAuthDestination — never a hardcoded /app or /app/onboarding.
+ *      OTP verification) routes through the single resolvePostAuthDestination
+ *      — never a hardcoded /app or /app/onboarding. Google OAuth resolves
+ *      its destination via the shared /auth/callback page instead of inline
+ *      (see the "Google OAuth" describe block below) — the browser
+ *      navigates away entirely during the OAuth redirect, so there is
+ *      nothing left for onGoogle itself to resolve.
+ *   4. Google sign-in no longer depends on Lovable's OAuth relay
+ *      (@lovable.dev/cloud-auth-js) — it uses Supabase's own
+ *      signInWithOAuth, redirecting through Google and back to
+ *      /auth/callback, matching every other Supabase project.
  *
  * Source-scanned, matching this repo's established convention for route
  * files this test runner can't import/render directly.
@@ -78,14 +86,73 @@ describe("signup copy accurately describes account creation, not workspace creat
 });
 
 describe("every successful sign-in/sign-up path resolves its destination through the one authority", () => {
-  test("resolvePostAuthDestination is called on: signup-with-immediate-session, signin, OTP verify, and Google OAuth — never a hardcoded /app", () => {
+  test("resolvePostAuthDestination is called on: the already-signed-in effect, signup-with-immediate-session, signin, and OTP verify — never a hardcoded /app", () => {
     const occurrences = [...src.matchAll(/resolvePostAuthDestination\(/g)];
-    // 1 in the "already signed in" effect + 4 in the action handlers below.
     assert.ok(
-      occurrences.length >= 5,
-      `expected at least 5 call sites, found ${occurrences.length}`,
+      occurrences.length >= 4,
+      `expected at least 4 call sites, found ${occurrences.length}`,
     );
     assert.doesNotMatch(src, /navigate\(\{ to: "\/app"/);
     assert.doesNotMatch(src, /navigate\(\{ to: "\/app\/onboarding"/);
+  });
+});
+
+describe("Google OAuth uses Supabase directly, not Lovable's relay", () => {
+  function extractOnGoogle(): string {
+    const start = src.indexOf("async function onGoogle(");
+    const end = src.indexOf("\n  if (step ===", start);
+    assert.ok(start > -1 && end > -1, "expected to find onGoogle");
+    return src.slice(start, end);
+  }
+
+  test("does not import @lovable.dev/cloud-auth-js or the deleted lovable integration module", () => {
+    assert.doesNotMatch(src, /@lovable\.dev\/cloud-auth-js/);
+    assert.doesNotMatch(src, /integrations\/lovable/);
+    assert.doesNotMatch(src, /\blovable\.auth\./);
+  });
+
+  test('onGoogle calls supabase.auth.signInWithOAuth with provider: "google"', () => {
+    const onGoogle = extractOnGoogle();
+    assert.match(onGoogle, /supabase\.auth\.signInWithOAuth\(/);
+    assert.match(onGoogle, /provider:\s*"google"/);
+  });
+
+  test("the redirect target is /auth/callback on the current origin — never a hardcoded localhost or a different path", () => {
+    const onGoogle = extractOnGoogle();
+    assert.match(onGoogle, /redirectTo:\s*`\$\{window\.location\.origin\}\/auth\/callback`/);
+    assert.doesNotMatch(onGoogle, /localhost/);
+  });
+
+  test("a signInWithOAuth error surfaces a safe toast, never error.message from the provider", () => {
+    const onGoogle = extractOnGoogle();
+    const errIdx = onGoogle.indexOf("if (error) {");
+    assert.ok(errIdx > -1);
+    const errBlock = onGoogle.slice(errIdx, errIdx + 150);
+    assert.match(
+      errBlock,
+      /toast\.error\("Google sign-in failed\. Please try again or use email\."\)/,
+    );
+    assert.doesNotMatch(errBlock, /error\.message/);
+  });
+});
+
+describe("the Lovable OAuth relay integration is fully removed", () => {
+  test("src/integrations/lovable/index.ts no longer exists", () => {
+    const path = join(
+      dirname(fileURLToPath(import.meta.url)),
+      "..",
+      "integrations",
+      "lovable",
+      "index.ts",
+    );
+    assert.equal(existsSync(path), false, "expected the Lovable OAuth relay module to be deleted");
+  });
+
+  test("@lovable.dev/cloud-auth-js is no longer a dependency in package.json", () => {
+    const pkgPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "package.json");
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as {
+      dependencies?: Record<string, string>;
+    };
+    assert.equal(pkg.dependencies?.["@lovable.dev/cloud-auth-js"], undefined);
   });
 });

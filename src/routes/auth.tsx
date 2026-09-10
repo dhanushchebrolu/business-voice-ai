@@ -4,7 +4,6 @@ import { z } from "zod";
 import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
-import { lovable } from "@/integrations/lovable/index";
 import { useAuth } from "@/hooks/useAuth";
 import { resolvePostAuthDestination } from "@/lib/post-auth-destination";
 import { Logo } from "@/components/app/primitives";
@@ -214,21 +213,21 @@ function AuthPage() {
   async function onGoogle() {
     setBusy(true);
     try {
-      const result = await lovable.auth.signInWithOAuth("google", {
-        redirect_uri: `${window.location.origin}/auth/callback`,
+      // Supabase's own OAuth flow (no Lovable relay): this navigates the
+      // browser away to Google immediately on success, so there is nothing
+      // further to do here. Google redirects back to Supabase, which
+      // redirects to redirectTo below; auth.callback.tsx then picks up the
+      // new session (Supabase's client auto-detects it from the URL) and
+      // routes via resolvePostAuthDestination — the exact same
+      // backend-authoritative path every other sign-in method uses.
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: {
+          redirectTo: `${window.location.origin}/auth/callback`,
+        },
       });
-      if (result.error) {
+      if (error) {
         toast.error("Google sign-in failed. Please try again or use email.");
-        return;
-      }
-      if (result.redirected) return;
-      // Non-redirect (popup/iframe) path: tokens were already applied to the
-      // Supabase client by src/integrations/lovable/index.ts. Route the same
-      // way the callback page would.
-      const { data } = await supabase.auth.getUser();
-      if (data.user) {
-        const dest = await resolvePostAuthDestination(data.user.id);
-        navigate({ to: dest });
       }
     } finally {
       setBusy(false);
