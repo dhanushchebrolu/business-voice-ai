@@ -2,7 +2,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { z } from "zod";
 import { toast } from "sonner";
-import { Loader2 } from "lucide-react";
+import { Loader2, MailCheck } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { resolvePostAuthDestination } from "@/lib/post-auth-destination";
@@ -12,7 +12,6 @@ import { Input } from "@/components/ui/input";
 import { PasswordInput } from "@/components/ui/password-input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
-import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp";
 
 const searchSchema = z.object({
   mode: z.enum(["signin", "signup", "forgot"]).optional(),
@@ -55,13 +54,14 @@ function AuthPage() {
     terms: false,
   });
 
-  // Post-signup email verification step. Not URL-driven — it's an ephemeral
-  // continuation of the signup form, scoped to this component only.
-  const [step, setStep] = useState<"form" | "verify">("form");
+  // Post-signup "check your email" step. Not URL-driven — it's an ephemeral
+  // continuation of the signup form, scoped to this component only. Supabase
+  // is configured to confirm signup via an emailed link (not a code), so
+  // this step only ever shows a message and a resend action — there is no
+  // code to enter here. The link itself lands on /auth/callback, which
+  // resolves the same three-way destination as every other sign-in path.
+  const [step, setStep] = useState<"form" | "check-email">("form");
   const [pendingEmail, setPendingEmail] = useState("");
-  const [otp, setOtp] = useState("");
-  const [otpBusy, setOtpBusy] = useState(false);
-  const [otpError, setOtpError] = useState<string | null>(null);
   const [resendBusy, setResendBusy] = useState(false);
   const [cooldown, setCooldown] = useState(0);
 
@@ -124,18 +124,21 @@ function AuthPage() {
         if (error) throw error;
 
         if (data.session && data.user) {
-          // Email confirmation is disabled for this Supabase project — there
-          // is nothing to verify. Proceed directly rather than showing a
-          // verification screen with nothing to enter.
+          // Some Supabase project configurations return a live session
+          // immediately on signUp (e.g. email confirmation turned off for
+          // that project) — when that happens there is nothing to confirm,
+          // so proceed directly instead of showing a "check your email"
+          // screen for an email that was never sent.
           toast.success("Account created.");
           const dest = await resolvePostAuthDestination(data.user.id);
           navigate({ to: dest });
         } else {
+          // The common case: Supabase sends a confirmation link and there is
+          // no session yet. Show a "check your email" message — clicking the
+          // link (not entering a code) is what completes signup.
           setPendingEmail(form.email);
-          setOtp("");
-          setOtpError(null);
           setCooldown(RESEND_COOLDOWN_SECONDS);
-          setStep("verify");
+          setStep("check-email");
         }
       } else if (mode === "signin") {
         const { data, error } = await supabase.auth.signInWithPassword({
@@ -162,48 +165,17 @@ function AuthPage() {
     }
   }
 
-  async function onVerifyOtp() {
-    if (otp.length !== 6) return;
-    setOtpBusy(true);
-    setOtpError(null);
-    try {
-      const { data, error } = await supabase.auth.verifyOtp({
-        email: pendingEmail,
-        token: otp,
-        type: "signup",
-      });
-      if (error) {
-        if (/expired/i.test(error.message)) {
-          setOtpError("This code has expired. Request a new one below.");
-        } else {
-          setOtpError("That code isn't correct. Please check your inbox and try again.");
-        }
-        return;
-      }
-      toast.success("Email verified.");
-      const dest = await resolvePostAuthDestination(data.user!.id);
-      navigate({ to: dest });
-    } catch (error) {
-      setOtpError(
-        error instanceof Error ? error.message : "Could not verify that code. Please try again.",
-      );
-    } finally {
-      setOtpBusy(false);
-    }
-  }
-
-  async function onResendOtp() {
+  async function onResendConfirmation() {
     if (cooldown > 0 || resendBusy) return;
     setResendBusy(true);
     try {
       const { error } = await supabase.auth.resend({ type: "signup", email: pendingEmail });
       if (error) throw error;
-      toast.success("A new code is on its way.");
+      toast.success("Confirmation email sent.");
       setCooldown(RESEND_COOLDOWN_SECONDS);
-      setOtpError(null);
     } catch (error) {
       toast.error(
-        error instanceof Error ? error.message : "Could not resend the code. Please try again.",
+        error instanceof Error ? error.message : "Could not resend the email. Please try again.",
       );
     } finally {
       setResendBusy(false);
@@ -234,7 +206,7 @@ function AuthPage() {
     }
   }
 
-  if (step === "verify") {
+  if (step === "check-email") {
     return (
       <div className="grid min-h-screen lg:grid-cols-[1fr_1.1fr]">
         <div className="relative hidden flex-col justify-between border-r border-border bg-surface/40 p-10 lg:flex">
@@ -247,12 +219,12 @@ function AuthPage() {
               Check your inbox.
             </h2>
             <p className="mt-4 text-sm text-muted-foreground">
-              We sent a 6-digit code to {pendingEmail}. Enter it to verify your email and finish
-              creating your account.
+              We sent a confirmation link to {pendingEmail}. Click it to verify your email and
+              finish creating your account.
             </p>
           </div>
           <p className="relative text-xs text-muted-foreground">
-            Secure sign-up · Codes expire after a short time
+            Secure sign-up · Links expire after a short time
           </p>
         </div>
 
@@ -263,47 +235,27 @@ function AuthPage() {
                 <Logo />
               </Link>
             </div>
-            <h1 className="text-xl font-semibold tracking-tight">Verify your email</h1>
+            <span className="mx-auto grid size-10 place-items-center rounded-lg border border-border bg-muted">
+              <MailCheck className="size-4 text-muted-foreground" />
+            </span>
+            <h1 className="mt-4 text-xl font-semibold tracking-tight">Check your email</h1>
             <p className="mt-1.5 text-sm text-muted-foreground">
-              Enter the 6-digit code we sent to{" "}
-              <span className="font-medium text-foreground">{pendingEmail}</span>.
+              We sent a confirmation link to{" "}
+              <span className="font-medium text-foreground">{pendingEmail}</span>. Click the link in
+              that email to verify your account — there's nothing to enter here.
             </p>
-
-            <div className="mt-7 flex justify-center">
-              <InputOTP maxLength={6} value={otp} onChange={setOtp} disabled={otpBusy}>
-                <InputOTPGroup>
-                  <InputOTPSlot index={0} />
-                  <InputOTPSlot index={1} />
-                  <InputOTPSlot index={2} />
-                  <InputOTPSlot index={3} />
-                  <InputOTPSlot index={4} />
-                  <InputOTPSlot index={5} />
-                </InputOTPGroup>
-              </InputOTP>
-            </div>
-
-            {otpError ? <p className="mt-3 text-sm text-destructive">{otpError}</p> : null}
-
-            <Button
-              className="mt-6 w-full"
-              disabled={otp.length !== 6 || otpBusy}
-              onClick={onVerifyOtp}
-            >
-              {otpBusy ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
-              Verify
-            </Button>
 
             <button
               type="button"
-              className="mt-4 text-sm text-primary hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
-              onClick={onResendOtp}
+              className="mt-6 text-sm text-primary hover:underline disabled:cursor-not-allowed disabled:text-muted-foreground disabled:no-underline"
+              onClick={onResendConfirmation}
               disabled={cooldown > 0 || resendBusy}
             >
               {resendBusy
                 ? "Sending…"
                 : cooldown > 0
-                  ? `Resend code in ${cooldown}s`
-                  : "Resend code"}
+                  ? `Resend email in ${cooldown}s`
+                  : "Resend confirmation email"}
             </button>
 
             <p className="mt-6">

@@ -38,7 +38,7 @@ const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "auth.tsx
 
 function extractOnSubmit(): string {
   const start = src.indexOf("async function onSubmit(");
-  const end = src.indexOf("\n  async function onVerifyOtp(");
+  const end = src.indexOf("\n  async function onResendConfirmation(");
   assert.ok(start > -1 && end > -1, "expected to find onSubmit");
   return src.slice(start, end);
 }
@@ -86,14 +86,43 @@ describe("signup copy accurately describes account creation, not workspace creat
 });
 
 describe("every successful sign-in/sign-up path resolves its destination through the one authority", () => {
-  test("resolvePostAuthDestination is called on: the already-signed-in effect, signup-with-immediate-session, signin, and OTP verify — never a hardcoded /app", () => {
+  test("resolvePostAuthDestination is called on: the already-signed-in effect, signup-with-immediate-session, and signin — never a hardcoded /app", () => {
     const occurrences = [...src.matchAll(/resolvePostAuthDestination\(/g)];
     assert.ok(
-      occurrences.length >= 4,
-      `expected at least 4 call sites, found ${occurrences.length}`,
+      occurrences.length >= 3,
+      `expected at least 3 call sites, found ${occurrences.length}`,
     );
     assert.doesNotMatch(src, /navigate\(\{ to: "\/app"/);
     assert.doesNotMatch(src, /navigate\(\{ to: "\/app\/onboarding"/);
+  });
+});
+
+describe("signup confirmation is a link, not a 6-digit code", () => {
+  test("no OTP entry UI remains: no InputOTP component, no verifyOtp call, no code-entry copy", () => {
+    assert.doesNotMatch(src, /InputOTP/);
+    assert.doesNotMatch(src, /verifyOtp/);
+    assert.doesNotMatch(src, /onVerifyOtp/);
+    assert.doesNotMatch(src, /6-digit code/);
+    assert.doesNotMatch(src, /Enter it to verify/);
+  });
+
+  test('the "check your email" screen tells the user to click a link, and still offers Resend + Back to sign in', () => {
+    const startIdx = src.indexOf('if (step === "check-email")');
+    assert.ok(startIdx > -1, "expected a check-email step");
+    const block = src.slice(startIdx, startIdx + 3000);
+    assert.match(block, /confirmation link/i);
+    assert.match(block, /onClick={onResendConfirmation}/);
+    assert.match(block, /Back to sign in/);
+  });
+
+  test("onResendConfirmation calls supabase.auth.resend with type signup, still tied to the resend cooldown", () => {
+    const start = src.indexOf("async function onResendConfirmation(");
+    const end = src.indexOf("\n  async function onGoogle(");
+    assert.ok(start > -1 && end > -1);
+    const block = src.slice(start, end);
+    assert.match(block, /supabase\.auth\.resend\(/);
+    assert.match(block, /type:\s*"signup"/);
+    assert.match(block, /cooldown/);
   });
 });
 

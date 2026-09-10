@@ -10,7 +10,13 @@ test("an active platform admin always lands on /admin, even with a workspace", (
 });
 
 test("a non-admin with a non-archived organization lands on /app", () => {
-  for (const status of ["not_provisioned", "setup_payment_pending", "active", "suspended", "cancelled"]) {
+  for (const status of [
+    "not_provisioned",
+    "setup_payment_pending",
+    "active",
+    "suspended",
+    "cancelled",
+  ]) {
     assert.equal(
       deriveDestination({ isActivePlatformAdmin: false, organizationLifecycleStatus: status }),
       "/app",
@@ -22,13 +28,13 @@ test("a non-admin with a non-archived organization lands on /app", () => {
 test("an archived organization does not count as a workspace", () => {
   assert.equal(
     deriveDestination({ isActivePlatformAdmin: false, organizationLifecycleStatus: "archived" }),
-    "/account",
+    "/",
   );
 });
 
-test("no organization at all lands on /account (never auto-provisioned)", () => {
+test("no organization at all lands on / — the public website (never auto-provisioned)", () => {
   assert.equal(
     deriveDestination({ isActivePlatformAdmin: false, organizationLifecycleStatus: null }),
-    "/account",
+    "/",
   );
 });

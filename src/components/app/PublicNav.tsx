@@ -1,8 +1,17 @@
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
+import { LogOut } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { workspaceQuery } from "@/lib/workspace";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 /**
  * Whether the "Dashboard" button should render on public pages.
@@ -26,10 +35,22 @@ export function useDashboardAccess() {
   return { loading: Boolean(session) && isLoading, hasDashboard };
 }
 
-/** Public-site header nav. Shows Dashboard only when the backend confirms access; otherwise Sign in / Get started. */
+/**
+ * Public-site header nav.
+ *
+ * Three states, all backend-authoritative (never inferred from the mere
+ * presence of a session):
+ *   - Signed in with a live workspace -> Dashboard button.
+ *   - Signed in with no workspace -> identity + Sign out. Authentication is
+ *     not customer entitlement: this visitor sees the normal public site,
+ *     never a /app or /admin control, and is never shown Sign in / Get
+ *     started again while authenticated.
+ *   - Not signed in -> Sign in / Get started.
+ */
 export function PublicNav() {
-  const { session } = useAuth();
+  const { session, user, signOut } = useAuth();
   const { loading, hasDashboard } = useDashboardAccess();
+  const navigate = useNavigate();
 
   if (session && !loading && hasDashboard) {
     return (
@@ -43,6 +64,43 @@ export function PublicNav() {
         <Link to="/app">
           <Button size="sm">Dashboard</Button>
         </Link>
+      </nav>
+    );
+  }
+
+  if (session && !loading && !hasDashboard) {
+    return (
+      <nav className="flex items-center gap-2">
+        <Link
+          to="/pricing"
+          className="rounded-md px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground"
+        >
+          Pricing
+        </Link>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button className="flex items-center gap-2 rounded-md border border-border px-2 py-1.5 text-xs hover:bg-accent">
+              <span className="grid size-5 place-items-center rounded-full bg-primary/15 text-[10px] font-semibold text-primary">
+                {(user?.email ?? "?").slice(0, 1).toUpperCase()}
+              </span>
+              <span className="hidden max-w-[160px] truncate sm:inline">{user?.email}</span>
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-56">
+            <DropdownMenuLabel className="truncate text-xs font-normal text-muted-foreground">
+              {user?.email}
+            </DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onClick={async () => {
+                await signOut();
+                navigate({ to: "/" });
+              }}
+            >
+              <LogOut className="mr-2 size-3.5" /> Sign out
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </nav>
     );
   }
