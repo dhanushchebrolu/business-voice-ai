@@ -2118,6 +2118,10 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      bootstrap_first_platform_admin: {
+        Args: { p_email: string | null; p_user_id: string }
+        Returns: boolean
+      }
       customer_rate: { Args: { _key: string; _org: string }; Returns: number }
       debit_wallet_for_call: {
         Args: {
