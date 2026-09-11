@@ -18,10 +18,10 @@ import { dirname, join } from "node:path";
  *      previously said "Create your workspace" / "Create workspace" /
  *      "Create a workspace", which contradicted the actual (correct)
  *      behavior and read as if signup itself provisions a customer.
- *   3. Every successful auth path (signup with an immediate session, signin,
- *      OTP verification) routes through the single resolvePostAuthDestination
- *      — never a hardcoded /app or /app/onboarding. Google OAuth resolves
- *      its destination via the shared /auth/callback page instead of inline
+ *   3. Every successful auth path (signup with an immediate session, signin)
+ *      routes through the single resolvePostAuthDestination — never a
+ *      hardcoded /app or /app/onboarding. Google OAuth resolves its
+ *      destination via the shared /auth/callback page instead of inline
  *      (see the "Google OAuth" describe block below) — the browser
  *      navigates away entirely during the OAuth redirect, so there is
  *      nothing left for onGoogle itself to resolve.
@@ -29,6 +29,11 @@ import { dirname, join } from "node:path";
  *      (@lovable.dev/cloud-auth-js) — it uses Supabase's own
  *      signInWithOAuth, redirecting through Google and back to
  *      /auth/callback, matching every other Supabase project.
+ *   5. Klyro's Supabase project has Confirm Email OFF: signUp is plain
+ *      email+password, sends no email, and always returns a live session —
+ *      there is no confirmation-link/OTP/"check your email" state left in
+ *      this file (see "signup is email+password only" below), matching the
+ *      exact scenarios the removal task required covered.
  *
  * Source-scanned, matching this repo's established convention for route
  * files this test runner can't import/render directly.
@@ -38,7 +43,7 @@ const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "auth.tsx
 
 function extractOnSubmit(): string {
   const start = src.indexOf("async function onSubmit(");
-  const end = src.indexOf("\n  async function onResendConfirmation(");
+  const end = src.indexOf("\n  async function onGoogle(");
   assert.ok(start > -1 && end > -1, "expected to find onSubmit");
   return src.slice(start, end);
 }
@@ -94,42 +99,97 @@ describe("every successful sign-in/sign-up path resolves its destination through
     );
     assert.doesNotMatch(src, /navigate\(\{ to: "\/app"/);
     assert.doesNotMatch(src, /navigate\(\{ to: "\/app\/onboarding"/);
+    assert.doesNotMatch(src, /navigate\(\{ to: "\/admin"/);
+  });
+
+  test("post-auth destination rules themselves (admin/app/public) are the single shared authority — see post-auth-destination.test.ts, not re-derived here", () => {
+    // deriveDestination in post-auth-destination-logic.ts is what actually
+    // decides admin -> /admin, provisioned workspace -> /app, everyone else
+    // -> / (public site). This file only has to prove every auth path calls into it.
+    assert.doesNotMatch(src, /isActivePlatformAdmin/);
+    assert.doesNotMatch(src, /organizationLifecycleStatus/);
   });
 });
 
-describe("signup confirmation is a link, not a 6-digit code", () => {
-  test("no OTP entry UI remains: no InputOTP component, no verifyOtp call, no code-entry copy", () => {
-    assert.doesNotMatch(src, /InputOTP/);
-    assert.doesNotMatch(src, /verifyOtp/);
-    assert.doesNotMatch(src, /onVerifyOtp/);
-    assert.doesNotMatch(src, /6-digit code/);
-    assert.doesNotMatch(src, /Enter it to verify/);
+describe("signup is email+password only — no confirmation-email/OTP flow (Confirm Email is OFF for this project)", () => {
+  const onSubmit = extractOnSubmit();
+
+  test("signUp is called with no emailRedirectTo — signup never depends on or triggers an emailed link", () => {
+    const signUpIdx = onSubmit.indexOf("supabase.auth.signUp(");
+    assert.ok(signUpIdx > -1);
+    const block = onSubmit.slice(signUpIdx, signUpIdx + 400);
+    assert.doesNotMatch(block, /emailRedirectTo/);
   });
 
-  test('the "check your email" screen tells the user to click a link, and still offers Resend + Back to sign in', () => {
-    const startIdx = src.indexOf('if (step === "check-email")');
-    assert.ok(startIdx > -1, "expected a check-email step");
-    const block = src.slice(startIdx, startIdx + 3000);
-    assert.match(block, /confirmation link/i);
-    assert.match(block, /onClick={onResendConfirmation}/);
-    assert.match(block, /Back to sign in/);
+  test("a successful signup with a session immediately resolves its destination and navigates — no intermediate waiting state", () => {
+    assert.match(onSubmit, /toast\.success\("Account created\."\)/);
+    const successIdx = onSubmit.indexOf('toast.success("Account created."');
+    const destIdx = onSubmit.indexOf("resolvePostAuthDestination(signedUpUserId", successIdx);
+    const navIdx = onSubmit.indexOf("navigate({ to: dest })", successIdx);
+    assert.ok(successIdx > -1 && destIdx > -1 && navIdx > -1);
+    assert.ok(destIdx < navIdx);
   });
 
-  test("onResendConfirmation calls supabase.auth.resend with type signup, still tied to the resend cooldown", () => {
-    const start = src.indexOf("async function onResendConfirmation(");
-    const end = src.indexOf("\n  async function onGoogle(");
-    assert.ok(start > -1 && end > -1);
-    const block = src.slice(start, end);
-    assert.match(block, /supabase\.auth\.resend\(/);
-    assert.match(block, /type:\s*"signup"/);
-    assert.match(block, /cooldown/);
+  test("if signUp somehow returns no session (Confirm Email unexpectedly on), the fallback signs in immediately rather than entering any confirmation state", () => {
+    assert.match(onSubmit, /if \(!data\.session\)/);
+    const fallbackIdx = onSubmit.indexOf("if (!data.session)");
+    const block = onSubmit.slice(fallbackIdx, fallbackIdx + 500);
+    assert.match(block, /supabase\.auth\.signInWithPassword\(/);
+    assert.doesNotMatch(block, /setStep/);
+  });
+
+  test("no confirmation-email/OTP state, handlers, components, or copy remain anywhere in this file", () => {
+    for (const pattern of [
+      /InputOTP/,
+      /verifyOtp/,
+      /onVerifyOtp/,
+      /onResendConfirmation/,
+      /resend\(/,
+      /pendingEmail/,
+      /"check-email"/,
+      /Check your email/,
+      /Check your inbox/,
+      /Resend confirmation/,
+      /confirmation link/i,
+      /6-digit code/,
+      /RESEND_COOLDOWN_SECONDS/,
+    ]) {
+      assert.doesNotMatch(src, pattern, `expected no match for ${pattern}`);
+    }
+  });
+
+  test('signup copy invites email+password, and never mentions verification/confirmation/OTP/"check your inbox"', () => {
+    assert.match(src, /Use your email and password to get started/);
+    for (const forbidden of [
+      /email verification/i,
+      /confirmation email/i,
+      /\bOTP\b/,
+      /check your inbox/i,
+    ]) {
+      assert.doesNotMatch(src, forbidden, `signup copy must not mention ${forbidden}`);
+    }
+  });
+});
+
+describe("forgot-password (Supabase password recovery) is untouched by the confirmation-email removal", () => {
+  test("resetPasswordForEmail is still called with redirectTo pointed at /reset-password on the current origin", () => {
+    assert.match(src, /supabase\.auth\.resetPasswordForEmail\(/);
+    assert.match(src, /redirectTo:\s*`\$\{window\.location\.origin\}\/reset-password`/);
+  });
+
+  test("the forgot-password mode still sends a reset link and returns the visitor to sign-in, unrelated to signup's session flow", () => {
+    const forgotIdx = src.indexOf("} else {", src.indexOf('mode === "signin"'));
+    assert.ok(forgotIdx > -1);
+    const block = src.slice(forgotIdx, forgotIdx + 400);
+    assert.match(block, /resetPasswordForEmail/);
+    assert.match(block, /setMode\("signin"\)/);
   });
 });
 
 describe("Google OAuth uses Supabase directly, not Lovable's relay", () => {
   function extractOnGoogle(): string {
     const start = src.indexOf("async function onGoogle(");
-    const end = src.indexOf("\n  if (step ===", start);
+    const end = src.indexOf("\n  return (", start);
     assert.ok(start > -1 && end > -1, "expected to find onGoogle");
     return src.slice(start, end);
   }
