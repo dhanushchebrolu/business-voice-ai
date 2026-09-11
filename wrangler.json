@@ -1,4 +1,9 @@
 {
+  "name": "klyro",
+  "keep_vars": true,
+  "secrets": {
+    "required": ["SUPABASE_SERVICE_ROLE_KEY"]
+  },
   "durable_objects": {
     "bindings": [
       {
