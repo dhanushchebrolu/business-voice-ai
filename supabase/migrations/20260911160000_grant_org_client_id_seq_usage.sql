@@ -1,0 +1,37 @@
+-- Production incident (ref c49cabc1): createClientAccount's organizations
+-- insert failed with Postgres 42501 "permission denied for sequence
+-- org_client_id_seq".
+--
+-- organizations.client_id gets its value from a column DEFAULT —
+-- 'VAA-' || lpad(nextval('public.org_client_id_seq')::text, 6, '0') — set in
+-- 20260902060038_591a0810-758f-44e3-940d-5b8de002ffcd.sql, which created the
+-- sequence with `CREATE SEQUENCE IF NOT EXISTS public.org_client_id_seq
+-- START 1;` and never granted any role a privilege on it. In Postgres, a
+-- table-level grant (GRANT ALL ON public.organizations TO service_role,
+-- from the original schema migration) does not extend to a sequence
+-- referenced by one of that table's column defaults — sequence usage is
+-- checked as a wholly separate privilege on the sequence object itself.
+--
+-- That gap was invisible for a while: until
+-- 20260902091500_signup_no_longer_auto_provisions_workspace.sql, the only
+-- code path inserting into organizations was handle_new_user(), a
+-- SECURITY DEFINER trigger that evaluates nextval() as its own owner, not
+-- as the role that fired the trigger — so no caller's own sequence
+-- privileges were ever exercised. Once that migration moved organization
+-- creation to the admin-only createClientAccount path (admin-clients.functions.ts),
+-- every insert there runs directly as service_role (supabaseAdmin) with no
+-- SECURITY DEFINER indirection, so service_role's own (missing) sequence
+-- privilege is what Postgres checks — and denies.
+--
+-- Fix: grant exactly what nextval() requires — USAGE (see the PostgreSQL
+-- privileges reference for sequences: USAGE is sufficient for nextval/
+-- currval; UPDATE would additionally allow setval, and SELECT would
+-- additionally allow currval/direct reads — neither is needed here) — on
+-- this one sequence only, to service_role only. `authenticated` is
+-- deliberately not granted this: 20260905100000_restrict_organization_
+-- provisioning_grants.sql already revoked organizations INSERT from
+-- `authenticated`, and service_role is the only role that ever inserts
+-- into organizations now that self-serve provisioning is closed. GRANT is
+-- naturally idempotent — re-running this against a database that already
+-- has the privilege is a no-op, not an error.
+GRANT USAGE ON SEQUENCE public.org_client_id_seq TO service_role;
