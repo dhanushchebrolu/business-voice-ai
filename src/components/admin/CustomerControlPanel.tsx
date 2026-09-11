@@ -65,12 +65,18 @@ export function CustomerControlPanel({
   orgId,
   lifecycle,
   paymentOverride,
+  paymentOverrideReason,
+  paymentOverrideByEmail,
+  paymentOverrideAt,
   readiness,
   onChanged,
 }: {
   orgId: string;
   lifecycle: LifecycleStatus;
   paymentOverride: boolean;
+  paymentOverrideReason?: string | null;
+  paymentOverrideByEmail?: string | null;
+  paymentOverrideAt?: string | null;
   readiness: ProvisioningReadiness | null;
   onChanged: () => Promise<void> | void;
 }) {
@@ -156,19 +162,41 @@ export function CustomerControlPanel({
         </div>
       }
     >
-      <div className="flex flex-wrap items-center gap-3">
-        <StatusPill tone={paymentOverride ? "accent" : "idle"}>
-          {paymentOverride ? "Payment override active" : "Following global payment policy"}
-        </StatusPill>
-        {paymentOverride ? (
-          <Button size="sm" variant="ghost" onClick={() => setAction("override-off")}>
-            <ShieldOff className="mr-1.5 size-3.5" /> Remove override
-          </Button>
-        ) : (
-          <Button size="sm" variant="ghost" onClick={() => setAction("override-on")}>
-            <ShieldCheck className="mr-1.5 size-3.5" /> Override payment requirement
-          </Button>
-        )}
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-center gap-3">
+          <div>
+            <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              Payment access
+            </p>
+            <StatusPill tone={paymentOverride ? "accent" : "idle"} className="mt-1">
+              {paymentOverride ? "Unlocked" : "Locked"}
+            </StatusPill>
+          </div>
+          {paymentOverride ? (
+            <Button size="sm" variant="ghost" onClick={() => setAction("override-off")}>
+              <ShieldOff className="mr-1.5 size-3.5" /> Remove override
+            </Button>
+          ) : (
+            <Button size="sm" variant="ghost" onClick={() => setAction("override-on")}>
+              <ShieldCheck className="mr-1.5 size-3.5" /> Override payment requirement
+            </Button>
+          )}
+        </div>
+        <p className="text-xs text-muted-foreground">
+          {paymentOverride
+            ? "Reason: Admin demo override — no payment, invoice or subscription was created."
+            : "Reason: Setup payment required — following the global payment policy."}
+        </p>
+        {paymentOverride && paymentOverrideReason ? (
+          <p className="text-xs text-muted-foreground">Note: {paymentOverrideReason}</p>
+        ) : null}
+        {paymentOverride && (paymentOverrideByEmail || paymentOverrideAt) ? (
+          <p className="text-xs text-muted-foreground">
+            {paymentOverrideByEmail ? `Granted by: ${paymentOverrideByEmail}` : null}
+            {paymentOverrideByEmail && paymentOverrideAt ? " · " : null}
+            {paymentOverrideAt ? `Granted: ${new Date(paymentOverrideAt).toLocaleString()}` : null}
+          </p>
+        ) : null}
       </div>
 
       {lifecycle === "ready" && readiness ? <ReadinessChecklist readiness={readiness} /> : null}
