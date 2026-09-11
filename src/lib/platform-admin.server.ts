@@ -61,19 +61,44 @@ export function capabilitiesFor(role: PlatformRole): AdminCapability[] {
 }
 
 /**
- * Verifies the caller is an active platform admin using their own
- * (RLS-scoped) client, then returns their role + capabilities.
+ * Verifies the caller is an active platform admin, then returns their role
+ * + capabilities.
+ *
+ * `userId` is never client-supplied — every caller obtains it from
+ * requireSupabaseAuth's `context.userId`, which is itself derived from a
+ * server-side `supabase.auth.getClaims(token)` verification of the caller's
+ * own bearer token (auth-middleware.ts). Given that, the platform_admins
+ * lookup below intentionally goes through the service-role client rather
+ * than the caller's RLS-scoped `supabase` (kept as a parameter for callers
+ * that still need it for other reads): this is the one authorization check
+ * every admin action in the app depends on, and it must not be able to
+ * silently return "no row" because of anything RLS/self-read-policy/
+ * PostgREST-schema-cache related — a `platform_admins` row confirmed to
+ * exist by direct database inspection must always be found here. This does
+ * not weaken RLS: RLS is still fully enforced on every other table/query in
+ * the app, and `userId` here is already a server-verified value, never
+ * trusted from the request body/params.
  */
 export async function assertPlatformAdmin(
   supabase: SupabaseClient<Database>,
   userId: string,
   capability?: AdminCapability,
 ): Promise<PlatformAdmin> {
-  const { data, error } = await supabase
+  void supabase; // kept in the signature for callers that pass it; not used for this lookup — see comment above.
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const { data, error } = await supabaseAdmin
     .from("platform_admins")
     .select("user_id, email, name, role, is_active")
     .eq("user_id", userId)
     .maybeSingle();
+
+  console.log("admin_auth:assert_platform_admin", {
+    userId,
+    serviceRoleConfigured: Boolean(process.env["SUPABASE_SERVICE_ROLE_KEY"]),
+    adminRowFound: Boolean(data),
+    role: data?.role ?? null,
+    isActive: data?.is_active ?? null,
+  });
 
   if (error) throw new Error("Unauthorized");
   if (!data || !data.is_active) throw new Error("Unauthorized: platform admin access required");

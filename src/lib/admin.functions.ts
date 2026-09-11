@@ -43,18 +43,37 @@ const ACCOUNT_STATUSES: AccountStatus[] = [
   "cancelled",
 ];
 
-/** Who am I in the admin plane? Returns null for ordinary customers. */
+/**
+ * Who am I in the admin plane? Returns null for ordinary customers.
+ *
+ * Looks up platform_admins through the service-role client, scoped by
+ * context.userId (server-verified by requireSupabaseAuth's getClaims call,
+ * never client-supplied) — not through the caller's RLS-scoped
+ * context.supabase. This is the exact query /admin's "not an admin" screen
+ * depends on, so it must not be able to silently miss a row that direct
+ * database inspection confirms exists (see assertPlatformAdmin's longer
+ * comment for the full reasoning). RLS itself is untouched everywhere else.
+ */
 export const getAdminSession = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
   .handler(async ({ context }) => {
-    const { data } = await context.supabase
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { data } = await supabaseAdmin
       .from("platform_admins")
       .select("user_id, email, name, role, is_active")
       .eq("user_id", context.userId)
       .maybeSingle();
 
+    console.log("admin_auth:get_admin_session", {
+      route: "/admin",
+      userId: context.userId,
+      serviceRoleConfigured: Boolean(process.env["SUPABASE_SERVICE_ROLE_KEY"]),
+      adminRowFound: Boolean(data),
+      role: data?.role ?? null,
+      isActive: data?.is_active ?? null,
+    });
+
     if (!data || !data.is_active) {
-      const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
       const { count } = await supabaseAdmin
         .from("platform_admins")
         .select("user_id", { count: "exact", head: true })
