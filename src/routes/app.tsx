@@ -4,7 +4,8 @@ import { useQuery } from "@tanstack/react-query";
 import { Loader2 } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { workspaceQuery } from "@/lib/workspace";
-import { featureLocksQuery } from "@/lib/access";
+import { dashboardOverrideQuery } from "@/lib/access";
+import { isDashboardLocked } from "@/lib/dashboard-access";
 import { Shell } from "@/components/app/Shell";
 import { AccountLocked } from "@/components/app/AccountLocked";
 
@@ -28,33 +29,31 @@ function AppLayout() {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const { data: ws, isLoading } = useQuery(workspaceQuery(user?.id));
 
-  const { data: locks } = useQuery(featureLocksQuery(ws?.organization?.id));
-
   const org = ws?.organization;
+  const { data: dashboardOverride, isLoading: overrideLoading } = useQuery({
+    ...dashboardOverrideQuery(org?.id),
+    enabled: Boolean(org?.id),
+  });
+
   const lifecycle = org?.lifecycle_status ?? "not_provisioned";
-  // Customer-level lock (admin suspend, or cancellation) — everything blocked,
-  // data preserved. Independent of the emergency 'dashboard' feature-lock,
-  // which an admin can also set without changing lifecycle at all.
-  const customerLocked =
-    lifecycle === "suspended" || lifecycle === "cancelled" || lifecycle === "archived";
-  const dashboardForceLocked = locks?.["dashboard"] === true;
   // Dashboard ACCESS (can the customer reach a workspace at all) is distinct
   // from SERVICE access (can they use a specific billable feature). Setup
   // payment gates the latter, not the former — the customer can always see
-  // their setup/payment state once a workspace has been provisioned for them.
-  //
-  // organizations.payment_override (Phase B: setPaymentOverride /
-  // CustomerControlPanel's "Override payment requirement") is the existing,
-  // audited, per-customer demo/override mechanism — it already bypasses
-  // payment enforcement inside feature_locked() for every other feature.
-  // Reusing it here (rather than adding a second override concept) is what
-  // lets an admin demo the product to an unpaid customer: the lifecycle
-  // stays exactly what it was (never fabricated to "active"), no
-  // payment/invoice/subscription is created, only this one gate opens.
-  const setupPending =
-    !org?.payment_override &&
-    (lifecycle === "not_provisioned" || lifecycle === "setup_payment_pending");
-  const showLockedScreen = customerLocked || dashboardForceLocked || setupPending;
+  // their setup/payment state once a workspace has been provisioned for
+  // them, unless an admin has explicitly overridden that (isDashboardLocked,
+  // src/lib/dashboard-access.ts — the same rule PublicNav's Dashboard button
+  // uses, so the two can never disagree). organizations.payment_override
+  // (Phase B: setPaymentOverride / CustomerControlPanel's "Override payment
+  // requirement") remains the existing, audited, per-customer demo/override
+  // mechanism for the payment gate specifically — reused here, not
+  // duplicated: the lifecycle stays exactly what it was (never fabricated to
+  // "active"), no payment/invoice/subscription is created, only this one
+  // gate opens.
+  const showLockedScreen = isDashboardLocked({
+    lifecycleStatus: org?.lifecycle_status ?? null,
+    paymentOverride: org?.payment_override ?? false,
+    dashboardOverride: dashboardOverride ?? null,
+  });
 
   useEffect(() => {
     if (!loading && !session) navigate({ to: "/auth" });
@@ -82,7 +81,12 @@ function AppLayout() {
     }
   }, [isLoading, ws, org, showLockedScreen, pathname, navigate]);
 
-  if (loading || (session && isLoading) || (session && !isLoading && !org)) {
+  if (
+    loading ||
+    (session && isLoading) ||
+    (session && !isLoading && !org) ||
+    (session && org && overrideLoading)
+  ) {
     return (
       <div className="flex min-h-screen items-center justify-center gap-2 text-sm text-muted-foreground">
         <Loader2 className="size-4 animate-spin" /> Loading your workspace…

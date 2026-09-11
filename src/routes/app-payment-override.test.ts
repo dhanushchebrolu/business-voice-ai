@@ -13,9 +13,18 @@ import { dirname, join } from "node:path";
  * gate whenever payment_override is true), but app.tsx computed
  * setupPending from raw lifecycle_status alone and ignored it, so an admin
  * demo override could never actually reach setup_payment_pending/
- * not_provisioned customers. This is the fix, reusing the existing column
- * and write path — no new override concept, no lifecycle change, no fake
- * payment/invoice/subscription.
+ * not_provisioned customers.
+ *
+ * That fix was later folded into a single shared rule — isDashboardLocked
+ * (src/lib/dashboard-access.ts, with its own full behavioral test suite in
+ * dashboard-access.test.ts) — used by both app.tsx and PublicNav, as part
+ * of fixing a related bug: an explicit admin "Dashboard access" unlock
+ * (organization_feature_locks) also failed to bypass the setup-payment
+ * gate, for the same reason (a hand-rolled setupPending computation that
+ * ignored the relevant override). This file now only proves the wiring —
+ * that app.tsx actually passes payment_override and lifecycle_status
+ * through to the shared rule, and never fabricates lifecycle_status itself
+ * — since the boolean logic itself is covered exhaustively elsewhere.
  *
  * Source-scanned, matching this repo's established convention for route
  * files this test runner can't import/render directly.
@@ -23,23 +32,24 @@ import { dirname, join } from "node:path";
 
 const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "app.tsx"), "utf8");
 
-describe("setupPending respects an admin's payment_override", () => {
-  test("setupPending is false whenever org.payment_override is true, regardless of lifecycle", () => {
-    assert.match(
-      src,
-      /const setupPending =\s*\n?\s*!org\?\.payment_override &&\s*\n?\s*\(lifecycle === "not_provisioned" \|\| lifecycle === "setup_payment_pending"\);/,
-    );
+describe("app.tsx's dashboard gate is wired to the shared isDashboardLocked rule", () => {
+  test("showLockedScreen is computed by isDashboardLocked, not a hand-rolled boolean", () => {
+    assert.match(src, /const showLockedScreen = isDashboardLocked\(\{/);
   });
 
-  test("customerLocked (suspended/cancelled/archived) is untouched by payment_override — a locked customer stays locked", () => {
-    const customerLockedIdx = src.indexOf("const customerLocked =");
-    const nextSemicolon = src.indexOf(";", customerLockedIdx);
-    const statement = src.slice(customerLockedIdx, nextSemicolon);
-    assert.doesNotMatch(statement, /payment_override/);
-    assert.match(statement, /lifecycle === "suspended"/);
+  test("org.payment_override is passed through to the shared rule", () => {
+    const idx = src.indexOf("const showLockedScreen = isDashboardLocked({");
+    const block = src.slice(idx, idx + 300);
+    assert.match(block, /paymentOverride:\s*org\?\.payment_override/);
   });
 
-  test("lifecycle_status itself is never written by this route — payment_override only changes what the gate lets through", () => {
+  test("org.lifecycle_status is passed through, never a hardcoded/fabricated value", () => {
+    const idx = src.indexOf("const showLockedScreen = isDashboardLocked({");
+    const block = src.slice(idx, idx + 300);
+    assert.match(block, /lifecycleStatus:\s*org\?\.lifecycle_status/);
+  });
+
+  test("lifecycle_status itself is never written by this route — payment_override/dashboard override only change what the gate lets through", () => {
     assert.doesNotMatch(src, /lifecycle_status:\s*"active"/);
     assert.doesNotMatch(src, /\.update\(\{.*lifecycle/s);
   });

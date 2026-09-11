@@ -202,18 +202,20 @@ describe("route wiring — voice/phone locks are actually surfaced", () => {
     }
   });
 
-  test("app.tsx (dashboard-level routing/lifecycle logic) was not modified by this change", () => {
+  test("app.tsx (dashboard-level routing/lifecycle logic) does not render the per-page ServiceLocked banner", () => {
     const src = readRoute("app.tsx");
     assert.doesNotMatch(
       src,
       /ServiceLocked/,
       "dashboard-level gating must stay untouched by the per-page fix",
     );
-    // The existing full-dashboard lock conditions must be exactly as before.
-    assert.match(
-      src,
-      /const showLockedScreen = customerLocked \|\| dashboardForceLocked \|\| setupPending;/,
-    );
+    // app.tsx's full-dashboard lock decision is the shared isDashboardLocked
+    // rule (src/lib/dashboard-access.ts) — see dashboard-access.test.ts for
+    // its own dedicated coverage, and admin-dashboard-access.test.ts for
+    // this wiring specifically. Not re-asserted here beyond confirming the
+    // call is still present, since this suite's own scope is H2's
+    // per-feature ServiceLocked banners, not the dashboard-level gate.
+    assert.match(src, /const showLockedScreen = isDashboardLocked\(\{/);
   });
 });
 

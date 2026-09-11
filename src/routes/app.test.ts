@@ -34,6 +34,7 @@ describe("/app route guard", () => {
   test("still gates on workspace/lifecycle/feature-lock state before rendering the Shell — no weakening of customer gating", () => {
     assert.match(src, /showLockedScreen/);
     assert.match(src, /AccountLocked/);
-    assert.match(src, /featureLocksQuery/);
+    assert.match(src, /dashboardOverrideQuery/);
+    assert.match(src, /isDashboardLocked/);
   });
 });
