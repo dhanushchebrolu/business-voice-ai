@@ -42,7 +42,18 @@ function AppLayout() {
   // from SERVICE access (can they use a specific billable feature). Setup
   // payment gates the latter, not the former — the customer can always see
   // their setup/payment state once a workspace has been provisioned for them.
-  const setupPending = lifecycle === "not_provisioned" || lifecycle === "setup_payment_pending";
+  //
+  // organizations.payment_override (Phase B: setPaymentOverride /
+  // CustomerControlPanel's "Override payment requirement") is the existing,
+  // audited, per-customer demo/override mechanism — it already bypasses
+  // payment enforcement inside feature_locked() for every other feature.
+  // Reusing it here (rather than adding a second override concept) is what
+  // lets an admin demo the product to an unpaid customer: the lifecycle
+  // stays exactly what it was (never fabricated to "active"), no
+  // payment/invoice/subscription is created, only this one gate opens.
+  const setupPending =
+    !org?.payment_override &&
+    (lifecycle === "not_provisioned" || lifecycle === "setup_payment_pending");
   const showLockedScreen = customerLocked || dashboardForceLocked || setupPending;
 
   useEffect(() => {

@@ -17,6 +17,7 @@ import {
   Phone,
   PhoneCall,
   Bot,
+  Inbox,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -27,6 +28,7 @@ const NAV: {
   to:
     | "/admin"
     | "/admin/customers"
+    | "/admin/demo-requests"
     | "/admin/numbers"
     | "/admin/calls"
     | "/admin/billing"
@@ -44,6 +46,7 @@ const NAV: {
 }[] = [
   { to: "/admin", label: "Overview", icon: LayoutDashboard, exact: true },
   { to: "/admin/customers", label: "Customers", icon: Users },
+  { to: "/admin/demo-requests", label: "Demo requests", icon: Inbox },
   { to: "/admin/numbers", label: "Phone numbers", icon: Phone },
   { to: "/admin/calls", label: "Calls", icon: PhoneCall },
   { to: "/admin/billing", label: "Billing", icon: Receipt },

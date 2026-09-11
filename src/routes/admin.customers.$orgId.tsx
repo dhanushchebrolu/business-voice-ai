@@ -240,6 +240,17 @@ function CustomerDetail() {
             "not_provisioned") as LifecycleStatus
         }
         paymentOverride={Boolean((org as { payment_override?: boolean }).payment_override)}
+        paymentOverrideReason={
+          (org as { payment_override_reason?: string | null }).payment_override_reason ?? null
+        }
+        paymentOverrideByEmail={
+          (data.audit ?? []).find(
+            (a) => a.action === "PAYMENT_OVERRIDE_SET" || a.action === "PAYMENT_OVERRIDE_CLEARED",
+          )?.admin_email ?? null
+        }
+        paymentOverrideAt={
+          (org as { payment_override_at?: string | null }).payment_override_at ?? null
+        }
         readiness={readiness ?? null}
         onChanged={invalidate}
       />

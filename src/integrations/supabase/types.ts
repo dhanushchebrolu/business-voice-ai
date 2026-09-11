@@ -1731,36 +1731,56 @@ export type Database = {
       }
       demo_requests: {
         Row: {
+          admin_notes: string | null
           business_name: string | null
+          converted: boolean
           created_at: string
           email: string
           id: string
           message: string | null
           name: string
+          organization_id: string | null
           phone: string | null
           status: string
+          updated_at: string
         }
         Insert: {
+          admin_notes?: string | null
           business_name?: string | null
+          converted?: boolean
           created_at?: string
           email: string
           id?: string
           message?: string | null
           name: string
+          organization_id?: string | null
           phone?: string | null
           status?: string
+          updated_at?: string
         }
         Update: {
+          admin_notes?: string | null
           business_name?: string | null
+          converted?: boolean
           created_at?: string
           email?: string
           id?: string
           message?: string | null
           name?: string
+          organization_id?: string | null
           phone?: string | null
           status?: string
+          updated_at?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "demo_requests_organization_id_fkey"
+            columns: ["organization_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       public_knowledge_base: {
         Row: {

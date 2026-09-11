@@ -72,6 +72,8 @@ export interface CreateClientInput {
   walletOpeningBalance?: number | undefined; // paise
   notes?: string | undefined;
   internalNotes?: string | undefined;
+  /** When set, this creation is a demo-request conversion — the source row is marked WON/converted and linked to the new organization on success. */
+  sourceDemoRequestId?: string | undefined;
 }
 
 /**
@@ -94,6 +96,25 @@ export const createClientAccount = createServerFn({ method: "POST" })
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const email = data.email.trim().toLowerCase();
 
+    // Idempotency guard #1: a demo request can convert into a customer at
+    // most once. Checked before the org insert so a double-click on
+    // "Create customer" for the same request can never create two
+    // organizations — the second attempt fails fast with a clear error
+    // instead of silently succeeding again.
+    if (data.sourceDemoRequestId) {
+      const { data: demoRequest } = await supabaseAdmin
+        .from("demo_requests")
+        .select("id, converted, organization_id")
+        .eq("id", data.sourceDemoRequestId)
+        .maybeSingle();
+      if (!demoRequest) throw new Error("Demo request not found");
+      if (demoRequest.converted) {
+        throw new Error("This demo request has already been converted to a customer");
+      }
+    }
+
+    // Idempotency guard #2: the same contact email can't provision a second
+    // organization, regardless of whether it came through a demo request.
     const { data: clash } = await supabaseAdmin
       .from("organizations")
       .select("id, client_id, name")
@@ -183,6 +204,29 @@ export const createClientAccount = createServerFn({ method: "POST" })
       newValue: { client_id: org.client_id, name: org.name, email },
       reason: "Client created from admin control centre",
     });
+
+    if (data.sourceDemoRequestId) {
+      const { error: convertError } = await supabaseAdmin
+        .from("demo_requests")
+        .update({ status: "WON", converted: true, organization_id: org.id })
+        .eq("id", data.sourceDemoRequestId);
+      if (convertError) {
+        // The organization already exists and is fully usable — a failure
+        // linking the source demo request back is logged, not fatal. The
+        // demo request simply stays unconverted and can be retried; the
+        // guard above prevents that retry from ever double-provisioning.
+        console.error("admin-clients:demo_request_conversion_link_failed", convertError);
+      } else {
+        await writeAudit(admin, {
+          action: "demo_request.converted",
+          entityType: "demo_request",
+          entityId: data.sourceDemoRequestId,
+          organizationId: org.id,
+          newValue: { status: "WON", converted: true, organization_id: org.id },
+          reason: "Converted to customer from admin control centre",
+        });
+      }
+    }
 
     return { id: org.id, clientId: org.client_id };
   });
