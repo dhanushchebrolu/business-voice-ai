@@ -68,17 +68,32 @@ export const workspaceQuery = (userId: string | undefined) =>
         .maybeSingle();
       if (error) throw error;
       const organization = (membership?.organizations as Organization | null) ?? null;
-      if (!organization) return { organization: null, business: null, agent: null, subscription: null, role: null };
+      if (!organization)
+        return { organization: null, business: null, agent: null, subscription: null, role: null };
 
       const [businessRes, subRes] = await Promise.all([
-        supabase.from("businesses").select("*").eq("organization_id", organization.id).order("created_at").limit(1).maybeSingle(),
-        supabase.from("subscriptions").select("*").eq("organization_id", organization.id).maybeSingle(),
+        supabase
+          .from("businesses")
+          .select("*")
+          .eq("organization_id", organization.id)
+          .order("created_at")
+          .limit(1)
+          .maybeSingle(),
+        supabase
+          .from("subscriptions")
+          .select("*")
+          .eq("organization_id", organization.id)
+          .maybeSingle(),
       ]);
 
       const business = businessRes.data ?? null;
       let agent: AgentConfig | null = null;
       if (business) {
-        const { data } = await supabase.from("agent_configs").select("*").eq("business_id", business.id).maybeSingle();
+        const { data } = await supabase
+          .from("agent_configs")
+          .select("*")
+          .eq("business_id", business.id)
+          .maybeSingle();
         agent = data ?? null;
       }
 
@@ -113,7 +128,11 @@ export const faqsQuery = (businessId: string | undefined) =>
     queryKey: ["faqs", businessId],
     enabled: Boolean(businessId),
     queryFn: async () => {
-      const { data, error } = await supabase.from("faqs").select("*").eq("business_id", businessId!).order("sort_order");
+      const { data, error } = await supabase
+        .from("faqs")
+        .select("*")
+        .eq("business_id", businessId!)
+        .order("sort_order");
       if (error) throw error;
       return data;
     },
@@ -124,7 +143,11 @@ export const rulesQuery = (businessId: string | undefined) =>
     queryKey: ["rules", businessId],
     enabled: Boolean(businessId),
     queryFn: async () => {
-      const { data, error } = await supabase.from("business_rules").select("*").eq("business_id", businessId!).order("priority");
+      const { data, error } = await supabase
+        .from("business_rules")
+        .select("*")
+        .eq("business_id", businessId!)
+        .order("priority");
       if (error) throw error;
       return data;
     },
@@ -135,7 +158,11 @@ export const hoursQuery = (businessId: string | undefined) =>
     queryKey: ["hours", businessId],
     enabled: Boolean(businessId),
     queryFn: async () => {
-      const { data, error } = await supabase.from("business_hours").select("*").eq("business_id", businessId!).order("day_of_week");
+      const { data, error } = await supabase
+        .from("business_hours")
+        .select("*")
+        .eq("business_id", businessId!)
+        .order("day_of_week");
       if (error) throw error;
       return data;
     },
@@ -233,7 +260,9 @@ export const usageQuery = (organizationId: string | undefined) =>
       // Provider cost/margin must never reach a customer-facing response (spec §27/§73/§98).
       const { data, error } = await supabase
         .from("usage_records")
-        .select("id, organization_id, call_id, kind, provider, quantity, unit, billable_cost, occurred_at")
+        .select(
+          "id, organization_id, call_id, kind, provider, quantity, unit, billable_cost, occurred_at",
+        )
         .eq("organization_id", organizationId!)
         .order("occurred_at", { ascending: false })
         .limit(500);
@@ -242,7 +271,76 @@ export const usageQuery = (organizationId: string | undefined) =>
     },
   });
 
-export function agentStatusLabel(agent: AgentConfig | null, hasNumber: boolean): {
+export type ContactRow = Database["public"]["Tables"]["contacts"]["Row"];
+export type CampaignRow = Database["public"]["Tables"]["campaigns"]["Row"];
+export type CampaignContactRow = Database["public"]["Tables"]["campaign_contacts"]["Row"];
+
+export const contactsQuery = (organizationId: string | undefined) =>
+  queryOptions({
+    queryKey: ["contacts", organizationId],
+    enabled: Boolean(organizationId),
+    queryFn: async (): Promise<ContactRow[]> => {
+      const { data, error } = await supabase
+        .from("contacts")
+        .select("*")
+        .eq("organization_id", organizationId!)
+        .order("created_at", { ascending: false })
+        .limit(2000);
+      if (error) throw error;
+      return data;
+    },
+  });
+
+export const campaignsQuery = (organizationId: string | undefined) =>
+  queryOptions({
+    queryKey: ["campaigns", organizationId],
+    enabled: Boolean(organizationId),
+    queryFn: async (): Promise<CampaignRow[]> => {
+      const { data, error } = await supabase
+        .from("campaigns")
+        .select("*")
+        .eq("organization_id", organizationId!)
+        .order("created_at", { ascending: false });
+      if (error) throw error;
+      return data;
+    },
+  });
+
+export const campaignQuery = (campaignId: string | undefined) =>
+  queryOptions({
+    queryKey: ["campaign", campaignId],
+    enabled: Boolean(campaignId),
+    queryFn: async (): Promise<CampaignRow | null> => {
+      const { data, error } = await supabase
+        .from("campaigns")
+        .select("*")
+        .eq("id", campaignId!)
+        .maybeSingle();
+      if (error) throw error;
+      return data;
+    },
+  });
+
+export const campaignContactsQuery = (campaignId: string | undefined) =>
+  queryOptions({
+    queryKey: ["campaign-contacts", campaignId],
+    enabled: Boolean(campaignId),
+    queryFn: async (): Promise<(CampaignContactRow & { contacts: ContactRow | null })[]> => {
+      const { data, error } = await supabase
+        .from("campaign_contacts")
+        .select("*, contacts(*)")
+        .eq("campaign_id", campaignId!)
+        .order("created_at", { ascending: false })
+        .limit(2000);
+      if (error) throw error;
+      return data as never;
+    },
+  });
+
+export function agentStatusLabel(
+  agent: AgentConfig | null,
+  hasNumber: boolean,
+): {
   label: string;
   tone: "live" | "ready" | "idle" | "error";
 } {
@@ -288,7 +386,10 @@ export const invoicesQuery = (orgId: string | undefined) =>
     },
   });
 
-export const ACCOUNT_STATUS_LABEL: Record<AccountStatus, { label: string; tone: "live" | "ready" | "idle" | "accent" | "error" }> = {
+export const ACCOUNT_STATUS_LABEL: Record<
+  AccountStatus,
+  { label: string; tone: "live" | "ready" | "idle" | "accent" | "error" }
+> = {
   payment_required: { label: "Payment required", tone: "error" },
   setup_in_progress: { label: "Setup in progress", tone: "ready" },
   active: { label: "Active", tone: "live" },

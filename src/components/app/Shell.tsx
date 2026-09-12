@@ -15,6 +15,8 @@ import {
   X,
   LogOut,
   ChevronDown,
+  Megaphone,
+  Contact,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Logo, StatusPill } from "./primitives";
@@ -38,6 +40,8 @@ const NAV: {
     group: "Workspace",
     items: [
       { to: "/app", label: "Overview", icon: LayoutDashboard },
+      { to: "/app/campaigns", label: "Campaigns", icon: Megaphone },
+      { to: "/app/contacts", label: "Contacts", icon: Contact },
       { to: "/app/calls", label: "Calls", icon: PhoneCall },
       { to: "/app/leads", label: "Leads", icon: Users },
     ],
