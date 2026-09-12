@@ -60,6 +60,44 @@ describe("request construction", () => {
     assert.equal(capture.init?.method, "POST");
   });
 
+  test("createDeployment: sends connection_configs as an array of {connection_id, phone_numbers} — the confirmed ground-truth shape, not flat top-level fields", async () => {
+    const capture: { url?: string; init?: RequestInit } = {};
+    const config = {
+      ...baseConfig,
+      fetchImpl: mockFetch(200, { deployment_id: "dep_1" }, capture),
+    };
+    await createDeployment(config, {
+      name: "Klyro - Client inbound line",
+      description: "Inbound line provisioned by Klyro",
+      appId: "app_1",
+      appVersion: 3,
+      connectionId: "conn_1",
+      phoneNumbers: ["+911111111111", "+912222222222"],
+      inboundConfig: {
+        startTime: "10:00",
+        endTime: "20:00",
+        allowedDays: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"],
+        timezone: "Asia/Kolkata",
+      },
+    });
+    const body = JSON.parse(capture.init?.body as string);
+    assert.deepEqual(body.connection_configs, [
+      { connection_id: "conn_1", phone_numbers: ["+911111111111", "+912222222222"] },
+    ]);
+    assert.equal(body.connection_id, undefined, "must not also send the old flat connection_id");
+    assert.equal(body.phone_numbers, undefined, "must not also send the old flat phone_numbers");
+    assert.equal(body.name, "Klyro - Client inbound line");
+    assert.equal(body.description, "Inbound line provisioned by Klyro");
+    assert.equal(body.app_id, "app_1");
+    assert.equal(body.app_version, 3);
+    assert.deepEqual(body.inbound_config, {
+      start_time: "10:00",
+      end_time: "20:00",
+      allowed_days: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"],
+      timezone: "Asia/Kolkata",
+    });
+  });
+
   test("updateDeployment: PATCHes to .../deployments/{id}, sending only the fields provided", async () => {
     const capture: { url?: string; init?: RequestInit } = {};
     const config = {

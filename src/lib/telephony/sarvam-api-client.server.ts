@@ -12,16 +12,19 @@ import { TelephonyAdapterError } from "./adapter.ts";
  * already-verified/documented API contracts — this session has never
  * independently fetched Sarvam's docs (network egress to
  * docs.sarvam.ai/apps.sarvam.ai is blocked at the proxy level) and has never
- * had a live SARVAM_API_KEY to exercise a real request. The JSON *request
- * body* field names (snake_case conversions of the verified TypeScript
- * shapes below) are this session's best-effort construction, cross-checked
- * only against the independently-verified webhook payload field names
- * (app_id, app_version, deployment_id, campaign_id, interaction_id) where
- * they overlap — anything that does NOT overlap with a verified webhook
- * field (connection_id, phone_numbers, inbound_config.*, the instant-outbound
- * destination-number field, webhook correlation fields) is UNVERIFIED
- * against a live response and flagged at its point of use below. If a real
- * request ever comes back 400, check field names here first.
+ * had a live SARVAM_API_KEY to exercise a real request. The inbound-
+ * deployment and instant-outbound request bodies were later supplied
+ * verbatim as ground-truth examples (connection_configs as an array of
+ * {connection_id, phone_numbers} for deployments; the nested
+ * app_config/user_config/webhook_config shape for instant outbound — see
+ * toDeploymentRequestBody/toInstantOutboundBody) and this file was aligned
+ * to match exactly. Anything NOT covered by one of those confirmed examples
+ * (campaign list/get/update paths and bodies) remains this session's
+ * best-effort construction, cross-checked only against the independently-
+ * verified webhook payload field names (app_id, app_version, deployment_id,
+ * campaign_id, interaction_id) where they overlap, and is flagged at its
+ * point of use below. If a real request ever comes back 400, check field
+ * names here first.
  *
  * Every function here is a pure request/response boundary: it builds one
  * request, sends it, and normalizes the response or error. No tenant
@@ -170,17 +173,19 @@ export interface DeploymentResult {
 }
 
 /**
- * UNVERIFIED field names beyond app_id/app_version (see module doc):
- * connection_id, phone_numbers, inbound_config.{start_time,end_time,
- * allowed_days,timezone}.
+ * Field names confirmed directly by the requester as a ground-truth example
+ * body (connection_configs as an array of {connection_id, phone_numbers},
+ * not flat top-level fields — the flat shape this function used before was
+ * this session's own unverified reconstruction and never matched a
+ * confirmed example). inbound_config.{start_time,end_time,allowed_days,
+ * timezone} was likewise supplied verbatim.
  */
 function toDeploymentRequestBody(input: DeploymentRequestShape): Record<string, unknown> {
   const body: Record<string, unknown> = {
     name: input.name,
     app_id: input.appId,
     app_version: input.appVersion,
-    connection_id: input.connectionId,
-    phone_numbers: input.phoneNumbers,
+    connection_configs: [{ connection_id: input.connectionId, phone_numbers: input.phoneNumbers }],
   };
   if (input.description !== undefined) body["description"] = input.description;
   if (input.inboundConfig) {

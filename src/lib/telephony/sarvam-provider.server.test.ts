@@ -489,7 +489,9 @@ test("createInboundDeployment: once orgId/workspaceId are configured, issues a r
   assert.equal(headers["X-API-Key"], "sk_test_key_in");
   const body = JSON.parse(calledInit?.body as string);
   assert.equal(body.app_id, "app_1");
-  assert.equal(body.connection_id, "conn_1");
+  assert.deepEqual(body.connection_configs, [
+    { connection_id: "conn_1", phone_numbers: ["+912222222222"] },
+  ]);
 });
 
 test("createInboundDeployment: on a genuinely successful response, returns the real deploymentId — never fabricated", async () => {
