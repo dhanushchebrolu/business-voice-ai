@@ -41,7 +41,9 @@ export const listPhoneNumbers = createServerFn({ method: "GET" })
     const { data: numbers, error } = await query;
     if (error) throw error;
 
-    const orgIds = [...new Set((numbers ?? []).map((n) => n.organization_id))];
+    const orgIds = [
+      ...new Set((numbers ?? []).map((n) => n.organization_id).filter((id): id is string => !!id)),
+    ];
     const { data: orgs } = orgIds.length
       ? await supabaseAdmin.from("organizations").select("id, client_id, name").in("id", orgIds)
       : { data: [] as { id: string; client_id: string; name: string }[] };
@@ -49,9 +51,77 @@ export const listPhoneNumbers = createServerFn({ method: "GET" })
 
     return (numbers ?? []).map((n) => ({
       ...n,
-      clientId: orgById.get(n.organization_id)?.client_id ?? "—",
-      customerName: orgById.get(n.organization_id)?.name ?? "Unknown",
+      clientId: (n.organization_id && orgById.get(n.organization_id)?.client_id) || "—",
+      customerName:
+        (n.organization_id && orgById.get(n.organization_id)?.name) ||
+        (n.organization_id ? "Unknown" : "Unassigned (pool)"),
     }));
+  });
+
+interface ImportPoolNumberInput {
+  provider: string;
+  e164: string;
+  country?: string;
+  displayNumber?: string;
+  providerNumberId?: string;
+  monthlyPrice?: number;
+  reason: string;
+}
+
+/**
+ * Adds an already-acquired number to the unassigned pool (organization_id
+ * NULL, status 'available') instead of attaching it to a client directly.
+ * This is the supply side of automatic provisioning: an admin buys/imports
+ * numbers ahead of demand here, and claimAvailablePhoneNumber
+ * (phone-number-pool.server.ts) atomically hands one to whichever
+ * organization's setup payment clears next — see the
+ * 20260912160000_phone_number_pool.sql migration for the schema this needs.
+ */
+export const importPhoneNumberToPool = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: ImportPoolNumberInput) => {
+    if (!input?.provider) throw new Error("provider is required");
+    if (!input.e164?.trim()) throw new Error("e164 is required");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+
+    const { data: row, error } = await supabaseAdmin
+      .from("phone_numbers")
+      .insert({
+        organization_id: null,
+        e164: data.e164,
+        display_number: data.displayNumber ?? data.e164,
+        country: data.country ?? "IN",
+        provider: data.provider,
+        provider_number_id: data.providerNumberId ?? null,
+        status: "available",
+        inbound_enabled: false,
+        outbound_enabled: false,
+        monthly_price: data.monthlyPrice ?? null,
+        purchased_at: new Date().toISOString(),
+        provisioned_by: admin.userId,
+      })
+      .select("id")
+      .single();
+    if (error) {
+      if ((error as { code?: string }).code === "23505")
+        throw new Error("This number is already in the pool or assigned to a client.");
+      throw error;
+    }
+
+    await writeAudit(admin, {
+      action: "NUMBER_IMPORTED_TO_POOL",
+      entityType: "phone_number",
+      entityId: row.id,
+      organizationId: null,
+      newValue: { e164: data.e164, provider: data.provider },
+      reason: data.reason,
+    });
+    return { id: row.id, e164: data.e164 };
   });
 
 interface ProvisionNumberInput {
