@@ -2,6 +2,8 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { claimAvailablePhoneNumber } from "./phone-number-pool.server.ts";
 import { createInboundDeploymentForNumbers } from "./sarvam-inbound-deployment.server.ts";
+import { validateSarvamEnv } from "./telephony.server.ts";
+import { computeProvisioningState, type ProvisioningState } from "./provisioning-state.ts";
 
 /**
  * Automatic provisioning orchestrator: what runs the instant a client's
@@ -51,6 +53,8 @@ export interface ProvisionOrganizationResult {
   numberClaimedNow: boolean;
   deploymentCreatedNow: boolean;
   note: string;
+  /** The seven-state machine-readable status (Task list item 7) — see provisioning-state.ts. */
+  state: ProvisioningState;
 }
 
 export async function provisionOrganizationAfterPayment(
@@ -60,6 +64,8 @@ export async function provisionOrganizationAfterPayment(
   const notes: string[] = [];
   let numberClaimedNow = false;
   let deploymentCreatedNow = false;
+  let deploymentAttemptFailed = false;
+  const sarvamCredentialsConfigured = validateSarvamEnv().allPresent;
 
   try {
     const { data: org } = await supabaseAdmin
@@ -69,7 +75,14 @@ export async function provisionOrganizationAfterPayment(
       .maybeSingle();
     if (!org) {
       const note = "Organization not found — cannot provision.";
-      return { organizationId, phoneNumberId: null, numberClaimedNow, deploymentCreatedNow, note };
+      return {
+        organizationId,
+        phoneNumberId: null,
+        numberClaimedNow,
+        deploymentCreatedNow,
+        note,
+        state: "failed",
+      };
     }
 
     // Only ever advance forward from setup_paid — never regress an
@@ -83,7 +96,9 @@ export async function provisionOrganizationAfterPayment(
     // rather than claiming a second one from the pool.
     const { data: existingNumbers } = await supabaseAdmin
       .from("phone_numbers")
-      .select("id, status, provider, connection_id, agent_config_id, provider_deployment_id")
+      .select(
+        "id, status, provider, connection_id, agent_config_id, provider_deployment_id, inbound_enabled",
+      )
       .eq("organization_id", organizationId)
       .neq("status", "released")
       .order("created_at", { ascending: true });
@@ -116,6 +131,15 @@ export async function provisionOrganizationAfterPayment(
         numberClaimedNow,
         deploymentCreatedNow,
         note: notes.join(" "),
+        state: computeProvisioningState({
+          sarvamCredentialsConfigured,
+          lastAttemptFailed: false,
+          hasNumber: false,
+          numberActive: false,
+          connectionLinked: false,
+          agentSarvamMapped: false,
+          inboundEnabled: false,
+        }),
       };
     }
 
@@ -175,8 +199,10 @@ export async function provisionOrganizationAfterPayment(
           .eq("id", numberRow.id)
           .eq("status", numberRow.status); // no-op if something else already moved it
         if (activateError) throw activateError;
+        numberRow = { ...numberRow, status: "active", inbound_enabled: true };
         notes.push("Phone number is now active with inbound and outbound enabled.");
       } catch (err) {
+        deploymentAttemptFailed = true;
         notes.push(
           `Automatic inbound deployment creation failed: ${(err as Error).message}. Retry from the admin provisioning view once resolved.`,
         );
@@ -199,6 +225,15 @@ export async function provisionOrganizationAfterPayment(
       numberClaimedNow,
       deploymentCreatedNow,
       note: notes.join(" "),
+      state: computeProvisioningState({
+        sarvamCredentialsConfigured,
+        lastAttemptFailed: deploymentAttemptFailed,
+        hasNumber: true,
+        numberActive: numberRow.status === "active",
+        connectionLinked: connectionReady,
+        agentSarvamMapped: agentReady,
+        inboundEnabled: Boolean(numberRow.inbound_enabled),
+      }),
     };
   } catch (err) {
     const note = `Automatic provisioning failed unexpectedly: ${(err as Error).message}`;
@@ -212,7 +247,14 @@ export async function provisionOrganizationAfterPayment(
       // Best-effort only — the caller (Razorpay webhook) must never fail
       // because this side-channel status write also failed.
     }
-    return { organizationId, phoneNumberId: null, numberClaimedNow, deploymentCreatedNow, note };
+    return {
+      organizationId,
+      phoneNumberId: null,
+      numberClaimedNow,
+      deploymentCreatedNow,
+      note,
+      state: "failed",
+    };
   }
 }
 

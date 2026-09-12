@@ -1,10 +1,13 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { assertPlatformAdmin, writeAudit } from "@/lib/platform-admin.server";
-import { getTelephonyAdapter } from "@/lib/telephony.server";
+import { getTelephonyAdapter, validateSarvamEnv } from "@/lib/telephony.server";
 import { SarvamTelephonyAdapter } from "@/lib/telephony/sarvam-provider.server";
+import { TelephonyAdapterError } from "@/lib/telephony/adapter";
 import { createInboundDeploymentForNumbers } from "@/lib/sarvam-inbound-deployment.server";
-import type { Json } from "@/integrations/supabase/types";
+import { sendSarvamInstantOutboundCall } from "@/lib/sarvam-outbound-call.server";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Database, Json } from "@/integrations/supabase/types";
 
 /**
  * A Sarvam campaign's raw response body, as passed through to the admin
@@ -418,4 +421,221 @@ export const updateSarvamCampaign = createServerFn({ method: "POST" })
     });
 
     return { ok: true as const, campaignId: updated.campaignId };
+  });
+
+/* ------------------------------------------------------------------ */
+/* 6. Provider connectivity + single-target live tests                  */
+/* ------------------------------------------------------------------ */
+
+export interface SarvamConnectivityTestResult {
+  env: ReturnType<typeof validateSarvamEnv>;
+  outboundProbe: {
+    attempted: boolean;
+    ok: boolean;
+    status: number | null;
+    message: string | null;
+  };
+}
+
+/**
+ * Read-only "is Sarvam actually reachable" check for the admin Settings
+ * page. Never places a call or creates a deployment — the only network
+ * request it ever makes is listCampaigns(), a real, already-implemented
+ * GET request (see sarvam-provider.server.ts's listCampaigns / the
+ * verified scheduling/v1/.../campaigns endpoint) that is inherently
+ * read-only and side-effect-free, using the OUTBOUND key + org/workspace
+ * scope.
+ *
+ * The inbound key's liveness is NOT independently verified here: no
+ * confirmed read-only inbound-management endpoint exists to probe with
+ * (see the module doc's "Sarvam app/agent creation... no public API was
+ * found" note) — inventing one would violate the "do not invent
+ * endpoints" instruction. Only its *presence* is checked (via
+ * validateSarvamEnv). The inbound key's actual validity against Sarvam is
+ * exercised for real by testSarvamInboundDeployment below, which is the
+ * honest way to test it: by doing the one real thing that key is for.
+ *
+ * Naturally runs as a no-op probe everywhere the required env vars are
+ * unset (any non-production environment among them) — there is no
+ * separate "is this deployed" flag to invent; env-var presence already is
+ * that signal here.
+ */
+export const testSarvamConnectivity = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }): Promise<SarvamConnectivityTestResult> => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "customers.read");
+
+    const env = validateSarvamEnv();
+    const result: SarvamConnectivityTestResult = {
+      env,
+      outboundProbe: { attempted: false, ok: false, status: null, message: null },
+    };
+
+    if (env.outboundApiKeyPresent && env.orgIdPresent && env.workspaceIdPresent) {
+      result.outboundProbe.attempted = true;
+      const adapter = getTelephonyAdapter("sarvam");
+      try {
+        if (!adapter || !(adapter instanceof SarvamTelephonyAdapter))
+          throw new Error("Sarvam adapter is not available.");
+        const campaigns = await adapter.listCampaigns();
+        result.outboundProbe.ok = true;
+        result.outboundProbe.status = 200;
+        result.outboundProbe.message = `Authenticated — ${campaigns.length} campaign(s) visible to this org/workspace.`;
+      } catch (err) {
+        // TelephonyAdapterError messages are constructed to never include
+        // the API key or request headers (see sarvam-api-client.server.ts's
+        // mapErrorResponse) — safe to surface as-is to an admin.
+        result.outboundProbe.ok = false;
+        result.outboundProbe.status = err instanceof TelephonyAdapterError ? err.status : null;
+        result.outboundProbe.message = (err as Error).message;
+      }
+    }
+
+    await writeAudit(admin, {
+      action: "SARVAM_CONNECTIVITY_TEST",
+      entityType: "platform",
+      entityId: null,
+      organizationId: null,
+      newValue: result as unknown as Json,
+      reason: "Provider connectivity test",
+    });
+
+    return result;
+  });
+
+/**
+ * Verifies a phone number's organization is restricted to a demo/test
+ * account before any live-test action below is allowed to touch it —
+ * reuses the existing businesses.is_demo flag (already used for demo
+ * data seeding) rather than inventing a new "is_test" column. Throws with
+ * a clear, actionable message when the target isn't a demo org.
+ */
+async function assertDemoOrganization(
+  supabaseAdmin: SupabaseClient<Database>,
+  organizationId: string,
+): Promise<void> {
+  const { data: business } = await supabaseAdmin
+    .from("businesses")
+    .select("is_demo")
+    .eq("organization_id", organizationId)
+    .maybeSingle();
+  if (!business?.is_demo) {
+    throw new Error(
+      "Live provider tests are restricted to a demo/test organization (businesses.is_demo must be true). " +
+        "Mark a dedicated test organization's business record as demo before running this.",
+    );
+  }
+}
+
+interface TestSarvamInboundDeploymentInput {
+  phoneNumberId: string;
+  confirmTest: boolean;
+  reason: string;
+}
+
+/**
+ * One-number, explicitly-confirmed live test of real inbound deployment
+ * creation — calls the exact same createInboundDeploymentForNumbers the
+ * automatic orchestrator and the regular admin action use (Task #92), so
+ * this test proves the real path works, not a parallel one. Restricted to
+ * a single phoneNumberId (never an array/bulk input) belonging to a
+ * businesses.is_demo organization, and requires confirmTest: true as a
+ * second, explicit safety gate beyond the usual admin authorization.
+ */
+export const testSarvamInboundDeployment = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: TestSarvamInboundDeploymentInput) => {
+    if (!input?.phoneNumberId) throw new Error("phoneNumberId is required");
+    if (input.confirmTest !== true)
+      throw new Error("This creates a real Sarvam deployment — explicit confirmation is required.");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+
+    const { data: numberRow } = await supabaseAdmin
+      .from("phone_numbers")
+      .select("id, organization_id")
+      .eq("id", data.phoneNumberId)
+      .maybeSingle();
+    if (!numberRow) throw new Error("Phone number not found.");
+    if (!numberRow.organization_id)
+      throw new Error("This phone number has no organization assigned.");
+    await assertDemoOrganization(supabaseAdmin, numberRow.organization_id);
+
+    const result = await createInboundDeploymentForNumbers(supabaseAdmin, {
+      phoneNumberIds: [data.phoneNumberId],
+      name: `Klyro TEST deployment — ${new Date().toISOString()}`,
+    });
+
+    await writeAudit(admin, {
+      action: "SARVAM_TEST_INBOUND_DEPLOYMENT",
+      entityType: "phone_number",
+      entityId: data.phoneNumberId,
+      organizationId: result.organizationId,
+      newValue: { deploymentId: result.deploymentId },
+      reason: data.reason,
+    });
+
+    return result;
+  });
+
+interface TestSarvamOutboundCallInput {
+  phoneNumberId: string;
+  toE164: string;
+  confirmTest: boolean;
+  reason: string;
+}
+
+/**
+ * One-call, explicitly-confirmed live test of real outbound dialing —
+ * calls the exact same sendSarvamInstantOutboundCall the customer-facing
+ * path uses. Restricted to a single destination number belonging to a
+ * businesses.is_demo organization's phone number, and requires
+ * confirmTest: true. The admin is responsible for entering only a real
+ * test number they control — this function has no separate "test contact
+ * registry" to invent, and never accepts more than one destination.
+ */
+export const testSarvamOutboundCall = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: TestSarvamOutboundCallInput) => {
+    if (!input?.phoneNumberId) throw new Error("phoneNumberId is required");
+    if (!input.toE164 || !/^\+\d{6,15}$/.test(input.toE164))
+      throw new Error("A valid E.164 destination number is required");
+    if (input.confirmTest !== true)
+      throw new Error("This places a real outbound call — explicit confirmation is required.");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+
+    const { data: numberRow } = await supabaseAdmin
+      .from("phone_numbers")
+      .select("id, organization_id")
+      .eq("id", data.phoneNumberId)
+      .maybeSingle();
+    if (!numberRow) throw new Error("Phone number not found.");
+    if (!numberRow.organization_id)
+      throw new Error("This phone number has no organization assigned.");
+    await assertDemoOrganization(supabaseAdmin, numberRow.organization_id);
+
+    const result = await sendSarvamInstantOutboundCall(supabaseAdmin, {
+      phoneNumberId: data.phoneNumberId,
+      toE164: data.toE164,
+    });
+
+    await writeAudit(admin, {
+      action: "SARVAM_TEST_OUTBOUND_CALL",
+      entityType: "call_log",
+      entityId: result.callId,
+      organizationId: numberRow.organization_id,
+      newValue: { toE164: data.toE164, interactionId: result.interactionId },
+      reason: data.reason,
+    });
+
+    return result;
   });

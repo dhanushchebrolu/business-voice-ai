@@ -95,6 +95,50 @@ export function resolveSarvamKeys(): {
   };
 }
 
+export interface SarvamEnvValidation {
+  inboundApiKeyPresent: boolean;
+  outboundApiKeyPresent: boolean;
+  orgIdPresent: boolean;
+  workspaceIdPresent: boolean;
+  allPresent: boolean;
+  /** Human-readable names of exactly what's missing — never the values themselves. */
+  missing: string[];
+}
+
+/**
+ * Explicit presence validation for the four Sarvam prerequisites named in
+ * the production readiness checklist: SARVAM_INBOUND_VOICE_API_KEY,
+ * SARVAM_OUTBOUND_VOICE_API_KEY, SARVAM_ORG_ID, SARVAM_WORKSPACE_ID. Key
+ * presence is checked via resolveSarvamKeys() so the same fallback chain
+ * (dedicated key -> SARVAM_VOICE_AGENTS_API_KEY -> legacy SARVAM_API_KEY)
+ * counts here too — this reports whether a usable value resolves, not
+ * whether that literal env var name is set. Org/workspace id have no
+ * fallback: they're read directly. Never returns or logs a value, only
+ * booleans and the names of what's missing.
+ */
+export function validateSarvamEnv(): SarvamEnvValidation {
+  const { inboundApiKey, outboundApiKey } = resolveSarvamKeys();
+  const orgIdPresent = Boolean(process.env["SARVAM_ORG_ID"]);
+  const workspaceIdPresent = Boolean(process.env["SARVAM_WORKSPACE_ID"]);
+  const inboundApiKeyPresent = Boolean(inboundApiKey);
+  const outboundApiKeyPresent = Boolean(outboundApiKey);
+
+  const missing: string[] = [];
+  if (!inboundApiKeyPresent) missing.push("SARVAM_INBOUND_VOICE_API_KEY");
+  if (!outboundApiKeyPresent) missing.push("SARVAM_OUTBOUND_VOICE_API_KEY");
+  if (!orgIdPresent) missing.push("SARVAM_ORG_ID");
+  if (!workspaceIdPresent) missing.push("SARVAM_WORKSPACE_ID");
+
+  return {
+    inboundApiKeyPresent,
+    outboundApiKeyPresent,
+    orgIdPresent,
+    workspaceIdPresent,
+    allPresent: missing.length === 0,
+    missing,
+  };
+}
+
 export function providerStatus() {
   return TELEPHONY_PROVIDERS.map((p) => {
     if (p.id === "sarvam") {

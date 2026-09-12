@@ -7,6 +7,8 @@ import {
   writeAudit,
   type PlatformRole,
 } from "@/lib/platform-admin.server";
+import { validateSarvamEnv } from "@/lib/telephony.server";
+import { computeProvisioningState } from "@/lib/provisioning-state";
 import type { Database } from "@/integrations/supabase/types";
 
 /**
@@ -484,8 +486,43 @@ export const getCustomerDetail = createServerFn({ method: "GET" })
       audit: audit.data ?? [],
       knowledge: knowledge.data ?? [],
       connections: connections.data ?? [],
+      provisioningState: computeProvisioningStateForAdminView({
+        org: org.data,
+        numbers: numbers.data ?? [],
+        agent: agent.data,
+      }),
     };
   });
+
+/**
+ * Wraps computeProvisioningState (provisioning-state.ts) for the admin
+ * Customer 360 view, deriving its inputs from the same rows this function
+ * already fetched — no new query. `lastAttemptFailed` here is a best-effort
+ * heuristic (the word "failed" appearing in the stored provisioning_note),
+ * unlike the orchestrator's own live computation, which has a real boolean
+ * from its own try/catch (see provisioning-orchestrator.server.ts) — this
+ * is read-only historical display, not a decision input, so the weaker
+ * signal is an acceptable, clearly-labeled tradeoff here.
+ */
+function computeProvisioningStateForAdminView(input: {
+  org: { lifecycle_status: string; provisioning_note: string | null } | null;
+  numbers: { status: string; connection_id: string | null; inbound_enabled: boolean }[];
+  agent: { sarvam_app_id: string | null; sarvam_app_version: number | null } | null;
+}): ReturnType<typeof computeProvisioningState> {
+  const candidate =
+    input.numbers.find((n) => n.status === "active") ??
+    input.numbers.find((n) => n.status !== "released") ??
+    null;
+  return computeProvisioningState({
+    sarvamCredentialsConfigured: validateSarvamEnv().allPresent,
+    lastAttemptFailed: Boolean(input.org?.provisioning_note?.toLowerCase().includes("failed")),
+    hasNumber: candidate !== null,
+    numberActive: candidate?.status === "active",
+    connectionLinked: Boolean(candidate?.connection_id),
+    agentSarvamMapped: Boolean(input.agent?.sarvam_app_id && input.agent?.sarvam_app_version),
+    inboundEnabled: Boolean(candidate?.inbound_enabled),
+  });
+}
 
 /** Lock or unlock a single feature for one customer (null clears the override). */
 export const setFeatureLock = createServerFn({ method: "POST" })
