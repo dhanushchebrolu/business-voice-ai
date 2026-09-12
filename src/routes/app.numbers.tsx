@@ -5,7 +5,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { PhoneCall, Check, Hourglass } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
-import { workspaceQuery, numbersQuery } from "@/lib/workspace";
+import { workspaceQuery, numbersQuery, provisioningStatusLabel } from "@/lib/workspace";
 import { pricingQuery, formatMoney } from "@/lib/pricing";
 import { useCheckout } from "@/hooks/useCheckout";
 import { PageHeader, SectionCard, StatusPill, LoadingState } from "@/components/app/primitives";
@@ -96,16 +96,28 @@ function NumbersPage() {
   const phoneLocked = locks?.["phone"] === true;
   const lifecycle = ws?.organization?.lifecycle_status ?? "not_provisioned";
 
+  // The friendly, six-state provisioning status (Task #96) — never a raw
+  // Sarvam identifier or internal field, only the derived label. Computed
+  // from whichever number is furthest along (the active one, or else the
+  // most recently created non-released candidate), matching what
+  // provisioning-orchestrator.server.ts itself tracks per organization.
+  const candidateNumber = active ?? numbers?.find((n) => n.status !== "released") ?? null;
+  const provisioningStatus = provisioningStatusLabel({
+    lifecycleStatus: lifecycle,
+    hasNumber: Boolean(candidateNumber),
+    numberActive: candidateNumber?.status === "active",
+    connectionLinked: Boolean(candidateNumber?.connection_id),
+    agentSarvamMapped: Boolean(ws?.agent?.sarvam_app_id && ws?.agent?.sarvam_app_version),
+    inboundEnabled: Boolean(candidateNumber?.inbound_enabled),
+    outboundEnabled: Boolean(candidateNumber?.outbound_enabled),
+  });
+
   return (
     <div className="space-y-6">
       <PageHeader
         title="Phone & AI Voice Service"
         description="One monthly service that gives your business a phone number answered by your AI receptionist."
-        actions={
-          <StatusPill tone={active ? "live" : "idle"}>
-            {active ? "Active" : "Setup required"}
-          </StatusPill>
-        }
+        actions={<StatusPill tone={provisioningStatus.tone}>{provisioningStatus.label}</StatusPill>}
       />
 
       {isLoading ? (

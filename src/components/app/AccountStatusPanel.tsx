@@ -10,6 +10,7 @@ import {
   ACCOUNT_STATUS_LABEL,
   workspaceQuery,
   numbersQuery,
+  provisioningStatusLabel,
   type AccountStatus,
 } from "@/lib/workspace";
 import { SectionCard, StatusPill } from "./primitives";
@@ -42,12 +43,30 @@ export function AccountStatusPanel() {
   const billingBypassed = bypass?.bypassed === true;
 
   const status = (ws?.organization?.account_status ?? "payment_required") as AccountStatus;
-  const meta = ACCOUNT_STATUS_LABEL[status];
   const nextBilling = ws?.organization?.next_billing_at
     ? new Date(ws.organization.next_billing_at)
     : null;
   const activeNumber = numbers?.find((n) => n.status === "active");
   const voiceReady = (ws?.agent?.active_version ?? 0) > 0;
+
+  // While account_status is "setup_in_progress" (lifecycle_status
+  // setup_paid/provisioning/ready — see the account_status DB trigger),
+  // show Task #96's more specific provisioning stage instead of the
+  // generic "Setup in progress" — same underlying signals
+  // app.numbers.tsx's own header pill uses, never a raw Sarvam identifier.
+  const candidateNumber = activeNumber ?? numbers?.find((n) => n.status !== "released") ?? null;
+  const meta =
+    status === "setup_in_progress"
+      ? provisioningStatusLabel({
+          lifecycleStatus: ws?.organization?.lifecycle_status ?? "setup_paid",
+          hasNumber: Boolean(candidateNumber),
+          numberActive: candidateNumber?.status === "active",
+          connectionLinked: Boolean(candidateNumber?.connection_id),
+          agentSarvamMapped: Boolean(ws?.agent?.sarvam_app_id && ws?.agent?.sarvam_app_version),
+          inboundEnabled: Boolean(candidateNumber?.inbound_enabled),
+          outboundEnabled: Boolean(candidateNumber?.outbound_enabled),
+        })
+      : ACCOUNT_STATUS_LABEL[status];
 
   const channels: {
     icon: typeof PhoneCall;
@@ -61,7 +80,7 @@ export function AccountStatusPanel() {
       label: "Phone",
       ok: Boolean(activeNumber),
       tone: activeNumber ? "live" : "idle",
-      hint: activeNumber?.e164 ?? "Setup required",
+      hint: activeNumber?.e164 ?? (status === "setup_in_progress" ? meta.label : "Setup required"),
     },
     {
       icon: Bot,
