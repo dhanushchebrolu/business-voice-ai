@@ -59,6 +59,47 @@ describe("campaign dispatcher — architecture invariants", () => {
   test("respects the campaign's own calling window before dialing anything", () => {
     assert.match(dispatch, /isWithinCallingWindow\(/);
   });
+
+  test("never dispatches a sarvam_campaign-mode campaign itself — that mode's contacts are already with Sarvam", () => {
+    assert.match(dispatch, /\.eq\("dispatch_mode", "instant_outbound_fallback"\)/);
+  });
+
+  test("claims a contact atomically — the UPDATE re-checks status in its own WHERE clause, not just at SELECT time", () => {
+    assert.match(dispatch, /\.update\(\{ status: "calling", attempts \}\)/);
+    assert.match(
+      dispatch,
+      /\.in\("status", \["pending", "retry_scheduled"\]\)\s*\n\s*\.select\("id"\)/,
+    );
+    assert.match(dispatch, /if \(!claimed \|\| claimed\.length === 0\)/);
+  });
+});
+
+describe("sarvam_campaign dispatch mode — never armed silently", () => {
+  test("the platform-wide kill switch defaults closed and is the only thing that can arm sarvam_campaign mode", () => {
+    assert.match(campaignsFn, /KLYRO_DISPATCH_MODE.*===\s*"sarvam_campaign"/);
+    assert.match(campaignsFn, /sarvamCampaignModeArmed\(\)/);
+  });
+
+  test("a campaign requesting sarvam_campaign mode while it is not armed fails launch loudly, it does not silently fall back", () => {
+    assert.match(campaignsFn, /is not armed on this platform/);
+  });
+
+  test("a sarvam_campaign launch requires an admin-mapped provider_campaign_id — it never invents one", () => {
+    assert.match(campaignsFn, /provider_campaign_id/);
+    assert.match(campaignsFn, /An admin must create the campaign in Sarvam's dashboard/);
+  });
+
+  test("re-launching a paused sarvam_campaign-mode campaign never re-uploads (and re-dials) the same cohort", () => {
+    assert.match(campaignsFn, /if \(campaign\.provider_cohort_id\) return;/);
+  });
+
+  test("the cohort-upload client function is documented as unverified, not claimed as a confirmed contract", () => {
+    const client = readFileSync(
+      new URL("./telephony/sarvam-api-client.server.ts", import.meta.url),
+      "utf8",
+    );
+    assert.match(client, /MEDIUM CONFIDENCE, NOT INDEPENDENTLY CONFIRMED/);
+  });
 });
 
 describe("campaign dispatch cron route — access control", () => {

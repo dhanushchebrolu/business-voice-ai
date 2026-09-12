@@ -16,12 +16,15 @@ import {
   listCampaigns as apiListCampaigns,
   updateCampaign as apiUpdateCampaign,
   updateDeployment as apiUpdateDeployment,
+  uploadCohort as apiUploadCohort,
   type CreateInstantOutboundInput,
   type InstantOutboundResult,
   type SarvamApiClientConfig,
   type SarvamCampaign,
   type UpdateCampaignInput,
   type UpdateDeploymentInput,
+  type UploadCohortInput,
+  type UploadCohortResult,
 } from "./sarvam-api-client.server.ts";
 import { constantTimeEquals } from "../constant-time-equals.server.ts";
 
@@ -437,6 +440,17 @@ export class SarvamTelephonyAdapter implements TelephonyProviderAdapter {
    */
   async createInstantOutbound(input: CreateInstantOutboundInput): Promise<InstantOutboundResult> {
     return apiCreateInstantOutbound(this.managementApiConfig(), input);
+  }
+
+  /**
+   * Bulk cohort upload for the (experimental, gated-off-by-default)
+   * `sarvam_campaign` dispatch mode — see sarvam-api-client.server.ts's
+   * uploadCohort doc for this endpoint's MEDIUM-confidence, not-primary-
+   * source verification status. Never called from the default
+   * `instant_outbound_fallback` path.
+   */
+  async uploadCohort(input: UploadCohortInput): Promise<UploadCohortResult> {
+    return apiUploadCohort(this.managementApiConfig(), input);
   }
 
   /**

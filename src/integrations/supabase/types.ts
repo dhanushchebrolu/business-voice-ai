@@ -601,6 +601,7 @@ export type Database = {
           completed_at: string | null;
           created_at: string;
           created_by: string | null;
+          dispatch_mode: string;
           id: string;
           language: string | null;
           launched_at: string | null;
@@ -611,6 +612,8 @@ export type Database = {
           output_variable_defs: Json;
           paused_at: string | null;
           phone_number_id: string | null;
+          provider_campaign_id: string | null;
+          provider_cohort_id: string | null;
           retry_after_minutes: number;
           retry_statuses: string[];
           schedule: Json;
@@ -627,6 +630,7 @@ export type Database = {
           completed_at?: string | null;
           created_at?: string;
           created_by?: string | null;
+          dispatch_mode?: string;
           id?: string;
           language?: string | null;
           launched_at?: string | null;
@@ -637,6 +641,8 @@ export type Database = {
           output_variable_defs?: Json;
           paused_at?: string | null;
           phone_number_id?: string | null;
+          provider_campaign_id?: string | null;
+          provider_cohort_id?: string | null;
           retry_after_minutes?: number;
           retry_statuses?: string[];
           schedule?: Json;
@@ -653,6 +659,7 @@ export type Database = {
           completed_at?: string | null;
           created_at?: string;
           created_by?: string | null;
+          dispatch_mode?: string;
           id?: string;
           language?: string | null;
           launched_at?: string | null;
@@ -663,6 +670,8 @@ export type Database = {
           output_variable_defs?: Json;
           paused_at?: string | null;
           phone_number_id?: string | null;
+          provider_campaign_id?: string | null;
+          provider_cohort_id?: string | null;
           retry_after_minutes?: number;
           retry_statuses?: string[];
           schedule?: Json;

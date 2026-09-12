@@ -413,3 +413,131 @@ export async function createInstantOutbound(
     raw: obj,
   };
 }
+
+/* ------------------------------------------------------------------ */
+/* 5. Cohort upload (bulk campaign dispatch)                            */
+/*    POST /api/scheduling/v1/orgs/{org}/workspaces/{ws}/campaigns/     */
+/*         {campaign_id}/cohorts/upload                                 */
+/*                                                                       */
+/* VERIFICATION STATUS — MEDIUM CONFIDENCE, NOT INDEPENDENTLY CONFIRMED: */
+/* this schema comes from WebSearch-synthesized snippets of a site that */
+/* self-titles "Welcome to Sarvam Agents - Agent Docs" at                */
+/* agent-docs.azurewebsites.net — a site distinct from docs.sarvam.ai,  */
+/* never directly fetched in this environment (also EGRESS_BLOCKED), so */
+/* its authenticity/ownership could not be confirmed the way            */
+/* docs.sarvam.ai pages at least partially were. The schema below was   */
+/* corroborated across multiple independent search queries with         */
+/* consistent field names, which is more evidence than the deployment/  */
+/* campaign-PATCH endpoints above ever had — but it is still NOT a      */
+/* primary-source fetch and NOT a live-tested response. Do not treat    */
+/* this as "verified" the way createInstantOutbound's endpoint path is  */
+/* (that one is at least corroborated by the org/workspace scoping      */
+/* convention shared with the independently-fetched conv-ai-sdk). This  */
+/* function must not be enabled in production (see                     */
+/* campaigns.functions.ts's KLYRO_DISPATCH_MODE gate) until it has been */
+/* exercised against a real response.                                   */
+/* ------------------------------------------------------------------ */
+
+export interface CohortTransformation {
+  /** CSV column name holding the destination phone number. */
+  phoneNumberColumn: string;
+  /** CSV column name holding a value Sarvam should echo back on every webhook for this row (Klyro sets this to its own campaign_contacts.id). */
+  userIdentifierColumn: string;
+  /** {agentVariableName: csvColumnName} — keys must match the target agent's own declared variables (per the source page); unknown keys are presumed rejected per-row, not per-request. */
+  appVariableColumns: Record<string, string>;
+}
+
+export interface UploadCohortInput {
+  campaignId: string;
+  cohortName: string;
+  /** Full CSV text, header row + data rows, matching the column names referenced in `transformation`. */
+  csvText: string;
+  transformation: CohortTransformation;
+}
+
+export interface UploadCohortResult {
+  cohortId: string;
+  totalRecords: number;
+  validRecords: number;
+  rejectedRecords: number;
+  raw: Record<string, unknown>;
+}
+
+function buildTransformationJson(t: CohortTransformation): string {
+  return JSON.stringify({
+    phone_number: t.phoneNumberColumn,
+    user_identifier: t.userIdentifierColumn,
+    app_variables: t.appVariableColumns,
+  });
+}
+
+/**
+ * Multipart upload — deliberately does NOT go through sarvamRequest (which
+ * always sets Content-Type: application/json): the browser/runtime's
+ * FormData + fetch sets the correct multipart boundary itself, and manually
+ * setting Content-Type here would break it.
+ */
+export async function uploadCohort(
+  config: SarvamApiClientConfig,
+  input: UploadCohortInput,
+): Promise<UploadCohortResult> {
+  const form = new FormData();
+  form.append("name", input.cohortName);
+  form.append("cohort_file", new Blob([input.csvText], { type: "text/csv" }), "contacts.csv");
+  form.append(
+    "cohort_transformation_file",
+    new Blob([buildTransformationJson(input.transformation)], { type: "application/json" }),
+    "transformation.json",
+  );
+
+  const fetchImpl = config.fetchImpl ?? fetch;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), config.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+
+  let res: Response;
+  try {
+    res = await fetchImpl(
+      `${SARVAM_APPS_BASE_URL}${scopedPath(config, "scheduling", `campaigns/${encodeURIComponent(input.campaignId)}/cohorts/upload`)}`,
+      {
+        method: "POST",
+        headers: { "X-API-Key": config.apiKey },
+        body: form,
+        signal: controller.signal,
+      },
+    );
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new TelephonyAdapterError("Sarvam did not respond in time. Please retry.", 503);
+    }
+    throw new TelephonyAdapterError("Could not reach Sarvam. Please retry.", 503);
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const rawText = await res.text().catch(() => "");
+  let parsed: unknown;
+  try {
+    parsed = rawText ? JSON.parse(rawText) : undefined;
+  } catch {
+    parsed = undefined;
+  }
+  if (!res.ok) throw mapErrorResponse(res.status, parsed, rawText);
+
+  const obj = asPlainObject(parsed) ?? {};
+  const result = asPlainObject(obj["result"]) ?? obj;
+  const cohortId = obj["cohort_id"];
+  if (typeof cohortId !== "string" || !cohortId) {
+    throw new TelephonyAdapterError(
+      "Sarvam accepted the cohort upload but the response did not include a cohort_id.",
+      502,
+    );
+  }
+  const num = (v: unknown) => (typeof v === "number" ? v : 0);
+  return {
+    cohortId,
+    totalRecords: num(result["total_records"]),
+    validRecords: num(result["valid_records"]),
+    rejectedRecords: num(result["rejected_records"]),
+    raw: obj,
+  };
+}

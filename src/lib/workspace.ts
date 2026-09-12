@@ -337,19 +337,7 @@ export const campaignContactsQuery = (campaignId: string | undefined) =>
     },
   });
 
-export function agentStatusLabel(
-  agent: AgentConfig | null,
-  hasNumber: boolean,
-): {
-  label: string;
-  tone: "live" | "ready" | "idle" | "error";
-} {
-  if (!agent || agent.active_version === 0) return { label: "Not configured", tone: "idle" };
-  if (agent.status === "error") return { label: "Error", tone: "error" };
-  if (agent.status === "paused") return { label: "Paused", tone: "idle" };
-  if (hasNumber && agent.status === "live") return { label: "Live", tone: "live" };
-  return { label: "Ready — no number", tone: "ready" };
-}
+export { agentStatusLabel } from "./agent-status.ts";
 
 export type PaymentRow = Database["public"]["Tables"]["payments"]["Row"];
 export type PaymentOrderRow = Database["public"]["Tables"]["payment_orders"]["Row"];

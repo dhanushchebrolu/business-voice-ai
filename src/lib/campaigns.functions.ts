@@ -1,6 +1,24 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { checkTelephonyAccess, walletCanAffordOutbound } from "@/lib/telephony-guard.server";
+import { getTelephonyAdapter } from "@/lib/telephony.server";
+import { SarvamTelephonyAdapter } from "@/lib/telephony/sarvam-provider.server";
+import { buildCohortPayload } from "@/lib/campaign-cohort";
+
+/**
+ * Platform-wide kill switch for the experimental `sarvam_campaign` dispatch
+ * mode (spec "THIRD"/"SIXTH"). Defaults closed: unless an operator has
+ * explicitly set KLYRO_DISPATCH_MODE=sarvam_campaign in the server
+ * environment, EVERY campaign dials through instant_outbound_fallback
+ * regardless of what its own `dispatch_mode` column says — a per-campaign
+ * setting can request the experimental mode, but only this env var can
+ * actually arm it platform-wide. This is the "never silently switch"
+ * requirement: a campaign stuck wanting sarvam_campaign mode while this is
+ * off fails launch with an explicit error, it never silently falls back.
+ */
+function sarvamCampaignModeArmed(): boolean {
+  return process.env["KLYRO_DISPATCH_MODE"] === "sarvam_campaign";
+}
 
 /**
  * Campaign lifecycle transitions (spec §24/§36/§37/§38). Creating/editing a
@@ -113,6 +131,24 @@ export const launchCampaign = createServerFn({ method: "POST" })
     if (!pendingCount || pendingCount === 0)
       throw new Error("Add at least one contact before launching this campaign.");
 
+    // 5. Dispatch mode (spec "THIRD"/"SIXTH"): sarvam_campaign is never
+    // entered silently. Either it's fully armed and configured, or launch
+    // fails with an explicit, actionable reason — it never falls back to
+    // instant_outbound_fallback on its own.
+    if (campaign.dispatch_mode === "sarvam_campaign") {
+      if (!sarvamCampaignModeArmed()) {
+        throw new Error(
+          "This campaign is set to sarvam_campaign dispatch mode, but that mode is not armed on this platform (KLYRO_DISPATCH_MODE is not set to sarvam_campaign). Switch this campaign to instant_outbound_fallback, or ask an operator to arm sarvam_campaign mode.",
+        );
+      }
+      if (!campaign.provider_campaign_id) {
+        throw new Error(
+          "This campaign has no Sarvam campaign mapped (provider_campaign_id is unset). An admin must create the campaign in Sarvam's dashboard and record its id before launching in sarvam_campaign mode.",
+        );
+      }
+      await launchViaSarvamCampaign(campaign, orgId);
+    }
+
     await supabaseAdmin
       .from("campaigns")
       .update({ status: "running", launched_at: new Date().toISOString() })
@@ -120,6 +156,104 @@ export const launchCampaign = createServerFn({ method: "POST" })
 
     return { ok: true };
   });
+
+/**
+ * EXPERIMENTAL, PARTIAL — sarvam_campaign dispatch mode's launch action:
+ * uploads every pending campaign_contact as one Sarvam cohort via
+ * uploadCohort. Per that function's doc, the underlying endpoint's schema
+ * is MEDIUM-confidence, not independently verified against a live response
+ * — this code path only runs at all when KLYRO_DISPATCH_MODE=sarvam_campaign
+ * is explicitly set (see sarvamCampaignModeArmed above), which an operator
+ * should not do until it has been exercised with a real test contact (spec
+ * "SIXTH").
+ *
+ * KNOWN GAP, DELIBERATELY NOT BUILT: after this upload, campaign_contacts
+ * are marked "queued" and STAY there — there is no code path that ever
+ * moves them to a terminal status for this mode. An earlier version of this
+ * change also lazily created a call_logs row from the webhook's
+ * user_identifier the first time Sarvam reported an attempt, which would
+ * have closed this gap — but doing so required weakening an existing,
+ * deliberate security-invariant test in the webhook route (exactly one
+ * call_logs INSERT in the whole route, guarding "outbound events must never
+ * insert a call_logs row from webhook data alone"). Rather than loosen that
+ * invariant for an unverified, off-by-default experimental path, this gap
+ * is left open and reported honestly: a sarvam_campaign-mode campaign will
+ * never auto-complete, and campaign_contacts enrolled in it will never show
+ * a real outcome, until that webhook-correlation piece is built (ideally
+ * after the underlying cohort/webhook contract is actually confirmed).
+ *
+ * Idempotent: if this campaign already has a provider_cohort_id, the upload
+ * is skipped (re-launching a paused sarvam_campaign-mode campaign must never
+ * re-upload and double-dial the same cohort).
+ */
+async function launchViaSarvamCampaign(
+  campaign: {
+    id: string;
+    organization_id: string;
+    provider_campaign_id: string | null;
+    provider_cohort_id: string | null;
+  },
+  orgId: string,
+) {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  if (campaign.provider_cohort_id) return; // already uploaded — never re-upload on resume
+
+  const adapter = getTelephonyAdapter("sarvam");
+  if (!adapter || !(adapter instanceof SarvamTelephonyAdapter))
+    throw new Error("Sarvam is not connected. Configure SARVAM_API_KEY first.");
+
+  const { data: pending } = await supabaseAdmin
+    .from("campaign_contacts")
+    .select("id, variables, contacts(phone)")
+    .eq("campaign_id", campaign.id)
+    .in("status", ["pending", "retry_scheduled"]);
+
+  const rows = (pending ?? [])
+    .filter((cc) => (cc as { contacts: { phone: string } | null }).contacts?.phone)
+    .map((cc) => {
+      const typed = cc as {
+        id: string;
+        variables: Record<string, string>;
+        contacts: { phone: string };
+      };
+      return {
+        campaignContactId: typed.id,
+        phone: typed.contacts.phone,
+        variables: typed.variables,
+      };
+    });
+  if (rows.length === 0) return;
+
+  const payload = buildCohortPayload(rows);
+  const result = await adapter.uploadCohort({
+    campaignId: campaign.provider_campaign_id!,
+    cohortName: `klyro-${campaign.id.slice(0, 8)}-${Date.now()}`,
+    csvText: payload.csvText,
+    transformation: payload.transformation,
+  });
+
+  await supabaseAdmin
+    .from("campaigns")
+    .update({ provider_cohort_id: result.cohortId })
+    .eq("id", campaign.id);
+  await supabaseAdmin
+    .from("campaign_contacts")
+    .update({ status: "queued" })
+    .eq("campaign_id", campaign.id)
+    .in(
+      "id",
+      rows.map((r) => r.campaignContactId),
+    );
+
+  if (result.rejectedRecords > 0) {
+    console.error(
+      "campaigns:sarvam_cohort_rejected_records",
+      campaign.id,
+      result.cohortId,
+      result.rejectedRecords,
+    );
+  }
+}
 
 interface CampaignActionInput {
   campaignId: string;
