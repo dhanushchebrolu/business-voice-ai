@@ -49,10 +49,16 @@ export async function dispatchDueCampaigns(): Promise<DispatchSummary> {
     errors: [],
   };
 
+  // Only ever dispatches instant_outbound_fallback campaigns (spec "THIRD"):
+  // a sarvam_campaign-mode campaign already had its full contact list
+  // uploaded to Sarvam as a cohort at launch time (campaigns.functions.ts) —
+  // Sarvam paces/dials it, not this loop. Dispatching it here too would be
+  // exactly the double-dial this migration's unique index exists to prevent.
   const { data: campaigns } = await supabaseAdmin
     .from("campaigns")
     .select("*")
-    .eq("status", "running");
+    .eq("status", "running")
+    .eq("dispatch_mode", "instant_outbound_fallback");
 
   for (const campaign of campaigns ?? []) {
     summary.campaignsConsidered++;
@@ -167,11 +173,28 @@ async function dispatchOneCampaign(
       break; // no point trying the rest of this campaign's batch this tick
     }
 
+    // Atomic claim (spec "SEVENTH" — no duplicate dispatch): the UPDATE's
+    // own WHERE clause re-checks status is still pending/retry_scheduled at
+    // the moment of the write, not just at SELECT time above. If a
+    // concurrent dispatcher tick (or a retried cron invocation) already
+    // claimed this exact row between our SELECT and this UPDATE, the
+    // conditional match fails, `claimed` comes back empty, and we skip this
+    // contact entirely rather than dialing it a second time. Also
+    // backstopped at the storage layer by
+    // idx_call_logs_campaign_contact_inflight (a partial unique index) —
+    // even a bug here could not produce two live call_logs rows for the
+    // same campaign_contact.
     const attempts = cc.attempts + 1;
-    await supabaseAdmin
+    const { data: claimed } = await supabaseAdmin
       .from("campaign_contacts")
       .update({ status: "calling", attempts })
-      .eq("id", cc.id);
+      .eq("id", cc.id)
+      .in("status", ["pending", "retry_scheduled"])
+      .select("id");
+    if (!claimed || claimed.length === 0) {
+      skipped++;
+      continue;
+    }
 
     const { data: call, error: insertError } = await supabaseAdmin
       .from("call_logs")
