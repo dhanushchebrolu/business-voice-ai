@@ -136,6 +136,25 @@ export const Route = createFileRoute("/api/public/webhooks/razorpay")({
                       : { setup_paid_at: new Date().toISOString() },
                   )
                   .eq("id", order.organization_id);
+
+                // Automatic provisioning (claim a pool number, link any
+                // already-registered Sarvam connection/agent, attempt an
+                // inbound deployment) — never throws, so a Sarvam outage or
+                // a missing admin-side mapping cannot turn an already-
+                // recorded payment into a failed webhook. See
+                // provisioning-orchestrator.server.ts for exactly what this
+                // does and does not automate.
+                const { provisionOrganizationAfterPayment } =
+                  await import("@/lib/provisioning-orchestrator.server");
+                const provisioning = await provisionOrganizationAfterPayment(
+                  supabaseAdmin,
+                  order.organization_id,
+                );
+                console.log(
+                  "razorpay:webhook_auto_provisioning",
+                  order.organization_id,
+                  provisioning.note,
+                );
               }
               if (order.purpose === "monthly_plan") {
                 // Recurring billing does not move the onboarding lifecycle —
