@@ -64,6 +64,7 @@ describe("getCustomerDetail — every query is tenant-scoped to the requested or
     "agent_versions",
     "audit_logs",
     "knowledge_documents",
+    "telephony_connections",
   ];
 
   for (const table of scopedTables) {
@@ -127,6 +128,24 @@ describe("getCustomerDetail — Phase 2 additions are real, not fabricated", () 
     const block = fnSrc.slice(idx, idx + 400);
     assert.match(block, /customer_charge/);
     assert.match(block, /provider_cost/);
+  });
+});
+
+describe("getCustomerDetail — Task #95 provisioning-view addition", () => {
+  const fnSrc = extractFn("getCustomerDetail");
+
+  test("fetches this org's telephony_connections (status/last_error), the same table provisioning-health.server.ts's own connection check reads — no second data source", () => {
+    const idx = fnSrc.indexOf('.from("telephony_connections")');
+    assert.ok(idx > -1);
+    const block = fnSrc.slice(idx, idx + 250);
+    assert.match(
+      block,
+      /select\(\s*"id, provider, provider_connection_id, label, status, last_error, updated_at"\s*\)/,
+    );
+  });
+
+  test("returns connections in the response, defaulting to an empty array rather than undefined", () => {
+    assert.match(fnSrc, /connections:\s*connections\.data\s*\?\?\s*\[\]/);
   });
 });
 

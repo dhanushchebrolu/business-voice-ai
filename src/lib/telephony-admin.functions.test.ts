@@ -46,6 +46,7 @@ const MUTATING_FUNCTIONS = [
   "suspendPhoneNumber",
   "releasePhoneNumber",
   "setNumberDirection",
+  "retryProvisioning",
 ];
 
 describe("every phone-number mutation requires platform-admin authorization before any DB write", () => {
@@ -174,5 +175,30 @@ describe("no customer-facing code path can reach these admin mutations", () => {
       "utf8",
     );
     assert.doesNotMatch(workspaceSrc, /telephony-admin\.functions/);
+  });
+});
+
+describe("retryProvisioning — the admin Retry action calls the same orchestrator the webhook calls, never a second implementation", () => {
+  const fnSrc = extractFn("retryProvisioning");
+
+  test("imports and calls provisionOrganizationAfterPayment — no admin-only reimplementation of claim/link/deploy logic", () => {
+    assert.match(
+      src,
+      /import \{ provisionOrganizationAfterPayment \} from "@\/lib\/provisioning-orchestrator\.server"/,
+    );
+    assert.match(fnSrc, /await provisionOrganizationAfterPayment\(supabaseAdmin, data\.orgId\)/);
+  });
+
+  test("audits the retry with the shared function's own returned result, after it resolves — never before", () => {
+    const callIdx = fnSrc.indexOf("await provisionOrganizationAfterPayment(");
+    const auditIdx = fnSrc.indexOf('action: "PROVISIONING_RETRIED"');
+    assert.ok(callIdx > -1 && auditIdx > -1);
+    assert.ok(callIdx < auditIdx, "the shared call must happen before the audit record");
+    assert.match(fnSrc, /organizationId:\s*data\.orgId/);
+    assert.match(fnSrc, /note:\s*result\.note/);
+  });
+
+  test("returns the shared function's result object directly — no summarized/reshaped subset that could drift from what actually happened", () => {
+    assert.match(fnSrc, /return result;/);
   });
 });
