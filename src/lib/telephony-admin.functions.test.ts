@@ -40,6 +40,7 @@ function extractFn(name: string): string {
 
 const MUTATING_FUNCTIONS = [
   "provisionPhoneNumber",
+  "importPhoneNumberToPool",
   "activatePhoneNumber",
   "reassignPhoneNumber",
   "suspendPhoneNumber",
@@ -96,6 +97,27 @@ describe("provisionPhoneNumber — tenant safety and duplicate-provisioning safe
   test("every provisioning action is audited with the acting admin and the target organization", () => {
     assert.match(fnSrc, /action:\s*"NUMBER_PROVISIONED"/);
     assert.match(fnSrc, /organizationId:\s*data\.orgId/);
+  });
+});
+
+describe("importPhoneNumberToPool — supply side of automatic provisioning", () => {
+  const fnSrc = extractFn("importPhoneNumberToPool");
+
+  test("a pool number is inserted with organization_id null and status available — never pre-assigned", () => {
+    assert.match(fnSrc, /organization_id:\s*null/);
+    assert.match(fnSrc, /status:\s*"available"/);
+    assert.match(fnSrc, /inbound_enabled:\s*false/);
+    assert.match(fnSrc, /outbound_enabled:\s*false/);
+  });
+
+  test("a duplicate e164 conflict (23505) surfaces a human-readable error, not a raw DB error", () => {
+    assert.match(fnSrc, /code.*===\s*"23505"/);
+    assert.match(fnSrc, /already in the pool or assigned/i);
+  });
+
+  test("every import is audited", () => {
+    assert.match(fnSrc, /action:\s*"NUMBER_IMPORTED_TO_POOL"/);
+    assert.match(fnSrc, /organizationId:\s*null/);
   });
 });
 

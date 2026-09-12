@@ -1760,7 +1760,7 @@ export type Database = {
           inbound_enabled: boolean;
           metadata: Json;
           monthly_price: number | null;
-          organization_id: string;
+          organization_id: string | null;
           outbound_enabled: boolean;
           provider: string;
           provider_deployment_id: string | null;
@@ -1768,6 +1768,7 @@ export type Database = {
           provisioned_by: string | null;
           purchased_at: string | null;
           released_at: string | null;
+          reserved_at: string | null;
           status: string;
           suspended_reason: string | null;
           updated_at: string;
@@ -1784,7 +1785,7 @@ export type Database = {
           inbound_enabled?: boolean;
           metadata?: Json;
           monthly_price?: number | null;
-          organization_id: string;
+          organization_id?: string | null;
           outbound_enabled?: boolean;
           provider?: string;
           provider_deployment_id?: string | null;
@@ -1792,6 +1793,7 @@ export type Database = {
           provisioned_by?: string | null;
           purchased_at?: string | null;
           released_at?: string | null;
+          reserved_at?: string | null;
           status?: string;
           suspended_reason?: string | null;
           updated_at?: string;
@@ -1808,7 +1810,7 @@ export type Database = {
           inbound_enabled?: boolean;
           metadata?: Json;
           monthly_price?: number | null;
-          organization_id?: string;
+          organization_id?: string | null;
           outbound_enabled?: boolean;
           provider?: string;
           provider_deployment_id?: string | null;
@@ -1816,6 +1818,7 @@ export type Database = {
           provisioned_by?: string | null;
           purchased_at?: string | null;
           released_at?: string | null;
+          reserved_at?: string | null;
           status?: string;
           suspended_reason?: string | null;
           updated_at?: string;

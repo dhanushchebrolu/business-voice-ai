@@ -163,6 +163,14 @@ async function processTelephonyEvent(providerId: string, event: NormalizedCallEv
     console.error("telephony:webhook_unknown_number", vaaniNumber);
     return;
   }
+  if (!phoneNumber.organization_id) {
+    // Cannot happen through the normal lifecycle (only pool numbers ever
+    // have a null organization_id, and this query filters status='active' —
+    // a pool number is never 'active'; see the phone_number_pool migration).
+    // Guarded anyway rather than trusting that invariant blindly.
+    console.error("telephony:webhook_active_number_missing_org", vaaniNumber);
+    return;
+  }
 
   // Reassignment safety (spec Phase 5 §8): the lookup above only proves
   // which organization owns this number RIGHT NOW — it says nothing about
