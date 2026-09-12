@@ -6,6 +6,7 @@ import { ArrowLeft, Lock, Unlock, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import { getCustomerDetail, setFeatureLock, adjustWallet } from "@/lib/admin.functions";
 import { getProvisioningReadiness } from "@/lib/admin-clients.functions";
+import { retryProvisioning } from "@/lib/telephony-admin.functions";
 import { getProfitAnalytics } from "@/lib/admin-finance.functions";
 import {
   PageHeader,
@@ -58,6 +59,7 @@ function CustomerDetail() {
   const fetchProfit = useServerFn(getProfitAnalytics);
   const saveLock = useServerFn(setFeatureLock);
   const saveWallet = useServerFn(adjustWallet);
+  const retry = useServerFn(retryProvisioning);
   const queryClient = useQueryClient();
 
   const [lockTarget, setLockTarget] = useState<{
@@ -67,6 +69,7 @@ function CustomerDetail() {
   } | null>(null);
   const [walletOpen, setWalletOpen] = useState(false);
   const [walletAmount, setWalletAmount] = useState("");
+  const [retryOpen, setRetryOpen] = useState(false);
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["admin-customer", orgId],
@@ -350,6 +353,72 @@ function CustomerDetail() {
           )}
         </SectionCard>
       </div>
+
+      <SectionCard
+        title="Provisioning"
+        description="Automatic provisioning's own record of what it did and didn't do — never a fabricated 'all set'."
+        actions={
+          <div className="flex items-center gap-2">
+            <Link
+              to="/admin/numbers"
+              className="text-xs text-muted-foreground hover:text-foreground"
+            >
+              Manage numbers →
+            </Link>
+            <Button size="sm" variant="outline" onClick={() => setRetryOpen(true)}>
+              Retry provisioning
+            </Button>
+          </div>
+        }
+      >
+        <div className="grid gap-4 lg:grid-cols-2">
+          <div>
+            <p className="text-xs text-muted-foreground">Sarvam connection(s)</p>
+            {data.connections.length ? (
+              <ul className="mt-1 space-y-1.5">
+                {data.connections.map((c) => (
+                  <li key={c.id} className="flex items-center justify-between gap-3 text-sm">
+                    <span className="font-mono text-xs">
+                      {c.provider}
+                      {c.provider_connection_id
+                        ? ` · ${c.provider_connection_id}`
+                        : " · not registered"}
+                    </span>
+                    <StatusPill tone={c.status === "connected" && !c.last_error ? "live" : "error"}>
+                      {c.last_error ? "error" : c.status}
+                    </StatusPill>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="mt-1 text-sm text-muted-foreground">
+                No telephony connection registered for this customer yet.
+              </p>
+            )}
+            {data.connections.some((c) => c.last_error) ? (
+              <p className="mt-1 text-xs text-warning">
+                {data.connections.find((c) => c.last_error)?.last_error}
+              </p>
+            ) : null}
+          </div>
+
+          <div>
+            <p className="text-xs text-muted-foreground">Last automatic provisioning attempt</p>
+            <p className="mt-1 text-sm">
+              {(org as { provisioning_attempted_at?: string | null }).provisioning_attempted_at
+                ? new Date(
+                    (org as { provisioning_attempted_at?: string }).provisioning_attempted_at!,
+                  ).toLocaleString()
+                : "Never run"}
+            </p>
+            {(org as { provisioning_note?: string | null }).provisioning_note ? (
+              <p className="mt-1 text-xs text-muted-foreground">
+                {(org as { provisioning_note?: string }).provisioning_note}
+              </p>
+            ) : null}
+          </div>
+        </div>
+      </SectionCard>
 
       <div className="grid gap-4 lg:grid-cols-3">
         <SectionCard title="Wallet">
@@ -793,6 +862,22 @@ function CustomerDetail() {
           });
           toast.success("Wallet updated");
           setWalletAmount("");
+          await invalidate();
+        }}
+      />
+
+      <ReasonDialog
+        open={retryOpen}
+        onOpenChange={setRetryOpen}
+        title="Retry automatic provisioning?"
+        description="Re-runs the same claim/link/deploy logic the payment webhook triggers automatically — reuses an already-assigned number rather than claiming a second one, and only creates a deployment if the connection and agent are both already mapped."
+        confirmLabel="Retry"
+        onConfirm={async (reason) => {
+          const result = await retry({ data: { orgId, reason } });
+          toast(result.deploymentCreatedNow ? "Deployment created" : "Provisioning retried", {
+            description: result.note,
+          });
+          setRetryOpen(false);
           await invalidate();
         }}
       />

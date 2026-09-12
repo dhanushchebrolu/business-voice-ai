@@ -345,6 +345,7 @@ export const getCustomerDetail = createServerFn({ method: "GET" })
       lastPublish,
       audit,
       knowledge,
+      connections,
     ] = await Promise.all([
       supabaseAdmin.from("organizations").select("*").eq("id", orgId).maybeSingle(),
       supabaseAdmin.from("businesses").select("*").eq("organization_id", orgId).maybeSingle(),
@@ -423,6 +424,15 @@ export const getCustomerDetail = createServerFn({ method: "GET" })
         .select("id, title, source_type, status, updated_at")
         .eq("organization_id", orgId)
         .order("updated_at", { ascending: false }),
+      // Task #95 — the Provisioning view's own signal: which telephony
+      // connection(s) this org has registered, and whether the last known
+      // check of each is healthy. Same telephony_connections table
+      // provisioning-health.server.ts already reads for its own "webhook /
+      // connection" check — no parallel data source introduced.
+      supabaseAdmin
+        .from("telephony_connections")
+        .select("id, provider, provider_connection_id, label, status, last_error, updated_at")
+        .eq("organization_id", orgId),
     ]);
 
     if (!org.data) throw new Error("Customer not found");
@@ -473,6 +483,7 @@ export const getCustomerDetail = createServerFn({ method: "GET" })
       lastPublish: lastPublish.data ?? null,
       audit: audit.data ?? [],
       knowledge: knowledge.data ?? [],
+      connections: connections.data ?? [],
     };
   });
 

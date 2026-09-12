@@ -2,6 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { assertPlatformAdmin, writeAudit } from "@/lib/platform-admin.server";
 import { getTelephonyAdapter, providerStatus, TELEPHONY_PROVIDERS } from "@/lib/telephony.server";
+import { provisionOrganizationAfterPayment } from "@/lib/provisioning-orchestrator.server";
 
 /**
  * Admin telephony control plane: phone-number lifecycle and the
@@ -444,6 +445,48 @@ export const setNumberDirection = createServerFn({ method: "POST" })
       reason: data.reason,
     });
     return { ok: true as const };
+  });
+
+/**
+ * Manually re-runs the automatic provisioning orchestrator (Task #93) for
+ * one organization — the admin-facing "Retry" action for the Provisioning
+ * view on the Customer 360 page. Calls the exact same
+ * provisionOrganizationAfterPayment the Razorpay webhook calls on its own,
+ * so a retry can never do anything the automatic path wouldn't also do
+ * (claim/reuse a pool number, link an already-registered connection/agent,
+ * attempt a deployment) — this is not a second, admin-only provisioning
+ * implementation. Useful once an admin has finished a manual Sarvam
+ * connection/agent mapping and wants deployment creation to happen now,
+ * rather than waiting for the next webhook event (there may not be one).
+ */
+export const retryProvisioning = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { orgId: string; reason: string }) => {
+    if (!input?.orgId) throw new Error("orgId is required");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+
+    const result = await provisionOrganizationAfterPayment(supabaseAdmin, data.orgId);
+
+    await writeAudit(admin, {
+      action: "PROVISIONING_RETRIED",
+      entityType: "organization",
+      entityId: data.orgId,
+      organizationId: data.orgId,
+      newValue: {
+        phoneNumberId: result.phoneNumberId,
+        numberClaimedNow: result.numberClaimedNow,
+        deploymentCreatedNow: result.deploymentCreatedNow,
+        note: result.note,
+      },
+      reason: data.reason,
+    });
+
+    return result;
   });
 
 /* ------------------------------------------------------------------ */
