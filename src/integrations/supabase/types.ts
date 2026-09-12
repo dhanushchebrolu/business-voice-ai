@@ -1532,6 +1532,8 @@ export type Database = {
           payment_override_reason: string | null;
           pre_suspension_status: Database["public"]["Enums"]["lifecycle_status"] | null;
           provisioned_at: string | null;
+          provisioning_attempted_at: string | null;
+          provisioning_note: string | null;
           setup_paid_at: string | null;
           slug: string | null;
           tags: string[];
@@ -1577,6 +1579,8 @@ export type Database = {
           payment_override_reason?: string | null;
           pre_suspension_status?: Database["public"]["Enums"]["lifecycle_status"] | null;
           provisioned_at?: string | null;
+          provisioning_attempted_at?: string | null;
+          provisioning_note?: string | null;
           setup_paid_at?: string | null;
           slug?: string | null;
           tags?: string[];
@@ -1622,6 +1626,8 @@ export type Database = {
           payment_override_reason?: string | null;
           pre_suspension_status?: Database["public"]["Enums"]["lifecycle_status"] | null;
           provisioned_at?: string | null;
+          provisioning_attempted_at?: string | null;
+          provisioning_note?: string | null;
           setup_paid_at?: string | null;
           slug?: string | null;
           tags?: string[];
