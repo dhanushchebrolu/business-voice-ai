@@ -351,21 +351,56 @@ export async function updateCampaign(
 /*    POST /api/outbounds/v1/orgs/{org}/workspaces/{ws}/outbounds       */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Request shape supplied directly by the user as an already-confirmed Sarvam
+ * example (not this session's own reconstruction) — treated as
+ * higher-confidence ground truth than the earlier flat body this replaces,
+ * though still not independently live-tested (no SARVAM_API_KEY available
+ * in this environment). Structurally: `app_config` (which agent/version/
+ * connection to use + per-call variables/overrides), `user_config` (who to
+ * call), `webhook_config` (where Sarvam should report the result, plus a
+ * `metadata` object Sarvam is expected to echo back verbatim on that
+ * webhook — see sarvam-provider.server.ts's extractClientReference/
+ * extractMetadataOrganizationId, which now read this object first).
+ */
 export interface CreateInstantOutboundInput {
   appId: string;
   appVersion: number;
   connectionId: string;
+  /** The assigned Klyro number's own E.164 — the caller ID the contact sees. */
+  fromE164: string;
   toE164: string;
   agentVariables?: Record<string, unknown> | undefined;
+  /** Optional per-call overrides — both fields are optional passthroughs; omit either to use the agent's own configured default. */
+  appOverrides?:
+    { initialBotMessage?: string | undefined; initialStateName?: string | undefined } | undefined;
+  /** Klyro's own public webhook URL for this call to land on — never a bare host, always the full route + ?provider=sarvam. */
+  webhookUrl: string;
   /**
-   * Klyro's own call_logs.id, sent as a candidate correlation value under
-   * BOTH `user_identifier` and `metadata` (top-level string fields) because
-   * which of the two Sarvam actually echoes back on the resulting webhook is
-   * unconfirmed (see sarvam-provider.server.ts's extractClientReference,
-   * which reads both back defensively for the same reason) — sending both
-   * costs nothing and maximizes the chance correlation actually works.
+   * Correlation metadata Klyro expects Sarvam to echo back verbatim on the
+   * resulting webhook. `organizationId` is REQUIRED here (used only as a
+   * defense-in-depth cross-check on the way back in, never as the sole
+   * resolver — see extractMetadataOrganizationId's doc). The others are
+   * whichever of Klyro's own already-existing identifiers apply to this
+   * call; omit whichever don't (e.g. a non-campaign instant-outbound call
+   * has no campaignId/campaignContactId).
    */
-  clientReference?: string | undefined;
+  metadata: {
+    organizationId: string;
+    leadId?: string | undefined;
+    campaignId?: string | undefined;
+    campaignContactId?: string | undefined;
+    /**
+     * NOT part of the user-supplied example's four named fields — added
+     * because metadata is a generic passthrough object (webhook payloads
+     * echo back whatever was sent, not a fixed key whitelist) and the
+     * single, non-campaign instant-outbound call path
+     * (sarvam-outbound.functions.ts) has no lead/campaign id to correlate
+     * with, only its own call_logs.id. Extends the given shape additively;
+     * never replaces any of its four named fields.
+     */
+    callId?: string | undefined;
+  };
 }
 
 export interface InstantOutboundResult {
@@ -380,20 +415,38 @@ export interface InstantOutboundResult {
   raw: Record<string, unknown>;
 }
 
-/** UNVERIFIED: the destination-number field name (`to_number`) is a best-effort guess, not confirmed. */
 function toInstantOutboundBody(input: CreateInstantOutboundInput): Record<string, unknown> {
-  const body: Record<string, unknown> = {
+  const appConfig: Record<string, unknown> = {
     app_id: input.appId,
     app_version: input.appVersion,
-    connection_id: input.connectionId,
-    to_number: input.toE164,
+    app_type: "agent",
+    connection_config: {
+      connection_id: input.connectionId,
+      agent_phone_number: input.fromE164,
+    },
   };
-  if (input.agentVariables !== undefined) body["agent_variables"] = input.agentVariables;
-  if (input.clientReference !== undefined) {
-    body["user_identifier"] = input.clientReference;
-    body["metadata"] = input.clientReference;
+  if (input.agentVariables !== undefined) appConfig["agent_variables"] = input.agentVariables;
+  if (input.appOverrides) {
+    const overrides: Record<string, unknown> = {};
+    if (input.appOverrides.initialBotMessage !== undefined)
+      overrides["initial_bot_message"] = input.appOverrides.initialBotMessage;
+    if (input.appOverrides.initialStateName !== undefined)
+      overrides["initial_state_name"] = input.appOverrides.initialStateName;
+    if (Object.keys(overrides).length > 0) appConfig["app_overrides"] = overrides;
   }
-  return body;
+
+  const metadata: Record<string, string> = { organization_id: input.metadata.organizationId };
+  if (input.metadata.leadId !== undefined) metadata["lead_id"] = input.metadata.leadId;
+  if (input.metadata.campaignId !== undefined) metadata["campaign_id"] = input.metadata.campaignId;
+  if (input.metadata.campaignContactId !== undefined)
+    metadata["campaign_contact_id"] = input.metadata.campaignContactId;
+  if (input.metadata.callId !== undefined) metadata["call_id"] = input.metadata.callId;
+
+  return {
+    app_config: appConfig,
+    user_config: { user_phone_number: input.toE164 },
+    webhook_config: { url: input.webhookUrl, metadata },
+  };
 }
 
 export async function createInstantOutbound(

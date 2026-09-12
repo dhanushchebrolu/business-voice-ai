@@ -1,6 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
-import { getTelephonyAdapter } from "@/lib/telephony.server";
+import { getTelephonyAdapter, sarvamWebhookUrl } from "@/lib/telephony.server";
 import { checkTelephonyAccess, walletCanAffordOutbound } from "@/lib/telephony-guard.server";
 import { SarvamTelephonyAdapter } from "@/lib/telephony/sarvam-provider.server";
 
@@ -64,6 +64,9 @@ export const createSarvamInstantOutboundCall = createServerFn({ method: "POST" }
     const affordable = await walletCanAffordOutbound(orgId);
     if (!affordable) throw new Error("Insufficient wallet balance to place this call.");
 
+    const webhookUrl = sarvamWebhookUrl();
+    if (!webhookUrl) throw new Error("Outbound calling is not configured on this platform yet.");
+
     const adapter = getTelephonyAdapter("sarvam");
     if (!adapter) throw new Error("Sarvam is not connected. Configure SARVAM_API_KEY first.");
     if (!(adapter instanceof SarvamTelephonyAdapter))
@@ -114,8 +117,10 @@ export const createSarvamInstantOutboundCall = createServerFn({ method: "POST" }
         appId: agentConfig.sarvam_app_id,
         appVersion: agentConfig.sarvam_app_version,
         connectionId: connection.provider_connection_id,
+        fromE164: gate.phoneNumber.e164,
         toE164: data.toE164,
-        clientReference: call.id,
+        webhookUrl,
+        metadata: { organizationId: orgId, callId: call.id },
       });
 
       // interaction_id may not be returned synchronously — see

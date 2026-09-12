@@ -36,7 +36,11 @@ export const TELEPHONY_PROVIDERS: TelephonyProviderDef[] = [
   {
     id: "sarvam",
     label: "Sarvam Voice Agents",
-    requiredSecrets: ["SARVAM_API_KEY"],
+    // Informational only for sarvam — see resolveSarvamKeys() below for the
+    // real fallback-chain resolution providerStatus()/getTelephonyAdapter()
+    // actually use. Listed here so the admin UI's "missing secrets" display
+    // has at least one concrete name to show.
+    requiredSecrets: ["SARVAM_INBOUND_VOICE_API_KEY", "SARVAM_OUTBOUND_VOICE_API_KEY"],
     supportsPurchase: true,
   },
   // Phase D.1: corrected from supportsPurchase:true — Exotel has no
@@ -68,18 +72,71 @@ export const TELEPHONY_PROVIDERS: TelephonyProviderDef[] = [
   { id: "intalk", label: "Intalk", requiredSecrets: ["INTALK_API_KEY"], supportsPurchase: false },
 ];
 
+/**
+ * Resolves Sarvam's separately-configurable inbound/outbound Voice Agents
+ * API keys, in the exact fallback order requested: a dedicated
+ * SARVAM_INBOUND_VOICE_API_KEY / SARVAM_OUTBOUND_VOICE_API_KEY first, then
+ * the single-key SARVAM_VOICE_AGENTS_API_KEY fallback (for an account
+ * confirmed to use the same key for both), then the legacy SARVAM_API_KEY
+ * (so an environment already running the previous single-key setup keeps
+ * working unchanged). Either resolved value may independently be null —
+ * callers decide whether that's fatal for the specific operation they need
+ * (see SarvamTelephonyAdapter.managementApiConfig).
+ */
+export function resolveSarvamKeys(): {
+  inboundApiKey: string | null;
+  outboundApiKey: string | null;
+} {
+  const legacy = process.env["SARVAM_API_KEY"];
+  const single = process.env["SARVAM_VOICE_AGENTS_API_KEY"] ?? legacy;
+  return {
+    inboundApiKey: process.env["SARVAM_INBOUND_VOICE_API_KEY"] ?? single ?? null,
+    outboundApiKey: process.env["SARVAM_OUTBOUND_VOICE_API_KEY"] ?? single ?? null,
+  };
+}
+
 export function providerStatus() {
-  return TELEPHONY_PROVIDERS.map((p) => ({
-    id: p.id,
-    label: p.label,
-    supportsPurchase: p.supportsPurchase,
-    configured: p.requiredSecrets.every((s) => Boolean(process.env[s])),
-    missing: p.requiredSecrets.filter((s) => !process.env[s]),
-  }));
+  return TELEPHONY_PROVIDERS.map((p) => {
+    if (p.id === "sarvam") {
+      const { inboundApiKey, outboundApiKey } = resolveSarvamKeys();
+      const missing: string[] = [];
+      if (!inboundApiKey)
+        missing.push("SARVAM_INBOUND_VOICE_API_KEY (or SARVAM_VOICE_AGENTS_API_KEY)");
+      if (!outboundApiKey)
+        missing.push("SARVAM_OUTBOUND_VOICE_API_KEY (or SARVAM_VOICE_AGENTS_API_KEY)");
+      return {
+        id: p.id,
+        label: p.label,
+        supportsPurchase: p.supportsPurchase,
+        configured: Boolean(inboundApiKey && outboundApiKey),
+        missing,
+      };
+    }
+    return {
+      id: p.id,
+      label: p.label,
+      supportsPurchase: p.supportsPurchase,
+      configured: p.requiredSecrets.every((s) => Boolean(process.env[s])),
+      missing: p.requiredSecrets.filter((s) => !process.env[s]),
+    };
+  });
 }
 
 export function anyProviderConfigured(): boolean {
   return providerStatus().some((p) => p.configured);
+}
+
+/**
+ * The single public webhook route every Sarvam outbound request's
+ * `webhook_config.url` must point at — same route the inbound path already
+ * uses, disambiguated by the existing `?provider=sarvam` query param this
+ * route already reads. Returns null when TELEPHONY_WEBHOOK_BASE_URL isn't
+ * configured; callers must refuse to dial rather than send Sarvam a request
+ * with no way to report the result back.
+ */
+export function sarvamWebhookUrl(): string | null {
+  const base = process.env["TELEPHONY_WEBHOOK_BASE_URL"];
+  return base ? `${base}/api/public/webhooks/telephony?provider=sarvam` : null;
 }
 
 /** Base REST URL for a generically-adapted provider's API. */
@@ -113,8 +170,14 @@ export function getTelephonyAdapter(providerId: string): TelephonyProviderAdapte
   // (its endpoints are hardcoded in sarvam-api-client.server.ts), so reading
   // it would just invent configuration that does nothing.
   if (providerId === "sarvam") {
-    const apiKey = process.env["SARVAM_API_KEY"];
-    if (!apiKey) return null;
+    const { inboundApiKey, outboundApiKey } = resolveSarvamKeys();
+    // The webhook-processing path (verifyWebhookSignature/
+    // normalizeWebhookEvent) needs neither key — it's pure payload parsing —
+    // so this adapter is still constructed even when only one direction's
+    // key is configured, letting inbound-only or outbound-only setups work.
+    // Each management-API method fails closed on its own if its specific
+    // key is missing (see managementApiConfig).
+    if (!inboundApiKey && !outboundApiKey) return null;
     // SARVAM_ORG_ID/SARVAM_WORKSPACE_ID are optional here on purpose: the
     // webhook-processing path (verifyWebhookSignature/normalizeWebhookEvent)
     // needs neither, so their absence must never break that already-working
@@ -127,7 +190,11 @@ export function getTelephonyAdapter(providerId: string): TelephonyProviderAdapte
     // defense-in-depth check (see that method's doc comment for exactly
     // what it does and does not prove).
     return new SarvamTelephonyAdapter({
-      apiKey,
+      // A method that needs the direction whose key is missing still fails
+      // closed inside managementApiConfig with an explicit message — never
+      // silently reuses the other direction's key.
+      inboundApiKey: inboundApiKey ?? "",
+      outboundApiKey: outboundApiKey ?? "",
       orgId: process.env["SARVAM_ORG_ID"],
       workspaceId: process.env["SARVAM_WORKSPACE_ID"],
       webhookSecret: process.env["SARVAM_WEBHOOK_SECRET"],

@@ -119,6 +119,17 @@ export interface NormalizedCallEvent {
    * unattributable and must be dropped, never guessed.
    */
   clientReference?: string | undefined;
+  /**
+   * organization_id Klyro itself supplied in the outbound request's
+   * `webhook_config.metadata.organization_id` (see
+   * sarvam-api-client.server.ts's toInstantOutboundBody), echoed back by
+   * the provider. Defense-in-depth ONLY — never used to choose which
+   * organization a webhook belongs to; only to cross-check against the
+   * organization_id already resolved from a Klyro-owned row via
+   * `clientReference`, and to drop an event whose two sources disagree
+   * (see the webhook route's use of this field).
+   */
+  metadataOrganizationId?: string | undefined;
   /** Raw provider payload, kept for audit/debugging — never shown to a customer. */
   raw: Record<string, unknown>;
 }

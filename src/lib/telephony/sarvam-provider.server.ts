@@ -121,7 +121,18 @@ import { constantTimeEquals } from "../constant-time-equals.server.ts";
  */
 
 export interface SarvamTelephonyConfig {
-  apiKey: string;
+  /**
+   * Separate credentials for inbound (deployment) vs. outbound
+   * (instant-outbound/cohort) operations, per the account's own key
+   * separation — see telephony.server.ts's sarvam branch for the exact
+   * SARVAM_INBOUND_VOICE_API_KEY / SARVAM_OUTBOUND_VOICE_API_KEY /
+   * SARVAM_VOICE_AGENTS_API_KEY (single-key fallback) / SARVAM_API_KEY
+   * (legacy fallback) resolution order. Both are required to be non-empty —
+   * telephony.server.ts refuses to construct this adapter at all if neither
+   * resolves.
+   */
+  inboundApiKey: string;
+  outboundApiKey: string;
   /**
    * Sarvam org/workspace scope, read from SARVAM_ORG_ID/SARVAM_WORKSPACE_ID
    * when present. Optional here — the webhook-processing path
@@ -314,13 +325,52 @@ function classifyOutboundStatus(
   return "failed";
 }
 
-/** Best-effort candidate client-reference — see the module doc's note on `clientReference`. */
+/**
+ * Best-effort candidate client-reference — see the module doc's note on
+ * `clientReference`. Per the outbound request body Klyro now sends
+ * (sarvam-api-client.server.ts's toInstantOutboundBody), `webhook_config`
+ * carries a structured `metadata` OBJECT with `campaign_contact_id`,
+ * `organization_id`, `campaign_id`, `lead_id` — not a single flat string —
+ * so that shape is checked first. `campaign_contact_id` is preferred (it is
+ * the most specific Klyro-owned row available); `organization_id` alone is
+ * never sufficient for correlation to a specific call, only used elsewhere
+ * as a defense-in-depth cross-check once a row is already resolved. The
+ * older flat `user_identifier`/`metadata`-as-string shape is still checked
+ * as a fallback for backward compatibility with the previous request body.
+ */
 function extractClientReference(fields: Record<string, unknown>): string | undefined {
+  const metadataObj = asPlainObject(fields["metadata"]);
+  if (metadataObj) {
+    const campaignContactId = metadataObj["campaign_contact_id"];
+    if (isNonEmptyString(campaignContactId)) return campaignContactId;
+    const callId = metadataObj["call_id"];
+    if (isNonEmptyString(callId)) return callId;
+    const leadId = metadataObj["lead_id"];
+    if (isNonEmptyString(leadId)) return leadId;
+  }
   const userIdentifier = fields["user_identifier"];
   if (isNonEmptyString(userIdentifier)) return userIdentifier;
   const metadata = fields["metadata"];
   if (isNonEmptyString(metadata)) return metadata;
   return undefined;
+}
+
+/**
+ * Extracts the organization_id Klyro itself supplied in
+ * `webhook_config.metadata.organization_id` when the request was sent (see
+ * toInstantOutboundBody) — used ONLY as a defense-in-depth cross-check
+ * against the organization_id already resolved from a Klyro-owned row via
+ * `clientReference`, never as a standalone source of authorization. A
+ * webhook that supplies a metadata.organization_id disagreeing with the
+ * row it otherwise resolved to is a signal something is wrong (stale
+ * metadata, a bug, or a forged request) and callers should treat it as
+ * such rather than trusting either value blindly.
+ */
+function extractMetadataOrganizationId(fields: Record<string, unknown>): string | undefined {
+  const metadataObj = asPlainObject(fields["metadata"]);
+  if (!metadataObj) return undefined;
+  const organizationId = metadataObj["organization_id"];
+  return isNonEmptyString(organizationId) ? organizationId : undefined;
 }
 
 export class SarvamTelephonyAdapter implements TelephonyProviderAdapter {
@@ -359,16 +409,32 @@ export class SarvamTelephonyAdapter implements TelephonyProviderAdapter {
     );
   }
 
-  /** Scopes the Voice Agents management API client config, or fails closed if org/workspace isn't configured. */
-  private managementApiConfig(): SarvamApiClientConfig {
+  /**
+   * Scopes the Voice Agents management API client config, or fails closed
+   * if org/workspace isn't configured. `purpose` selects which of the two
+   * separately-configurable API keys this specific call uses — inbound
+   * deployment creation and outbound instant-outbound/cohort calls are
+   * billed/rate-limited independently on the account, so they must never
+   * share a key silently just because both happen to be set.
+   */
+  private managementApiConfig(purpose: "inbound" | "outbound"): SarvamApiClientConfig {
     if (!this.config.orgId || !this.config.workspaceId) {
       throw new TelephonyAdapterError(
-        "This operation requires SARVAM_ORG_ID and SARVAM_WORKSPACE_ID to be configured, in addition to SARVAM_API_KEY.",
+        "This operation requires SARVAM_ORG_ID and SARVAM_WORKSPACE_ID to be configured, in addition to the Sarvam Voice Agents API key(s).",
+        503,
+      );
+    }
+    const apiKey = purpose === "inbound" ? this.config.inboundApiKey : this.config.outboundApiKey;
+    if (!apiKey) {
+      const envVar =
+        purpose === "inbound" ? "SARVAM_INBOUND_VOICE_API_KEY" : "SARVAM_OUTBOUND_VOICE_API_KEY";
+      throw new TelephonyAdapterError(
+        `This ${purpose} operation requires ${envVar} (or SARVAM_VOICE_AGENTS_API_KEY) to be configured.`,
         503,
       );
     }
     return {
-      apiKey: this.config.apiKey,
+      apiKey,
       orgId: this.config.orgId,
       workspaceId: this.config.workspaceId,
       fetchImpl: this.config.fetchImpl,
@@ -392,7 +458,7 @@ export class SarvamTelephonyAdapter implements TelephonyProviderAdapter {
    * before ever reaching this call.
    */
   async createInboundDeployment(input: CreateInboundDeploymentInput): Promise<CreatedDeployment> {
-    const result = await apiCreateDeployment(this.managementApiConfig(), input);
+    const result = await apiCreateDeployment(this.managementApiConfig("inbound"), input);
     return { deploymentId: result.deploymentId };
   }
 
@@ -405,7 +471,11 @@ export class SarvamTelephonyAdapter implements TelephonyProviderAdapter {
     deploymentId: string,
     input: UpdateDeploymentInput,
   ): Promise<CreatedDeployment> {
-    const result = await apiUpdateDeployment(this.managementApiConfig(), deploymentId, input);
+    const result = await apiUpdateDeployment(
+      this.managementApiConfig("inbound"),
+      deploymentId,
+      input,
+    );
     return { deploymentId: result.deploymentId };
   }
 
@@ -417,16 +487,16 @@ export class SarvamTelephonyAdapter implements TelephonyProviderAdapter {
    * body are the same convention, not independently confirmed.
    */
   async listCampaigns(): Promise<SarvamCampaign[]> {
-    const result = await apiListCampaigns(this.managementApiConfig());
+    const result = await apiListCampaigns(this.managementApiConfig("outbound"));
     return result.campaigns;
   }
 
   async getCampaign(campaignId: string): Promise<SarvamCampaign> {
-    return apiGetCampaign(this.managementApiConfig(), campaignId);
+    return apiGetCampaign(this.managementApiConfig("outbound"), campaignId);
   }
 
   async updateCampaign(campaignId: string, input: UpdateCampaignInput): Promise<SarvamCampaign> {
-    return apiUpdateCampaign(this.managementApiConfig(), campaignId, input);
+    return apiUpdateCampaign(this.managementApiConfig("outbound"), campaignId, input);
   }
 
   /**
@@ -439,7 +509,7 @@ export class SarvamTelephonyAdapter implements TelephonyProviderAdapter {
    * a placeholder.
    */
   async createInstantOutbound(input: CreateInstantOutboundInput): Promise<InstantOutboundResult> {
-    return apiCreateInstantOutbound(this.managementApiConfig(), input);
+    return apiCreateInstantOutbound(this.managementApiConfig("outbound"), input);
   }
 
   /**
@@ -450,7 +520,7 @@ export class SarvamTelephonyAdapter implements TelephonyProviderAdapter {
    * `instant_outbound_fallback` path.
    */
   async uploadCohort(input: UploadCohortInput): Promise<UploadCohortResult> {
-    return apiUploadCohort(this.managementApiConfig(), input);
+    return apiUploadCohort(this.managementApiConfig("outbound"), input);
   }
 
   /**
@@ -542,6 +612,7 @@ export class SarvamTelephonyAdapter implements TelephonyProviderAdapter {
           ? fields["attempt_id"]
           : undefined,
         clientReference,
+        metadataOrganizationId: extractMetadataOrganizationId(fields),
         raw: fields,
       };
     }
