@@ -4,7 +4,13 @@ import { PhoneCall, MessageSquare, Bot, MessagesSquare } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { useCheckout } from "@/hooks/useCheckout";
 import { pricingQuery, formatMoney } from "@/lib/pricing";
-import { ACCOUNT_STATUS_LABEL, workspaceQuery, numbersQuery, type AccountStatus } from "@/lib/workspace";
+import {
+  ACCOUNT_STATUS_LABEL,
+  workspaceQuery,
+  numbersQuery,
+  provisioningStatusLabel,
+  type AccountStatus,
+} from "@/lib/workspace";
 import { SectionCard, StatusPill } from "./primitives";
 import { Button } from "@/components/ui/button";
 
@@ -22,22 +28,60 @@ export function AccountStatusPanel() {
   const { pay, pending } = useCheckout({ email: user?.email });
 
   const status = (ws?.organization?.account_status ?? "payment_required") as AccountStatus;
-  const meta = ACCOUNT_STATUS_LABEL[status];
-  const nextBilling = ws?.organization?.next_billing_at ? new Date(ws.organization.next_billing_at) : null;
+  const nextBilling = ws?.organization?.next_billing_at
+    ? new Date(ws.organization.next_billing_at)
+    : null;
   const activeNumber = numbers?.find((n) => n.status === "active");
   const voiceReady = (ws?.agent?.active_version ?? 0) > 0;
 
-  const channels: { icon: typeof PhoneCall; label: string; ok: boolean; tone: ChannelTone; hint: string }[] = [
+  // While account_status is "setup_in_progress" (lifecycle_status
+  // setup_paid/provisioning/ready — see the account_status DB trigger),
+  // show Task #96's more specific provisioning stage instead of the
+  // generic "Setup in progress" — same underlying signals
+  // app.numbers.tsx's own header pill uses, never a raw Sarvam identifier.
+  const candidateNumber = activeNumber ?? numbers?.find((n) => n.status !== "released") ?? null;
+  const meta =
+    status === "setup_in_progress"
+      ? provisioningStatusLabel({
+          lifecycleStatus: ws?.organization?.lifecycle_status ?? "setup_paid",
+          hasNumber: Boolean(candidateNumber),
+          numberActive: candidateNumber?.status === "active",
+          connectionLinked: Boolean(candidateNumber?.connection_id),
+          agentSarvamMapped: Boolean(ws?.agent?.sarvam_app_id && ws?.agent?.sarvam_app_version),
+          inboundEnabled: Boolean(candidateNumber?.inbound_enabled),
+          outboundEnabled: Boolean(candidateNumber?.outbound_enabled),
+        })
+      : ACCOUNT_STATUS_LABEL[status];
+
+  const channels: {
+    icon: typeof PhoneCall;
+    label: string;
+    ok: boolean;
+    tone: ChannelTone;
+    hint: string;
+  }[] = [
     {
       icon: PhoneCall,
       label: "Phone",
       ok: Boolean(activeNumber),
       tone: activeNumber ? "live" : "idle",
-      hint: activeNumber?.e164 ?? "Setup required",
+      hint: activeNumber?.e164 ?? (status === "setup_in_progress" ? meta.label : "Setup required"),
     },
-    { icon: Bot, label: "Voice agent", ok: voiceReady, tone: voiceReady ? "live" : "idle", hint: voiceReady ? "Published" : "Not published" },
+    {
+      icon: Bot,
+      label: "Voice agent",
+      ok: voiceReady,
+      tone: voiceReady ? "live" : "idle",
+      hint: voiceReady ? "Published" : "Not published",
+    },
     { icon: MessageSquare, label: "WhatsApp", ok: false, tone: "idle", hint: "Setup required" },
-    { icon: MessagesSquare, label: "Website chatbot", ok: false, tone: "idle", hint: "Setup required" },
+    {
+      icon: MessagesSquare,
+      label: "Website chatbot",
+      ok: false,
+      tone: "idle",
+      hint: "Setup required",
+    },
   ];
 
   const monthly = pricing?.["pricing.monthly_plan"];
@@ -53,14 +97,22 @@ export function AccountStatusPanel() {
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
         <dl className="grid gap-4 sm:grid-cols-3">
           <div>
-            <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Plan</dt>
+            <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+              Plan
+            </dt>
             <dd className="mt-1 text-sm font-medium">
               {ws?.subscription?.plan ?? "—"}
-              {monthly ? <span className="ml-1.5 text-muted-foreground">{formatMoney(monthly.amount, monthly.currency)}/mo</span> : null}
+              {monthly ? (
+                <span className="ml-1.5 text-muted-foreground">
+                  {formatMoney(monthly.amount, monthly.currency)}/mo
+                </span>
+              ) : null}
             </dd>
           </div>
           <div>
-            <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Setup payment</dt>
+            <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+              Setup payment
+            </dt>
             <dd className="mt-1 text-sm font-medium">
               {ws?.organization?.setup_paid_at
                 ? `Paid ${new Date(ws.organization.setup_paid_at).toLocaleDateString()}`
@@ -68,8 +120,12 @@ export function AccountStatusPanel() {
             </dd>
           </div>
           <div>
-            <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Next billing date</dt>
-            <dd className="mt-1 text-sm font-medium tabular">{nextBilling ? nextBilling.toLocaleDateString() : "—"}</dd>
+            <dt className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+              Next billing date
+            </dt>
+            <dd className="mt-1 text-sm font-medium tabular">
+              {nextBilling ? nextBilling.toLocaleDateString() : "—"}
+            </dd>
           </div>
         </dl>
 
@@ -93,7 +149,10 @@ export function AccountStatusPanel() {
 
       <div className="mt-5 grid gap-2.5 sm:grid-cols-2 xl:grid-cols-4">
         {channels.map((c) => (
-          <div key={c.label} className="flex items-center gap-3 rounded-md border border-border px-3 py-2.5">
+          <div
+            key={c.label}
+            className="flex items-center gap-3 rounded-md border border-border px-3 py-2.5"
+          >
             <c.icon className={c.ok ? "size-4 text-primary" : "size-4 text-muted-foreground"} />
             <div className="min-w-0">
               <p className="text-sm font-medium">{c.label}</p>

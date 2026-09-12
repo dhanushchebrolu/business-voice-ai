@@ -338,6 +338,7 @@ export const campaignContactsQuery = (campaignId: string | undefined) =>
   });
 
 export { agentStatusLabel } from "./agent-status.ts";
+export { provisioningStatusLabel } from "./provisioning-status.ts";
 
 export type PaymentRow = Database["public"]["Tables"]["payments"]["Row"];
 export type PaymentOrderRow = Database["public"]["Tables"]["payment_orders"]["Row"];
