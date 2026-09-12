@@ -3,6 +3,7 @@ import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { assertPlatformAdmin, writeAudit } from "@/lib/platform-admin.server";
 import { getTelephonyAdapter } from "@/lib/telephony.server";
 import { SarvamTelephonyAdapter } from "@/lib/telephony/sarvam-provider.server";
+import { createInboundDeploymentForNumbers } from "@/lib/sarvam-inbound-deployment.server";
 import type { Json } from "@/integrations/supabase/types";
 
 /**
@@ -209,15 +210,15 @@ interface CreateSarvamInboundDeploymentInput {
 
 /**
  * Validates and attempts to create a Sarvam inbound deployment for one or
- * more Klyro phone numbers. All validation below runs — and is fully real,
- * tested, working code — before the actual Sarvam API call at the end,
- * which is now a real HTTP request (see SarvamTelephonyAdapter
- * .createInboundDeployment's doc for its verification status: code exists
- * and sends a real request, but has never been exercised against a live
- * Sarvam response in this environment). This function does not fake success
- * — it propagates that adapter's error rather than writing
- * provider_deployment_id or an audit record for something that didn't
- * happen.
+ * more Klyro phone numbers. The validation, tenant-safety checks, and the
+ * actual Sarvam API call all live in createInboundDeploymentForNumbers
+ * (sarvam-inbound-deployment.server.ts) — the automatic provisioning
+ * orchestrator calls that exact same function, so this admin path and the
+ * automatic path can never drift apart. This handler's own job is just the
+ * admin gate and the audit record. Does not fake success: no audit record
+ * is written unless the shared function's Sarvam call actually succeeded
+ * (see SarvamTelephonyAdapter.createInboundDeployment's doc for that call's
+ * verification status).
  */
 export const createSarvamInboundDeployment = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
@@ -231,96 +232,24 @@ export const createSarvamInboundDeployment = createServerFn({ method: "POST" })
     const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
-    const { data: numbers, error: numbersError } = await supabaseAdmin
-      .from("phone_numbers")
-      .select("id, e164, organization_id, connection_id, agent_config_id")
-      .in("id", data.phoneNumberIds);
-    if (numbersError) throw numbersError;
-    if (!numbers || numbers.length !== data.phoneNumberIds.length)
-      throw new Error("One or more phone numbers were not found.");
-
-    // A single deployment binds one connection + one app to a set of
-    // numbers — every number in the request must share both, and (as a
-    // direct consequence) the same organization. Rejecting a mixed set
-    // here is what makes "cross-tenant mapping" structurally impossible:
-    // there is no way to smuggle a number from a different organization
-    // into a deployment for this one.
-    const orgIds = new Set(numbers.map((n) => n.organization_id));
-    if (orgIds.size > 1)
-      throw new Error("All phone numbers in one deployment must belong to the same organization.");
-    const connectionIds = new Set(numbers.map((n) => n.connection_id));
-    if (connectionIds.size > 1 || numbers.some((n) => !n.connection_id))
-      throw new Error(
-        "All phone numbers in one deployment must share the same telephony connection.",
-      );
-    const agentConfigIds = new Set(numbers.map((n) => n.agent_config_id));
-    if (agentConfigIds.size > 1 || numbers.some((n) => !n.agent_config_id))
-      throw new Error("All phone numbers in one deployment must share the same agent.");
-
-    const organizationId = numbers[0]!.organization_id;
-    const connectionId = numbers[0]!.connection_id!;
-    const agentConfigId = numbers[0]!.agent_config_id!;
-
-    const { data: connection } = await supabaseAdmin
-      .from("telephony_connections")
-      .select("id, provider, provider_connection_id")
-      .eq("id", connectionId)
-      .maybeSingle();
-    if (!connection) throw new Error("Telephony connection not found.");
-    if (connection.provider !== "sarvam")
-      throw new Error("This deployment flow only applies to sarvam connections.");
-    if (!connection.provider_connection_id)
-      throw new Error(
-        "This connection has not been registered with Sarvam yet — call registerTelephonyConnection first.",
-      );
-
-    const { data: agentConfig } = await supabaseAdmin
-      .from("agent_configs")
-      .select("id, organization_id, sarvam_app_id, sarvam_app_version")
-      .eq("id", agentConfigId)
-      .maybeSingle();
-    if (!agentConfig) throw new Error("Agent not found.");
-    if (agentConfig.organization_id !== organizationId)
-      throw new Error("The agent's organization does not match the phone numbers' organization.");
-    if (!agentConfig.sarvam_app_id || !agentConfig.sarvam_app_version)
-      throw new Error(
-        "This agent has not been mapped to a Sarvam app yet — call setSarvamAppMapping first.",
-      );
-
-    const adapter = getTelephonyAdapter("sarvam");
-    if (!adapter) throw new Error("Sarvam is not connected. Configure SARVAM_API_KEY first.");
-    if (!(adapter instanceof SarvamTelephonyAdapter))
-      throw new Error("Unexpected adapter type for provider 'sarvam'.");
-
-    // This call is a real HTTP request against Sarvam's documented
-    // deployment-creation endpoint — see SarvamTelephonyAdapter
-    // .createInboundDeployment's doc comment for its verification status.
-    // No provider_deployment_id write and no audit entry happen unless it
-    // genuinely succeeds.
-    const created = await adapter.createInboundDeployment({
+    const result = await createInboundDeploymentForNumbers(supabaseAdmin, {
+      phoneNumberIds: data.phoneNumberIds,
       name: data.name,
-      appId: agentConfig.sarvam_app_id,
-      appVersion: agentConfig.sarvam_app_version,
-      connectionId: connection.provider_connection_id,
-      phoneNumbers: numbers.map((n) => n.e164),
     });
-
-    const { error: updateError } = await supabaseAdmin
-      .from("phone_numbers")
-      .update({ provider_deployment_id: created.deploymentId })
-      .in("id", data.phoneNumberIds);
-    if (updateError) throw updateError;
 
     await writeAudit(admin, {
       action: "SARVAM_DEPLOYMENT_CREATED",
       entityType: "phone_number",
       entityId: data.phoneNumberIds[0] ?? null,
-      organizationId,
-      newValue: { deployment_id: created.deploymentId, phone_number_ids: data.phoneNumberIds },
+      organizationId: result.organizationId,
+      newValue: {
+        deployment_id: result.deploymentId,
+        phone_number_ids: data.phoneNumberIds,
+      },
       reason: data.reason,
     });
 
-    return { ok: true as const, deploymentId: created.deploymentId };
+    return { ok: true as const, deploymentId: result.deploymentId };
   });
 
 /* ------------------------------------------------------------------ */
