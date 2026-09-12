@@ -74,8 +74,8 @@ describe("createSarvamInstantOutboundCall — create-call-log-first pattern, pre
     assert.match(src, /status:\s*"initiated"/);
   });
 
-  test("passes the call_logs row's own id as clientReference — the correlation key the webhook fallback expects", () => {
-    assert.match(src, /clientReference:\s*call\.id/);
+  test("passes the call_logs row's own id as metadata.callId — the correlation key the webhook fallback expects", () => {
+    assert.match(src, /metadata:\s*\{\s*organizationId:\s*orgId,\s*callId:\s*call\.id\s*\}/);
   });
 
   test("does NOT unconditionally write provider_call_id — only when interactionId is actually present in the response", () => {

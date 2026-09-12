@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { SarvamTelephonyAdapter, SARVAM_WEBHOOK_AUTH_VERIFIED } from "./sarvam-provider.server.ts";
 import { TelephonyAdapterError } from "./adapter.ts";
 
-const config = { apiKey: "sk_test_key" };
+const config = { inboundApiKey: "sk_test_key_in", outboundApiKey: "sk_test_key_out" };
 
 /**
  * Sample payloads shaped exactly per the field lists this session verified
@@ -186,6 +186,38 @@ test("normalizeWebhookEvent: clientReference is undefined when neither user_iden
   const event = adapter.normalizeWebhookEvent(JSON.stringify(payload));
   assert.ok(event);
   assert.equal(event.clientReference, undefined);
+});
+
+test("normalizeWebhookEvent: prefers metadata.campaign_contact_id (the structured object shape Klyro now sends) over a flat user_identifier", () => {
+  const adapter = new SarvamTelephonyAdapter(config);
+  const payload = {
+    ...OUTBOUND_SUCCESS_SAMPLE,
+    metadata: { organization_id: "org_1", campaign_id: "camp_1", campaign_contact_id: "cc_1" },
+  };
+  const event = adapter.normalizeWebhookEvent(JSON.stringify(payload));
+  assert.ok(event);
+  assert.equal(event.clientReference, "cc_1");
+});
+
+test("normalizeWebhookEvent: falls back to metadata.call_id when no campaign_contact_id is present (the single instant-outbound path)", () => {
+  const adapter = new SarvamTelephonyAdapter(config);
+  const { user_identifier: _drop, ...rest } = OUTBOUND_SUCCESS_SAMPLE;
+  const payload = { ...rest, metadata: { organization_id: "org_1", call_id: "call_abc" } };
+  const event = adapter.normalizeWebhookEvent(JSON.stringify(payload));
+  assert.ok(event);
+  assert.equal(event.clientReference, "call_abc");
+});
+
+test("normalizeWebhookEvent: surfaces metadata.organization_id as metadataOrganizationId for defense-in-depth, never as clientReference itself", () => {
+  const adapter = new SarvamTelephonyAdapter(config);
+  const payload = {
+    ...OUTBOUND_SUCCESS_SAMPLE,
+    metadata: { organization_id: "org_xyz", campaign_contact_id: "cc_1" },
+  };
+  const event = adapter.normalizeWebhookEvent(JSON.stringify(payload));
+  assert.ok(event);
+  assert.equal(event.metadataOrganizationId, "org_xyz");
+  assert.equal(event.clientReference, "cc_1");
 });
 
 test("normalizeWebhookEvent: malformed JSON returns null rather than throwing", () => {
@@ -407,7 +439,10 @@ test("updateInboundDeployment, listCampaigns, getCampaign, updateCampaign and cr
         appId: "app_1",
         appVersion: 1,
         connectionId: "conn_1",
+        fromE164: "+912222222222",
         toE164: "+919876543210",
+        webhookUrl: "https://klyro.example.com/api/public/webhooks/telephony?provider=sarvam",
+        metadata: { organizationId: "org_1" },
       }),
     notConfigured,
   );
@@ -451,7 +486,7 @@ test("createInboundDeployment: once orgId/workspaceId are configured, issues a r
   );
   assert.equal(calledInit?.method, "POST");
   const headers = calledInit?.headers as Record<string, string>;
-  assert.equal(headers["X-API-Key"], "sk_test_key");
+  assert.equal(headers["X-API-Key"], "sk_test_key_in");
   const body = JSON.parse(calledInit?.body as string);
   assert.equal(body.app_id, "app_1");
   assert.equal(body.connection_id, "conn_1");
@@ -476,4 +511,39 @@ test("createInboundDeployment: on a genuinely successful response, returns the r
     phoneNumbers: ["+912222222222"],
   });
   assert.equal(result.deploymentId, "dep_real_123");
+});
+
+test("createInboundDeployment and createInstantOutbound send the inbound and outbound API keys respectively — never the other direction's key", async () => {
+  const capturedKeys: string[] = [];
+  const fetchImpl = (async (_url: string | URL, init?: RequestInit) => {
+    capturedKeys.push((init?.headers as Record<string, string>)["X-API-Key"]!);
+    return new Response(JSON.stringify({ deployment_id: "dep_1", interaction_id: "int_1" }), {
+      status: 200,
+    });
+  }) as typeof fetch;
+  const adapter = new SarvamTelephonyAdapter({
+    ...config,
+    orgId: "org_1",
+    workspaceId: "ws_1",
+    fetchImpl,
+  });
+
+  await adapter.createInboundDeployment({
+    name: "test-deployment",
+    appId: "app_1",
+    appVersion: 1,
+    connectionId: "conn_1",
+    phoneNumbers: ["+912222222222"],
+  });
+  await adapter.createInstantOutbound({
+    appId: "app_1",
+    appVersion: 1,
+    connectionId: "conn_1",
+    fromE164: "+912222222222",
+    toE164: "+919876543210",
+    webhookUrl: "https://klyro.example.com/api/public/webhooks/telephony?provider=sarvam",
+    metadata: { organizationId: "org_1" },
+  });
+
+  assert.deepEqual(capturedKeys, [config.inboundApiKey, config.outboundApiKey]);
 });

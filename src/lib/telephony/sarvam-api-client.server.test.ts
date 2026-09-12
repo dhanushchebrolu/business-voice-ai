@@ -118,14 +118,17 @@ describe("request construction", () => {
     assert.deepEqual(body.webhook_config, { metadata: { source: "klyro" } });
   });
 
-  test("createInstantOutbound: POSTs to the documented outbounds path with app/connection/destination fields", async () => {
+  test("createInstantOutbound: POSTs to the documented outbounds path with the nested app_config/user_config/webhook_config shape", async () => {
     const capture: { url?: string; init?: RequestInit } = {};
     const config = { ...baseConfig, fetchImpl: mockFetch(200, {}, capture) };
     await createInstantOutbound(config, {
       appId: "app_1",
       appVersion: 2,
       connectionId: "conn_1",
+      fromE164: "+912222222222",
       toE164: "+919876543210",
+      webhookUrl: "https://klyro.example.com/api/public/webhooks/telephony?provider=sarvam",
+      metadata: { organizationId: "org_1" },
     });
     assert.equal(
       capture.url,
@@ -133,25 +136,64 @@ describe("request construction", () => {
     );
     assert.equal(capture.init?.method, "POST");
     const body = JSON.parse(capture.init?.body as string);
-    assert.equal(body.app_id, "app_1");
-    assert.equal(body.app_version, 2);
-    assert.equal(body.connection_id, "conn_1");
-    assert.equal(body.to_number, "+919876543210");
+    assert.equal(body.app_config.app_id, "app_1");
+    assert.equal(body.app_config.app_version, 2);
+    assert.equal(body.app_config.app_type, "agent");
+    assert.equal(body.app_config.connection_config.connection_id, "conn_1");
+    assert.equal(body.app_config.connection_config.agent_phone_number, "+912222222222");
+    assert.equal(body.user_config.user_phone_number, "+919876543210");
+    assert.equal(
+      body.webhook_config.url,
+      "https://klyro.example.com/api/public/webhooks/telephony?provider=sarvam",
+    );
+    assert.equal(body.webhook_config.metadata.organization_id, "org_1");
   });
 
-  test("createInstantOutbound: attaches clientReference under BOTH user_identifier and metadata (candidate correlation, per module doc)", async () => {
+  test("createInstantOutbound: metadata carries whichever of lead/campaign/campaign-contact/call ids are supplied, omitting the rest", async () => {
     const capture: { url?: string; init?: RequestInit } = {};
     const config = { ...baseConfig, fetchImpl: mockFetch(200, {}, capture) };
     await createInstantOutbound(config, {
       appId: "app_1",
       appVersion: 2,
       connectionId: "conn_1",
+      fromE164: "+912222222222",
       toE164: "+919876543210",
-      clientReference: "8f14e45f-ceea-467e-a4a9-1c1c1c1c1c1c",
+      webhookUrl: "https://klyro.example.com/api/public/webhooks/telephony?provider=sarvam",
+      metadata: {
+        organizationId: "org_1",
+        campaignId: "camp_1",
+        campaignContactId: "cc_1",
+      },
     });
     const body = JSON.parse(capture.init?.body as string);
-    assert.equal(body.user_identifier, "8f14e45f-ceea-467e-a4a9-1c1c1c1c1c1c");
-    assert.equal(body.metadata, "8f14e45f-ceea-467e-a4a9-1c1c1c1c1c1c");
+    assert.equal(body.webhook_config.metadata.organization_id, "org_1");
+    assert.equal(body.webhook_config.metadata.campaign_id, "camp_1");
+    assert.equal(body.webhook_config.metadata.campaign_contact_id, "cc_1");
+    assert.equal(body.webhook_config.metadata.lead_id, undefined);
+    assert.equal(body.webhook_config.metadata.call_id, undefined);
+  });
+
+  test("createInstantOutbound: agentVariables and appOverrides are passed through under app_config, omitted when absent", async () => {
+    const capture: { url?: string; init?: RequestInit } = {};
+    const config = { ...baseConfig, fetchImpl: mockFetch(200, {}, capture) };
+    await createInstantOutbound(config, {
+      appId: "app_1",
+      appVersion: 2,
+      connectionId: "conn_1",
+      fromE164: "+912222222222",
+      toE164: "+919876543210",
+      webhookUrl: "https://klyro.example.com/api/public/webhooks/telephony?provider=sarvam",
+      metadata: { organizationId: "org_1" },
+      agentVariables: { customer_name: "Asha" },
+      appOverrides: { initialBotMessage: "Hi Asha, this is Smile Dental." },
+    });
+    const body = JSON.parse(capture.init?.body as string);
+    assert.deepEqual(body.app_config.agent_variables, { customer_name: "Asha" });
+    assert.equal(
+      body.app_config.app_overrides.initial_bot_message,
+      "Hi Asha, this is Smile Dental.",
+    );
+    assert.equal(body.app_config.app_overrides.initial_state_name, undefined);
   });
 });
 
@@ -330,7 +372,10 @@ describe("response parsing — never fabricates an id the response didn't actual
       appId: "a",
       appVersion: 1,
       connectionId: "c",
+      fromE164: "+912222222222",
       toE164: "+919876543210",
+      webhookUrl: "https://klyro.example.com/api/public/webhooks/telephony?provider=sarvam",
+      metadata: { organizationId: "org_1" },
     });
     assert.equal(result.interactionId, "int_555");
   });
@@ -341,7 +386,10 @@ describe("response parsing — never fabricates an id the response didn't actual
       appId: "a",
       appVersion: 1,
       connectionId: "c",
+      fromE164: "+912222222222",
       toE164: "+919876543210",
+      webhookUrl: "https://klyro.example.com/api/public/webhooks/telephony?provider=sarvam",
+      metadata: { organizationId: "org_1" },
     });
     assert.equal(result.interactionId, undefined);
     assert.deepEqual(result.raw, { accepted: true });

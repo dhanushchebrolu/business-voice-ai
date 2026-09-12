@@ -1,4 +1,4 @@
-import { getTelephonyAdapter } from "@/lib/telephony.server";
+import { getTelephonyAdapter, sarvamWebhookUrl } from "@/lib/telephony.server";
 import { checkTelephonyAccess, walletCanAffordOutbound } from "@/lib/telephony-guard.server";
 import { SarvamTelephonyAdapter } from "@/lib/telephony/sarvam-provider.server";
 import { isWithinCallingWindow, type CampaignSchedule } from "@/lib/campaign-schedule";
@@ -135,6 +135,10 @@ async function dispatchOneCampaign(
   if (!adapter || !(adapter instanceof SarvamTelephonyAdapter)) {
     return { dialed: 0, skipped: 0, completed: false };
   }
+  const webhookUrl = sarvamWebhookUrl();
+  if (!webhookUrl) {
+    return { dialed: 0, skipped: 0, completed: false };
+  }
 
   const { data: due } = await supabaseAdmin
     .from("campaign_contacts")
@@ -228,9 +232,15 @@ async function dispatchOneCampaign(
         appId: agentConfig.sarvam_app_id,
         appVersion: agentConfig.sarvam_app_version,
         connectionId: connection.provider_connection_id,
+        fromE164: gate.phoneNumber.e164,
         toE164: contact.phone,
         agentVariables,
-        clientReference: call.id,
+        webhookUrl,
+        metadata: {
+          organizationId: campaign.organization_id,
+          campaignId: campaign.id,
+          campaignContactId: cc.id,
+        },
       });
       if (result.interactionId) {
         await supabaseAdmin

@@ -29,10 +29,20 @@ function withEnv(vars: Record<string, string | undefined>, fn: () => void) {
   }
 }
 
-test("TELEPHONY_PROVIDERS: the sarvam entry requires only SARVAM_API_KEY", () => {
+const SARVAM_KEY_ENV_VARS = [
+  "SARVAM_API_KEY",
+  "SARVAM_VOICE_AGENTS_API_KEY",
+  "SARVAM_INBOUND_VOICE_API_KEY",
+  "SARVAM_OUTBOUND_VOICE_API_KEY",
+];
+
+test("TELEPHONY_PROVIDERS: the sarvam entry lists the separate inbound/outbound key names", () => {
   const def = TELEPHONY_PROVIDERS.find((p) => p.id === "sarvam");
   assert.ok(def, "expected a sarvam entry in the provider registry");
-  assert.deepEqual(def.requiredSecrets, ["SARVAM_API_KEY"]);
+  assert.deepEqual(def.requiredSecrets, [
+    "SARVAM_INBOUND_VOICE_API_KEY",
+    "SARVAM_OUTBOUND_VOICE_API_KEY",
+  ]);
   assert.equal(def.supportsPurchase, true);
 });
 
@@ -46,27 +56,68 @@ test("TELEPHONY_PROVIDERS: SARVAM_TELEPHONY_ACCOUNT is not required anywhere in 
   }
 });
 
-test("providerStatus: sarvam reports configured once SARVAM_API_KEY is set, and not before", () => {
-  withEnv({ SARVAM_API_KEY: undefined }, () => {
-    const before = providerStatus().find((p) => p.id === "sarvam");
-    assert.equal(before?.configured, false);
-    assert.deepEqual(before?.missing, ["SARVAM_API_KEY"]);
-  });
-  withEnv({ SARVAM_API_KEY: "sk_live_example" }, () => {
-    const after = providerStatus().find((p) => p.id === "sarvam");
-    assert.equal(after?.configured, true);
-    assert.deepEqual(after?.missing, []);
+function clearAllSarvamKeys(overrides: Record<string, string | undefined> = {}) {
+  const cleared: Record<string, string | undefined> = {};
+  for (const key of SARVAM_KEY_ENV_VARS) cleared[key] = undefined;
+  return { ...cleared, ...overrides };
+}
+
+test("providerStatus: sarvam reports not configured when neither inbound nor outbound key resolves", () => {
+  withEnv(clearAllSarvamKeys(), () => {
+    const status = providerStatus().find((p) => p.id === "sarvam");
+    assert.equal(status?.configured, false);
+    assert.equal(status?.missing.length, 2);
   });
 });
 
-test("getTelephonyAdapter('sarvam'): returns null when SARVAM_API_KEY is missing, never a half-configured adapter", () => {
-  withEnv({ SARVAM_API_KEY: undefined }, () => {
+test("providerStatus: legacy SARVAM_API_KEY alone still configures both directions (backward compatibility)", () => {
+  withEnv(clearAllSarvamKeys({ SARVAM_API_KEY: "sk_live_legacy" }), () => {
+    const status = providerStatus().find((p) => p.id === "sarvam");
+    assert.equal(status?.configured, true);
+    assert.deepEqual(status?.missing, []);
+  });
+});
+
+test("providerStatus: SARVAM_VOICE_AGENTS_API_KEY alone configures both directions", () => {
+  withEnv(clearAllSarvamKeys({ SARVAM_VOICE_AGENTS_API_KEY: "sk_live_single" }), () => {
+    const status = providerStatus().find((p) => p.id === "sarvam");
+    assert.equal(status?.configured, true);
+  });
+});
+
+test("providerStatus: only the outbound key set still reports configured:false — inbound remains missing", () => {
+  withEnv(clearAllSarvamKeys({ SARVAM_OUTBOUND_VOICE_API_KEY: "sk_live_out" }), () => {
+    const status = providerStatus().find((p) => p.id === "sarvam");
+    assert.equal(status?.configured, false);
+    assert.equal(
+      status?.missing.some((m) => m.startsWith("SARVAM_INBOUND_VOICE_API_KEY")),
+      true,
+    );
+  });
+});
+
+test("providerStatus: dedicated SARVAM_INBOUND_VOICE_API_KEY/SARVAM_OUTBOUND_VOICE_API_KEY together configure sarvam", () => {
+  withEnv(
+    clearAllSarvamKeys({
+      SARVAM_INBOUND_VOICE_API_KEY: "sk_live_in",
+      SARVAM_OUTBOUND_VOICE_API_KEY: "sk_live_out",
+    }),
+    () => {
+      const status = providerStatus().find((p) => p.id === "sarvam");
+      assert.equal(status?.configured, true);
+      assert.deepEqual(status?.missing, []);
+    },
+  );
+});
+
+test("getTelephonyAdapter('sarvam'): returns null when no Sarvam key resolves at all, never a half-configured adapter", () => {
+  withEnv(clearAllSarvamKeys(), () => {
     assert.equal(getTelephonyAdapter("sarvam"), null);
   });
 });
 
-test("getTelephonyAdapter('sarvam'): returns a real SarvamTelephonyAdapter once SARVAM_API_KEY is set", () => {
-  withEnv({ SARVAM_API_KEY: "sk_live_example" }, () => {
+test("getTelephonyAdapter('sarvam'): returns a real SarvamTelephonyAdapter once a key resolves", () => {
+  withEnv(clearAllSarvamKeys({ SARVAM_API_KEY: "sk_live_example" }), () => {
     const adapter = getTelephonyAdapter("sarvam");
     assert.ok(adapter instanceof SarvamTelephonyAdapter);
     assert.equal(adapter?.id, "sarvam");
