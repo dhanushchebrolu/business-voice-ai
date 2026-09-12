@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { getCustomerDetail, setFeatureLock, adjustWallet } from "@/lib/admin.functions";
 import { getProvisioningReadiness } from "@/lib/admin-clients.functions";
 import { retryProvisioning } from "@/lib/telephony-admin.functions";
+import { testSarvamInboundDeployment, testSarvamOutboundCall } from "@/lib/sarvam-admin.functions";
 import { getProfitAnalytics } from "@/lib/admin-finance.functions";
 import {
   PageHeader,
@@ -37,6 +38,7 @@ import { CrmPanel } from "@/components/admin/CrmPanel";
 import { PricingOverridePanel } from "@/components/admin/PricingOverridePanel";
 import type { LifecycleStatus } from "@/lib/lifecycle";
 import type { ProvisioningCheckStatus } from "@/lib/provisioning-health.server";
+import type { ProvisioningState } from "@/lib/provisioning-state";
 
 /** Maps a Phase 1 readiness check's pass/warning/fail onto the HEALTHY/WARNING/BLOCKED vocabulary this page shows admins — same three states, no new health model. */
 const HEALTH_LABEL: Record<
@@ -46,6 +48,20 @@ const HEALTH_LABEL: Record<
   pass: { label: "Healthy", tone: "live" },
   warning: { label: "Warning", tone: "ready" },
   fail: { label: "Blocked", tone: "error" },
+};
+
+/** Labels/tones for the seven-state provisioning machine (provisioning-state.ts) as shown to admins. */
+const PROVISIONING_STATE_LABEL: Record<
+  ProvisioningState,
+  { label: string; tone: "live" | "ready" | "error" | "idle" }
+> = {
+  waiting_for_credentials: { label: "Waiting for credentials", tone: "idle" },
+  waiting_for_agent: { label: "Waiting for agent mapping", tone: "ready" },
+  waiting_for_connection: { label: "Waiting for connection", tone: "ready" },
+  waiting_for_number: { label: "Waiting for number", tone: "ready" },
+  provisioning: { label: "Provisioning", tone: "ready" },
+  active: { label: "Active", tone: "live" },
+  failed: { label: "Failed", tone: "error" },
 };
 
 export const Route = createFileRoute("/admin/customers/$orgId")({
@@ -60,6 +76,8 @@ function CustomerDetail() {
   const saveLock = useServerFn(setFeatureLock);
   const saveWallet = useServerFn(adjustWallet);
   const retry = useServerFn(retryProvisioning);
+  const runInboundTest = useServerFn(testSarvamInboundDeployment);
+  const runOutboundTest = useServerFn(testSarvamOutboundCall);
   const queryClient = useQueryClient();
 
   const [lockTarget, setLockTarget] = useState<{
@@ -70,6 +88,9 @@ function CustomerDetail() {
   const [walletOpen, setWalletOpen] = useState(false);
   const [walletAmount, setWalletAmount] = useState("");
   const [retryOpen, setRetryOpen] = useState(false);
+  const [inboundTestOpen, setInboundTestOpen] = useState(false);
+  const [outboundTestOpen, setOutboundTestOpen] = useState(false);
+  const [testDestinationNumber, setTestDestinationNumber] = useState("");
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["admin-customer", orgId],
@@ -107,6 +128,13 @@ function CustomerDetail() {
   const walletCheck = readiness?.checks.find((c) => c.key === "wallet") ?? null;
   const lastActivity = data.calls[0]?.started_at ?? data.audit[0]?.created_at ?? null;
   const hasActivePhoneNumber = data.numbers.some((n) => n.status === "active");
+  const isDemoOrg = data.business?.is_demo === true;
+  // Same "candidate number" derivation as computeProvisioningStateForAdminView
+  // (admin.functions.ts) — the number these live-test actions target.
+  const testTargetNumber =
+    data.numbers.find((n) => n.status === "active") ??
+    data.numbers.find((n) => n.status !== "released") ??
+    null;
 
   const invalidate = async () => {
     await queryClient.invalidateQueries({ queryKey: ["admin-customer", orgId] });
@@ -359,6 +387,9 @@ function CustomerDetail() {
         description="Automatic provisioning's own record of what it did and didn't do — never a fabricated 'all set'."
         actions={
           <div className="flex items-center gap-2">
+            <StatusPill tone={PROVISIONING_STATE_LABEL[data.provisioningState].tone}>
+              {PROVISIONING_STATE_LABEL[data.provisioningState].label}
+            </StatusPill>
             <Link
               to="/admin/numbers"
               className="text-xs text-muted-foreground hover:text-foreground"
@@ -416,6 +447,43 @@ function CustomerDetail() {
                 {(org as { provisioning_note?: string }).provisioning_note}
               </p>
             ) : null}
+          </div>
+        </div>
+
+        <div className="mt-4 border-t border-border pt-3">
+          <p className="text-sm font-medium">Live provider tests</p>
+          <p className="text-xs text-muted-foreground">
+            Places one real inbound deployment or one real outbound call against Sarvam — restricted
+            to demo/test organizations, requires explicit confirmation, never bulk.
+          </p>
+          {!isDemoOrg ? (
+            <p className="mt-2 text-xs text-warning">
+              This organization is not marked as a demo/test org (businesses.is_demo). Live tests
+              are disabled here — mark it as demo first if this is intentionally a test account.
+            </p>
+          ) : !testTargetNumber ? (
+            <p className="mt-2 text-xs text-muted-foreground">
+              No non-released phone number is assigned to this org yet — assign one before running a
+              live test.
+            </p>
+          ) : null}
+          <div className="mt-2 flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!isDemoOrg || !testTargetNumber}
+              onClick={() => setInboundTestOpen(true)}
+            >
+              Test inbound deployment
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!isDemoOrg || !testTargetNumber}
+              onClick={() => setOutboundTestOpen(true)}
+            >
+              Test outbound call
+            </Button>
           </div>
         </div>
       </SectionCard>
@@ -878,6 +946,60 @@ function CustomerDetail() {
             description: result.note,
           });
           setRetryOpen(false);
+          await invalidate();
+        }}
+      />
+
+      <ReasonDialog
+        open={inboundTestOpen}
+        onOpenChange={setInboundTestOpen}
+        title="Test inbound deployment?"
+        description={`This creates a REAL Sarvam inbound deployment for ${testTargetNumber?.display_number ?? testTargetNumber?.e164 ?? "this number"}. Restricted to demo/test organizations. This is not a simulation.`}
+        confirmLabel="Create test deployment"
+        onConfirm={async (reason) => {
+          if (!testTargetNumber) throw new Error("No phone number available to test");
+          const result = await runInboundTest({
+            data: { phoneNumberId: testTargetNumber.id, confirmTest: true, reason },
+          });
+          toast.success("Test deployment created", {
+            description: `Deployment ${result.deploymentId}`,
+          });
+          setInboundTestOpen(false);
+          await invalidate();
+        }}
+      />
+
+      <ReasonDialog
+        open={outboundTestOpen}
+        onOpenChange={(open) => {
+          setOutboundTestOpen(open);
+          if (!open) setTestDestinationNumber("");
+        }}
+        title="Test outbound call?"
+        description={`This places a REAL outbound call from ${testTargetNumber?.display_number ?? testTargetNumber?.e164 ?? "this number"} to the number below. Restricted to demo/test organizations. Enter only a number you control.`}
+        confirmLabel="Place test call"
+        extra={
+          <Input
+            placeholder="Destination number, E.164 (e.g. +919876543210)"
+            value={testDestinationNumber}
+            onChange={(e) => setTestDestinationNumber(e.target.value)}
+          />
+        }
+        onConfirm={async (reason) => {
+          if (!testTargetNumber) throw new Error("No phone number available to test");
+          if (!/^\+\d{6,15}$/.test(testDestinationNumber))
+            throw new Error("Enter a valid E.164 destination number");
+          const result = await runOutboundTest({
+            data: {
+              phoneNumberId: testTargetNumber.id,
+              toE164: testDestinationNumber,
+              confirmTest: true,
+              reason,
+            },
+          });
+          toast.success("Test call placed", { description: `Call ${result.callId}` });
+          setOutboundTestOpen(false);
+          setTestDestinationNumber("");
           await invalidate();
         }}
       />

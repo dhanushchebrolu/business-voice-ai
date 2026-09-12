@@ -204,6 +204,15 @@ describe("provisionOrganizationAfterPayment — links existing connection/agent 
     assert.equal(result.deploymentCreatedNow, false);
     assert.match(result.note, /no registered Sarvam connection yet/);
     assert.match(result.note, /agent has not been mapped to a Sarvam app yet/);
+    // No SARVAM_* env vars are set in this test's process, so
+    // sarvamCredentialsConfigured is false here — that platform-wide
+    // blocker takes priority over the per-org connection/agent gaps in
+    // computeProvisioningState's own priority order (see the dedicated
+    // "missing platform-wide Sarvam credentials" describe block below for
+    // that case in isolation; a variant of this same scenario WITH
+    // credentials configured would instead report waiting_for_connection,
+    // since connection is checked before agent mapping).
+    assert.equal(result.state, "waiting_for_credentials");
 
     // No deployment attempt: createInboundDeploymentForNumbers would need a
     // telephony_connections/agent_configs re-read it never gets to, and no
@@ -285,6 +294,7 @@ describe("provisionOrganizationAfterPayment — automatic deployment when connec
     assert.equal(result.deploymentCreatedNow, true);
     assert.match(result.note, /Created Sarvam inbound deployment dep_1/);
     assert.match(result.note, /now active with inbound and outbound enabled/);
+    assert.equal(result.state, "active");
 
     const activateUpdate = calls.find(
       (c) =>
@@ -359,6 +369,7 @@ describe("provisionOrganizationAfterPayment — automatic deployment when connec
 
     assert.equal(result.deploymentCreatedNow, false);
     assert.match(result.note, /Automatic inbound deployment creation failed/);
+    assert.equal(result.state, "failed");
 
     const activateUpdate = calls.find(
       (c) =>
@@ -367,6 +378,41 @@ describe("provisionOrganizationAfterPayment — automatic deployment when connec
         (c.payload as { status?: string }).status === "active",
     );
     assert.equal(activateUpdate, undefined);
+  });
+});
+
+describe("provisionOrganizationAfterPayment — state reflects missing platform-wide Sarvam credentials", () => {
+  test("reports waiting_for_credentials when SARVAM_* env vars are not configured, even with a number already assigned", async () => {
+    const prior = {
+      SARVAM_API_KEY: process.env["SARVAM_API_KEY"],
+      SARVAM_INBOUND_VOICE_API_KEY: process.env["SARVAM_INBOUND_VOICE_API_KEY"],
+      SARVAM_OUTBOUND_VOICE_API_KEY: process.env["SARVAM_OUTBOUND_VOICE_API_KEY"],
+      SARVAM_VOICE_AGENTS_API_KEY: process.env["SARVAM_VOICE_AGENTS_API_KEY"],
+      SARVAM_ORG_ID: process.env["SARVAM_ORG_ID"],
+      SARVAM_WORKSPACE_ID: process.env["SARVAM_WORKSPACE_ID"],
+    };
+    for (const key of Object.keys(prior)) delete process.env[key];
+
+    try {
+      const existing = { ...POOL_NUMBER, organization_id: "org_1", status: "provisioning" };
+      const { client } = makeFakeSupabase({
+        organizations: {
+          select: [{ data: ORG_ROW, error: null }],
+          update: [{ data: null, error: null }],
+        },
+        phone_numbers: { select: [{ data: [existing], error: null }] },
+        telephony_connections: { select: [{ data: null, error: null }] },
+        agent_configs: { select: [{ data: null, error: null }] },
+      });
+
+      const result = await provisionOrganizationAfterPayment(client, "org_1");
+      assert.equal(result.state, "waiting_for_credentials");
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 });
 
