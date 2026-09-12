@@ -52,6 +52,7 @@ import { Route as AdminCustomersOrgIdRouteImport } from './routes/admin.customer
 import { Route as AppCampaignsCampaignIdRouteImport } from './routes/app.campaigns.$campaignId'
 import { Route as AppCampaignsNewRouteImport } from './routes/app.campaigns.new'
 import { Route as ApiPublicCronDispatchCampaignsRouteImport } from './routes/api/public/cron/dispatch-campaigns'
+import { Route as ApiPublicSarvamClientContextRouteImport } from './routes/api/public/sarvam/client-context'
 import { Route as ApiPublicWebhooksRazorpayRouteImport } from './routes/api/public/webhooks/razorpay'
 import { Route as ApiPublicWebhooksTelephonyRouteImport } from './routes/api/public/webhooks/telephony'
 import { Route as ApiPublicWebhooksExotelMediaTokenRouteImport } from './routes/api/public/webhooks/exotel.media-token'
@@ -272,6 +273,12 @@ const ApiPublicCronDispatchCampaignsRoute =
     path: '/api/public/cron/dispatch-campaigns',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicSarvamClientContextRoute =
+  ApiPublicSarvamClientContextRouteImport.update({
+    id: '/api/public/sarvam/client-context',
+    path: '/api/public/sarvam/client-context',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicWebhooksRazorpayRoute =
   ApiPublicWebhooksRazorpayRouteImport.update({
     id: '/api/public/webhooks/razorpay',
@@ -335,6 +342,7 @@ export interface FileRoutesByFullPath {
   '/app/campaigns/new': typeof AppCampaignsNewRoute
   '/admin/customers/': typeof AdminCustomersIndexRoute
   '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
+  '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
   '/api/public/webhooks/exotel/media-token': typeof ApiPublicWebhooksExotelMediaTokenRoute
@@ -379,6 +387,7 @@ export interface FileRoutesByTo {
   '/app/campaigns/new': typeof AppCampaignsNewRoute
   '/admin/customers': typeof AdminCustomersIndexRoute
   '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
+  '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
   '/api/public/webhooks/exotel/media-token': typeof ApiPublicWebhooksExotelMediaTokenRoute
@@ -428,6 +437,7 @@ export interface FileRoutesById {
   '/app/campaigns/new': typeof AppCampaignsNewRoute
   '/admin/customers/': typeof AdminCustomersIndexRoute
   '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
+  '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
   '/api/public/webhooks/exotel/media-token': typeof ApiPublicWebhooksExotelMediaTokenRoute
@@ -478,6 +488,7 @@ export interface FileRouteTypes {
     | '/app/campaigns/new'
     | '/admin/customers/'
     | '/api/public/cron/dispatch-campaigns'
+    | '/api/public/sarvam/client-context'
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/telephony'
     | '/api/public/webhooks/exotel/media-token'
@@ -522,6 +533,7 @@ export interface FileRouteTypes {
     | '/app/campaigns/new'
     | '/admin/customers'
     | '/api/public/cron/dispatch-campaigns'
+    | '/api/public/sarvam/client-context'
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/telephony'
     | '/api/public/webhooks/exotel/media-token'
@@ -570,6 +582,7 @@ export interface FileRouteTypes {
     | '/app/campaigns/new'
     | '/admin/customers/'
     | '/api/public/cron/dispatch-campaigns'
+    | '/api/public/sarvam/client-context'
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/telephony'
     | '/api/public/webhooks/exotel/media-token'
@@ -585,6 +598,7 @@ export interface RootRouteChildren {
   PricingRoute: typeof PricingRoute
   ResetPasswordRoute: typeof ResetPasswordRoute
   ApiPublicCronDispatchCampaignsRoute: typeof ApiPublicCronDispatchCampaignsRoute
+  ApiPublicSarvamClientContextRoute: typeof ApiPublicSarvamClientContextRoute
   ApiPublicWebhooksRazorpayRoute: typeof ApiPublicWebhooksRazorpayRoute
   ApiPublicWebhooksTelephonyRoute: typeof ApiPublicWebhooksTelephonyRoute
   ApiPublicWebhooksExotelMediaTokenRoute: typeof ApiPublicWebhooksExotelMediaTokenRoute
@@ -893,6 +907,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicCronDispatchCampaignsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/sarvam/client-context': {
+      id: '/api/public/sarvam/client-context'
+      path: '/api/public/sarvam/client-context'
+      fullPath: '/api/public/sarvam/client-context'
+      preLoaderRoute: typeof ApiPublicSarvamClientContextRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/webhooks/razorpay': {
       id: '/api/public/webhooks/razorpay'
       path: '/api/public/webhooks/razorpay'
@@ -1048,6 +1069,7 @@ const rootRouteChildren: RootRouteChildren = {
   PricingRoute: PricingRoute,
   ResetPasswordRoute: ResetPasswordRoute,
   ApiPublicCronDispatchCampaignsRoute: ApiPublicCronDispatchCampaignsRoute,
+  ApiPublicSarvamClientContextRoute: ApiPublicSarvamClientContextRoute,
   ApiPublicWebhooksRazorpayRoute: ApiPublicWebhooksRazorpayRoute,
   ApiPublicWebhooksTelephonyRoute: ApiPublicWebhooksTelephonyRoute,
   ApiPublicWebhooksExotelMediaTokenRoute:

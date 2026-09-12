@@ -1,9 +1,12 @@
 /**
- * Server-side abuse protection for the unauthenticated public assistant
- * endpoints (publicChat, publicVoiceTurn — see public-assistant.functions.ts).
- * Every call there triggers a real, billed Sarvam API request, so this must
- * run before that call, entirely server-side, and never depend on anything
- * the browser controls.
+ * Server-side abuse protection for unauthenticated/service-to-service
+ * endpoints: the public assistant endpoints (publicChat, publicVoiceTurn —
+ * see public-assistant.functions.ts), each of which triggers a real, billed
+ * Sarvam API request, and the Sarvam client-context endpoint (Task #94 —
+ * see sarvam-client-context.server.ts), which is called directly by
+ * Sarvam's own runtime rather than a browser. This must run before any of
+ * that work, entirely server-side, and never depend on anything the caller
+ * controls.
  *
  * `createRateLimiter` is pure/injectable (see rate-limit.server.test.ts) —
  * only `SupabaseRateLimitStore` below touches the network/database, using
@@ -100,4 +103,18 @@ export const checkVoiceRateLimit = createRateLimiter(
   new SupabaseRateLimitStore("voice"),
   VOICE_LIMIT,
   WINDOW_SECONDS,
+);
+
+// Sarvam's runtime calls the client-context endpoint once per inbound call
+// to fetch business info — a much tighter window than the public assistant
+// (this is a plain read, no LLM/STT/TTS cost) but still bounded, keyed by
+// the resolved phone number/connection/deployment id rather than caller IP
+// (every call legitimately comes from Sarvam's own infrastructure, so an
+// IP-based key would either block all of Sarvam or none of it).
+const CONTEXT_WINDOW_SECONDS = 60;
+const CONTEXT_LIMIT = 30;
+export const checkSarvamContextRateLimit = createRateLimiter(
+  new SupabaseRateLimitStore("sarvam_context"),
+  CONTEXT_LIMIT,
+  CONTEXT_WINDOW_SECONDS,
 );
