@@ -39,6 +39,8 @@ import { Route as AppAgentRouteImport } from './routes/app.agent'
 import { Route as AppBillingRouteImport } from './routes/app.billing'
 import { Route as AppBusinessRouteImport } from './routes/app.business'
 import { Route as AppCallsRouteImport } from './routes/app.calls'
+import { Route as AppCampaignsRouteImport } from './routes/app.campaigns'
+import { Route as AppContactsRouteImport } from './routes/app.contacts'
 import { Route as AppKnowledgeRouteImport } from './routes/app.knowledge'
 import { Route as AppLeadsRouteImport } from './routes/app.leads'
 import { Route as AppNumbersRouteImport } from './routes/app.numbers'
@@ -47,6 +49,9 @@ import { Route as AppSettingsRouteImport } from './routes/app.settings'
 import { Route as AuthCallbackRouteImport } from './routes/auth.callback'
 import { Route as AdminCustomersIndexRouteImport } from './routes/admin.customers.index'
 import { Route as AdminCustomersOrgIdRouteImport } from './routes/admin.customers.$orgId'
+import { Route as AppCampaignsCampaignIdRouteImport } from './routes/app.campaigns.$campaignId'
+import { Route as AppCampaignsNewRouteImport } from './routes/app.campaigns.new'
+import { Route as ApiPublicCronDispatchCampaignsRouteImport } from './routes/api/public/cron/dispatch-campaigns'
 import { Route as ApiPublicWebhooksRazorpayRouteImport } from './routes/api/public/webhooks/razorpay'
 import { Route as ApiPublicWebhooksTelephonyRouteImport } from './routes/api/public/webhooks/telephony'
 import { Route as ApiPublicWebhooksExotelMediaTokenRouteImport } from './routes/api/public/webhooks/exotel.media-token'
@@ -201,6 +206,16 @@ const AppCallsRoute = AppCallsRouteImport.update({
   path: '/calls',
   getParentRoute: () => AppRoute,
 } as any)
+const AppCampaignsRoute = AppCampaignsRouteImport.update({
+  id: '/campaigns',
+  path: '/campaigns',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppContactsRoute = AppContactsRouteImport.update({
+  id: '/contacts',
+  path: '/contacts',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppKnowledgeRoute = AppKnowledgeRouteImport.update({
   id: '/knowledge',
   path: '/knowledge',
@@ -241,6 +256,22 @@ const AdminCustomersOrgIdRoute = AdminCustomersOrgIdRouteImport.update({
   path: '/$orgId',
   getParentRoute: () => AdminCustomersRoute,
 } as any)
+const AppCampaignsCampaignIdRoute = AppCampaignsCampaignIdRouteImport.update({
+  id: '/$campaignId',
+  path: '/$campaignId',
+  getParentRoute: () => AppCampaignsRoute,
+} as any)
+const AppCampaignsNewRoute = AppCampaignsNewRouteImport.update({
+  id: '/new',
+  path: '/new',
+  getParentRoute: () => AppCampaignsRoute,
+} as any)
+const ApiPublicCronDispatchCampaignsRoute =
+  ApiPublicCronDispatchCampaignsRouteImport.update({
+    id: '/api/public/cron/dispatch-campaigns',
+    path: '/api/public/cron/dispatch-campaigns',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicWebhooksRazorpayRoute =
   ApiPublicWebhooksRazorpayRouteImport.update({
     id: '/api/public/webhooks/razorpay',
@@ -288,6 +319,8 @@ export interface FileRoutesByFullPath {
   '/app/billing': typeof AppBillingRoute
   '/app/business': typeof AppBusinessRoute
   '/app/calls': typeof AppCallsRoute
+  '/app/campaigns': typeof AppCampaignsRouteWithChildren
+  '/app/contacts': typeof AppContactsRoute
   '/app/knowledge': typeof AppKnowledgeRoute
   '/app/leads': typeof AppLeadsRoute
   '/app/numbers': typeof AppNumbersRoute
@@ -298,7 +331,10 @@ export interface FileRoutesByFullPath {
   '/admin/': typeof AdminIndexRoute
   '/app/': typeof AppIndexRoute
   '/admin/customers/$orgId': typeof AdminCustomersOrgIdRoute
+  '/app/campaigns/$campaignId': typeof AppCampaignsCampaignIdRoute
+  '/app/campaigns/new': typeof AppCampaignsNewRoute
   '/admin/customers/': typeof AdminCustomersIndexRoute
+  '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
   '/api/public/webhooks/exotel/media-token': typeof ApiPublicWebhooksExotelMediaTokenRoute
@@ -327,6 +363,8 @@ export interface FileRoutesByTo {
   '/app/billing': typeof AppBillingRoute
   '/app/business': typeof AppBusinessRoute
   '/app/calls': typeof AppCallsRoute
+  '/app/campaigns': typeof AppCampaignsRouteWithChildren
+  '/app/contacts': typeof AppContactsRoute
   '/app/knowledge': typeof AppKnowledgeRoute
   '/app/leads': typeof AppLeadsRoute
   '/app/numbers': typeof AppNumbersRoute
@@ -337,7 +375,10 @@ export interface FileRoutesByTo {
   '/admin': typeof AdminIndexRoute
   '/app': typeof AppIndexRoute
   '/admin/customers/$orgId': typeof AdminCustomersOrgIdRoute
+  '/app/campaigns/$campaignId': typeof AppCampaignsCampaignIdRoute
+  '/app/campaigns/new': typeof AppCampaignsNewRoute
   '/admin/customers': typeof AdminCustomersIndexRoute
+  '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
   '/api/public/webhooks/exotel/media-token': typeof ApiPublicWebhooksExotelMediaTokenRoute
@@ -371,6 +412,8 @@ export interface FileRoutesById {
   '/app/billing': typeof AppBillingRoute
   '/app/business': typeof AppBusinessRoute
   '/app/calls': typeof AppCallsRoute
+  '/app/campaigns': typeof AppCampaignsRouteWithChildren
+  '/app/contacts': typeof AppContactsRoute
   '/app/knowledge': typeof AppKnowledgeRoute
   '/app/leads': typeof AppLeadsRoute
   '/app/numbers': typeof AppNumbersRoute
@@ -381,7 +424,10 @@ export interface FileRoutesById {
   '/admin/': typeof AdminIndexRoute
   '/app/': typeof AppIndexRoute
   '/admin/customers/$orgId': typeof AdminCustomersOrgIdRoute
+  '/app/campaigns/$campaignId': typeof AppCampaignsCampaignIdRoute
+  '/app/campaigns/new': typeof AppCampaignsNewRoute
   '/admin/customers/': typeof AdminCustomersIndexRoute
+  '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
   '/api/public/webhooks/exotel/media-token': typeof ApiPublicWebhooksExotelMediaTokenRoute
@@ -416,6 +462,8 @@ export interface FileRouteTypes {
     | '/app/billing'
     | '/app/business'
     | '/app/calls'
+    | '/app/campaigns'
+    | '/app/contacts'
     | '/app/knowledge'
     | '/app/leads'
     | '/app/numbers'
@@ -426,7 +474,10 @@ export interface FileRouteTypes {
     | '/admin/'
     | '/app/'
     | '/admin/customers/$orgId'
+    | '/app/campaigns/$campaignId'
+    | '/app/campaigns/new'
     | '/admin/customers/'
+    | '/api/public/cron/dispatch-campaigns'
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/telephony'
     | '/api/public/webhooks/exotel/media-token'
@@ -455,6 +506,8 @@ export interface FileRouteTypes {
     | '/app/billing'
     | '/app/business'
     | '/app/calls'
+    | '/app/campaigns'
+    | '/app/contacts'
     | '/app/knowledge'
     | '/app/leads'
     | '/app/numbers'
@@ -465,7 +518,10 @@ export interface FileRouteTypes {
     | '/admin'
     | '/app'
     | '/admin/customers/$orgId'
+    | '/app/campaigns/$campaignId'
+    | '/app/campaigns/new'
     | '/admin/customers'
+    | '/api/public/cron/dispatch-campaigns'
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/telephony'
     | '/api/public/webhooks/exotel/media-token'
@@ -498,6 +554,8 @@ export interface FileRouteTypes {
     | '/app/billing'
     | '/app/business'
     | '/app/calls'
+    | '/app/campaigns'
+    | '/app/contacts'
     | '/app/knowledge'
     | '/app/leads'
     | '/app/numbers'
@@ -508,7 +566,10 @@ export interface FileRouteTypes {
     | '/admin/'
     | '/app/'
     | '/admin/customers/$orgId'
+    | '/app/campaigns/$campaignId'
+    | '/app/campaigns/new'
     | '/admin/customers/'
+    | '/api/public/cron/dispatch-campaigns'
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/telephony'
     | '/api/public/webhooks/exotel/media-token'
@@ -523,6 +584,7 @@ export interface RootRouteChildren {
   ContactRoute: typeof ContactRoute
   PricingRoute: typeof PricingRoute
   ResetPasswordRoute: typeof ResetPasswordRoute
+  ApiPublicCronDispatchCampaignsRoute: typeof ApiPublicCronDispatchCampaignsRoute
   ApiPublicWebhooksRazorpayRoute: typeof ApiPublicWebhooksRazorpayRoute
   ApiPublicWebhooksTelephonyRoute: typeof ApiPublicWebhooksTelephonyRoute
   ApiPublicWebhooksExotelMediaTokenRoute: typeof ApiPublicWebhooksExotelMediaTokenRoute
@@ -740,6 +802,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppCallsRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/campaigns': {
+      id: '/app/campaigns'
+      path: '/campaigns'
+      fullPath: '/app/campaigns'
+      preLoaderRoute: typeof AppCampaignsRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/app/contacts': {
+      id: '/app/contacts'
+      path: '/contacts'
+      fullPath: '/app/contacts'
+      preLoaderRoute: typeof AppContactsRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/knowledge': {
       id: '/app/knowledge'
       path: '/knowledge'
@@ -795,6 +871,27 @@ declare module '@tanstack/react-router' {
       fullPath: '/admin/customers/$orgId'
       preLoaderRoute: typeof AdminCustomersOrgIdRouteImport
       parentRoute: typeof AdminCustomersRoute
+    }
+    '/app/campaigns/$campaignId': {
+      id: '/app/campaigns/$campaignId'
+      path: '/$campaignId'
+      fullPath: '/app/campaigns/$campaignId'
+      preLoaderRoute: typeof AppCampaignsCampaignIdRouteImport
+      parentRoute: typeof AppCampaignsRoute
+    }
+    '/app/campaigns/new': {
+      id: '/app/campaigns/new'
+      path: '/new'
+      fullPath: '/app/campaigns/new'
+      preLoaderRoute: typeof AppCampaignsNewRouteImport
+      parentRoute: typeof AppCampaignsRoute
+    }
+    '/api/public/cron/dispatch-campaigns': {
+      id: '/api/public/cron/dispatch-campaigns'
+      path: '/api/public/cron/dispatch-campaigns'
+      fullPath: '/api/public/cron/dispatch-campaigns'
+      preLoaderRoute: typeof ApiPublicCronDispatchCampaignsRouteImport
+      parentRoute: typeof rootRouteImport
     }
     '/api/public/webhooks/razorpay': {
       id: '/api/public/webhooks/razorpay'
@@ -885,11 +982,27 @@ const AdminRouteChildren: AdminRouteChildren = {
 
 const AdminRouteWithChildren = AdminRoute._addFileChildren(AdminRouteChildren)
 
+interface AppCampaignsRouteChildren {
+  AppCampaignsCampaignIdRoute: typeof AppCampaignsCampaignIdRoute
+  AppCampaignsNewRoute: typeof AppCampaignsNewRoute
+}
+
+const AppCampaignsRouteChildren: AppCampaignsRouteChildren = {
+  AppCampaignsCampaignIdRoute: AppCampaignsCampaignIdRoute,
+  AppCampaignsNewRoute: AppCampaignsNewRoute,
+}
+
+const AppCampaignsRouteWithChildren = AppCampaignsRoute._addFileChildren(
+  AppCampaignsRouteChildren,
+)
+
 interface AppRouteChildren {
   AppAgentRoute: typeof AppAgentRoute
   AppBillingRoute: typeof AppBillingRoute
   AppBusinessRoute: typeof AppBusinessRoute
   AppCallsRoute: typeof AppCallsRoute
+  AppCampaignsRoute: typeof AppCampaignsRouteWithChildren
+  AppContactsRoute: typeof AppContactsRoute
   AppKnowledgeRoute: typeof AppKnowledgeRoute
   AppLeadsRoute: typeof AppLeadsRoute
   AppNumbersRoute: typeof AppNumbersRoute
@@ -903,6 +1016,8 @@ const AppRouteChildren: AppRouteChildren = {
   AppBillingRoute: AppBillingRoute,
   AppBusinessRoute: AppBusinessRoute,
   AppCallsRoute: AppCallsRoute,
+  AppCampaignsRoute: AppCampaignsRouteWithChildren,
+  AppContactsRoute: AppContactsRoute,
   AppKnowledgeRoute: AppKnowledgeRoute,
   AppLeadsRoute: AppLeadsRoute,
   AppNumbersRoute: AppNumbersRoute,
@@ -932,6 +1047,7 @@ const rootRouteChildren: RootRouteChildren = {
   ContactRoute: ContactRoute,
   PricingRoute: PricingRoute,
   ResetPasswordRoute: ResetPasswordRoute,
+  ApiPublicCronDispatchCampaignsRoute: ApiPublicCronDispatchCampaignsRoute,
   ApiPublicWebhooksRazorpayRoute: ApiPublicWebhooksRazorpayRoute,
   ApiPublicWebhooksTelephonyRoute: ApiPublicWebhooksTelephonyRoute,
   ApiPublicWebhooksExotelMediaTokenRoute:

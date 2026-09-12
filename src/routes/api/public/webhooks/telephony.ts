@@ -11,6 +11,11 @@ import {
   buildProviderMetadata,
   isPlausibleClientReference,
 } from "@/lib/telephony/webhook-correlation.server";
+import {
+  applyOutcomeToCampaignContact,
+  maybeCompleteCampaign,
+} from "@/lib/campaign-dispatch.server";
+import type { CallTerminalStatus } from "@/lib/campaign-outcome";
 
 /**
  * Inbound telephony provider webhook — the single entry point every
@@ -285,6 +290,10 @@ async function applyCallEvent(
     phone_number_id: string | null;
     provider: string;
     provider_call_id: string | null;
+    campaign_id?: string | null;
+    campaign_contact_id?: string | null;
+    contact_id?: string | null;
+    retry_attempt?: number | null;
   },
   event: NormalizedCallEvent,
 ) {
@@ -367,5 +376,86 @@ async function applyCallEvent(
       },
       event.durationSeconds ?? 0,
     );
+
+    if (call.direction === "outbound" && call.campaign_id && call.campaign_contact_id) {
+      await applyCampaignTerminalEvent(
+        call.campaign_id,
+        call.campaign_contact_id,
+        call.contact_id ?? null,
+        event,
+      );
+    }
+  }
+}
+
+/**
+ * Rolls a terminal outbound webhook event up into the campaign layer (spec
+ * §16/§30/§31/§39): decides retry-vs-terminal for this campaign_contact via
+ * the exact same shared decision function the dispatcher's own synchronous
+ * failure path uses, marks the campaign completed once nothing is left to
+ * dial, and — only on a fully successful call — creates a lead from
+ * whatever output variables the provider returned. Never fabricates a lead
+ * or an outcome the provider event didn't actually carry.
+ */
+async function applyCampaignTerminalEvent(
+  campaignId: string,
+  campaignContactId: string,
+  contactId: string | null,
+  event: NormalizedCallEvent,
+) {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const { data: campaign } = await supabaseAdmin
+    .from("campaigns")
+    .select(
+      "id, name, organization_id, business_id, max_attempts, retry_after_minutes, retry_statuses",
+    )
+    .eq("id", campaignId)
+    .maybeSingle();
+  if (!campaign) return;
+
+  const { data: cc } = await supabaseAdmin
+    .from("campaign_contacts")
+    .select("attempts")
+    .eq("id", campaignContactId)
+    .maybeSingle();
+  if (!cc) return;
+
+  await applyOutcomeToCampaignContact(
+    campaignContactId,
+    event.status as CallTerminalStatus,
+    cc.attempts,
+    campaign,
+    event.agentVariables ?? null,
+  );
+
+  const completed = await maybeCompleteCampaign(campaignId);
+  if (completed) {
+    console.error("telephony:campaign_completed", campaignId);
+  }
+
+  if (event.status === "completed" && contactId) {
+    const { data: contact } = await supabaseAdmin
+      .from("contacts")
+      .select("name, phone, email")
+      .eq("id", contactId)
+      .maybeSingle();
+    if (contact) {
+      const vars = event.agentVariables ?? {};
+      const interest =
+        typeof vars["interest_level"] === "string" ? (vars["interest_level"] as string) : null;
+      await supabaseAdmin.from("leads").insert({
+        organization_id: campaign.organization_id,
+        business_id: campaign.business_id,
+        campaign_id: campaignId,
+        contact_id: contactId,
+        name: contact.name,
+        phone: contact.phone,
+        email: contact.email,
+        source: "campaign",
+        asked_about: campaign.name,
+        score: interest === "high" ? "hot" : interest === "low" ? "cold" : "warm",
+        notes: Object.keys(vars).length > 0 ? JSON.stringify(vars) : null,
+      });
+    }
   }
 }
