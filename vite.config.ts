@@ -50,6 +50,24 @@ function validateSupabasePublicEnv(): Plugin {
       const env = loadEnv(mode, process.cwd(), "VITE_");
       const required = ["VITE_SUPABASE_URL", "VITE_SUPABASE_PUBLISHABLE_KEY"] as const;
       const missing = required.filter((name) => !env[name]);
+
+      // TEMPORARY DIAGNOSTIC — remove once the Cloudflare build pipeline is
+      // confirmed to see these variables. Prints presence/absence and build
+      // context ONLY — never a value, never anything from `env` beyond a
+      // boolean. Runs on every build (pass or fail) so a successful
+      // Cloudflare build's own log also confirms which mode/NODE_ENV it
+      // actually ran under.
+      console.log(
+        "[build-env-diagnostic] VITE_SUPABASE_URL:",
+        env["VITE_SUPABASE_URL"] ? "present" : "missing",
+      );
+      console.log(
+        "[build-env-diagnostic] VITE_SUPABASE_PUBLISHABLE_KEY:",
+        env["VITE_SUPABASE_PUBLISHABLE_KEY"] ? "present" : "missing",
+      );
+      console.log("[build-env-diagnostic] NODE_ENV:", process.env["NODE_ENV"] ?? "(unset)");
+      console.log("[build-env-diagnostic] Vite build mode:", mode);
+
       if (missing.length === 0) return;
 
       // Names only, never a value — safe to print in a build log.
