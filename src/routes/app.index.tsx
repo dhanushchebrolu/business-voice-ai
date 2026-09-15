@@ -2,8 +2,21 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { PhoneCall, Users, Bot, Hash, ArrowUpRight } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
-import { workspaceQuery, callsQuery, leadsQuery, numbersQuery, agentStatusLabel } from "@/lib/workspace";
-import { PageHeader, StatCard, SectionCard, EmptyState, StatusPill, LoadingState } from "@/components/app/primitives";
+import {
+  workspaceQuery,
+  callsQuery,
+  leadsQuery,
+  numbersQuery,
+  agentStatusLabel,
+} from "@/lib/workspace";
+import {
+  PageHeader,
+  StatCard,
+  SectionCard,
+  EmptyState,
+  StatusPill,
+  LoadingState,
+} from "@/components/app/primitives";
 import { getBusinessType } from "@/lib/business-types";
 import { Button } from "@/components/ui/button";
 import { AccountStatusPanel } from "@/components/app/AccountStatusPanel";
@@ -31,12 +44,22 @@ function Overview() {
 
   const type = getBusinessType(ws?.business?.business_type);
   const activeNumber = numbers?.find((n) => n.status === "active");
-  const status = agentStatusLabel(ws?.agent ?? null, Boolean(activeNumber));
-  const totalMinutes = Math.round((calls ?? []).reduce((sum, c) => sum + (c.duration_seconds ?? 0), 0) / 60);
+  const status = agentStatusLabel(ws?.agent ?? null, Boolean(activeNumber), activeNumber?.provider);
+  const totalMinutes = Math.round(
+    (calls ?? []).reduce((sum, c) => sum + (c.duration_seconds ?? 0), 0) / 60,
+  );
 
   const setupSteps = [
-    { done: Boolean(ws?.business?.description), label: "Describe your business", to: "/app/business" },
-    { done: (ws?.agent?.active_version ?? 0) > 0, label: "Publish your receptionist", to: "/app/agent" },
+    {
+      done: Boolean(ws?.business?.description),
+      label: "Describe your business",
+      to: "/app/business",
+    },
+    {
+      done: (ws?.agent?.active_version ?? 0) > 0,
+      label: "Save your receptionist configuration",
+      to: "/app/agent",
+    },
     { done: Boolean(activeNumber), label: "Connect a phone number", to: "/app/numbers" },
   ];
   const pending = setupSteps.filter((s) => !s.done);
@@ -58,12 +81,17 @@ function Overview() {
 
       <AccountStatusPanel />
 
-
       {pending.length ? (
-        <SectionCard title="Finish your setup" description="Three steps stand between you and answered calls.">
+        <SectionCard
+          title="Finish your setup"
+          description="Three steps stand between you and answered calls."
+        >
           <ol className="space-y-2.5">
             {setupSteps.map((step, i) => (
-              <li key={step.label} className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2.5">
+              <li
+                key={step.label}
+                className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2.5"
+              >
                 <span className="flex items-center gap-3 text-sm">
                   <span
                     className={`grid size-5 place-items-center rounded-full text-[11px] font-semibold ${
@@ -72,7 +100,9 @@ function Overview() {
                   >
                     {step.done ? "✓" : i + 1}
                   </span>
-                  <span className={step.done ? "text-muted-foreground line-through" : ""}>{step.label}</span>
+                  <span className={step.done ? "text-muted-foreground line-through" : ""}>
+                    {step.label}
+                  </span>
                 </span>
                 {!step.done ? (
                   <Link to={step.to}>
@@ -90,8 +120,15 @@ function Overview() {
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard label="Calls answered" value={calls?.length ?? 0} hint="All time" />
         <StatCard label="Talk minutes" value={totalMinutes} hint="Billed per minute" />
-        <StatCard label={type.customerLabel + " captured"} value={leads?.length ?? 0} tone="accent" />
-        <StatCard label="Live numbers" value={numbers?.filter((n) => n.status === "active").length ?? 0} />
+        <StatCard
+          label={type.customerLabel + " captured"}
+          value={leads?.length ?? 0}
+          tone="accent"
+        />
+        <StatCard
+          label="Live numbers"
+          value={numbers?.filter((n) => n.status === "active").length ?? 0}
+        />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
@@ -109,10 +146,15 @@ function Overview() {
           {calls?.length ? (
             <ul className="divide-y divide-border">
               {calls.slice(0, 6).map((call) => (
-                <li key={call.id} className="flex items-center justify-between gap-3 py-2.5 text-sm">
+                <li
+                  key={call.id}
+                  className="flex items-center justify-between gap-3 py-2.5 text-sm"
+                >
                   <span className="truncate">
                     <span className="font-medium">{call.caller_number ?? "Unknown caller"}</span>
-                    <span className="ml-2 text-muted-foreground">{call.summary ?? call.outcome ?? "No summary"}</span>
+                    <span className="ml-2 text-muted-foreground">
+                      {call.summary ?? call.outcome ?? "No summary"}
+                    </span>
                   </span>
                   <span className="shrink-0 tabular text-xs text-muted-foreground">
                     {Math.round((call.duration_seconds ?? 0) / 60)}m
@@ -124,7 +166,7 @@ function Overview() {
             <EmptyState
               icon={PhoneCall}
               title="No calls yet"
-              description="Once a phone number is connected and your receptionist is published, calls will appear here in real time."
+              description="Once a phone number is connected and your receptionist is saved and ready, calls will appear here in real time."
               action={
                 <Link to="/app/numbers">
                   <Button size="sm" variant="secondary">
@@ -150,10 +192,15 @@ function Overview() {
           {leads?.length ? (
             <ul className="divide-y divide-border">
               {leads.slice(0, 6).map((lead) => (
-                <li key={lead.id} className="flex items-center justify-between gap-3 py-2.5 text-sm">
+                <li
+                  key={lead.id}
+                  className="flex items-center justify-between gap-3 py-2.5 text-sm"
+                >
                   <span className="truncate">
                     <span className="font-medium">{lead.name ?? "Unnamed"}</span>
-                    <span className="ml-2 text-muted-foreground">{lead.phone ?? lead.email ?? "No contact"}</span>
+                    <span className="ml-2 text-muted-foreground">
+                      {lead.phone ?? lead.email ?? "No contact"}
+                    </span>
                   </span>
                   <StatusPill tone={lead.score === "hot" ? "accent" : "idle"} dot={false}>
                     {lead.score}
@@ -175,7 +222,7 @@ function Overview() {
         <EmptyState
           icon={Bot}
           title="Your receptionist isn't configured"
-          description="Add your business information and publish a version to generate the agent's instructions."
+          description="Add your business information and save your configuration to generate the agent's instructions."
           action={
             <Link to="/app/business">
               <Button size="sm">Configure business</Button>

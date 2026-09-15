@@ -133,7 +133,7 @@ function readRoute(name: string): string {
 }
 
 describe("route wiring — voice/phone locks are actually surfaced", () => {
-  test("app.agent.tsx gates only publish/rollback, using the 'voice' feature key", () => {
+  test("app.agent.tsx surfaces the 'voice' lock as an informational banner, never disables Save", () => {
     const src = readRoute("app.agent.tsx");
     assert.match(
       src,
@@ -142,27 +142,16 @@ describe("route wiring — voice/phone locks are actually surfaced", () => {
     assert.match(src, /featureLocksQuery/);
     assert.match(src, /locks\?\.\["voice"\]/);
     assert.match(src, /<ServiceLocked feature="voice"/);
-    // Publish (now a two-step confirm-then-publish flow — Phase 3) and
-    // Restore must be disabled when locked. The trigger button that opens
-    // the publish confirmation dialog carries the same disabled condition
-    // as before; doPublish itself is only reachable from inside that dialog.
-    assert.match(
-      src,
-      /onClick=\{\(\) => \{\s*\n\s*setPublishError\(null\);\s*\n\s*setPublishConfirmOpen\(true\);\s*\n\s*\}\}\s*\n\s*disabled=\{publishing \|\| voiceLocked\}/,
-    );
-    assert.match(
-      src,
-      /onClick=\{\(e\) => \{\s*\n\s*e\.preventDefault\(\);\s*\n\s*void doPublish\(\);/,
-    );
-    assert.match(
-      src,
-      /disabled=\{voiceLocked\}[\s\S]{0,120}onClick=\{async \(\) => \{\s*\n\s*await rollback/,
-    );
-    // ...but configuration/preview/test actions must NOT be gated by this
-    // change (agent.functions.ts's own H1 comment: these stay usable
-    // during setup). None of these onClick handlers should be wrapped in
-    // a voiceLocked-disabled prop.
-    assert.doesNotMatch(src, /onClick=\{save\}\s+disabled=\{saving \|\| voiceLocked\}/);
+    // The old two-step publish/rollback flow (and the client-side
+    // voiceLocked-disabled gate on it) is gone: saving is now the only
+    // customer-facing action, and it is never blocked in the UI — the real,
+    // unbypassable gate is saveAgentConfiguration's own server-side
+    // checkFeatureAccess("voice") call (agent.functions.ts), which decides
+    // whether the save can actually reach "ready", plus
+    // checkTelephonyAccess's independent re-check at real call time.
+    assert.doesNotMatch(src, /publishAgentVersion|rollbackAgentVersion|publishConfirmOpen/);
+    assert.match(src, /onClick=\{save\}\s+disabled=\{saving\}/);
+    assert.doesNotMatch(src, /onClick=\{save\}[\s\S]{0,40}voiceLocked/);
     assert.doesNotMatch(src, /onClick=\{send\}\s+disabled=\{thinking \|\| voiceLocked\}/);
   });
 

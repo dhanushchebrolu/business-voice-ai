@@ -599,6 +599,59 @@ export const getProvisioningReadiness = createServerFn({ method: "GET" })
     return checkProvisioningReadiness(data.orgId);
   });
 
+/**
+ * Readiness for the Klyro-owned Exotel runtime (separate from the Sarvam-
+ * *managed* provisioning readiness above — see klyro-runtime-readiness.ts's
+ * module doc for why the two paths have genuinely different prerequisites).
+ * Every boolean fed into computeKlyroRuntimeReadiness comes from something
+ * actually checked here: real env-var presence (via telephony.server.ts's
+ * providerStatus()/sarvam.server.ts's isConfigured(), not a direct
+ * process.env read in this file) and real DB rows for this org's agent and
+ * assigned phone number. No live runtime health probe exists yet, so
+ * runtimeHealthCheck is left null — computeKlyroRuntimeReadiness reports
+ * that honestly as runtimeVerified: false rather than this function
+ * guessing.
+ */
+export const getKlyroRuntimeReadiness = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { orgId: string }) => {
+    if (!input?.orgId) throw new Error("orgId is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    await assertPlatformAdmin(context.supabase, context.userId, "customers.read");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { providerStatus, sarvamWebhookUrl } = await import("@/lib/telephony.server");
+    const { sarvam } = await import("@/lib/sarvam.server");
+    const { computeKlyroRuntimeReadiness } = await import("@/lib/klyro-runtime-readiness");
+
+    const exotelStatus = providerStatus().find((p) => p.id === "exotel");
+
+    const { data: agentConfig } = await supabaseAdmin
+      .from("agent_configs")
+      .select("status")
+      .eq("organization_id", data.orgId)
+      .maybeSingle();
+
+    const { data: numbers } = await supabaseAdmin
+      .from("phone_numbers")
+      .select("provider, status")
+      .eq("organization_id", data.orgId)
+      .neq("status", "released")
+      .order("created_at", { ascending: true });
+    const assignedNumber = numbers?.[0] ?? null;
+
+    return computeKlyroRuntimeReadiness({
+      exotelCredentialsPresent: Boolean(exotelStatus?.configured),
+      sarvamKeyPresent: sarvam.isConfigured(),
+      agentReady: agentConfig?.status === "ready" || agentConfig?.status === "live",
+      numberAssigned: Boolean(assignedNumber),
+      numberIsExotel: assignedNumber?.provider === "exotel",
+      webhookBaseUrlConfigured: sarvamWebhookUrl() !== null,
+      runtimeHealthCheck: null,
+    });
+  });
+
 /* ------------------------------------------------------------------ */
 /* Customer-level lock / unlock                                        */
 /* ------------------------------------------------------------------ */

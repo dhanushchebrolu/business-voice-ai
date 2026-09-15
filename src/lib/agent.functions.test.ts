@@ -80,6 +80,97 @@ describe("publishAgentVersion — Sarvam sync never marks fake success", () => {
   });
 });
 
+describe("saveAgentConfiguration — save-only workflow activates the existing agent, never duplicates it", () => {
+  const fnSrc = extractFn("saveAgentConfiguration");
+
+  test("resolves organizationId via requireBusinessAccess — tenant isolation, never trusts a client-supplied org", () => {
+    assert.match(
+      fnSrc,
+      /const \{ organizationId \} = await requireBusinessAccess\(context\.supabase, data\.businessId\)/,
+    );
+  });
+
+  test("does not accept a client-supplied organizationId in its input schema", () => {
+    const inputSchemaStart = src.indexOf("const saveAgentConfigurationInput = z.object({");
+    const inputSchemaEnd = src.indexOf("\n});", inputSchemaStart);
+    const inputSchema = src.slice(inputSchemaStart, inputSchemaEnd);
+    assert.doesNotMatch(inputSchema, /organizationId:\s*z\./);
+  });
+
+  test("looks up the existing agent_configs row by business_id and throws rather than creating a new one when missing", () => {
+    assert.match(
+      fnSrc,
+      /\.from\("agent_configs"\)\s*\n\s*\.select\("id, greetings, active_version"\)\s*\n\s*\.eq\("business_id", data\.businessId\)/,
+    );
+    assert.match(
+      fnSrc,
+      /if \(!agentRow\) throw new Error\("Agent configuration not found for this business\."\);/,
+    );
+  });
+
+  test("only ever updates agent_configs — never inserts a second row for the same business", () => {
+    assert.doesNotMatch(fnSrc, /\.from\("agent_configs"\)\s*\n\s*\.insert\(/);
+    const updateOccurrences = [...fnSrc.matchAll(/\.from\("agent_configs"\)\s*\n\s*\.update\(/g)];
+    assert.equal(
+      updateOccurrences.length,
+      2,
+      "one update for fields, one for status/active_version",
+    );
+  });
+
+  test("merges the new greeting into existing greetings by language rather than discarding other languages", () => {
+    assert.match(
+      fnSrc,
+      /const greetings = \{\s*\n\s*\.\.\.\(\(agentRow\.greetings as Record<string, string> \| null\) \?\? \{\}\),\s*\n\s*\[data\.primary_language\]: data\.greeting,\s*\n\s*\};/,
+    );
+  });
+
+  test("re-validates via the same validateAgentConfig used by publish, from a fresh loadSnapshot after the write", () => {
+    const updateIdx = fnSrc.indexOf(".update({\n        agent_name:");
+    const snapshotIdx = fnSrc.indexOf(
+      "const snapshot = await loadSnapshot(context.supabase, data.businessId);",
+    );
+    const validateIdx = fnSrc.indexOf("const issues = validateAgentConfig(snapshot);");
+    assert.ok(updateIdx > -1 && snapshotIdx > -1 && validateIdx > -1);
+    assert.ok(updateIdx < snapshotIdx && snapshotIdx < validateIdx);
+  });
+
+  test("uses non-throwing checkFeatureAccess and folds a locked voice feature into the returned issues, never throws for an unpaid customer", () => {
+    assert.match(fnSrc, /const voiceGate = await checkFeatureAccess\(organizationId, "voice"\);/);
+    assert.match(fnSrc, /if \(!voiceGate\.allowed\) \{/);
+    assert.match(fnSrc, /field: "Billing"/);
+    assert.doesNotMatch(fnSrc, /assertFeatureUnlocked/);
+  });
+
+  test("status becomes ready only when there are zero issues; otherwise stays not_configured", () => {
+    assert.match(fnSrc, /const ready = issues\.length === 0;/);
+    assert.match(fnSrc, /status: ready \? "ready" : "not_configured"/);
+  });
+
+  test("active_version only ever advances (never regresses) and only when ready", () => {
+    assert.match(
+      fnSrc,
+      /active_version: ready \? Math\.max\(agentRow\.active_version, 1\) : agentRow\.active_version/,
+    );
+  });
+
+  test("records agent_saved_ready or agent_saved_incomplete depending on outcome", () => {
+    assert.match(fnSrc, /action: ready \? "agent_saved_ready" : "agent_saved_incomplete"/);
+  });
+
+  test("the status/active_version update happens after the field update and the validity check, never before", () => {
+    const fieldUpdateIdx = fnSrc.indexOf(".update({\n        agent_name:");
+    const issuesIdx = fnSrc.indexOf("const issues = validateAgentConfig(snapshot);");
+    const statusUpdateIdx = fnSrc.indexOf('status: ready ? "ready" : "not_configured"');
+    assert.ok(fieldUpdateIdx > -1 && issuesIdx > -1 && statusUpdateIdx > -1);
+    assert.ok(fieldUpdateIdx < issuesIdx && issuesIdx < statusUpdateIdx);
+  });
+
+  test("never touches agent_versions — the versioning/publish table is left entirely alone by this function", () => {
+    assert.doesNotMatch(fnSrc, /agent_versions/);
+  });
+});
+
 describe("rollbackAgentVersion — same fail-closed guarantees as publish", () => {
   const fnSrc = extractFn("rollbackAgentVersion");
 
