@@ -89,6 +89,18 @@ export class ExotelMediaBridge implements AudioMediaBridge {
     });
   }
 
+  /**
+   * Feeds one raw WebSocket message into this bridge's own protocol
+   * handling, exactly as if the socket's own "message" event had fired.
+   * Used by the caller (call-session-durable-object.server.ts /
+   * exotel-media-route.server.ts) to replay messages that arrived on the
+   * socket *before* this bridge existed — see those callers' own comments
+   * on the buffered pre-registration window this closes.
+   */
+  ingestRawMessage(data: unknown): void {
+    this.handleRawMessage(data);
+  }
+
   private handleRawMessage(data: unknown) {
     if (typeof data !== "string") {
       console.error("exotel_bridge:unexpected_binary_frame", {

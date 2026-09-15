@@ -95,10 +95,40 @@ export async function handleExotelMediaUpgrade(request: Request): Promise<Respon
   server.accept();
 
   let settled = false;
+  // BUGFIX: see call-session-durable-object.server.ts's identical fix for
+  // the full rationale — handleFirstMessage's validation is several awaited
+  // round trips deep, and Exotel starts streaming "media" frames immediately
+  // after "start". Without buffering, any frame arriving during that
+  // validation window was silently dropped: `settled` was already `true`
+  // (so `onMessage` no-oped every later message) and the ExotelMediaBridge
+  // that would actually handle "media" doesn't exist until validation
+  // finishes. This is the local-dev fallback path (no CALL_SESSION binding
+  // configured) — kept in parity with the Durable Object's production path.
+  let pending: unknown[] | null = null;
 
   const onMessage = (ev: { data: unknown }) => {
+    if (pending) {
+      pending.push(ev.data);
+      return;
+    }
     if (settled) return; // ignore anything after validation has already resolved either way
-    void handleFirstMessage(ev.data);
+    void handleFirstMessage(ev.data).catch((err: unknown) => {
+      // BUGFIX: an uncaught throw inside handleFirstMessage's validation
+      // chain (a Supabase config or network error, for example) previously
+      // became an unhandled promise rejection here — fatal by default in
+      // Node. Treat it the same as any other rejection: log, discard
+      // whatever was buffered, and close the socket.
+      console.error(
+        "exotel_media_route:media_validation_crashed",
+        err instanceof Error ? err.message : String(err),
+      );
+      pending = null;
+      try {
+        server.close(1011, "internal error");
+      } catch {
+        /* best-effort */
+      }
+    });
   };
 
   async function handleFirstMessage(data: unknown) {
@@ -114,6 +144,7 @@ export async function handleExotelMediaUpgrade(request: Request): Promise<Respon
     if (eventName !== "start") return; // ignore anything else until we've seen start
 
     settled = true; // one validation attempt only, even if messages race
+    pending = []; // start buffering any "media" frames that arrive while we validate
     const start = (msg["start"] as Record<string, unknown> | undefined) ?? msg;
     const callSid = firstDefinedString(start, ["call_sid", "CallSid", "callSid"]);
     const streamSid = firstDefinedString(start, ["stream_sid", "StreamSid", "streamSid"]);
@@ -172,6 +203,11 @@ export async function handleExotelMediaUpgrade(request: Request): Promise<Respon
 
     const bridge = new ExotelMediaBridge(server, streamSid ?? callSid, callSid);
     registerMediaBridge(callSid, bridge);
+    // Replay anything that arrived while we were validating — see the
+    // `pending` buffer's own comment above for why this is necessary.
+    const buffered = pending ?? [];
+    pending = null;
+    for (const raw of buffered) bridge.ingestRawMessage(raw);
     console.info("exotel_media_route:accepted", {
       callId: call.id,
       callSid,
@@ -181,6 +217,7 @@ export async function handleExotelMediaUpgrade(request: Request): Promise<Respon
 
   function reject(reason: string) {
     console.error("exotel_media_route:rejected", { reason });
+    pending = null; // discard anything buffered — the call is being refused
     try {
       server.close(1008, "unauthorized");
     } catch {

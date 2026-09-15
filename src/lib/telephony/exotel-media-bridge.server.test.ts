@@ -109,6 +109,27 @@ test("malformed messages are dropped, never thrown, and never delivered as frame
   assert.equal(received.length, 0);
 });
 
+test("ingestRawMessage() feeds a message through the exact same protocol handling as a real socket message — the replay path the pre-registration buffering fix depends on", () => {
+  const socket = new FakeExotelSocket();
+  const bridge = new ExotelMediaBridge(socket, "placeholder", "CAtestcall");
+  const received: string[] = [];
+  bridge.onInboundFrame((frame) => received.push(Buffer.from(frame.data).toString("utf8")));
+
+  // Establish the real stream_sid the normal way first...
+  bridge.ingestRawMessage(
+    JSON.stringify({ event: "start", start: { stream_sid: "STreplay", call_sid: "CAtestcall" } }),
+  );
+  // ...then replay a "media" frame exactly as call-session-durable-object.server.ts
+  // / exotel-media-route.server.ts do for frames that arrived before this
+  // bridge existed. It must be indistinguishable from one delivered live.
+  bridge.ingestRawMessage(JSON.stringify({ event: "media", media: { payload: b64("replayed") } }));
+  assert.deepEqual(received, ["replayed"]);
+
+  // Malformed input replayed this way is dropped exactly like a live one — no throw.
+  assert.doesNotThrow(() => bridge.ingestRawMessage("not json"));
+  assert.equal(received.length, 1);
+});
+
 test("close() is idempotent and closes the underlying socket", () => {
   const socket = new FakeExotelSocket();
   const bridge = new ExotelMediaBridge(socket, "placeholder", "CAtestcall");
