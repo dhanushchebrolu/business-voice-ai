@@ -405,6 +405,64 @@ describe("CallSessionDurableObject", () => {
     }
   });
 
+  test("BUGFIX regression: a 'media' frame arriving in the same tick as 'start' does not crash the process and the socket is still cleanly closed once validation fails", async () => {
+    // Reproduces the exact race the pre-registration message-buffering fix
+    // closes: Exotel's Voicebot Applet starts streaming "media" immediately
+    // after "start", while handleFirstMessage's own validation
+    // (call_logs/phone_numbers/checkTelephonyAccess) is still several
+    // awaited round trips deep. Before the fix, the second message would be
+    // silently swallowed by the top-level `settled` no-op guard; also,
+    // separately, if handleFirstMessage's DB access ever threw (exactly
+    // what happens here — no SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY is
+    // configured in this test environment), that rejection had no .catch
+    // anywhere in its call chain, which is a fatal unhandled rejection in
+    // Node by default. This test cannot observe "was the frame buffered"
+    // directly (asserting on frame delivery requires a live/mocked Supabase
+    // response — a NEEDS LIVE TEST item, same boundary the rest of this
+    // suite already documents for the full call_logs-cross-check path) —
+    // what it DOES prove, deterministically: this sequence completes at all
+    // (a genuine unhandled rejection here would fail the whole test run,
+    // not just this test) and the socket ends up closed rather than hung
+    // open forever.
+    const originalPair = (globalThis as Record<string, unknown>)["WebSocketPair"];
+    FakeWebSocketPair.instances = [];
+    (globalThis as Record<string, unknown>)["WebSocketPair"] = FakeWebSocketPair;
+    try {
+      const doInstance = new CallSessionDurableObject(fakeState("t12"), {});
+      await doInstance.fetch(
+        new Request("https://call-session/api/public/media-stream/exotel", {
+          headers: { upgrade: "websocket" },
+        }),
+      );
+      const serverSocket = FakeWebSocketPair.instances[0]![0];
+
+      // Both arrive synchronously, back to back — before handleFirstMessage
+      // has had any chance to await anything. Previously, the second one
+      // would be dropped by `if (settled) return` with zero trace; now it's
+      // captured into the pending buffer instead.
+      serverSocket.emit("message", {
+        data: JSON.stringify({ event: "start", start: { call_sid: "CA-race-1" } }),
+      } as never);
+      serverSocket.emit("message", {
+        data: JSON.stringify({ event: "media", media: { payload: "AAAA" } }),
+      } as never);
+
+      // Let the (rejecting, since Supabase isn't configured) validation
+      // chain actually settle — proves the promise's rejection was handled,
+      // not left unhandled.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      assert.ok(
+        serverSocket.closedWith !== null,
+        "expected the socket to have been closed once validation failed, not left hanging open",
+      );
+    } finally {
+      if (originalPair === undefined)
+        delete (globalThis as Record<string, unknown>)["WebSocketPair"];
+      else (globalThis as Record<string, unknown>)["WebSocketPair"] = originalPair;
+    }
+  });
+
   test("PROOF: two Durable Object instances never share bridge-rendezvous state", async () => {
     const instanceA = new CallSessionDurableObject(fakeState("shard-a"), {}) as unknown as {
       registerBridge: (id: string, bridge: AudioMediaBridge) => void;

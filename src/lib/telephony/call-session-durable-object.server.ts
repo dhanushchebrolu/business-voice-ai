@@ -183,11 +183,57 @@ export class CallSessionDurableObject {
     server.accept();
 
     let settled = false;
+    // BUGFIX: handleFirstMessage's own validation (the call_logs lookup,
+    // the phone_numbers lookup, checkTelephonyAccess) is several awaited
+    // round trips deep. Exotel's Voicebot Applet starts streaming "media"
+    // frames immediately after "start" — in the original version of this
+    // method, any such frame arriving during that validation window was
+    // silently dropped: `onMessage` had already set `settled = true`
+    // synchronously (so it would no-op every later message), and the
+    // ExotelMediaBridge that would actually handle "media" frames does not
+    // exist yet — it is only constructed once validation finishes. That
+    // meant the caller's first fraction of a second of speech could be lost
+    // before the bridge ever saw it. Buffering here, and replaying into the
+    // bridge once it exists (or discarding once validation fails and the
+    // socket is closed), closes that window without changing anything about
+    // the validation logic itself.
+    let pending: unknown[] | null = null;
     const onMessage = (ev: { data: unknown }) => {
+      if (pending) {
+        pending.push(ev.data);
+        return;
+      }
       if (settled) return; // one validation attempt only, even if messages race
       void this.handleFirstMessage(server, ev.data, () => {
         settled = true;
-      });
+        pending = [];
+      })
+        .then((bridge) => {
+          const buffered = pending ?? [];
+          pending = null;
+          if (bridge) for (const raw of buffered) bridge.ingestRawMessage(raw);
+        })
+        .catch((err: unknown) => {
+          // BUGFIX: handleFirstMessage's validation chain is not wrapped in
+          // its own try/catch — an unexpected throw (a Supabase config or
+          // network error, for example) previously became an unhandled
+          // promise rejection here, since this call site had no .catch at
+          // all. Node treats an unhandled rejection as fatal by default,
+          // which would have taken down this Durable Object instance (and
+          // every other in-flight call it was coordinating) over a single
+          // bad request. Treat it the same as any other rejection: log,
+          // discard whatever was buffered, and close the socket.
+          console.error(
+            "call_session_do:media_validation_crashed",
+            err instanceof Error ? err.message : String(err),
+          );
+          pending = null;
+          try {
+            server.close(1011, "internal error");
+          } catch {
+            /* best-effort */
+          }
+        });
     };
     server.addEventListener("message", onMessage);
     server.addEventListener("close", () => {
@@ -200,21 +246,29 @@ export class CallSessionDurableObject {
     } as ResponseInit & { webSocket: unknown });
   }
 
+  /**
+   * Returns the bridge once it has been constructed and registered, or
+   * `null` if this "start" event was rejected (or the message wasn't a
+   * "start" event at all) — the caller (handleMediaUpgrade's `onMessage`)
+   * uses this to know whether, and where, to replay any "media" frames that
+   * arrived on the socket while this method was still awaiting its
+   * validation chain.
+   */
   private async handleFirstMessage(
     server: AcceptableSocket,
     data: unknown,
     markSettled: () => void,
-  ): Promise<void> {
-    if (typeof data !== "string") return;
+  ): Promise<ExotelMediaBridge | null> {
+    if (typeof data !== "string") return null;
     let msg: Record<string, unknown>;
     try {
       msg = JSON.parse(data) as Record<string, unknown>;
     } catch {
-      return;
+      return null;
     }
     const eventName = String(msg["event"] ?? "").toLowerCase();
-    if (eventName === "connected") return; // handshake ack only — wait for start
-    if (eventName !== "start") return; // ignore anything else until we've seen start
+    if (eventName === "connected") return null; // handshake ack only — wait for start
+    if (eventName !== "start") return null; // ignore anything else until we've seen start
 
     markSettled();
     const start = (msg["start"] as Record<string, unknown> | undefined) ?? msg;
@@ -227,13 +281,14 @@ export class CallSessionDurableObject {
       ? firstDefinedString(customParams, ["token", "session_token"])
       : undefined;
 
-    const reject = (reason: string) => {
+    const reject = (reason: string): null => {
       console.error("call_session_do:media_rejected", { reason });
       try {
         server.close(1008, "unauthorized");
       } catch {
         /* best-effort */
       }
+      return null;
     };
 
     if (!callSid) return reject("Missing CallSid on start event");
@@ -286,6 +341,7 @@ export class CallSessionDurableObject {
       callSid,
       organizationId: call.organization_id,
     });
+    return bridge;
   }
 
   /* ------------------------------------------------------------------ */
@@ -318,8 +374,15 @@ export class CallSessionDurableObject {
     this.arrived.delete(providerCallId);
     const waiter = this.waiters.get(providerCallId);
     if (waiter) {
+      // BUGFIX: previously this only cleared the timeout and deleted the
+      // waiter entry, leaving its promise unresolved — a WS that closes
+      // while /internal/start-runtime is concurrently awaiting this exact
+      // providerCallId's bridge would hang for the full timeoutMs (up to
+      // DEFAULT_BRIDGE_TIMEOUT_MS) before resolving null, instead of failing
+      // fast the moment it's known no bridge is coming.
       clearTimeout(waiter.timeout);
       this.waiters.delete(providerCallId);
+      waiter.resolve(null);
     }
   }
 
