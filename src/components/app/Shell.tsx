@@ -72,10 +72,8 @@ export function Shell({ children }: { children: ReactNode }) {
   const { data: ws } = useQuery(workspaceQuery(user?.id));
   const { data: numbers } = useQuery(numbersQuery(ws?.organization?.id));
 
-  const status = agentStatusLabel(
-    ws?.agent ?? null,
-    Boolean(numbers?.some((n) => n.status === "active")),
-  );
+  const activeNumber = numbers?.find((n) => n.status === "active");
+  const status = agentStatusLabel(ws?.agent ?? null, Boolean(activeNumber), activeNumber?.provider);
 
   return (
     <div className="flex min-h-screen bg-background">

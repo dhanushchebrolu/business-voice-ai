@@ -155,13 +155,31 @@ describe("existing agent onboarding still works — every column app.onboarding.
   });
 });
 
-describe("existing agent settings still works — every column app.agent.tsx updates is in the new GRANT UPDATE list", () => {
-  test("cross-file check: settings' actual UPDATE column set is a subset of the migration's GRANT UPDATE column set", () => {
-    const settingsSrc = readRepoFile("src", "routes", "app.agent.tsx");
-    const updateBlockMatch = settingsSrc.match(
-      /\.from\("agent_configs"\)\s*\.update\(\{([\s\S]*?)\}\)\s*\n\s*\.eq\("id", agent\.id\);/,
+describe("existing agent settings still works — every column saveAgentConfiguration updates is in the new GRANT UPDATE list", () => {
+  // app.agent.tsx no longer talks to Supabase directly (the RLS-scoped,
+  // "authenticated"-role client the migration's GRANT UPDATE list was
+  // written to constrain) — settings now go through saveAgentConfiguration
+  // (agent.functions.ts), a server function using supabaseAdmin
+  // (service-role, bypasses RLS/grants entirely). The GRANT UPDATE list is
+  // no longer the enforcement boundary for this write path; the boundary
+  // is now server-side: the zod input schema decides what a client can
+  // send, and the handler decides what of that reaches the database. This
+  // test keeps the original cross-file sanity check (the columns a save
+  // actually writes are still a subset of what the migration ever intended
+  // "settings" to touch) pointed at the new call site, plus asserts the
+  // fields the migration was written to protect (sarvam_app_id,
+  // sarvam_app_version, status, active_version) are never taken from
+  // client input at all.
+  const agentFnsSrc = readRepoFile("src", "lib", "agent.functions.ts");
+
+  test("cross-file check: saveAgentConfiguration's actual UPDATE column set is a subset of the migration's GRANT UPDATE column set", () => {
+    const updateBlockMatch = agentFnsSrc.match(
+      /\.from\("agent_configs"\)\s*\n\s*\.update\(\{([\s\S]*?)\}\)\s*\n\s*\.eq\("id", agentRow\.id\);\s*\n\s*if \(updateError\)/,
     );
-    assert.ok(updateBlockMatch, "expected to find the agent_configs update call in app.agent.tsx");
+    assert.ok(
+      updateBlockMatch,
+      "expected to find saveAgentConfiguration's field-update call in agent.functions.ts",
+    );
     const usedColumns = [...updateBlockMatch![1]!.matchAll(/^\s*(\w+):/gm)].map((m) => m[1]!);
     assert.ok(usedColumns.length > 0, "expected to parse at least one column from the update call");
 
@@ -175,9 +193,30 @@ describe("existing agent settings still works — every column app.agent.tsx upd
     for (const col of usedColumns) {
       assert.ok(
         grantedColumns.includes(col),
-        `settings updates "${col}" but the migration does not grant UPDATE on it`,
+        `saveAgentConfiguration updates "${col}" but the migration does not grant UPDATE on it`,
       );
     }
+  });
+
+  test("status/active_version are computed server-side (from the validated 'ready' result), never taken directly from client input", () => {
+    const saveFnStart = agentFnsSrc.indexOf("export const saveAgentConfiguration = createServerFn");
+    const nextExportIdx = agentFnsSrc.indexOf("\nexport const ", saveFnStart + 1);
+    const fnSrc =
+      nextExportIdx > -1
+        ? agentFnsSrc.slice(saveFnStart, nextExportIdx)
+        : agentFnsSrc.slice(saveFnStart);
+
+    assert.match(fnSrc, /status: ready \? "ready" : "not_configured"/);
+    assert.match(
+      fnSrc,
+      /active_version: ready \? Math\.max\(agentRow\.active_version, 1\) : agentRow\.active_version/,
+    );
+    // Never a client-supplied value for the fields this migration exists to protect.
+    for (const forbidden of ["sarvam_app_id", "sarvam_app_version"]) {
+      assert.doesNotMatch(fnSrc, new RegExp(`${forbidden}:\\s*data\\.`));
+    }
+    assert.doesNotMatch(fnSrc, /status:\s*data\./);
+    assert.doesNotMatch(fnSrc, /active_version:\s*data\./);
   });
 });
 

@@ -62,9 +62,76 @@ interface Session {
   stt: Awaited<ReturnType<typeof connectSarvamStt>> | null;
   tts: Awaited<ReturnType<typeof connectSarvamTts>> | null;
   accumulatingUserText: string;
+  silenceTimer: ReturnType<typeof setTimeout> | null;
+  silencePromptSent: boolean;
 }
 
 const activeSessions = new Map<string, Session>();
+
+/**
+ * Silence handling: while waiting on the caller (LISTENING, or INTERRUPTED
+ * — the caller cut the agent off but hasn't said anything since), a
+ * caller who goes quiet is prompted once ("are you still there?"), then
+ * hung up on gracefully if the silence continues. Any caller speech
+ * (speech_start — the earliest signal, not final_transcript) cancels the
+ * pending timer and resets the prompt flag: only genuine silence
+ * accumulates toward either threshold. Never armed outside
+ * LISTENING/INTERRUPTED (e.g. not while the agent itself is talking or
+ * thinking) — that's not caller silence.
+ */
+const SILENCE_PROMPT_MS = 12_000;
+const SILENCE_HANGUP_MS = 10_000;
+
+/** Reads current state through a function boundary so a stale narrowing from before an `await` can't linger. */
+function stateOf(session: Session): RuntimeState {
+  return session.handle.state;
+}
+
+function clearSilenceTimer(session: Session) {
+  if (session.silenceTimer) {
+    clearTimeout(session.silenceTimer);
+    session.silenceTimer = null;
+  }
+}
+
+function armSilenceTimer(session: Session) {
+  clearSilenceTimer(session);
+  if (session.handle.state !== "LISTENING" && session.handle.state !== "INTERRUPTED") return;
+  const delay = session.silencePromptSent ? SILENCE_HANGUP_MS : SILENCE_PROMPT_MS;
+  session.silenceTimer = setTimeout(() => {
+    if (session.silencePromptSent) void endDueToSilence(session);
+    else void speakSilencePrompt(session);
+  }, delay);
+}
+
+async function speakSilencePrompt(session: Session) {
+  if (session.handle.state !== "LISTENING" && session.handle.state !== "INTERRUPTED") return;
+  session.silencePromptSent = true;
+  try {
+    await speak(session, "Are you still there? I can stay on the line if you need a moment.");
+  } catch (err) {
+    log("silence_prompt_failed", session, { message: (err as Error).message });
+  }
+  // Only settle back to LISTENING if nothing else moved the state on while
+  // this prompt was being spoken (e.g. the caller barged in mid-prompt,
+  // which already transitions to INTERRUPTED and will be handled there).
+  if (stateOf(session) === "SPEAKING") session.handle.state = "LISTENING";
+  armSilenceTimer(session);
+}
+
+async function endDueToSilence(session: Session) {
+  if (session.handle.state !== "LISTENING" && session.handle.state !== "INTERRUPTED") return;
+  log("silence_hangup", session);
+  try {
+    await speak(
+      session,
+      "I haven't heard anything, so I'll end the call here. Feel free to call back anytime.",
+    );
+  } catch (err) {
+    log("silence_goodbye_failed", session, { message: (err as Error).message });
+  }
+  await terminateRuntimeSession(session.input.callId, "caller_silence_timeout");
+}
 
 function log(
   event: string,
@@ -186,17 +253,22 @@ async function handleUserUtterance(session: Session, text: string) {
     if (!reply) {
       log("llm_empty_reply", session);
       session.handle.state = "LISTENING";
+      armSilenceTimer(session);
       return;
     }
 
     session.turns.push({ role: "assistant", text: reply, at: new Date().toISOString() });
     await speak(session, reply);
-    if (generation === session.generation) session.handle.state = "LISTENING";
+    if (generation === session.generation) {
+      session.handle.state = "LISTENING";
+      armSilenceTimer(session);
+    }
   } catch (err) {
     log("llm_error", session, { message: (err as Error).message });
     if (generation === session.generation) {
       await speakFallback(session, err);
       session.handle.state = "LISTENING";
+      armSilenceTimer(session);
     }
   }
 }
@@ -216,6 +288,10 @@ async function speakFallback(session: Session, error: unknown) {
 function onSttEvent(session: Session, event: SttEvent) {
   switch (event.type) {
     case "speech_start": {
+      // The caller is audibly speaking — whatever silence has accumulated
+      // so far no longer counts, regardless of which state this arrives in.
+      clearSilenceTimer(session);
+      session.silencePromptSent = false;
       if (session.handle.state === "SPEAKING" || session.handle.state === "THINKING") {
         // Barge-in: stop talking immediately, discard the audio already
         // queued for the caller, and soft-cancel any in-flight LLM turn.
@@ -228,6 +304,12 @@ function onSttEvent(session: Session, event: SttEvent) {
       break;
     }
     case "speech_end":
+      // The caller just stopped talking. Re-arm from here rather than from
+      // speech_start, so the silence window doesn't start counting down
+      // while they're still mid-utterance — a no-op unless the state is
+      // LISTENING/INTERRUPTED (e.g. does nothing while the agent is
+      // THINKING/SPEAKING, which isn't caller silence).
+      armSilenceTimer(session);
       break;
     case "partial_transcript":
       session.accumulatingUserText = event.text;
@@ -309,6 +391,8 @@ export async function startRuntimeSession(
     stt: null,
     tts: null,
     accumulatingUserText: "",
+    silenceTimer: null,
+    silencePromptSent: false,
   };
   activeSessions.set(input.callId, session);
   log("runtime_started", session);
@@ -360,6 +444,7 @@ export async function startRuntimeSession(
     session.turns.push({ role: "assistant", text: greeting, at: new Date().toISOString() });
     await speak(session, greeting);
     handle.state = "LISTENING";
+    armSilenceTimer(session);
     log("greeting_played", session);
     void markAgentLive(input.agentConfigId);
   } catch (err) {
@@ -386,6 +471,7 @@ export async function terminateRuntimeSession(callId: string, reason: string): P
   log("runtime_terminating", session, { reason });
 
   session.generation++; // discard any in-flight LLM work
+  clearSilenceTimer(session);
   try {
     session.stt?.close();
   } catch {

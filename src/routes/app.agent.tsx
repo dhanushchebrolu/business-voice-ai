@@ -3,16 +3,15 @@ import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { toast } from "sonner";
-import { Loader2, Rocket, Send } from "lucide-react";
+import { Loader2, Send } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
-import { supabase } from "@/integrations/supabase/client";
-import { workspaceQuery, versionsQuery, numbersQuery } from "@/lib/workspace";
+import { workspaceQuery, numbersQuery } from "@/lib/workspace";
+import { agentStatusLabel } from "@/lib/agent-status";
 import { LANGUAGES, VOICES, PACE_MIN, PACE_MAX } from "@/lib/voices";
 import { PERSONAS, CAPABILITIES } from "@/lib/business-types";
 import {
   previewAgentConfig,
-  publishAgentVersion,
-  rollbackAgentVersion,
+  saveAgentConfiguration,
   testAgentText,
   getProviderStatus,
 } from "@/lib/agent.functions";
@@ -33,16 +32,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
 
 export const Route = createFileRoute("/app/agent")({
   head: () => ({
@@ -50,8 +39,7 @@ export const Route = createFileRoute("/app/agent")({
       { title: "AI receptionist — Vaani" },
       {
         name: "description",
-        content:
-          "Configure persona, voice, language and behaviour, then publish a new agent version.",
+        content: "Configure persona, voice, language and behaviour for your AI receptionist.",
       },
       { name: "robots", content: "noindex" },
     ],
@@ -65,23 +53,23 @@ function AgentPage() {
   const { data: ws, isLoading } = useQuery(workspaceQuery(user?.id));
   const business = ws?.business ?? null;
   const agent = ws?.agent ?? null;
-  const { data: versions } = useQuery(versionsQuery(business?.id));
   const { data: locks } = useQuery(featureLocksQuery(ws?.organization?.id));
   const { data: numbers } = useQuery(numbersQuery(ws?.organization?.id));
-  const agentNumber = numbers?.find((n) => n.agent_config_id === agent?.id) ?? null;
-  // Mirrors the same lock feature_locked("voice") checks server-side before
-  // publish/rollback (see agent.functions.ts's assertFeatureUnlocked) — this
-  // only decides what the button/banner show, never whether the request is
-  // actually allowed. Configuration (save draft, test, preview) stays
-  // available regardless: only publishing/rolling back an agent version is
-  // gated, matching agent.functions.ts's own configuration/activation split.
+  const activeNumber = numbers?.find((n) => n.status === "active");
+  // Informational only — the save button is never blocked by this (a
+  // customer mid-setup, before any payment, must still be able to save and
+  // prepare their agent). The real, unbypassable gate is
+  // saveAgentConfiguration's own checkFeatureAccess("voice") call, which
+  // decides whether a save can actually reach "ready" — and
+  // checkTelephonyAccess's independent re-check at real call time either
+  // way. This banner exists purely to explain why a save might land as
+  // "Incomplete" for a reason that isn't a missing field.
   const voiceLocked = locks?.["voice"] === true;
   const lifecycle = ws?.organization?.lifecycle_status ?? "not_provisioned";
 
   const provider = useServerFn(getProviderStatus);
   const preview = useServerFn(previewAgentConfig);
-  const publish = useServerFn(publishAgentVersion);
-  const rollback = useServerFn(rollbackAgentVersion);
+  const saveConfig = useServerFn(saveAgentConfiguration);
   const testText = useServerFn(testAgentText);
 
   const { data: providerStatus } = useQuery({
@@ -108,9 +96,6 @@ function AgentPage() {
     capabilities: {} as Record<string, boolean>,
   });
   const [saving, setSaving] = useState(false);
-  const [publishing, setPublishing] = useState(false);
-  const [publishConfirmOpen, setPublishConfirmOpen] = useState(false);
-  const [publishError, setPublishError] = useState<string | null>(null);
   const [chat, setChat] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
   const [message, setMessage] = useState("");
   const [thinking, setThinking] = useState(false);
@@ -137,66 +122,38 @@ function AgentPage() {
   if (isLoading || !business || !agent) return <LoadingState label="Loading receptionist" />;
 
   async function save() {
-    if (!agent) return;
+    if (!agent || !business) return;
     setSaving(true);
-    const { error } = await supabase
-      .from("agent_configs")
-      .update({
-        agent_name: form.agent_name,
-        persona: form.persona,
-        primary_language: form.primary_language,
-        voice_id: form.voice_id,
-        speaking_pace: form.speaking_pace,
-        multilingual: form.multilingual,
-        after_hours_behavior: form.after_hours_behavior,
-        transfer_number: form.transfer_number || null,
-        custom_personality: form.custom_personality || null,
-        capabilities: form.capabilities,
-        greetings: {
-          ...(agent.greetings as Record<string, string>),
-          [form.primary_language]: form.greeting,
-        },
-      })
-      .eq("id", agent.id);
-    setSaving(false);
-    if (error) {
-      toast.error("Could not save the configuration.");
-      return;
-    }
-    await qc.invalidateQueries();
-    refetchPreview();
-    toast.success("Saved. Publish to apply it to live calls.");
-  }
-
-  async function doPublish() {
-    if (!business) return;
-    setPublishing(true);
-    setPublishError(null);
     try {
-      const result = await publish({
-        data: { businessId: business.id, changeNote: "Configuration updated" },
+      const result = await saveConfig({
+        data: {
+          businessId: business.id,
+          agent_name: form.agent_name,
+          persona: form.persona,
+          primary_language: form.primary_language,
+          voice_id: form.voice_id,
+          speaking_pace: form.speaking_pace,
+          multilingual: form.multilingual,
+          after_hours_behavior: form.after_hours_behavior,
+          transfer_number: form.transfer_number || null,
+          custom_personality: form.custom_personality || null,
+          greeting: form.greeting,
+          capabilities: form.capabilities,
+        },
       });
-      if (!result.ok) {
-        // Sarvam sync failures surface here too (agent.functions.ts returns
-        // them as an issue rather than throwing) — the previous published
-        // version is guaranteed untouched either way.
-        const message =
-          result.issues[0]?.message ?? "Fix the configuration issues before publishing.";
-        setPublishError(message);
-        toast.error(message);
-        return;
+      if (result.ready) {
+        toast.success("Saved. Your receptionist is active for new calls.");
+      } else {
+        toast(result.issues.length ? "Saved as an incomplete draft." : "Saved.", {
+          description: result.issues[0]?.message,
+        });
       }
-      setPublishConfirmOpen(false);
-      toast.success(
-        `Version ${result.version} published. Your previous version stays available to roll back to.`,
-      );
       await qc.invalidateQueries();
-    } catch {
-      const message = "Publishing failed. Your previous published version remains active.";
-      setPublishError(message);
-      toast.error(message);
+      refetchPreview();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not save the configuration.");
     } finally {
-      setPublishing(false);
+      setSaving(false);
     }
   }
 
@@ -218,39 +175,25 @@ function AgentPage() {
   }
 
   const issues = previewData?.issues ?? [];
-  const publishStatus: { label: string; tone: "live" | "ready" | "idle" | "error" } = publishing
-    ? { label: "Publishing…", tone: "ready" }
-    : publishError
-      ? { label: "Publish failed", tone: "error" }
-      : agent?.active_version
-        ? { label: "Published", tone: "live" }
-        : { label: "Draft", tone: "idle" };
-  const nextVersion = (versions?.[0]?.version ?? 0) + 1;
+  // Real status only — never a fake "connected"/"published"/"deployed"
+  // claim. agentStatusLabel already refuses to say Ready/Live while
+  // required fields are missing, a Sarvam-managed number's app mapping is
+  // absent, or the account is billing-locked; it says exactly why not.
+  const agentStatus = agentStatusLabel(agent, Boolean(activeNumber), activeNumber?.provider);
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="AI receptionist"
-        description="Persona, voice and behaviour. Saving stores a draft; publishing creates a versioned snapshot of your instructions."
+        description="Persona, voice and behaviour. Saving updates the active receptionist configuration — no separate publish step."
         actions={
           <>
             <StatusPill tone={providerStatus?.ai === "connected" ? "live" : "idle"}>
               {providerStatus?.ai === "connected" ? "AI connected" : "AI not connected"}
             </StatusPill>
-            <StatusPill tone={publishStatus.tone}>{publishStatus.label}</StatusPill>
-            <Button size="sm" variant="secondary" onClick={save} disabled={saving}>
-              {saving ? <Loader2 className="mr-2 size-3.5 animate-spin" /> : null}Save draft
-            </Button>
-            <Button
-              size="sm"
-              onClick={() => {
-                setPublishError(null);
-                setPublishConfirmOpen(true);
-              }}
-              disabled={publishing || voiceLocked}
-            >
-              <Rocket className="mr-1.5 size-3.5" />
-              Publish
+            <StatusPill tone={agentStatus.tone}>{agentStatus.label}</StatusPill>
+            <Button size="sm" onClick={save} disabled={saving}>
+              {saving ? <Loader2 className="mr-2 size-3.5 animate-spin" /> : null}Save configuration
             </Button>
           </>
         }
@@ -260,7 +203,7 @@ function AgentPage() {
 
       {issues.length ? (
         <div className="rounded-lg border border-warning/30 bg-warning/8 px-4 py-3 text-sm">
-          <p className="font-medium">Resolve before publishing</p>
+          <p className="font-medium">Resolve to activate</p>
           <ul className="mt-1.5 list-inside list-disc text-muted-foreground">
             {issues.map((issue) => (
               <li key={issue.field}>{issue.message}</li>
@@ -275,7 +218,6 @@ function AgentPage() {
           <TabsTrigger value="behaviour">Behaviour</TabsTrigger>
           <TabsTrigger value="instructions">Instructions</TabsTrigger>
           <TabsTrigger value="test">Test</TabsTrigger>
-          <TabsTrigger value="versions">Versions</TabsTrigger>
         </TabsList>
 
         <TabsContent value="identity" className="mt-4 grid gap-4 lg:grid-cols-2">
@@ -462,7 +404,7 @@ function AgentPage() {
         <TabsContent value="test" className="mt-4">
           <SectionCard
             title="Test conversation"
-            description="Talk to the agent in text using your current published grounding."
+            description="Talk to the agent in text using your currently saved grounding."
           >
             <div className="space-y-3">
               <div className="max-h-[360px] space-y-2 overflow-y-auto">
@@ -502,107 +444,7 @@ function AgentPage() {
             </div>
           </SectionCard>
         </TabsContent>
-
-        <TabsContent value="versions" className="mt-4">
-          <SectionCard
-            title="Published versions"
-            description="Roll back instantly if a change causes problems."
-          >
-            <ul className="divide-y divide-border">
-              {versions?.length ? (
-                versions.map((v) => (
-                  <li key={v.id} className="flex items-center justify-between gap-3 py-2.5">
-                    <div>
-                      <p className="text-sm font-medium">
-                        Version {v.version}{" "}
-                        {v.status === "active" ? (
-                          <StatusPill tone="live" dot={false} className="ml-1.5">
-                            active
-                          </StatusPill>
-                        ) : null}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        {v.change_note} · {new Date(v.created_at).toLocaleString()}
-                      </p>
-                    </div>
-                    {v.status !== "active" ? (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        disabled={voiceLocked}
-                        onClick={async () => {
-                          await rollback({ data: { businessId: business.id, version: v.version } });
-                          await qc.invalidateQueries();
-                          toast.success(`Rolled back to version ${v.version}.`);
-                        }}
-                      >
-                        Restore
-                      </Button>
-                    ) : null}
-                  </li>
-                ))
-              ) : (
-                <li className="py-4 text-sm text-muted-foreground">Nothing published yet.</li>
-              )}
-            </ul>
-          </SectionCard>
-        </TabsContent>
       </Tabs>
-
-      <AlertDialog
-        open={publishConfirmOpen}
-        onOpenChange={(open) => !publishing && setPublishConfirmOpen(open)}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Publish this configuration?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This creates version {nextVersion} and makes it the one real calls use immediately.
-              Your current published version stays available to roll back to if anything goes wrong.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-2 rounded-md border border-border bg-surface/40 p-3 text-sm">
-            <dt className="text-xs text-muted-foreground">Agent</dt>
-            <dd className="text-right">{form.agent_name || "—"}</dd>
-            <dt className="text-xs text-muted-foreground">Version</dt>
-            <dd className="text-right">v{nextVersion}</dd>
-            <dt className="text-xs text-muted-foreground">Language</dt>
-            <dd className="text-right">
-              {LANGUAGES.find((l) => l.code === form.primary_language)?.label ??
-                form.primary_language}
-              {form.multilingual ? " (auto-detect)" : ""}
-            </dd>
-            <dt className="text-xs text-muted-foreground">Voice</dt>
-            <dd className="text-right">
-              {VOICES.find((v) => v.id === form.voice_id)?.name ?? form.voice_id}
-            </dd>
-            <dt className="text-xs text-muted-foreground">Phone</dt>
-            <dd className="text-right">
-              {agentNumber?.display_number ?? agentNumber?.e164 ?? "Not assigned yet"}
-            </dd>
-            <dt className="text-xs text-muted-foreground">Deployment</dt>
-            <dd className="text-right">
-              {agentNumber?.provider === "sarvam" && agentNumber.provider_deployment_id
-                ? "Active — will be kept in sync"
-                : "None"}
-            </dd>
-          </dl>
-          {publishError ? <p className="text-sm text-destructive">{publishError}</p> : null}
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={publishing}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              disabled={publishing}
-              onClick={(e) => {
-                e.preventDefault();
-                void doPublish();
-              }}
-            >
-              {publishing ? <Loader2 className="mr-2 size-3.5 animate-spin" /> : null}
-              {publishing ? "Publishing…" : "Publish"}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </div>
   );
 }
