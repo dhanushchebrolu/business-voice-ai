@@ -15,10 +15,14 @@
  * implementing `TelephonyProviderAdapter.openMediaBridge` for that one
  * provider — nothing in voice-runtime.server.ts changes.
  *
- * No provider in this repository implements a real media transport yet —
- * see the Phase E report's "Known limitations". `openMediaBridge` returning
- * `null` (the only behavior implemented today) means exactly that: this
- * call has no live audio path, so the runtime cannot start.
+ * Exotel implements this contract (see ../telephony/exotel-provider.ts's
+ * `openMediaBridge` and exotel-media-bridge.server.ts's `ExotelMediaBridge`)
+ * — a provider without a real media transport (or whose bridge genuinely
+ * never arrives for a given call) still returns `null` from
+ * `openMediaBridge`, which means exactly what it always meant: this call
+ * has no live audio path right now, so the runtime cannot start for it.
+ * That is a per-call/per-provider outcome, not a statement about what this
+ * repository has implemented.
  */
 
 export type AudioEncoding = "mulaw" | "alaw" | "linear16" | "opus";

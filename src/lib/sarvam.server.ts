@@ -7,9 +7,23 @@
  *   - POST /speech-to-text       (Saaras)
  * Operations that Sarvam does not expose publicly (agent deployment / number
  * provisioning) are declared here as unsupported instead of being faked.
+ *
+ * REQUEST_TIMEOUT_MS bounds every call here (`call()`'s `fetch`, via
+ * `AbortSignal.timeout`) — previously unbounded, so a stuck Sarvam
+ * connection during a live voice call could hang indefinitely (silence on
+ * the line, or a call that never terminates) instead of failing fast into
+ * the existing fallback-speech/retry path (voice-runtime.server.ts's
+ * speakFallback). No official Sarvam-documented timeout exists to match
+ * against (see this repo's standing verification-note convention for this
+ * provider); 15s is chosen to stay well inside a caller's patience for a
+ * single conversational turn while still being generous for a real
+ * completion, matching the order of magnitude of
+ * sarvam-realtime.server.ts's own CONNECT_TIMEOUT_MS for the streaming
+ * STT/TTS sockets.
  */
 
 const BASE_URL = "https://api.sarvam.ai";
+const REQUEST_TIMEOUT_MS = 15_000;
 
 export const SARVAM_MODELS = {
   chat: "sarvam-m",
@@ -42,8 +56,12 @@ async function call<T>(path: string, body: unknown): Promise<T> {
         "api-subscription-key": apiKey(),
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
-  } catch {
+  } catch (err) {
+    if (err instanceof Error && err.name === "TimeoutError") {
+      throw new ProviderError("The AI voice provider timed out. Please retry.", 504);
+    }
     throw new ProviderError("Could not reach the AI voice provider. Please retry.", 503);
   }
 
@@ -140,8 +158,12 @@ export const sarvam = {
         method: "POST",
         headers: { "api-subscription-key": apiKey() },
         body: form,
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
-    } catch {
+    } catch (err) {
+      if (err instanceof Error && err.name === "TimeoutError") {
+        throw new ProviderError("The AI voice provider timed out. Please retry.", 504);
+      }
       throw new ProviderError("Could not reach the AI voice provider. Please retry.", 503);
     }
     if (!res.ok) {

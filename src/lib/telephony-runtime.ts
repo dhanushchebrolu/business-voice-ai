@@ -14,12 +14,16 @@
  * this call (`adapter.openMediaBridge`, see ./telephony/audio-bridge.ts) —
  * starts the real Sarvam-backed conversation via voice-runtime.server.ts.
  *
- * No provider in this repository implements `openMediaBridge` yet (see the
- * Phase E report's "Known limitations"), so in this environment this
- * function always returns `handled: false` for that reason — never a
- * fabricated success. Everything upstream of this call (the entitlement
- * gate, the call_logs row, the webhook's own control flow) is unchanged
- * from Phase D.
+ * Exotel implements `openMediaBridge` (see ./telephony/exotel-provider.ts
+ * and exotel-media-bridge.server.ts) — this stopped being true after the
+ * Exotel media-stream work landed; a provider without that method (or one
+ * whose `openMediaBridge` genuinely can't produce a bridge for this call,
+ * e.g. no live connection arrived in time) still degrades to `handled:
+ * false` here, never a fabricated success. Everything upstream of this
+ * call (the entitlement gate, the call_logs row, the webhook's own control
+ * flow) is unchanged from Phase D. This function itself never references
+ * Exotel or any other provider by name — see voice-runtime.server.ts's own
+ * module doc for the provider-neutrality boundary this preserves.
  */
 
 import { checkTelephonyAccess } from "./telephony-guard.server";
@@ -197,9 +201,9 @@ export async function routeToAgentRuntime(
     });
 
     return {
-      handled: handle.state !== "ERROR",
+      handled: handle.state !== "failed",
       note:
-        handle.state === "ERROR"
+        handle.state === "failed"
           ? "The voice runtime failed to start — see server logs for the specific STT/TTS connection error."
           : `Voice runtime started (runtime session ${handle.runtimeSessionId}).`,
     };
