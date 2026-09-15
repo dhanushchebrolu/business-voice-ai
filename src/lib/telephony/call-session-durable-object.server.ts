@@ -416,7 +416,7 @@ export class CallSessionDurableObject {
     const existing = getActiveSession(body.callId);
     if (existing) {
       return jsonResponse({
-        handled: existing.state !== "ERROR",
+        handled: existing.state !== "failed",
         note: `Voice runtime already running (runtime session ${existing.runtimeSessionId}).`,
       } satisfies AgentRuntimeRpcResult);
     }
@@ -445,9 +445,9 @@ export class CallSessionDurableObject {
     });
 
     return jsonResponse({
-      handled: handle.state !== "ERROR",
+      handled: handle.state !== "failed",
       note:
-        handle.state === "ERROR"
+        handle.state === "failed"
           ? "The voice runtime failed to start — see server logs for the specific STT/TTS connection error."
           : `Voice runtime started (runtime session ${handle.runtimeSessionId}).`,
     } satisfies AgentRuntimeRpcResult);

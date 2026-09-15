@@ -29,7 +29,7 @@ import type { ExotelSocketLike } from "./exotel-media-bridge.server.ts";
  *   - transport-level "start" event rejection paths that don't require a
  *     database call (missing CallSid)
  *   - startRuntimeSession's existing, already-tested "no SARVAM_API_KEY ->
- *     fails closed into ERROR, never throws" behavior, reached through the
+ *     fails closed into "failed", never throws" behavior, reached through the
  *     Durable Object's own RPC path, proving the DO correctly surfaces a
  *     failed Sarvam connection as `{handled: false}` rather than crashing
  *   - MOST IMPORTANTLY: that two separate instances of this class never
@@ -311,7 +311,7 @@ describe("CallSessionDurableObject", () => {
     assert.equal(res.status, 200);
     const body = (await res.json()) as { handled: boolean; note: string };
     // No SARVAM_API_KEY is configured in this environment (confirmed), so
-    // startRuntimeSession itself fails closed into ERROR — this is the
+    // startRuntimeSession itself fails closed into "failed" — this is the
     // pre-existing, already-tested behavior (voice-runtime.server.test.ts),
     // reached here through the Durable Object's RPC path. What matters for
     // this test is that a real bridge was found and startRuntimeSession was
@@ -352,7 +352,7 @@ describe("CallSessionDurableObject", () => {
       new Request("https://call-session/internal/start-runtime", { method: "POST", body: rpcBody }),
     );
     assert.equal(first.status, 200);
-    // First call fails closed (no SARVAM_API_KEY) — state ends as ERROR,
+    // First call fails closed (no SARVAM_API_KEY) — state ends as "failed",
     // which getActiveSession still reports as an active (just failed)
     // session, so a second call must short-circuit without waiting on a
     // second (now-gone) bridge.
