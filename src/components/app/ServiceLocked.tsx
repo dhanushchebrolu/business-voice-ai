@@ -1,10 +1,13 @@
 import { Lock } from "lucide-react";
 import { Link } from "@tanstack/react-router";
+import { useQuery } from "@tanstack/react-query";
+import { useServerFn } from "@tanstack/react-start";
 import { EmptyState } from "./primitives";
 import { Button } from "@/components/ui/button";
 import { FEATURE_LABEL, type FeatureKey } from "@/lib/features";
 import type { LifecycleStatus } from "@/lib/lifecycle";
 import { lockMessageFor } from "@/lib/service-lock-message";
+import { getBillingBypassStatus } from "@/lib/billing.functions";
 
 /**
  * Customer-facing "this service isn't available right now" UI (H2).
@@ -39,6 +42,21 @@ export interface ServiceLockedProps {
 }
 
 export function ServiceLocked({ feature, lifecycle, compact = false }: ServiceLockedProps) {
+  // TEMPORARY BACKEND TESTING BYPASS — REMOVE BEFORE PRODUCTION BILLING ENABLEMENT
+  // This component only ever renders when featureLocksQuery's feature_locked()
+  // RPC reports a lock (see every caller's `feature ? <ServiceLocked .../> :
+  // null` guard) — i.e. it is always a payment/entitlement warning, never a
+  // genuine setup-completeness message. Safe to suppress entirely while
+  // BYPASS_BILLING_GATES mirrors the same bypass feature-gate.server.ts
+  // applies server-side.
+  const getBypassStatus = useServerFn(getBillingBypassStatus);
+  const { data: bypass } = useQuery({
+    queryKey: ["billing-bypass-status"],
+    queryFn: () => getBypassStatus(),
+    staleTime: 30_000,
+  });
+  if (bypass?.bypassed === true) return null;
+
   const label = FEATURE_LABEL[feature] ?? feature;
   const { title, description, cta } = lockMessageFor(lifecycle, label);
   const action = cta ? (
