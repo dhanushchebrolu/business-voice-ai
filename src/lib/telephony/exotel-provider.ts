@@ -165,13 +165,51 @@ export class ExotelTelephonyAdapter implements TelephonyProviderAdapter {
     _headers: Record<string, string | null>,
     url?: URL,
   ): boolean {
+    // `URLSearchParams.get` already URL-decodes the value per the WHATWG
+    // URL spec (including a literal "+" -> space, the
+    // application/x-www-form-urlencoded convention) — this is correct
+    // behavior for a normally percent-encoded query parameter, but it is
+    // also exactly why an un-encoded special character in the secret
+    // itself (a literal "&", "=", "+", "#", or space pasted straight into
+    // the Exotel Passthru URL) silently corrupts what actually arrives
+    // here: a "&" splits the query string into an extra parameter, cutting
+    // `verify_token` short; a "+" decodes to a space the real secret never
+    // had. Both produce a length or content mismatch below with no way to
+    // tell which from the boolean return value alone — see the diagnostic
+    // logging this comment introduces.
     const provided = url?.searchParams.get("verify_token");
-    if (!provided) return false;
     const expected = this.config.webhookVerifyToken;
-    const a = Buffer.from(provided, "utf8");
-    const b = Buffer.from(expected, "utf8");
-    if (a.length !== b.length) return false;
-    return timingSafeEqual(a, b);
+    const expectedBytes = Buffer.from(expected, "utf8");
+
+    if (!provided) {
+      // Safe: presence/length only, never either value.
+      console.error("exotel_provider:webhook_verify_token_check", {
+        secretConfigured: expectedBytes.length > 0,
+        secretLength: expectedBytes.length,
+        receivedTokenPresent: false,
+        receivedLength: 0,
+        matched: false,
+      });
+      return false;
+    }
+
+    const providedBytes = Buffer.from(provided, "utf8");
+    const matched =
+      providedBytes.length === expectedBytes.length &&
+      timingSafeEqual(providedBytes, expectedBytes);
+
+    // Logged every time (pass or fail), matching the format this diagnostic
+    // is meant to be read from wrangler tail on the very next test call —
+    // a passing check is just as useful to confirm as a failing one.
+    console[matched ? "info" : "error"]("exotel_provider:webhook_verify_token_check", {
+      secretConfigured: expectedBytes.length > 0,
+      secretLength: expectedBytes.length,
+      receivedTokenPresent: true,
+      receivedLength: providedBytes.length,
+      matched,
+    });
+
+    return matched;
   }
 
   normalizeWebhookEvent(rawBody: string): NormalizedCallEvent | null {

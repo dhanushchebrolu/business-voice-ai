@@ -37,6 +37,112 @@ test("verifyWebhookSignature: no url at all fails closed", () => {
   assert.equal(adapter.verifyWebhookSignature("", {}), false);
 });
 
+/**
+ * Production incident: wrangler tail showed telephony:webhook_request_received
+ * followed by telephony:webhook_signature_invalid, with EXOTEL_WEBHOOK_SECRET
+ * confirmed present (getTelephonyAdapter would have logged
+ * telephony:webhook_provider_not_configured and returned 503 instead of ever
+ * reaching signature verification if any Exotel env var, including the
+ * secret, were missing). That narrows the failure to a genuine VALUE
+ * mismatch between the configured secret and the verify_token Exotel is
+ * actually sending — most plausibly an unescaped special character (a
+ * literal "&", "=", "+", "#", or space) pasted straight into the Exotel
+ * Passthru URL, which either splits the query string (truncating
+ * verify_token) or gets decoded differently than the literal secret
+ * intended (URLSearchParams follows the application/x-www-form-urlencoded
+ * convention, decoding "+" to a space). This suite verifies the new
+ * diagnostic — length-only, never either raw value — makes that
+ * distinguishable from wrangler tail without ever exposing the secret.
+ */
+describe("verifyWebhookSignature: diagnostic logging never exposes either raw value", () => {
+  function captureLogs() {
+    const calls: { level: "info" | "error"; event: string; data: unknown }[] = [];
+    const originalInfo = console.info;
+    const originalError = console.error;
+    console.info = (event: unknown, data?: unknown) => {
+      calls.push({ level: "info", event: String(event), data });
+    };
+    console.error = (event: unknown, data?: unknown) => {
+      calls.push({ level: "error", event: String(event), data });
+    };
+    return {
+      calls,
+      restore: () => {
+        console.info = originalInfo;
+        console.error = originalError;
+      },
+    };
+  }
+
+  test("a matching token logs secretLength/receivedLength/matched:true, never either raw string", () => {
+    const { calls, restore } = captureLogs();
+    try {
+      const adapter = new ExotelTelephonyAdapter(config);
+      const url = new URL(
+        "https://vaani.app/api/public/webhooks/telephony?provider=exotel&verify_token=correct-verify-token",
+      );
+      adapter.verifyWebhookSignature("", {}, url);
+    } finally {
+      restore();
+    }
+    const entry = calls.find((c) => c.event === "exotel_provider:webhook_verify_token_check");
+    assert.ok(entry, "expected the diagnostic log line to fire");
+    assert.equal(entry!.level, "info");
+    const data = entry!.data as Record<string, unknown>;
+    assert.equal(data["secretConfigured"], true);
+    assert.equal(data["secretLength"], config.webhookVerifyToken.length);
+    assert.equal(data["receivedLength"], config.webhookVerifyToken.length);
+    assert.equal(data["matched"], true);
+    const serialized = JSON.stringify(data);
+    assert.doesNotMatch(serialized, /correct-verify-token/);
+  });
+
+  test("a length mismatch (e.g. an un-encoded '&' truncating verify_token) is diagnosable from lengths alone", () => {
+    const { calls, restore } = captureLogs();
+    try {
+      const adapter = new ExotelTelephonyAdapter(config);
+      // Simulates the exact failure mode: the secret pasted into the
+      // Passthru URL contained an un-encoded "&", so only "correct" made it
+      // into verify_token before the query string split into a second,
+      // unrelated parameter.
+      const url = new URL(
+        "https://vaani.app/api/public/webhooks/telephony?provider=exotel&verify_token=correct",
+      );
+      const result = adapter.verifyWebhookSignature("", {}, url);
+      assert.equal(result, false);
+    } finally {
+      restore();
+    }
+    const entry = calls.find((c) => c.event === "exotel_provider:webhook_verify_token_check");
+    assert.ok(entry);
+    assert.equal(entry!.level, "error");
+    const data = entry!.data as Record<string, unknown>;
+    assert.equal(data["secretLength"], config.webhookVerifyToken.length);
+    assert.equal(data["receivedLength"], "correct".length);
+    assert.notEqual(data["secretLength"], data["receivedLength"]);
+    assert.equal(data["matched"], false);
+    const serialized = JSON.stringify(data);
+    assert.doesNotMatch(serialized, /correct-verify-token/);
+  });
+
+  test("a missing verify_token logs receivedTokenPresent:false and receivedLength:0, never throws", () => {
+    const { calls, restore } = captureLogs();
+    try {
+      const adapter = new ExotelTelephonyAdapter(config);
+      const url = new URL("https://vaani.app/api/public/webhooks/telephony?provider=exotel");
+      assert.equal(adapter.verifyWebhookSignature("", {}, url), false);
+    } finally {
+      restore();
+    }
+    const entry = calls.find((c) => c.event === "exotel_provider:webhook_verify_token_check");
+    assert.ok(entry);
+    const data = entry!.data as Record<string, unknown>;
+    assert.equal(data["receivedTokenPresent"], false);
+    assert.equal(data["receivedLength"], 0);
+    assert.equal(data["secretConfigured"], true);
+  });
+});
+
 test("normalizeWebhookEvent: form-urlencoded status callback parses correctly", () => {
   const adapter = new ExotelTelephonyAdapter(config);
   const body = new URLSearchParams({
