@@ -31,6 +31,32 @@ const guardSrc = readFileSync(
   "utf8",
 );
 
+describe("Runtime lifecycle diagnostics (live-call regression: call_logs.status ended up 'failed' with no visible reason — the entitlement gate was rejecting the call, and nothing logged why)", () => {
+  test("business resolution is logged with whether a business was found, never the business/organization id itself", () => {
+    const logStart = runtimeSrc.indexOf('console.info("telephony:runtime_stage", {\n      callId');
+    assert.ok(logStart > -1);
+    const logEnd = runtimeSrc.indexOf("});", logStart);
+    const block = runtimeSrc.slice(logStart, logEnd);
+    assert.match(block, /stage: "business_resolution"/);
+    assert.match(block, /resolved: Boolean\(businessId\)/);
+    // The logged object itself never carries the id values, only booleans.
+    assert.doesNotMatch(block, /organizationId:|businessId:/);
+  });
+
+  test("agent resolution is logged with its source (published version vs. live snapshot), never the agent name or instructions text", () => {
+    const idx = runtimeSrc.indexOf('stage: "agent_resolution"');
+    assert.ok(idx > -1);
+    const block = runtimeSrc.slice(Math.max(0, idx - 100), idx + 200);
+    assert.match(block, /source: publishedVersion \? "published_version" : "live_snapshot"/);
+    assert.doesNotMatch(block, /businessName/);
+  });
+
+  test("the final media+runtime handoff result is logged for both the production (Durable Object) and local-dev fallback paths", () => {
+    assert.match(runtimeSrc, /stage: "media_and_runtime_handoff"/);
+    assert.match(runtimeSrc, /stage: "media_bridge_open"/);
+  });
+});
+
 describe("#2 Correct tenant/agent loading — every ID routeToAgentRuntime uses is caller-supplied, never re-derived from anything else inside this function", () => {
   test("organizationId/businessId/phoneNumberId are read from the function's own input, not fetched by a separate, spoofable lookup", () => {
     assert.match(runtimeSrc, /export async function routeToAgentRuntime\(/);
