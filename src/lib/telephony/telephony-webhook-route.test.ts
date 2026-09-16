@@ -213,10 +213,25 @@ describe("telephony webhook route — unknown-number diagnostic (live-call regre
   test("an unmatched inbound number runs a second, broader (no provider/status filter) lookup and logs provider_call, normalized_number, and matching_rows_for_number — never organization_id or any other identifying field", () => {
     const idx = routeSrc.indexOf('console.error("telephony:webhook_unknown_number"');
     assert.ok(idx > -1);
-    const block = routeSrc.slice(Math.max(0, idx - 400), idx + 300);
+    const block = routeSrc.slice(Math.max(0, idx - 1200), idx + 250);
     assert.match(block, /\.select\("provider, status"\)/);
     assert.match(block, /\.eq\("e164", vaaniNumber\)/);
     assert.doesNotMatch(block, /organization_id/);
+  });
+
+  test("also logs only the Supabase project HOSTNAME (never the full URL, a key, or a secret) — distinguishes 'row genuinely missing' from 'Worker pointed at a different Supabase project'", () => {
+    const supabaseUrlIdx = routeSrc.indexOf('process.env["SUPABASE_URL"]');
+    const logIdx = routeSrc.indexOf('console.error("telephony:webhook_unknown_number"');
+    assert.ok(supabaseUrlIdx > -1 && logIdx > -1);
+    assert.ok(
+      supabaseUrlIdx < logIdx,
+      "the host must be resolved before the log call that uses it",
+    );
+    const block = routeSrc.slice(supabaseUrlIdx, logIdx + 400);
+    assert.match(block, /new URL\(rawUrl\)\.hostname/);
+    assert.match(block, /supabase_host: supabaseHost/);
+    // Never the service-role key or the full connection string.
+    assert.doesNotMatch(block, /SERVICE_ROLE_KEY/);
   });
 });
 

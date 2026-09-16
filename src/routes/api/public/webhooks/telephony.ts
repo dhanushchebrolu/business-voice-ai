@@ -205,6 +205,22 @@ async function processTelephonyEvent(providerId: string, event: NormalizedCallEv
       .select("provider, status")
       .eq("e164", vaaniNumber)
       .limit(5);
+    // Also log which Supabase PROJECT this Worker is actually querying —
+    // only the hostname (e.g. "abcxyz.supabase.co"), never the URL's own
+    // query string or the service-role key used to authenticate against
+    // it. This is the one fact that distinguishes "the row genuinely
+    // doesn't exist in this project" from "this Worker is pointed at a
+    // different Supabase project than whatever was used to create the
+    // row" — the second case looks identical from inside this function
+    // alone (an empty matching_rows_for_number either way), so it needs
+    // its own signal to be diagnosable from logs rather than guessed.
+    let supabaseHost: string | null = null;
+    try {
+      const rawUrl = process.env["SUPABASE_URL"];
+      supabaseHost = rawUrl ? new URL(rawUrl).hostname : null;
+    } catch {
+      supabaseHost = "unparseable";
+    }
     console.error("telephony:webhook_unknown_number", {
       provider: providerId,
       normalized_number: vaaniNumber,
@@ -212,6 +228,7 @@ async function processTelephonyEvent(providerId: string, event: NormalizedCallEv
         provider: r.provider,
         status: r.status,
       })),
+      supabase_host: supabaseHost,
     });
     return;
   }
