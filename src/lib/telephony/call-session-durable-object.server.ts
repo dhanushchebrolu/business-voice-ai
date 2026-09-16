@@ -446,6 +446,16 @@ export class CallSessionDurableObject {
 
   private async handleStartRuntime(request: Request): Promise<Response> {
     const body = (await request.json()) as StartRuntimeRpcInput;
+    const requestedTimeoutMs = body.timeoutMs ?? DEFAULT_BRIDGE_TIMEOUT_MS;
+    // Diagnostic requirement 3 (was the DO/runtime session even reached?):
+    // this fires the instant the RPC body is parsed — before the bridge
+    // wait, before startRuntimeSession — so it's present in the logs even
+    // if everything after it fails or times out.
+    console.info("call_session_do:start_runtime_received", {
+      doId: this.state.id.toString(),
+      callId: body.callId,
+      requestedTimeoutMs,
+    });
 
     // Idempotent: a duplicate "answered"/"in_progress" webhook event (or a
     // retried delivery) for a call whose runtime is already running must
@@ -453,23 +463,52 @@ export class CallSessionDurableObject {
     // per call_id, but checking here too avoids an unnecessary bridge wait.
     const existing = getActiveSession(body.callId);
     if (existing) {
+      console.info("call_session_do:start_runtime_already_active", {
+        callId: body.callId,
+        state: existing.state,
+      });
       return jsonResponse({
         handled: existing.state !== "failed",
         note: `Voice runtime already running (runtime session ${existing.runtimeSessionId}).`,
       } satisfies AgentRuntimeRpcResult);
     }
 
-    const bridge = await this.awaitBridge(
-      body.providerCallId,
-      body.timeoutMs ?? DEFAULT_BRIDGE_TIMEOUT_MS,
-    );
+    // Diagnostic requirement 5 (the exact reason a timeout resolves false):
+    // waitedMs distinguishes "the bridge was never going to arrive" (waited
+    // the full requestedTimeoutMs) from "arrived just barely too late" —
+    // both currently produce the same {handled:false} result, but they
+    // point at different next steps (the former: nothing ever validated on
+    // the media-stream side for this CallSid at all; the latter: the
+    // timeout window itself may be too short for real-world latency).
+    const bridgeWaitStarted = Date.now();
+    const bridge = await this.awaitBridge(body.providerCallId, requestedTimeoutMs);
+    const waitedMs = Date.now() - bridgeWaitStarted;
     if (!bridge) {
+      console.error("call_session_do:start_runtime_no_bridge", {
+        callId: body.callId,
+        requestedTimeoutMs,
+        waitedMs,
+      });
       return jsonResponse({
         handled: false,
         note: "The provider does not expose a live audio channel yet — the runtime cannot start without one.",
       } satisfies AgentRuntimeRpcResult);
     }
+    console.info("call_session_do:start_runtime_bridge_found", {
+      callId: body.callId,
+      waitedMs,
+    });
 
+    // Diagnostic requirement 4 (were Sarvam STT/LLM/TTS connections even
+    // attempted?): this log marks the exact point control passes into
+    // voice-runtime.server.ts's startRuntimeSession, whose own
+    // tts_connect_failed/stt_connect_failed/tts_connected/stt_connected/
+    // greeting_failed logs (unchanged by this fix — already comprehensive)
+    // cover everything from here on. If this log is present but none of
+    // those follow it, startRuntimeSession itself hung or threw somewhere
+    // this call site's own try/catch (routeToAgentRuntime, one layer up)
+    // would still have caught.
+    console.info("call_session_do:starting_voice_runtime", { callId: body.callId });
     const handle = await startRuntimeSession({
       callId: body.callId,
       organizationId: body.organizationId,
@@ -482,6 +521,10 @@ export class CallSessionDurableObject {
       bridge,
     });
 
+    console.info("call_session_do:start_runtime_completed", {
+      callId: body.callId,
+      state: handle.state,
+    });
     return jsonResponse({
       handled: handle.state !== "failed",
       note:

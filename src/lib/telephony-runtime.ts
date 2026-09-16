@@ -191,14 +191,29 @@ export async function routeToAgentRuntime(
         headers: { "content-type": "application/json" },
         body: JSON.stringify(rpcInput),
       });
+      // Diagnostic requirement 1: the raw HTTP status, logged unconditionally
+      // — previously only logged on a non-2xx status, so a 200 OK carrying a
+      // {handled:false} body (the actual production case: the RPC itself
+      // succeeded, but the runtime handoff it reports on did not) left no
+      // trace of the response ever having been inspected at all.
+      console.info("telephony:runtime_do_rpc_status", {
+        callId: input.callId,
+        provider_call_id: input.providerCallId,
+        httpStatus: response.status,
+      });
       if (!response.ok) {
         console.error("telephony:runtime_do_rpc_failed", input.callId, response.status);
         return { handled: false, note: "The voice runtime coordinator returned an error." };
       }
       const result = (await response.json()) as AgentRuntimeRpcResult;
-      // Diagnostic: this is the closest real signal to "was a live Exotel
-      // media session established" — the Durable Object's own
-      // handleStartRuntime (call-session-durable-object.server.ts) only
+      // Diagnostic requirements 2/5: `result.note` is always one of a small,
+      // fixed set of hardcoded strings the Durable Object itself writes
+      // (see call-session-durable-object.server.ts's handleStartRuntime) —
+      // never request payload, a transcript, or any other user-supplied
+      // text — so, exactly like telephony-guard.server.ts's `gate.reason`
+      // elsewhere in this codebase, it is safe to log verbatim. This is
+      // the closest real signal to "was a live Exotel media session
+      // established" — the Durable Object's own handleStartRuntime only
       // returns handled:true after it has actually found/waited for the
       // Exotel WebSocket media bridge AND started the Sarvam runtime on
       // it. There is no separate "generate a media WebSocket URL" step in
@@ -209,6 +224,7 @@ export async function routeToAgentRuntime(
         provider_call_id: input.providerCallId,
         stage: "media_and_runtime_handoff",
         resolved: result.handled,
+        note: result.note,
       });
       return result;
     }

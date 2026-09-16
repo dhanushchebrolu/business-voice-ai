@@ -54,6 +54,26 @@ function fakeState(name: string): DurableObjectState {
   return { id: { toString: () => name } };
 }
 
+/** Captures console.info/error calls (this DO's diagnostics use both) without letting them reach the test runner's own output. */
+function captureLogs() {
+  const calls: { level: "info" | "error"; event: string; data: unknown }[] = [];
+  const originalInfo = console.info;
+  const originalError = console.error;
+  console.info = (event: unknown, data?: unknown) => {
+    calls.push({ level: "info", event: String(event), data });
+  };
+  console.error = (event: unknown, data?: unknown) => {
+    calls.push({ level: "error", event: String(event), data });
+  };
+  return {
+    calls,
+    restore: () => {
+      console.info = originalInfo;
+      console.error = originalError;
+    },
+  };
+}
+
 function fakeBridge(): AudioMediaBridge & {
   sentFrames: AudioFrame[];
   closed: boolean;
@@ -523,6 +543,168 @@ describe("CallSessionDurableObject", () => {
     // (no assertion needed beyond "this doesn't throw" — registerBridge on
     // A succeeding independently, after B's unrelated call, confirms A's
     // internal maps were never touched by B.)
+  });
+
+  test("DIAGNOSTIC (production incident: media_and_runtime_handoff resolved false with no visible reason): a bridge that never arrives logs start_runtime_received then start_runtime_no_bridge with requestedTimeoutMs/waitedMs, never a raw secret/payload value", async () => {
+    const doInstance = new CallSessionDurableObject(fakeState("diag-no-bridge"), {});
+    const logs = captureLogs();
+    let body: { handled: boolean; note: string };
+    try {
+      const res = await doInstance.fetch(
+        new Request("https://call-session/internal/start-runtime", {
+          method: "POST",
+          body: JSON.stringify({
+            callId: "call-diag-no-bridge",
+            organizationId: "org-1",
+            businessId: "biz-1",
+            agentConfigId: null,
+            agentVersion: null,
+            instructions: "test",
+            snapshotAgent: {
+              primary_language: "en",
+              multilingual: false,
+              voice_id: "v1",
+              speaking_pace: 1,
+              greetings: {},
+            },
+            businessName: "Test Business",
+            providerCallId: "callsid-diag-no-bridge",
+            timeoutMs: 50,
+          }),
+        }),
+      );
+      body = (await res.json()) as { handled: boolean; note: string };
+    } finally {
+      logs.restore();
+    }
+    assert.equal(body!.handled, false);
+
+    const received = logs.calls.find((c) => c.event === "call_session_do:start_runtime_received");
+    assert.ok(received, "expected start_runtime_received to log before the bridge wait");
+    assert.deepEqual(received!.data, {
+      doId: "diag-no-bridge",
+      callId: "call-diag-no-bridge",
+      requestedTimeoutMs: 50,
+    });
+
+    const noBridge = logs.calls.find((c) => c.event === "call_session_do:start_runtime_no_bridge");
+    assert.ok(
+      noBridge,
+      "expected start_runtime_no_bridge to log the exact reason for handled:false",
+    );
+    const noBridgeData = noBridge!.data as {
+      callId: string;
+      requestedTimeoutMs: number;
+      waitedMs: number;
+    };
+    assert.equal(noBridgeData.callId, "call-diag-no-bridge");
+    assert.equal(noBridgeData.requestedTimeoutMs, 50);
+    assert.ok(
+      noBridgeData.waitedMs >= 45,
+      `expected waitedMs to reflect the real wait, got ${noBridgeData.waitedMs}`,
+    );
+
+    // Never a bridge-found or voice-runtime-started log on this path.
+    assert.equal(
+      logs.calls.some((c) => c.event === "call_session_do:start_runtime_bridge_found"),
+      false,
+    );
+    assert.equal(
+      logs.calls.some((c) => c.event === "call_session_do:starting_voice_runtime"),
+      false,
+    );
+  });
+
+  test("DIAGNOSTIC: a bridge that IS found logs start_runtime_bridge_found, then starting_voice_runtime, then start_runtime_completed — confirming Sarvam connection was actually attempted, not silently skipped", async () => {
+    const doInstance = new CallSessionDurableObject(
+      fakeState("diag-bridge-found"),
+      {},
+    ) as unknown as {
+      registerBridge: (id: string, bridge: AudioMediaBridge) => void;
+    };
+    const bridge = fakeBridge();
+    doInstance.registerBridge("callsid-diag-found", bridge);
+
+    const logs = captureLogs();
+    let body: { handled: boolean; note: string };
+    try {
+      const res = await (doInstance as unknown as CallSessionDurableObject).fetch(
+        new Request("https://call-session/internal/start-runtime", {
+          method: "POST",
+          body: JSON.stringify({
+            callId: "call-diag-found",
+            organizationId: "org-1",
+            businessId: "biz-1",
+            agentConfigId: null,
+            agentVersion: null,
+            instructions: "test",
+            snapshotAgent: {
+              primary_language: "en",
+              multilingual: false,
+              voice_id: "v1",
+              speaking_pace: 1,
+              greetings: {},
+            },
+            businessName: "Test Business",
+            providerCallId: "callsid-diag-found",
+            timeoutMs: 5000,
+          }),
+        }),
+      );
+      body = (await res.json()) as { handled: boolean; note: string };
+    } finally {
+      logs.restore();
+    }
+    // No SARVAM_API_KEY configured in this sandbox — startRuntimeSession
+    // itself fails closed (pre-existing, tested behavior). What this test
+    // verifies is that it was actually REACHED and attempted, which is
+    // exactly the visibility gap this diagnostic closes.
+    assert.equal(body!.handled, false);
+
+    const bridgeFoundIdx = logs.calls.findIndex(
+      (c) => c.event === "call_session_do:start_runtime_bridge_found",
+    );
+    const startingIdx = logs.calls.findIndex(
+      (c) => c.event === "call_session_do:starting_voice_runtime",
+    );
+    const completedIdx = logs.calls.findIndex(
+      (c) => c.event === "call_session_do:start_runtime_completed",
+    );
+    assert.ok(bridgeFoundIdx > -1 && startingIdx > -1 && completedIdx > -1);
+    assert.ok(
+      bridgeFoundIdx < startingIdx && startingIdx < completedIdx,
+      "expected bridge_found -> starting_voice_runtime -> start_runtime_completed, in that order",
+    );
+    assert.equal(
+      (logs.calls[completedIdx]!.data as { state: string }).state,
+      "failed",
+      "no SARVAM_API_KEY in this sandbox -> the runtime's own state is 'failed', surfaced here verbatim",
+    );
+  });
+
+  test("DIAGNOSTIC (source check): the already-active short-circuit logs before returning, and precedes the bridge wait in source order", () => {
+    // A genuinely still-active session (not yet self-terminated) can't be
+    // reliably produced in this sandbox: with no SARVAM_API_KEY configured,
+    // startRuntimeSession always fails its TTS/STT connect and immediately
+    // calls terminateRuntimeSession, which deletes the session from
+    // activeSessions before a second RPC could ever observe it as
+    // "already running" — exactly the same limitation the pre-existing
+    // "/internal/start-runtime is idempotent" test above already works
+    // around (it exercises /internal/terminate-runtime after a failed
+    // start, not a genuine duplicate /internal/start-runtime call). This
+    // checks the same invariant the way that test does: statically.
+    const source = readFileSync(
+      new URL("./call-session-durable-object.server.ts", import.meta.url),
+      "utf8",
+    );
+    const existingIdx = source.indexOf("const existing = getActiveSession(body.callId);");
+    const logIdx = source.indexOf("call_session_do:start_runtime_already_active");
+    const bridgeWaitIdx = source.indexOf("const bridgeWaitStarted = Date.now();");
+    assert.ok(existingIdx > -1 && logIdx > -1 && bridgeWaitIdx > -1);
+    assert.ok(
+      existingIdx < logIdx && logIdx < bridgeWaitIdx,
+      "expected the already-active log between the getActiveSession check and the bridge wait — it must never re-enter awaitBridge",
+    );
   });
 });
 

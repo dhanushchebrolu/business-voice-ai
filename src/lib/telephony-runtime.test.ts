@@ -57,6 +57,34 @@ describe("Runtime lifecycle diagnostics (live-call regression: call_logs.status 
   });
 });
 
+describe("Durable Object RPC diagnostics (production incident: media_and_runtime_handoff resolved false with no way to tell why)", () => {
+  test("the DO RPC's HTTP status is logged unconditionally, not only on a non-2xx response", () => {
+    const statusLogIdx = runtimeSrc.indexOf('console.info("telephony:runtime_do_rpc_status"');
+    const okCheckIdx = runtimeSrc.indexOf("if (!response.ok)");
+    assert.ok(statusLogIdx > -1 && okCheckIdx > -1);
+    assert.ok(
+      statusLogIdx < okCheckIdx,
+      "the status must be logged before the ok/not-ok branch decides what to do with it",
+    );
+    const block = runtimeSrc.slice(statusLogIdx, okCheckIdx);
+    assert.match(block, /httpStatus: response\.status/);
+  });
+
+  test("the DO's response note (the exact reason handled resolved false or true) is logged alongside the media_and_runtime_handoff result, not discarded", () => {
+    const idx = runtimeSrc.indexOf('stage: "media_and_runtime_handoff"');
+    assert.ok(idx > -1);
+    const block = runtimeSrc.slice(idx, idx + 200);
+    assert.match(block, /resolved: result\.handled/);
+    assert.match(block, /note: result\.note/);
+  });
+
+  test("result.note is treated as a safe-to-log fixed string (like telephony-guard.server.ts's gate.reason), not redacted or dropped", () => {
+    const idx = runtimeSrc.indexOf("note: result.note");
+    const block = runtimeSrc.slice(Math.max(0, idx - 900), idx);
+    assert.match(block, /safe to log verbatim/i);
+  });
+});
+
 describe("#2 Correct tenant/agent loading — every ID routeToAgentRuntime uses is caller-supplied, never re-derived from anything else inside this function", () => {
   test("organizationId/businessId/phoneNumberId are read from the function's own input, not fetched by a separate, spoofable lookup", () => {
     assert.match(runtimeSrc, /export async function routeToAgentRuntime\(/);
