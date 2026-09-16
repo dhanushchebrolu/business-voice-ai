@@ -1,5 +1,6 @@
 {
   "name": "klyro",
+  "compatibility_date": "2026-09-16",
   "keep_vars": true,
   "secrets": {
     "required": ["SUPABASE_SERVICE_ROLE_KEY"]
