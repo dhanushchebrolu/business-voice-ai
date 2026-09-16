@@ -188,32 +188,51 @@ export class ExotelTelephonyAdapter implements TelephonyProviderAdapter {
     }
 
     const callSid = firstString(fields, ["CallSid", "call_sid", "Sid"]);
+    if (!callSid) {
+      // No usable call identity at all — genuinely nothing to do with this
+      // event (never fabricate a CallSid). Diagnostic only: field NAMES the
+      // payload actually carried, never values.
+      console.error("exotel_provider:webhook_payload_unrecognized", {
+        fieldsPresent: Object.keys(fields),
+        callSidFound: false,
+      });
+      return null;
+    }
+
     const rawStatus = firstString(fields, [
       "Status",
       "DialCallStatus",
       "CallStatus",
       "status",
     ])?.toLowerCase();
-    if (!callSid || !rawStatus || !(rawStatus in STATUS_MAP)) {
-      // Diagnostic only — field NAMES the payload actually carried, never
-      // values (a phone number, a recording URL, etc. could be among them).
-      // This is exactly the signal needed to tell "Exotel sent a status
-      // value this STATUS_MAP doesn't recognize" apart from "Exotel names
-      // the field something other than Status/DialCallStatus/CallStatus" —
-      // both silently returned `null` before this log existed.
-      console.error("exotel_provider:webhook_payload_unrecognized", {
+    const statusRecognized = Boolean(rawStatus && rawStatus in STATUS_MAP);
+    // Exotel's Voicebot Passthru sends an initial callback (observed live:
+    // CallType=call-attempt, every status-ish field absent/null) with a
+    // valid CallSid but no recognized status field at all. Previously this
+    // returned null and dropped the event outright — since this is the
+    // *first* event for a brand-new call, dropping it meant the call_logs
+    // row the media-stream authorization check depends on was never
+    // created, so the Voicebot's WebSocket connection was rejected a few
+    // hundred ms later with "No known call for CallSid ...". Falling back
+    // to "initiated" (the earliest, most permissive NormalizedCallStatus —
+    // see telephony-guard.server.ts's ALLOWED_TRANSITIONS, which allows
+    // initiated -> every other status) fixes that without guessing at a
+    // status the payload didn't actually assert: a real ringing/answered/
+    // completed event for the same CallSid still arrives and correctly
+    // progresses the row via applyCallEvent's own transition check.
+    const status: NormalizedCallStatus = statusRecognized ? STATUS_MAP[rawStatus!]! : "initiated";
+    if (!statusRecognized) {
+      console.error("exotel_provider:webhook_status_fallback", {
+        callSid,
         fieldsPresent: Object.keys(fields),
-        callSidFound: Boolean(callSid),
-        statusFieldFound: Boolean(rawStatus),
-        statusRecognized: Boolean(rawStatus && rawStatus in STATUS_MAP),
+        fallbackStatus: status,
       });
-      return null;
     }
 
     const direction = firstString(fields, ["Direction", "direction"]);
     return {
       providerCallId: callSid,
-      status: STATUS_MAP[rawStatus]!,
+      status,
       direction: direction?.toLowerCase().startsWith("outbound") ? "outbound" : "inbound",
       fromE164: firstString(fields, ["From", "CallFrom", "from"]),
       toE164: firstString(fields, ["To", "CallTo", "to"]),

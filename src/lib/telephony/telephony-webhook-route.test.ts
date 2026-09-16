@@ -190,6 +190,25 @@ describe("telephony webhook route — GET support (live-call regression: Exotel'
   });
 });
 
+describe("telephony webhook route — duplicate/racing inbound callbacks never create a second call_logs row (live-call regression)", () => {
+  test("a concurrent duplicate insert (23505 on idx_call_logs_provider_call_id) falls back to the same update path as a pre-existing row, never throws past it", () => {
+    const insertIdx = routeSrc.indexOf('.from("call_logs")\n    .insert(');
+    assert.ok(insertIdx > -1);
+    const nearby = routeSrc.slice(insertIdx, insertIdx + 2200);
+    assert.match(nearby, /if \(insertError\) \{/);
+    assert.match(nearby, /\(insertError as \{ code\?: string \}\)\.code === "23505"/);
+    assert.match(nearby, /\.eq\("provider", providerId\)/);
+    assert.match(nearby, /\.eq\("provider_call_id", event\.providerCallId\)/);
+    assert.match(nearby, /await applyCallEvent\(existingRow, event\);/);
+  });
+
+  test("both the insert path and the applyCallEvent update path log a success event carrying provider_call_id and call_id (never a raw payload/secret)", () => {
+    assert.match(routeSrc, /"telephony:call_log_inserted"/);
+    assert.match(routeSrc, /"telephony:call_log_updated"/);
+    assert.match(routeSrc, /"telephony:call_log_insert_raced"/);
+  });
+});
+
 describe("telephony webhook route — billing/entitlement reuse (requirement E: do not rewrite)", () => {
   test("still imports and calls the exact existing telephony-guard.server functions, not a parallel implementation", () => {
     assert.match(
