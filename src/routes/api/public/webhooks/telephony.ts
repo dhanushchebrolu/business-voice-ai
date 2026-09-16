@@ -276,6 +276,23 @@ async function processTelephonyEvent(providerId: string, event: NormalizedCallEv
   }
 
   const gate = await checkTelephonyAccess(phoneNumber.organization_id, phoneNumber.id, "inbound");
+  if (!gate.allowed) {
+    // Diagnostic: this is the exact point a call that otherwise resolved
+    // correctly (real CallSid, real status, real phone_numbers row) still
+    // ends up inserted as call_logs.status = 'failed' a few lines below —
+    // checkTelephonyAccess rejected it, and gate.reason is always one of
+    // four fixed, pre-written strings (never a tenant ID, never a raw DB
+    // error) so it's safe to log verbatim. Logged BEFORE the insert since
+    // the row (and its id) doesn't exist yet at this point — the insert's
+    // own "telephony:call_log_inserted" log line right after this one
+    // carries the resulting call_id/status for the same event.
+    console.error("telephony:call_rejected_by_gate", {
+      provider: providerId,
+      provider_call_id: event.providerCallId,
+      stage: "entitlement_gate",
+      reason: gate.reason,
+    });
+  }
 
   // A provider whose own runtime handles the entire call (e.g. Sarvam Voice
   // Agents) can deliver its one-and-only webhook already in a terminal

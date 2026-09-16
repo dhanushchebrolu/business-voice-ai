@@ -100,6 +100,14 @@ export async function routeToAgentRuntime(
     }
 
     const businessId = await resolveBusinessId(input.organizationId, input.businessId);
+    // Diagnostic: call_id + which stage resolved/failed — never the
+    // organization/business id itself, only whether one was found.
+    console.info("telephony:runtime_stage", {
+      callId: input.callId,
+      provider_call_id: input.providerCallId,
+      stage: "business_resolution",
+      resolved: Boolean(businessId),
+    });
     if (!businessId) {
       return { handled: false, note: "No business is configured for this workspace yet." };
     }
@@ -145,6 +153,17 @@ export async function routeToAgentRuntime(
       agentVersion = null;
       businessName = snapshot.business.name;
     }
+    // Diagnostic: agent config resolved (published version or a valid live
+    // snapshot) vs. this branch never being reached (both "incomplete
+    // config" returns above happen before this line). Never the agent name
+    // or instructions text.
+    console.info("telephony:runtime_stage", {
+      callId: input.callId,
+      provider_call_id: input.providerCallId,
+      stage: "agent_resolution",
+      resolved: true,
+      source: publishedVersion ? "published_version" : "live_snapshot",
+    });
 
     const rpcInput: StartRuntimeRpcInput = {
       callId: input.callId,
@@ -176,10 +195,31 @@ export async function routeToAgentRuntime(
         console.error("telephony:runtime_do_rpc_failed", input.callId, response.status);
         return { handled: false, note: "The voice runtime coordinator returned an error." };
       }
-      return (await response.json()) as AgentRuntimeRpcResult;
+      const result = (await response.json()) as AgentRuntimeRpcResult;
+      // Diagnostic: this is the closest real signal to "was a live Exotel
+      // media session established" — the Durable Object's own
+      // handleStartRuntime (call-session-durable-object.server.ts) only
+      // returns handled:true after it has actually found/waited for the
+      // Exotel WebSocket media bridge AND started the Sarvam runtime on
+      // it. There is no separate "generate a media WebSocket URL" step in
+      // this codebase — Exotel's Voicebot Applet URL is static, configured
+      // once in Exotel's own dashboard, never generated per-call.
+      console.info("telephony:runtime_stage", {
+        callId: input.callId,
+        provider_call_id: input.providerCallId,
+        stage: "media_and_runtime_handoff",
+        resolved: result.handled,
+      });
+      return result;
     }
 
     const bridge = (await adapter.openMediaBridge?.(input.providerCallId)) ?? null;
+    console.info("telephony:runtime_stage", {
+      callId: input.callId,
+      provider_call_id: input.providerCallId,
+      stage: "media_bridge_open",
+      resolved: Boolean(bridge),
+    });
     if (!bridge) {
       return {
         handled: false,

@@ -235,6 +235,31 @@ describe("telephony webhook route — unknown-number diagnostic (live-call regre
   });
 });
 
+describe("telephony webhook route — gate-rejection diagnostic (live-call regression: a call with a valid CallSid/status/phone-number match still ended up call_logs.status='failed' with no visible reason — checkTelephonyAccess was rejecting it, silently, before this log existed)", () => {
+  test("when checkTelephonyAccess rejects an inbound call, the exact stage and reason are logged BEFORE the call_logs insert forces status to 'failed'", () => {
+    const gateIdx = routeSrc.indexOf(
+      'const gate = await checkTelephonyAccess(phoneNumber.organization_id, phoneNumber.id, "inbound");',
+    );
+    const logIdx = routeSrc.indexOf('console.error("telephony:call_rejected_by_gate"');
+    const insertIdx = routeSrc.indexOf('.from("call_logs")\n    .insert(');
+    assert.ok(gateIdx > -1 && logIdx > -1 && insertIdx > -1);
+    assert.ok(
+      gateIdx < logIdx && logIdx < insertIdx,
+      "the rejection must be logged after the gate resolves but before the insert that turns it into status='failed'",
+    );
+    const block = routeSrc.slice(logIdx, logIdx + 300);
+    assert.match(block, /stage: "entitlement_gate"/);
+    assert.match(block, /reason: gate\.reason/);
+  });
+
+  test("checkTelephonyAccess is imported from the shared guard module, not reimplemented locally — gate.reason is always one of that module's own fixed strings, safe to log verbatim", () => {
+    assert.match(
+      routeSrc,
+      /import\s*\{[\s\S]*?checkTelephonyAccess[\s\S]*?\}\s*from\s*"@\/lib\/telephony-guard\.server"/,
+    );
+  });
+});
+
 describe("telephony webhook route — billing/entitlement reuse (requirement E: do not rewrite)", () => {
   test("still imports and calls the exact existing telephony-guard.server functions, not a parallel implementation", () => {
     assert.match(
