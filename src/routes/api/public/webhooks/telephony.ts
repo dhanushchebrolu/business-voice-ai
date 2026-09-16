@@ -367,7 +367,39 @@ async function processTelephonyEvent(providerId: string, event: NormalizedCallEv
 
   if (!gate.allowed) return;
 
-  if (event.status === "answered" || event.status === "in_progress") {
+  // ROOT CAUSE (production incident: media session accepted, WebSocket
+  // upgrades and Exotel's "start"/"connected" events arrive, but the
+  // caller never hears Klyro's greeting): Exotel's Voicebot Applet flow
+  // hands the entire live call over to a bidirectional WebSocket the
+  // moment the call-flow reaches that step (see
+  // exotel-media-route.server.ts / call-session-durable-object.server.ts,
+  // and media-session-eligibility.ts's own doc comment on this same
+  // race) — its webhook callback for THIS call was observed live to never
+  // carry a recognized status at all (falls back to "initiated" — see
+  // exotel-provider.ts's normalizeWebhookEvent), and there is no
+  // guarantee a later "answered"/"in_progress" event ever arrives for the
+  // Voicebot Applet product surface specifically. Waiting for one before
+  // calling routeToAgentRuntime meant the Exotel media WebSocket was
+  // correctly authorized (media-session-eligibility.ts already allows
+  // "initiated") but nothing ever started the Sarvam voice runtime on it
+  // — no STT/TTS connection, no greeting, the caller heard only Exotel's
+  // own trial-account layer until it timed out and disconnected.
+  // startRuntimeSession is idempotent per call_id (voice-runtime.server.ts),
+  // so also triggering it here — in addition to the pre-existing
+  // "answered"/"in_progress" trigger below and in applyCallEvent, for a
+  // provider that DOES send a later status transition — is safe:
+  // whichever fires first wins, any later one is a no-op. Scoped to
+  // `providerId === "exotel"` specifically, not every provider: a
+  // provider without this WS-bridging design (routeToAgentRuntime's own
+  // doc comment — "a provider without openMediaBridge... still degrades
+  // to handled: false") would otherwise pay a wasted ~15s Durable Object
+  // bridge-await timeout (DEFAULT_BRIDGE_TIMEOUT_MS) on every single
+  // "initiated" event for no benefit.
+  if (
+    event.status === "answered" ||
+    event.status === "in_progress" ||
+    (providerId === "exotel" && event.status === "initiated")
+  ) {
     await routeToAgentRuntime({
       callId: call.id,
       organizationId: phoneNumber.organization_id,

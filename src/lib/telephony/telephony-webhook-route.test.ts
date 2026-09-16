@@ -280,3 +280,46 @@ describe("telephony webhook route — billing/entitlement reuse (requirement E: 
     );
   });
 });
+
+describe("telephony webhook route — Exotel 'initiated' runtime handoff (production incident: media session accepted, but the caller never heard Klyro's greeting)", () => {
+  test("the new-call insert path routes to the agent runtime on 'initiated' too, but ONLY when providerId is exotel — not for every provider", () => {
+    const idx = routeSrc.indexOf("if (!gate.allowed) return;");
+    const insertBranch = routeSrc.slice(idx, routeSrc.indexOf("await routeToAgentRuntime({", idx));
+    assert.match(insertBranch, /event\.status === "answered"/);
+    assert.match(insertBranch, /event\.status === "in_progress"/);
+    assert.match(
+      insertBranch,
+      /providerId === "exotel"\s*&&\s*event\.status === "initiated"/,
+      "expected the 'initiated' trigger to be scoped to providerId === \"exotel\", not unconditional",
+    );
+  });
+
+  test("the 'initiated' trigger is still gated by gate.allowed (entitlement) exactly like the pre-existing 'answered'/'in_progress' trigger — it does not bypass the gate", () => {
+    const gateIdx = routeSrc.indexOf("if (!gate.allowed) return;");
+    const triggerIdx = routeSrc.indexOf('providerId === "exotel" && event.status === "initiated"');
+    assert.ok(gateIdx > -1 && triggerIdx > -1);
+    assert.ok(
+      gateIdx < triggerIdx,
+      "the entitlement-gate short-circuit must run before the widened runtime-handoff trigger",
+    );
+  });
+
+  test("does not widen the 'initiated' trigger onto the outbound or existing-row (applyCallEvent) paths — only the inbound new-call insert branch", () => {
+    const outboundBranch = routeSrc.slice(
+      routeSrc.indexOf('if (event.direction === "outbound") {'),
+      routeSrc.indexOf("const vaaniNumber ="),
+    );
+    assert.doesNotMatch(outboundBranch, /event\.status === "initiated"/);
+
+    const applyCallEventSrc = routeSrc.slice(
+      routeSrc.indexOf("async function applyCallEvent"),
+      routeSrc.indexOf("async function applyCampaignTerminalEvent"),
+    );
+    assert.doesNotMatch(applyCallEventSrc, /event\.status === "initiated"/);
+    // applyCallEvent's own pre-existing trigger is untouched (still answered/in_progress only).
+    assert.match(
+      applyCallEventSrc,
+      /event\.status === "answered" \|\| event\.status === "in_progress"/,
+    );
+  });
+});

@@ -653,15 +653,26 @@ export async function startRuntimeSession(
   setState(session, "connecting");
 
   try {
+    const outputCodec = outputCodecFor(input.bridge);
+    const outputSampleRateHz = input.bridge.outboundFormat.sampleRateHz;
     session.tts = await deps.connectTts({
       voiceId: input.snapshotAgent.voice_id,
       language: input.snapshotAgent.primary_language,
       pace: input.snapshotAgent.speaking_pace,
-      outputCodec: outputCodecFor(input.bridge),
-      outputSampleRateHz: input.bridge.outboundFormat.sampleRateHz,
+      outputCodec,
+      outputSampleRateHz,
       onEvent: (e) => onTtsEvent(session, e),
     });
-    log("tts_connected", session);
+    /**
+     * Diagnostic (audio format tracing): the exact codec/sample rate this
+     * session told the AI voice provider to synthesize into, derived
+     * entirely from the bridge's own declared outboundFormat — never a
+     * hardcoded assumption here. If the telephony leg's actual configured
+     * sample rate on the provider's own dashboard doesn't match this
+     * value, that mismatch is the first thing to check against a live
+     * "audio never reaches the caller" report.
+     */
+    log("tts_connected", session, { outputCodec, outputSampleRateHz });
   } catch (err) {
     log("tts_connect_failed", session, { message: (err as Error).message });
     setState(session, "failed");
@@ -670,13 +681,23 @@ export async function startRuntimeSession(
   }
 
   try {
+    const sttSampleRateHz = input.bridge.inboundFormat.sampleRateHz;
+    const sttEncoding = input.bridge.inboundFormat.encoding === "mulaw" ? "mulaw" : "linear16";
     session.stt = await deps.connectStt({
       language: input.snapshotAgent.multilingual ? "unknown" : input.snapshotAgent.primary_language,
-      sampleRateHz: input.bridge.inboundFormat.sampleRateHz,
-      encoding: input.bridge.inboundFormat.encoding === "mulaw" ? "mulaw" : "linear16",
+      sampleRateHz: sttSampleRateHz,
+      encoding: sttEncoding,
       onEvent: (e) => onSttEvent(session, e),
     });
-    log("stt_connected", session);
+    /**
+     * Diagnostic (audio format tracing): the exact format this session
+     * told the AI voice provider inbound audio would arrive in, derived
+     * entirely from the bridge's own declared inboundFormat — never a
+     * hardcoded assumption here. Compare against the telephony provider's
+     * own configured format if STT connects but never produces a
+     * transcript for audio that is clearly being sent.
+     */
+    log("stt_connected", session, { sttSampleRateHz, sttEncoding });
     // Flush whatever arrived on the bridge while STT was still connecting —
     // see the onInboundFrame registration above.
     for (const frame of session.pendingInboundFrames) session.stt.sendAudioFrame(frame.data);

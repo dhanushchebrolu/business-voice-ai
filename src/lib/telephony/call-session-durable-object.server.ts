@@ -182,6 +182,15 @@ export class CallSessionDurableObject {
     const pair = new WebSocketPairCtor();
     const [server, client] = [pair[0], pair[1]];
     server.accept();
+    // Diagnostic requirement 1 (WS upgrade/handshake success) — see
+    // exotel-media-route.server.ts's identical log for the full rationale:
+    // no CallSid is known yet at this point, so this only confirms the
+    // transport-level upgrade itself succeeded, independent of whatever
+    // happens with CallSid validation after it.
+    console.info("call_session_do:handshake_accepted", {
+      doId: this.state.id.toString(),
+      path: MEDIA_STREAM_PATH,
+    });
 
     let settled = false;
     // BUGFIX: handleFirstMessage's own validation (the call_logs lookup,

@@ -94,6 +94,12 @@ export async function handleExotelMediaUpgrade(request: Request): Promise<Respon
   const pair = new WebSocketPairCtor();
   const [server, client] = [pair[0], pair[1]];
   server.accept();
+  // Diagnostic requirement 1 (WS upgrade/handshake success): this fires the
+  // moment the transport-level upgrade is accepted, before any CallSid is
+  // known — deliberately no callId/CallSid field here, only the fact that a
+  // handshake happened, so this route logs its own success even when
+  // everything after it (CallSid validation) fails or never arrives.
+  console.info("exotel_media_route:handshake_accepted", { path: MEDIA_STREAM_PATH });
 
   let settled = false;
   // BUGFIX: see call-session-durable-object.server.ts's identical fix for

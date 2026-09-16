@@ -45,6 +45,21 @@ function b64(text: string): string {
   return Buffer.from(text, "utf8").toString("base64");
 }
 
+/** Captures console.info calls (this bridge's diagnostics are all console.info) without ever letting a real one reach the test runner's own output. */
+function captureInfoLogs() {
+  const calls: { event: string; data: unknown }[] = [];
+  const original = console.info;
+  console.info = (event: unknown, data?: unknown) => {
+    calls.push({ event: String(event), data });
+  };
+  return {
+    calls,
+    restore: () => {
+      console.info = original;
+    },
+  };
+}
+
 test("Exotel protocol simulation: full Connected->Start->Media->Mark->Clear->Media->Stop sequence", () => {
   const socket = new FakeExotelSocket();
   const bridge = new ExotelMediaBridge(socket, "placeholder", "CAtestcall");
@@ -156,4 +171,136 @@ test("close() is idempotent and closes the underlying socket", () => {
   bridge.close();
   assert.equal(closeCount, 1);
   assert.equal(socket.readyState, 3);
+});
+
+test("DIAGNOSTIC (WebSocket lifecycle tracing): a 'media' frame arriving before any onInboundFrame listener is registered is logged once, never per-frame, and never throws", () => {
+  const socket = new FakeExotelSocket();
+  const bridge = new ExotelMediaBridge(socket, "placeholder", "CAtestcall");
+  const logs = captureInfoLogs();
+  try {
+    // No onInboundFrame listener registered yet — simulates media arriving
+    // before voice-runtime.server.ts's startRuntimeSession has attached.
+    socket.emitMessage(JSON.stringify({ event: "media", media: { payload: b64("early-frame") } }));
+    socket.emitMessage(
+      JSON.stringify({ event: "media", media: { payload: b64("early-frame-2") } }),
+    );
+  } finally {
+    logs.restore();
+  }
+  const dropped = logs.calls.filter(
+    (c) => c.event === "exotel_bridge:media_frame_dropped_no_listener",
+  );
+  assert.equal(dropped.length, 1, "expected exactly one warning, not one per dropped frame");
+  assert.deepEqual(dropped[0]!.data, { providerCallId: "CAtestcall" });
+});
+
+test("DIAGNOSTIC: once a listener is attached, frames are delivered normally and no drop warning fires", () => {
+  const socket = new FakeExotelSocket();
+  const bridge = new ExotelMediaBridge(socket, "placeholder", "CAtestcall");
+  const received: string[] = [];
+  bridge.onInboundFrame((frame) => received.push(Buffer.from(frame.data).toString("utf8")));
+  const logs = captureInfoLogs();
+  try {
+    socket.emitMessage(JSON.stringify({ event: "media", media: { payload: b64("heard") } }));
+  } finally {
+    logs.restore();
+  }
+  assert.deepEqual(received, ["heard"]);
+  assert.equal(
+    logs.calls.some((c) => c.event === "exotel_bridge:media_frame_dropped_no_listener"),
+    false,
+  );
+});
+
+test("DIAGNOSTIC: the first outbound frame sent to Exotel is logged once; a second frame does not repeat it", () => {
+  const socket = new FakeExotelSocket();
+  const bridge = new ExotelMediaBridge(socket, "placeholder", "CAtestcall");
+  const logs = captureInfoLogs();
+  try {
+    bridge.sendOutboundFrame({ data: new TextEncoder().encode("hello"), timestampMs: 0 });
+    bridge.sendOutboundFrame({ data: new TextEncoder().encode("world"), timestampMs: 20 });
+  } finally {
+    logs.restore();
+  }
+  const firstFrameLogs = logs.calls.filter(
+    (c) => c.event === "exotel_bridge:first_outbound_frame_sent",
+  );
+  assert.equal(firstFrameLogs.length, 1);
+  assert.deepEqual(firstFrameLogs[0]!.data, { providerCallId: "CAtestcall" });
+});
+
+test("DIAGNOSTIC (requirement 6: was the socket closed before any audio was sent?): sendOutboundFrame after close() is a no-op and is logged once, distinct from a successful send", () => {
+  const socket = new FakeExotelSocket();
+  const bridge = new ExotelMediaBridge(socket, "placeholder", "CAtestcall");
+  bridge.close();
+  const logs = captureInfoLogs();
+  try {
+    bridge.sendOutboundFrame({ data: new TextEncoder().encode("too-late"), timestampMs: 0 });
+    bridge.sendOutboundFrame({ data: new TextEncoder().encode("still-too-late"), timestampMs: 10 });
+  } finally {
+    logs.restore();
+  }
+  assert.equal(socket.sent.length, 0, "no media frame should reach the socket after close");
+  const droppedLogs = logs.calls.filter(
+    (c) => c.event === "exotel_bridge:outbound_frame_dropped_after_close",
+  );
+  assert.equal(droppedLogs.length, 1, "expected exactly one warning, not one per dropped frame");
+  assert.equal(
+    logs.calls.some((c) => c.event === "exotel_bridge:first_outbound_frame_sent"),
+    false,
+    "a frame that never actually reached Exotel must not be logged as 'first outbound frame sent'",
+  );
+});
+
+test("DIAGNOSTIC (requirements 3/6): closing logs the close reason, the underlying WS close code/reason, and how many outbound frames were sent before it — 0 means Klyro never got to speak", () => {
+  const socket = new FakeExotelSocket();
+  const bridge = new ExotelMediaBridge(socket, "placeholder", "CAtestcall");
+  const logs = captureInfoLogs();
+  try {
+    socket.emitMessage(JSON.stringify({ event: "connected" }));
+    // Closed by Exotel's side (e.g. the caller hung up) before Klyro ever spoke.
+    socket.close(1006, "abnormal closure");
+  } finally {
+    logs.restore();
+  }
+  const closedLogs = logs.calls.filter((c) => c.event === "exotel_bridge:closed");
+  assert.equal(closedLogs.length, 1);
+  assert.deepEqual(closedLogs[0]!.data, {
+    providerCallId: "CAtestcall",
+    reason: "ws closed (1006)",
+    wsCloseCode: 1006,
+    wsCloseReason: "abnormal closure",
+    outboundFramesSent: 0,
+  });
+});
+
+test("DIAGNOSTIC: outboundFramesSent in the close log reflects frames actually sent before close, once audio did go out", () => {
+  const socket = new FakeExotelSocket();
+  const bridge = new ExotelMediaBridge(socket, "placeholder", "CAtestcall");
+  bridge.sendOutboundFrame({ data: new TextEncoder().encode("greeting"), timestampMs: 0 });
+  bridge.sendOutboundFrame({ data: new TextEncoder().encode("more"), timestampMs: 50 });
+  const logs = captureInfoLogs();
+  try {
+    bridge.close();
+  } finally {
+    logs.restore();
+  }
+  const closedLogs = logs.calls.filter((c) => c.event === "exotel_bridge:closed");
+  assert.equal(closedLogs.length, 1);
+  assert.equal((closedLogs[0]!.data as { outboundFramesSent: number }).outboundFramesSent, 2);
+});
+
+test("DIAGNOSTIC (requirement 2): a 'stop' event is logged before the bridge closes", () => {
+  const socket = new FakeExotelSocket();
+  const bridge = new ExotelMediaBridge(socket, "placeholder", "CAtestcall");
+  const logs = captureInfoLogs();
+  try {
+    socket.emitMessage(JSON.stringify({ event: "stop" }));
+  } finally {
+    logs.restore();
+  }
+  const stopIdx = logs.calls.findIndex((c) => c.event === "exotel_bridge:stop");
+  const closedIdx = logs.calls.findIndex((c) => c.event === "exotel_bridge:closed");
+  assert.ok(stopIdx > -1 && closedIdx > -1);
+  assert.ok(stopIdx < closedIdx, "the 'stop' event log must precede the resulting close log");
 });

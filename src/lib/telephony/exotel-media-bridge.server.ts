@@ -57,6 +57,10 @@ export class ExotelMediaBridge implements AudioMediaBridge {
   private readonly startedAt = Date.now();
   /** Outbound "media" message counter — see sendOutboundFrame's own comment for why this exists. */
   private outboundChunkCounter = 0;
+  /** Diagnostic requirement 2/6: logged once, the first "media" frame that arrives before any onInboundFrame listener is registered — see handleMediaEvent. Never spams per-frame. */
+  private loggedDroppedFrameWarning = false;
+  /** Diagnostic requirement 6: logged once, the first outbound frame dropped because the socket was already closed — see sendOutboundFrame. */
+  private loggedPostCloseSendWarning = false;
 
   private readonly onRelease: (providerCallId: string) => void;
 
@@ -85,7 +89,9 @@ export class ExotelMediaBridge implements AudioMediaBridge {
     this.onRelease = onRelease;
 
     socket.addEventListener("message", (ev) => this.handleRawMessage(ev.data));
-    socket.addEventListener("close", (ev) => this.handleClose(`ws closed (${ev.code})`));
+    socket.addEventListener("close", (ev) =>
+      this.handleClose(`ws closed (${ev.code})`, ev.code, ev.reason),
+    );
     socket.addEventListener("error", () => {
       console.error("exotel_bridge:socket_error", { providerCallId: this.providerCallId });
     });
@@ -160,6 +166,7 @@ export class ExotelMediaBridge implements AudioMediaBridge {
         // ourselves, so there is nothing on our side to clear in response.
         return;
       case "stop":
+        console.info("exotel_bridge:stop", { providerCallId: this.providerCallId });
         this.handleClose("provider stop event");
         return;
       default:
@@ -200,6 +207,20 @@ export class ExotelMediaBridge implements AudioMediaBridge {
       return;
     }
 
+    // Diagnostic requirements 2/6: no onInboundFrame listener exists until
+    // voice-runtime.server.ts's startRuntimeSession has actually registered
+    // one — a "media" frame arriving before that (the runtime hasn't been
+    // routed to yet, or is still connecting STT/TTS) is silently dropped
+    // below with no handler to receive it. That's expected during the
+    // brief startup window, but worth surfacing once (never per-frame) so
+    // it's distinguishable from a frame simply never arriving at all.
+    if (this.inboundHandlers.length === 0 && !this.loggedDroppedFrameWarning) {
+      this.loggedDroppedFrameWarning = true;
+      console.info("exotel_bridge:media_frame_dropped_no_listener", {
+        providerCallId: this.providerCallId,
+      });
+    }
+
     const frame: AudioFrame = {
       data: new Uint8Array(bytes),
       timestampMs: Date.now() - this.startedAt,
@@ -207,9 +228,25 @@ export class ExotelMediaBridge implements AudioMediaBridge {
     for (const handler of this.inboundHandlers) handler(frame);
   }
 
-  private handleClose(reason: string) {
+  private handleClose(reason: string, code?: number, wsReason?: string) {
     if (this.closed) return;
     this.closed = true;
+    // Diagnostic requirements 3/6: guaranteed to fire for every close path
+    // (provider "stop" event, the WebSocket's own "close" event, or this
+    // bridge's own close()) — never the case before this change that a
+    // socket teardown went completely unlogged when no voice-runtime
+    // session ever attached (voice-runtime.server.ts's "bridge_closed" log
+    // only fires if startRuntimeSession was actually called). Logging
+    // outboundFramesSent alongside the close reason directly answers
+    // requirement 6: 0 here means the socket closed before Klyro ever sent
+    // any audio back to Exotel.
+    console.info("exotel_bridge:closed", {
+      providerCallId: this.providerCallId,
+      reason,
+      wsCloseCode: code ?? null,
+      wsCloseReason: wsReason || null,
+      outboundFramesSent: this.outboundChunkCounter,
+    });
     this.onRelease(this.providerCallId);
     for (const handler of this.closeHandlers) handler(reason);
   }
@@ -219,9 +256,32 @@ export class ExotelMediaBridge implements AudioMediaBridge {
   }
 
   sendOutboundFrame(frame: AudioFrame): void {
-    if (this.closed || this.socket.readyState !== 1 /* OPEN */) return;
+    if (this.closed || this.socket.readyState !== 1 /* OPEN */) {
+      // Diagnostic requirement 6: distinguishes "the socket was already
+      // closed when Klyro tried to speak" from silence with no attempt at
+      // all — logged once, not per-frame, since a burst of TTS audio can
+      // arrive in the same tick right after a close.
+      if (!this.loggedPostCloseSendWarning) {
+        this.loggedPostCloseSendWarning = true;
+        console.info("exotel_bridge:outbound_frame_dropped_after_close", {
+          providerCallId: this.providerCallId,
+          socketReadyState: this.socket.readyState,
+        });
+      }
+      return;
+    }
     const payload = Buffer.from(frame.data).toString("base64");
     this.outboundChunkCounter += 1;
+    if (this.outboundChunkCounter === 1) {
+      // Diagnostic requirement 5: the first, and most important, signal
+      // that Klyro ever sent audio back to Exotel at all — everything
+      // upstream (STT/LLM/TTS) can be perfectly healthy and still never
+      // reach this line if, e.g., the runtime was never started for this
+      // call (see telephony.ts's routeToAgentRuntime trigger).
+      console.info("exotel_bridge:first_outbound_frame_sent", {
+        providerCallId: this.providerCallId,
+      });
+    }
     // sequence_number (top-level) and media.chunk/media.timestamp were
     // previously omitted — WebSearch summaries of Exotel's Voicebot Applet
     // docs (docs.sarvam.ai is unreachable from this sandbox for Sarvam; the
