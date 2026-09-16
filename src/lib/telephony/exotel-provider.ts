@@ -11,6 +11,7 @@ import {
 } from "./adapter.ts";
 import type { AudioMediaBridge } from "./audio-bridge.ts";
 import { awaitMediaBridge } from "./exotel-media-registry.server.ts";
+import { normalizeToE164 } from "../contacts-import.ts";
 
 /**
  * Real Exotel adapter — call control against Exotel's documented REST API,
@@ -230,13 +231,29 @@ export class ExotelTelephonyAdapter implements TelephonyProviderAdapter {
     }
 
     const direction = firstString(fields, ["Direction", "direction"]);
+    // Exotel's own "From"/"To" fields were observed live NOT in E.164 (e.g.
+    // "09513886363" — Indian local/STD format, a leading 0 and no country
+    // code) even though this codebase's phone_numbers.e164 column is always
+    // written in E.164 ("+91...") by convention — a direct string match
+    // between the two never succeeds, producing a spurious
+    // "telephony:webhook_unknown_number" for a correctly-provisioned,
+    // active number. normalizeToE164 (contacts-import.ts — already used and
+    // tested for the exact same "0" + 10-digit Indian shape via CSV import)
+    // is reused here rather than duplicated. Falls back to the raw string
+    // when normalization can't make sense of it (an unrecognized shape),
+    // matching the previous behavior for those inputs exactly — never a
+    // regression, only a fix for the specific shape Exotel actually sends.
+    const rawFrom = firstString(fields, ["From", "CallFrom", "from"]);
+    const rawTo = firstString(fields, ["To", "CallTo", "to"]);
+    const fromE164 = rawFrom ? (normalizeToE164(rawFrom) ?? rawFrom) : undefined;
+    const toE164 = rawTo ? (normalizeToE164(rawTo) ?? rawTo) : undefined;
     return {
       providerCallId: callSid,
       status,
       direction: direction?.toLowerCase().startsWith("outbound") ? "outbound" : "inbound",
-      fromE164: firstString(fields, ["From", "CallFrom", "from"]),
-      toE164: firstString(fields, ["To", "CallTo", "to"]),
-      vaaniE164: firstString(fields, ["To", "CallTo"]),
+      fromE164,
+      toE164,
+      vaaniE164: toE164,
       durationSeconds: (() => {
         const v = firstString(fields, ["CallDuration", "Duration", "duration"]);
         const n = v ? Number(v) : NaN;

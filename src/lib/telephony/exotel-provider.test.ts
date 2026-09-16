@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { ExotelTelephonyAdapter } from "./exotel-provider.ts";
 
@@ -53,6 +53,73 @@ test("normalizeWebhookEvent: form-urlencoded status callback parses correctly", 
   assert.equal(event?.status, "completed");
   assert.equal(event?.direction, "inbound");
   assert.equal(event?.durationSeconds, 42);
+});
+
+describe("normalizeWebhookEvent: To/From number normalization (live-call regression — Exotel sends local Indian format, not E.164)", () => {
+  test("Exotel's real observed local-format To number (09513886363) normalizes to E.164 (+919513886363), matching phone_numbers.e164's stored convention", () => {
+    // Reproduces the exact live failure: Exotel's "To" field arrived as
+    // "09513886363" (a leading 0, no country code) for a real, correctly-
+    // provisioned, active number — a direct string match against
+    // phone_numbers.e164 (always "+91..." by this codebase's convention)
+    // never succeeded, producing "telephony:webhook_unknown_number" for a
+    // tenant that should have resolved correctly.
+    const adapter = new ExotelTelephonyAdapter(config);
+    const body = new URLSearchParams({
+      CallSid: "CA-local-format",
+      Status: "ringing",
+      To: "09513886363",
+      From: "09876543210",
+    }).toString();
+    const event = adapter.normalizeWebhookEvent(body);
+    assert.ok(event);
+    assert.equal(event?.toE164, "+919513886363");
+    assert.equal(event?.vaaniE164, "+919513886363");
+    assert.equal(event?.fromE164, "+919876543210");
+  });
+
+  test("an already-E.164 To number (+919513886363) passes through unchanged — normalization is idempotent, not just a one-way transform", () => {
+    const adapter = new ExotelTelephonyAdapter(config);
+    const body = new URLSearchParams({
+      CallSid: "CA-already-e164",
+      Status: "ringing",
+      To: "+919513886363",
+    }).toString();
+    const event = adapter.normalizeWebhookEvent(body);
+    assert.ok(event);
+    assert.equal(event?.toE164, "+919513886363");
+    assert.equal(event?.vaaniE164, "+919513886363");
+  });
+
+  test("a different, legitimately-unprovisioned number normalizes to its OWN distinct E.164 value, never coerced to match the known/provisioned number", () => {
+    // The fix must not make every number "resolve" — a number that
+    // genuinely has no phone_numbers row should still end up as its own
+    // correct E.164 (so the route's lookup correctly finds nothing), not
+    // accidentally collide with the number this bug report is about.
+    const adapter = new ExotelTelephonyAdapter(config);
+    const body = new URLSearchParams({
+      CallSid: "CA-unprovisioned",
+      Status: "ringing",
+      To: "08000000000",
+    }).toString();
+    const event = adapter.normalizeWebhookEvent(body);
+    assert.ok(event);
+    assert.equal(event?.toE164, "+918000000000");
+    assert.notEqual(event?.toE164, "+919513886363");
+  });
+
+  test("a genuinely unparseable To number (e.g. a short code or garbage) is passed through raw, not fabricated into a fake E.164 value", () => {
+    const adapter = new ExotelTelephonyAdapter(config);
+    const body = new URLSearchParams({
+      CallSid: "CA-unparseable",
+      Status: "ringing",
+      To: "1234", // too short to be a plausible Indian number — normalizeToE164 returns null for this
+    }).toString();
+    const event = adapter.normalizeWebhookEvent(body);
+    assert.ok(event);
+    // Falls back to the raw value exactly as before this fix — never
+    // silently dropped, never guessed into a wrong number.
+    assert.equal(event?.toE164, "1234");
+  });
 });
 
 test("normalizeWebhookEvent: JSON body also parses", () => {

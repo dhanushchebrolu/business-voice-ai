@@ -209,6 +209,17 @@ describe("telephony webhook route — duplicate/racing inbound callbacks never c
   });
 });
 
+describe("telephony webhook route — unknown-number diagnostic (live-call regression: distinguishes missing/wrong-provider/inactive without a manual SQL query)", () => {
+  test("an unmatched inbound number runs a second, broader (no provider/status filter) lookup and logs provider_call, normalized_number, and matching_rows_for_number — never organization_id or any other identifying field", () => {
+    const idx = routeSrc.indexOf('console.error("telephony:webhook_unknown_number"');
+    assert.ok(idx > -1);
+    const block = routeSrc.slice(Math.max(0, idx - 400), idx + 300);
+    assert.match(block, /\.select\("provider, status"\)/);
+    assert.match(block, /\.eq\("e164", vaaniNumber\)/);
+    assert.doesNotMatch(block, /organization_id/);
+  });
+});
+
 describe("telephony webhook route — billing/entitlement reuse (requirement E: do not rewrite)", () => {
   test("still imports and calls the exact existing telephony-guard.server functions, not a parallel implementation", () => {
     assert.match(
