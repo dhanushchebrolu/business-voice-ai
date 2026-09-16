@@ -29,6 +29,7 @@
 import { checkTelephonyAccess, maskPhoneNumber } from "./telephony-guard.server";
 import { getTelephonyAdapter } from "./telephony.server";
 import { getCallSessionStub } from "./telephony/cloudflare-env.server";
+import { maskCallSid } from "./telephony/media-session-authorization.server";
 import type {
   StartRuntimeRpcInput,
   AgentRuntimeRpcResult,
@@ -105,7 +106,7 @@ export async function routeToAgentRuntime(
     // organization/business id itself, only whether one was found.
     console.info("telephony:runtime_stage", {
       callId: input.callId,
-      provider_call_id: input.providerCallId,
+      provider_call_id: input.providerCallId ? maskCallSid(input.providerCallId) : null,
       stage: "business_resolution",
       resolved: Boolean(businessId),
     });
@@ -160,7 +161,7 @@ export async function routeToAgentRuntime(
     // or instructions text.
     console.info("telephony:runtime_stage", {
       callId: input.callId,
-      provider_call_id: input.providerCallId,
+      provider_call_id: input.providerCallId ? maskCallSid(input.providerCallId) : null,
       stage: "agent_resolution",
       resolved: true,
       source: publishedVersion ? "published_version" : "live_snapshot",
@@ -208,7 +209,7 @@ export async function routeToAgentRuntime(
       // once in Exotel's own dashboard, never generated per-call.
       console.info("telephony:runtime_stage", {
         callId: input.callId,
-        provider_call_id: input.providerCallId,
+        provider_call_id: input.providerCallId ? maskCallSid(input.providerCallId) : null,
         stage: "media_and_runtime_handoff",
         resolved: result.handled,
       });
@@ -218,7 +219,7 @@ export async function routeToAgentRuntime(
     const bridge = (await adapter.openMediaBridge?.(input.providerCallId)) ?? null;
     console.info("telephony:runtime_stage", {
       callId: input.callId,
-      provider_call_id: input.providerCallId,
+      provider_call_id: input.providerCallId ? maskCallSid(input.providerCallId) : null,
       stage: "media_bridge_open",
       resolved: Boolean(bridge),
     });

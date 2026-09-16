@@ -1,7 +1,6 @@
 import type { AudioMediaBridge } from "./audio-bridge.ts";
 import { ExotelMediaBridge, type ExotelSocketLike } from "./exotel-media-bridge.server.ts";
-import { verifyMediaSessionToken } from "./media-session-token.ts";
-import { checkTelephonyAccess } from "../telephony-guard.server.ts";
+import { authorizeExotelMediaSession, maskCallSid } from "./media-session-authorization.server.ts";
 import {
   startRuntimeSession,
   terminateRuntimeSession,
@@ -183,9 +182,10 @@ export class CallSessionDurableObject {
     server.accept();
 
     let settled = false;
-    // BUGFIX: handleFirstMessage's own validation (the call_logs lookup,
-    // the phone_numbers lookup, checkTelephonyAccess) is several awaited
-    // round trips deep. Exotel's Voicebot Applet starts streaming "media"
+    // BUGFIX: handleFirstMessage's own validation (delegated to
+    // authorizeExotelMediaSession's call_logs lookup, phone_numbers lookup
+    // and entitlement gate) is several awaited round trips deep. Exotel's
+    // Voicebot Applet starts streaming "media"
     // frames immediately after "start" — in the original version of this
     // method, any such frame arriving during that validation window was
     // silently dropped: `onMessage` had already set `settled = true`
@@ -292,72 +292,19 @@ export class CallSessionDurableObject {
     };
 
     if (!callSid) return reject("Missing CallSid on start event");
-    const sid: string = callSid;
 
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-
-    // Exotel's WebSocket connect and its own call-status webhook POST (the
-    // thing that actually writes this call_logs row) race independently —
-    // nothing guarantees the webhook lands first. A short, bounded retry
-    // absorbs that race instead of rejecting a legitimate call outright;
-    // any "media" frames that arrive on the socket during this window are
-    // already buffered by the caller (handleMediaUpgrade's `pending`
-    // buffer), so nothing is lost while this waits. Kept in parity with
-    // exotel-media-route.server.ts's identical fix.
-    async function lookupCall() {
-      const { data } = await supabaseAdmin
-        .from("call_logs")
-        .select("id, organization_id, phone_number_id, status")
-        .eq("provider", "exotel")
-        .eq("provider_call_id", sid)
-        .maybeSingle();
-      return data;
-    }
-    const CALL_LOOKUP_ATTEMPTS = 5;
-    const CALL_LOOKUP_DELAY_MS = 200;
-    let call = await lookupCall();
-    let attemptsMade = 1;
-    for (let attempt = 1; !call && attempt < CALL_LOOKUP_ATTEMPTS; attempt++) {
-      await new Promise((r) => setTimeout(r, CALL_LOOKUP_DELAY_MS));
-      call = await lookupCall();
-      attemptsMade++;
-    }
-    // Safe: CallSid/attempt counts only — never a payload value, never a key.
-    console.info("call_session_do:call_log_lookup", {
-      callSid: sid,
-      attempts: attemptsMade,
-      found: Boolean(call),
-    });
-    if (!call) return reject(`No known call for CallSid ${callSid}`);
-    if (call.status !== "answered" && call.status !== "in_progress") {
-      return reject(`Call ${call.id} is not eligible for a media session (status: ${call.status})`);
-    }
-    if (!call.phone_number_id) return reject(`Call ${call.id} has no associated phone number`);
-
-    if (optionalToken) {
-      const result = verifyMediaSessionToken(optionalToken);
-      if (
-        !result.ok ||
-        result.payload.callId !== call.id ||
-        result.payload.organizationId !== call.organization_id
-      ) {
-        return reject(`Media session token present but invalid or mismatched for call ${call.id}`);
-      }
-    }
-
-    const { data: phoneNumber } = await supabaseAdmin
-      .from("phone_numbers")
-      .select("*")
-      .eq("id", call.phone_number_id)
-      .maybeSingle();
-    if (!phoneNumber) return reject(`Phone number not found for call ${call.id}`);
-
-    const gate = await checkTelephonyAccess(call.organization_id, phoneNumber.id, "inbound");
-    if (!gate.allowed)
-      return reject(gate.reason ?? `Call ${call.id} is not authorized for the voice runtime`);
+    // The actual CallSid -> call_logs correlation, retry, status, token and
+    // entitlement checks all live in one shared module also used by
+    // exotel-media-route.server.ts (the local-dev fallback path) — see that
+    // module's doc for why sharing this matters: a status-check fix
+    // previously landed only in the fallback path and never reached this
+    // file, the one production traffic actually runs through when the
+    // CALL_SESSION binding is active.
+    const auth = await authorizeExotelMediaSession(callSid, optionalToken);
+    if (!auth.ok) return reject(auth.reason);
 
     if (!this.claim(callSid))
-      return reject(`A media session for CallSid ${callSid} is already active`);
+      return reject(`A media session for CallSid ${maskCallSid(callSid)} is already active`);
 
     const bridge = new ExotelMediaBridge(server, streamSid ?? callSid, callSid, (id) =>
       this.release(id),
@@ -365,9 +312,9 @@ export class CallSessionDurableObject {
     this.registerBridge(callSid, bridge);
     console.info("call_session_do:media_accepted", {
       doId: this.state.id.toString(),
-      callId: call.id,
-      callSid,
-      organizationId: call.organization_id,
+      callId: auth.callId,
+      callSid: maskCallSid(callSid),
+      organizationId: auth.organizationId,
     });
     return bridge;
   }

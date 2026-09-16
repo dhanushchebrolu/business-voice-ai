@@ -1,5 +1,8 @@
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import {
   CallSessionDurableObject,
   type DurableObjectState,
@@ -522,5 +525,44 @@ describe("CallSessionDurableObject", () => {
     // (no assertion needed beyond "this doesn't throw" — registerBridge on
     // A succeeding independently, after B's unrelated call, confirms A's
     // internal maps were never touched by B.)
+  });
+});
+
+describe("CallSid correlation is delegated to the shared module (production incident regression)", () => {
+  // Production incident: a live Exotel test call produced
+  // `exotel_media_route:*`-prefixed log lines instead of `call_session_do:*`
+  // — this file's CALL_SESSION binding wasn't active for that request, so
+  // traffic fell back to exotel-media-route.server.ts's local-dev path. A
+  // status-check race fix had previously been applied ONLY to that fallback
+  // file and never reached this one, the file production traffic actually
+  // runs through whenever the binding IS active. Tracing this file's own
+  // handleFirstMessage found it still carried its own independent copy of
+  // the CallSid -> call_logs lookup/retry/status/token/entitlement logic —
+  // this test proves that duplication is gone, so a future fix to one
+  // path can never again silently miss the other.
+  const src = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "call-session-durable-object.server.ts"),
+    "utf8",
+  );
+
+  test("imports authorizeExotelMediaSession from the shared module, not its own inline copy", () => {
+    assert.match(
+      src,
+      /import \{ authorizeExotelMediaSession, maskCallSid \} from "\.\/media-session-authorization\.server\.ts";/,
+    );
+    assert.match(src, /const auth = await authorizeExotelMediaSession\(callSid, optionalToken\);/);
+  });
+
+  test("no independent call_logs lookup/retry loop remains in this file", () => {
+    assert.doesNotMatch(src, /CALL_LOOKUP_ATTEMPTS/);
+    assert.doesNotMatch(src, /\.from\("call_logs"\)/);
+    assert.doesNotMatch(src, /checkTelephonyAccess\(/);
+  });
+
+  test("the accepted-session log masks the CallSid rather than printing it raw", () => {
+    const idx = src.indexOf('console.info("call_session_do:media_accepted"');
+    assert.ok(idx > -1);
+    const block = src.slice(idx, idx + 200);
+    assert.match(block, /callSid: maskCallSid\(callSid\)/);
   });
 });

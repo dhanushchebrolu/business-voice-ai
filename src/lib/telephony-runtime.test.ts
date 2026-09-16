@@ -117,7 +117,13 @@ describe("#20 Cross-tenant access rejection — the actual isolation mechanism",
     );
   });
 
-  test("the media-session validation path (call-session-durable-object.server.ts) independently re-derives organization_id from call_logs by provider_call_id, never trusts a client-supplied org id on the media socket", () => {
+  test("the media-session validation path independently re-derives organization_id from call_logs by provider_call_id, never trusts a client-supplied org id on the media socket", () => {
+    // Both call-session-durable-object.server.ts and
+    // exotel-media-route.server.ts delegate this lookup/gate to one shared
+    // module (media-session-authorization.server.ts) rather than each
+    // carrying their own copy — see that module's own doc for why (a prior
+    // fix landed in only one of the two duplicated copies and never reached
+    // production traffic).
     const doSrc = readFileSync(
       join(
         dirname(fileURLToPath(import.meta.url)),
@@ -126,17 +132,25 @@ describe("#20 Cross-tenant access rejection — the actual isolation mechanism",
       ),
       "utf8",
     );
-    // "sid" (not "callSid") since the race-condition retry fix wraps this
-    // lookup in a small `lookupCall()` closure that re-binds the narrowed
-    // CallSid to an explicitly-typed local — same value, same re-derivation
-    // guarantee, just retried up to a few times if the webhook that writes
-    // this row hasn't landed yet (see that function's own comment).
     assert.match(
       doSrc,
-      /\.from\("call_logs"\)\s*\n\s*\.select\("id, organization_id, phone_number_id, status"\)\s*\n\s*\.eq\("provider", "exotel"\)\s*\n\s*\.eq\("provider_call_id", sid\)/,
+      /import \{ authorizeExotelMediaSession, maskCallSid \} from "\.\/media-session-authorization\.server\.ts";/,
+    );
+
+    const authSrc = readFileSync(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        "telephony",
+        "media-session-authorization.server.ts",
+      ),
+      "utf8",
     );
     assert.match(
-      doSrc,
+      authSrc,
+      /\.from\("call_logs"\)\s*\n\s*\.select\("id, organization_id, phone_number_id, status"\)\s*\n\s*\.eq\("provider", "exotel"\)\s*\n\s*\.eq\("provider_call_id", callSid\)/,
+    );
+    assert.match(
+      authSrc,
       /const gate = await checkTelephonyAccess\(call\.organization_id, phoneNumber\.id, "inbound"\);/,
     );
   });

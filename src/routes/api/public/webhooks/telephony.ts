@@ -8,6 +8,7 @@ import {
 } from "@/lib/telephony-guard.server";
 import { routeToAgentRuntime, terminateAgentRuntime } from "@/lib/telephony-runtime";
 import type { NormalizedCallEvent } from "@/lib/telephony/adapter";
+import { maskCallSid } from "@/lib/telephony/media-session-authorization.server";
 import {
   buildProviderMetadata,
   isPlausibleClientReference,
@@ -78,7 +79,24 @@ async function handleTelephonyWebhook(request: Request): Promise<Response> {
     headers[key.toLowerCase()] = value;
   });
 
+  // Diagnostic: proves the request actually reached this handler at all,
+  // before signature verification can reject it with zero trace. A prior
+  // live-call investigation found the media WebSocket rejecting every
+  // connection with "no known call for CallSid" and no way to tell, from
+  // logs alone, whether that was because the status webhook never arrived
+  // versus arrived and was silently 401'd — this line closes that gap.
+  // Never the raw query string/body or header values (which may carry the
+  // provider's verify_token) — method and provider only.
+  console.info("telephony:webhook_request_received", {
+    method: request.method,
+    provider: providerId,
+  });
+
   if (!adapter.verifyWebhookSignature(raw, headers, url)) {
+    console.error("telephony:webhook_signature_invalid", {
+      method: request.method,
+      provider: providerId,
+    });
     return new Response("Invalid signature", { status: 401 });
   }
 
@@ -89,14 +107,17 @@ async function handleTelephonyWebhook(request: Request): Promise<Response> {
 
   // Structured webhook-receipt log: method/provider/status/direction/call
   // reference only — never the raw body/query string or headers (which may
-  // carry the provider's verify_token/signature material).
+  // carry the provider's verify_token/signature material). provider_call_id
+  // is masked so this line can be visually diffed against the media route's
+  // own masked CallSid log (media-session-authorization.server.ts) without
+  // ever printing the full identifier in either place.
   console.info("telephony:webhook_received", {
     method: request.method,
     provider: providerId,
     event_id: eventId,
     status: event.status,
     direction: event.direction,
-    provider_call_id: event.providerCallId,
+    provider_call_id: event.providerCallId ? maskCallSid(event.providerCallId) : null,
   });
 
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
@@ -289,7 +310,7 @@ async function processTelephonyEvent(providerId: string, event: NormalizedCallEv
     // carries the resulting call_id/status for the same event.
     console.error("telephony:call_rejected_by_gate", {
       provider: providerId,
-      provider_call_id: event.providerCallId,
+      provider_call_id: event.providerCallId ? maskCallSid(event.providerCallId) : null,
       organization_id: phoneNumber.organization_id,
       called_number: maskPhoneNumber(vaaniNumber),
       stage: "entitlement_gate",
@@ -346,7 +367,7 @@ async function processTelephonyEvent(providerId: string, event: NormalizedCallEv
     if ((insertError as { code?: string }).code === "23505") {
       console.info("telephony:call_log_insert_raced", {
         provider: providerId,
-        provider_call_id: event.providerCallId,
+        provider_call_id: event.providerCallId ? maskCallSid(event.providerCallId) : null,
       });
       const { data: existingRow } = await supabaseAdmin
         .from("call_logs")
@@ -363,7 +384,7 @@ async function processTelephonyEvent(providerId: string, event: NormalizedCallEv
   }
   console.info("telephony:call_log_inserted", {
     provider: providerId,
-    provider_call_id: event.providerCallId,
+    provider_call_id: event.providerCallId ? maskCallSid(event.providerCallId) : null,
     call_id: call.id,
     organization_id: phoneNumber.organization_id,
     called_number: maskPhoneNumber(vaaniNumber),
@@ -461,7 +482,7 @@ async function applyCallEvent(
   if (error) throw error;
   console.info("telephony:call_log_updated", {
     provider: call.provider,
-    provider_call_id: call.provider_call_id,
+    provider_call_id: call.provider_call_id ? maskCallSid(call.provider_call_id) : null,
     call_id: call.id,
     from_status: call.status,
     to_status: event.status,
