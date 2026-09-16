@@ -276,7 +276,36 @@ async function processTelephonyEvent(providerId: string, event: NormalizedCallEv
     })
     .select("*")
     .single();
-  if (insertError) throw insertError;
+
+  if (insertError) {
+    // Concurrent duplicate: another in-flight webhook request for this exact
+    // (provider, provider_call_id) already won the insert race between this
+    // function's own pre-check above (`existingCall`) and this INSERT —
+    // exactly the shape a call's fallback-status "call-attempt" event and
+    // its very next real status event racing (or a genuine Exotel retry
+    // delivery) would produce. idx_call_logs_provider_call_id (the existing
+    // unique index) rejects the second insert with 23505; fall back to the
+    // same update path the pre-check takes for a row that already existed
+    // *before* this request started, so a race can never produce two rows
+    // for one call.
+    if ((insertError as { code?: string }).code === "23505") {
+      console.info("telephony:call_log_insert_raced", {
+        provider: providerId,
+        provider_call_id: event.providerCallId,
+      });
+      const { data: existingRow } = await supabaseAdmin
+        .from("call_logs")
+        .select("*")
+        .eq("provider", providerId)
+        .eq("provider_call_id", event.providerCallId)
+        .maybeSingle();
+      if (existingRow) {
+        await applyCallEvent(existingRow, event);
+        return;
+      }
+    }
+    throw insertError;
+  }
   console.info("telephony:call_log_inserted", {
     provider: providerId,
     provider_call_id: event.providerCallId,
@@ -373,6 +402,13 @@ async function applyCallEvent(
     .update(patch as never)
     .eq("id", call.id);
   if (error) throw error;
+  console.info("telephony:call_log_updated", {
+    provider: call.provider,
+    provider_call_id: call.provider_call_id,
+    call_id: call.id,
+    from_status: call.status,
+    to_status: event.status,
+  });
 
   // The very first webhook event for a call can arrive already "answered"
   // (handled in processTelephonyEvent's new-call branch below), but the
