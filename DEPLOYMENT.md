@@ -20,6 +20,49 @@ See `.env.example` for the full, currently-known list of variable *names* the
 server code reads (kept in sync with `src/**/*.server.ts` — it documents names
 only, never values).
 
+## The Cloudflare dashboard has two separate places for "environment variables" — this is the #1 cause of "it's configured but the build doesn't see it"
+
+Cloudflare Workers Builds (the git-connected CI that produces this project's
+deployments) exposes **two distinct settings screens** that are easy to
+confuse, because both are labeled some variant of "environment variables":
+
+1. **Settings → Variables and Secrets** — the Worker's *runtime* vars/secrets.
+   These populate `process.env` inside the deployed Worker at request time.
+   They do **not** exist yet while `vite build` is running (the build happens
+   in a separate, earlier build container) — so `import.meta.env['VITE_...']`
+   (a Vite build-time static replacement, not a runtime lookup) can never see
+   a value that only lives here.
+2. **Settings → Build → Environment variables (build-time)** — variables
+   injected into the build container's shell environment before `npm`/`bun
+   run build` executes. This is the *only* place `VITE_SUPABASE_URL` /
+   `VITE_SUPABASE_PUBLISHABLE_KEY` can be set for Cloudflare Workers Builds to
+   pick them up, since Vite inlines them as literal strings into the client
+   bundle at build time — nothing set afterward, runtime var or dashboard
+   secret, can fix an already-built bundle.
+
+If a var is confirmed present under (1) but the build still fails/ships
+`undefined`, it almost always means it was added to (1) instead of (2), or
+added to (2) *after* the last build already ran (Cloudflare does not
+retroactively rebuild an existing deployment when you add a build variable —
+a new deployment must be triggered). `vite.config.ts`'s
+`validateSupabasePublicEnv` plugin (below) exists specifically to turn that
+silent mismatch into a loud, immediate build failure instead of a runtime
+"Application configuration is incomplete." toast per end user.
+
+## `vite.config.ts`'s build-time Supabase env guard
+
+`VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` are required for
+`vite build` to succeed (see the section above for why). A Vite plugin in
+`vite.config.ts` (`validateSupabasePublicEnv`, `command === "build"` only —
+`vite dev` is unaffected) prints presence/absence of each variable (never a
+value) plus the resolved `NODE_ENV`/build mode on every build, then throws
+and fails the build immediately if either is missing, naming which one(s).
+Check the Cloudflare Workers Build log's output for lines starting
+`[build-env-diagnostic]` to see exactly what the build container's
+environment actually contained for that deploy — this is the fastest way to
+settle a "the dashboard shows it, but the build says missing" report without
+guessing.
+
 ## Why dashboard variables used to disappear on deploy
 
 By default, `wrangler deploy` treats the Wrangler config as the **complete**
