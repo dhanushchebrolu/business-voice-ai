@@ -9,6 +9,23 @@ const PRICING_KEY: Record<CheckoutPurpose, string> = {
   phone_service_fee: "pricing.phone_service_fee",
 };
 
+/**
+ * TEMPORARY BACKEND TESTING BYPASS — REMOVE BEFORE PRODUCTION BILLING ENABLEMENT
+ *
+ * The frontend cannot read `process.env` directly (it's server-only) — this
+ * server function is the safe channel dashboard components use to find out
+ * whether BYPASS_BILLING_GATES is active on the Worker, so they can hide
+ * payment/entitlement UI (badges, pay buttons, lock warnings) while
+ * checkFeatureAccess (feature-gate.server.ts) is bypassing the same flag
+ * server-side. Reads the exact same env var that file checks, nothing else —
+ * no billing/payment/feature-lock table is read or written here. Once the
+ * flag is unset, this returns `false` again and every caller's UI reverts to
+ * normal on its next fetch.
+ */
+export const getBillingBypassStatus = createServerFn({ method: "GET" }).handler(async () => {
+  return { bypassed: process.env["BYPASS_BILLING_GATES"] === "true" };
+});
+
 /** Reports whether the platform's payment provider is configured (no secrets leak). */
 export const getPaymentProviderStatus = createServerFn({ method: "GET" }).handler(async () => {
   const { razorpayConfigured, getRazorpayCredentials } = await import("@/lib/razorpay.server");
@@ -42,7 +59,8 @@ export const createCheckoutOrder = createServerFn({ method: "POST" })
       .maybeSingle();
     if (memberError) throw memberError;
     if (!membership) throw new Error("No workspace found");
-    if (!["owner", "admin"].includes(membership.role)) throw new Error("Only owners and admins can make payments");
+    if (!["owner", "admin"].includes(membership.role))
+      throw new Error("Only owners and admins can make payments");
 
     const { data: setting } = await supabase
       .from("platform_settings")
@@ -52,7 +70,8 @@ export const createCheckoutOrder = createServerFn({ method: "POST" })
     const price = setting?.value as { amount: number; currency: string; label: string } | undefined;
     if (!price) throw new Error("Pricing is not configured yet");
 
-    const { razorpayConfigured, createRazorpayOrder, getRazorpayCredentials } = await import("@/lib/razorpay.server");
+    const { razorpayConfigured, createRazorpayOrder, getRazorpayCredentials } =
+      await import("@/lib/razorpay.server");
     if (!razorpayConfigured()) {
       return { configured: false as const };
     }
