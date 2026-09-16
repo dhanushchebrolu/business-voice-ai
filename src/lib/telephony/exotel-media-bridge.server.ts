@@ -55,6 +55,8 @@ export class ExotelMediaBridge implements AudioMediaBridge {
   private closeHandlers: ((reason: string) => void)[] = [];
   private closed = false;
   private readonly startedAt = Date.now();
+  /** Outbound "media" message counter — see sendOutboundFrame's own comment for why this exists. */
+  private outboundChunkCounter = 0;
 
   private readonly onRelease: (providerCallId: string) => void;
 
@@ -219,8 +221,33 @@ export class ExotelMediaBridge implements AudioMediaBridge {
   sendOutboundFrame(frame: AudioFrame): void {
     if (this.closed || this.socket.readyState !== 1 /* OPEN */) return;
     const payload = Buffer.from(frame.data).toString("base64");
+    this.outboundChunkCounter += 1;
+    // sequence_number (top-level) and media.chunk/media.timestamp were
+    // previously omitted — WebSearch summaries of Exotel's Voicebot Applet
+    // docs (docs.sarvam.ai is unreachable from this sandbox for Sarvam; the
+    // equivalent Exotel support-center/docs domains are equally
+    // unreachable, so this is the same secondary-source caveat as
+    // sarvam-realtime.server.ts's) describe these as part of the required
+    // outbound "media" event shape, not merely diagnostic metadata. Adding
+    // them is a safe, additive change either way (an extra recognized field
+    // is normally harmless if it turns out not to be required) against a
+    // real, plausible failure mode if it IS required: audio silently never
+    // reaching the caller while every earlier pipeline stage works
+    // correctly. `chunk` mirrors the running sequence counter (the
+    // documented convention); `timestamp` is milliseconds since this
+    // bridge's stream started, matching the same base used for
+    // AudioFrame.timestampMs.
     this.socket.send(
-      JSON.stringify({ event: "media", stream_sid: this.streamSid, media: { payload } }),
+      JSON.stringify({
+        event: "media",
+        stream_sid: this.streamSid,
+        sequence_number: this.outboundChunkCounter,
+        media: {
+          chunk: this.outboundChunkCounter,
+          timestamp: String(frame.timestampMs),
+          payload,
+        },
+      }),
     );
   }
 

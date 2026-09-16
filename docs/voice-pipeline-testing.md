@@ -48,6 +48,32 @@ for Supabase-dependent code with no live database in this sandbox).
 Exercises the actual Sarvam STT/LLM/TTS APIs over the network, without
 needing a real telephone call. Requires a real `SARVAM_API_KEY`.
 
+**Before running this tier, read the open schema questions below** — this
+repo's Sarvam clients were built and verified against Sarvam's own docs at
+the time, but `docs.sarvam.ai` is unreachable from this sandbox (network
+egress is blocked for that domain and every other Sarvam/documentation host
+tried), so nothing here has actually been exercised against the live API.
+The two module doc comments below list every point where secondary sources
+(WebSearch summaries, a third-party community Rust SDK) disagreed with the
+current implementation or with each other — check these FIRST if 3a/3b/3c
+fail, since each is a specific, actionable candidate root cause rather than
+a generic "something's wrong":
+
+- `src/lib/sarvam.server.ts` — is `SARVAM_MODELS.chat = "sarvam-m"` still a
+  valid Chat Completions model, or has it been replaced by `sarvam-105b`?
+- `src/lib/sarvam-realtime.server.ts` — is the STT WebSocket path
+  `/speech-to-text/ws` (current code) or `/speech-to-text-realtime/ws`? Is
+  inbound audio sent as raw binary frames (current code) or base64-encoded
+  inside a JSON `{"event":"audio_input",...}` message? Are the STT query
+  params `language-code`/`sample-rate` (current code) or
+  `language_code`/`sample_rate`? Is the TTS config field
+  `target_language_code` (current code) or `language_code`?
+
+A `ProviderError`/connection failure in 3a or 3b that isn't explained by a
+bad key or Sarvam being down should be checked against this list before
+assuming a deeper bug — the fix, if one of these is wrong, is a small,
+targeted change in the named file, not a redesign.
+
 ### 3a. LLM only (fastest smoke test)
 
 ```bash

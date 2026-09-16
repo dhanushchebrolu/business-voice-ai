@@ -60,6 +60,17 @@ export const Route = createFileRoute("/api/public/webhooks/telephony")({
         const eventId =
           event.eventId ?? `${event.providerCallId}:${event.status}:${event.occurredAt}`;
 
+        // Structured webhook-receipt log: provider/status/direction/call
+        // reference only — never the raw body or headers (which may carry
+        // the provider's verify_token/signature material).
+        console.info("telephony:webhook_received", {
+          provider: providerId,
+          event_id: eventId,
+          status: event.status,
+          direction: event.direction,
+          provider_call_id: event.providerCallId,
+        });
+
         const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
         // Idempotency: the unique (provider, event_id) index rejects replays,

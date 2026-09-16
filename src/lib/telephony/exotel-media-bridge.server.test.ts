@@ -72,11 +72,26 @@ test("Exotel protocol simulation: full Connected->Start->Media->Mark->Clear->Med
   const sentMedia = JSON.parse(socket.sent.at(-1)!) as {
     event: string;
     stream_sid: string;
-    media: { payload: string };
+    sequence_number: number;
+    media: { payload: string; chunk: number; timestamp: string };
   };
   assert.equal(sentMedia.event, "media");
   assert.equal(sentMedia.stream_sid, "STtest123");
   assert.equal(Buffer.from(sentMedia.media.payload, "base64").toString("utf8"), "assistant-audio");
+  // sequence_number/media.chunk/media.timestamp — see sendOutboundFrame's
+  // own comment for why these were added defensively.
+  assert.equal(sentMedia.sequence_number, 1);
+  assert.equal(sentMedia.media.chunk, 1);
+  assert.equal(sentMedia.media.timestamp, "0");
+
+  bridge.sendOutboundFrame({ data: new TextEncoder().encode("more-audio"), timestampMs: 120 });
+  const sentMedia2 = JSON.parse(socket.sent.at(-1)!) as {
+    sequence_number: number;
+    media: { chunk: number; timestamp: string };
+  };
+  assert.equal(sentMedia2.sequence_number, 2, "the sequence counter increments per outbound frame");
+  assert.equal(sentMedia2.media.chunk, 2);
+  assert.equal(sentMedia2.media.timestamp, "120");
 
   bridge.clearOutboundBuffer();
   const sentClear = JSON.parse(socket.sent.at(-1)!) as { event: string; stream_sid: string };
