@@ -292,14 +292,34 @@ export class CallSessionDurableObject {
     };
 
     if (!callSid) return reject("Missing CallSid on start event");
+    const sid: string = callSid;
 
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { data: call } = await supabaseAdmin
-      .from("call_logs")
-      .select("id, organization_id, phone_number_id, status")
-      .eq("provider", "exotel")
-      .eq("provider_call_id", callSid)
-      .maybeSingle();
+
+    // Exotel's WebSocket connect and its own call-status webhook POST (the
+    // thing that actually writes this call_logs row) race independently —
+    // nothing guarantees the webhook lands first. A short, bounded retry
+    // absorbs that race instead of rejecting a legitimate call outright;
+    // any "media" frames that arrive on the socket during this window are
+    // already buffered by the caller (handleMediaUpgrade's `pending`
+    // buffer), so nothing is lost while this waits. Kept in parity with
+    // exotel-media-route.server.ts's identical fix.
+    async function lookupCall() {
+      const { data } = await supabaseAdmin
+        .from("call_logs")
+        .select("id, organization_id, phone_number_id, status")
+        .eq("provider", "exotel")
+        .eq("provider_call_id", sid)
+        .maybeSingle();
+      return data;
+    }
+    const CALL_LOOKUP_ATTEMPTS = 5;
+    const CALL_LOOKUP_DELAY_MS = 200;
+    let call = await lookupCall();
+    for (let attempt = 1; !call && attempt < CALL_LOOKUP_ATTEMPTS; attempt++) {
+      await new Promise((r) => setTimeout(r, CALL_LOOKUP_DELAY_MS));
+      call = await lookupCall();
+    }
     if (!call) return reject(`No known call for CallSid ${callSid}`);
     if (call.status !== "answered" && call.status !== "in_progress") {
       return reject(`Call ${call.id} is not eligible for a media session (status: ${call.status})`);
