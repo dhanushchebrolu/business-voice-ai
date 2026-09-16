@@ -52,9 +52,12 @@
  * does not fix a wrong connection URL or a wrong audio-transport shape,
  * which need an actual code change once confirmed.
  *
- * See also sarvam.server.ts's own doc comment for the parallel, equally
- * unresolved question of whether `SARVAM_MODELS.chat = "sarvam-m"` is
- * still a valid chat-completions model.
+ * See also sarvam.server.ts's own doc comment: its chat model was updated
+ * to "sarvam-105b-conversations" (from "sarvam-m") and its batch STT model
+ * to "saaras:v3" (from "saaras:v2.5") on user-supplied reference, not an
+ * independently-reachable doc — same unresolved-until-a-real-call caveat as
+ * everything in this file. The realtime models below ("saaras:v3-realtime",
+ * "bulbul:v3") were not part of that change and remain as they were.
  */
 
 const STT_WS_URL = "wss://api.sarvam.ai/speech-to-text/ws";
