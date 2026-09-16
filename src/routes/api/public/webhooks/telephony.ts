@@ -194,7 +194,25 @@ async function processTelephonyEvent(providerId: string, event: NormalizedCallEv
     .eq("status", "active")
     .maybeSingle();
   if (!phoneNumber) {
-    console.error("telephony:webhook_unknown_number", vaaniNumber);
+    // Diagnostic: does ANY row exist for this exact (already-normalized)
+    // e164 at all, under any provider/status? Distinguishes "genuinely no
+    // mapping exists" from "wrong provider" or "inactive" without a manual
+    // SQL lookup every time this fires. Never logs anything beyond the
+    // e164 value itself (not a secret) and other rows' provider/status —
+    // no tenant ID, no row ID, no other customer-identifying data.
+    const { data: anyMatches } = await supabaseAdmin
+      .from("phone_numbers")
+      .select("provider, status")
+      .eq("e164", vaaniNumber)
+      .limit(5);
+    console.error("telephony:webhook_unknown_number", {
+      provider: providerId,
+      normalized_number: vaaniNumber,
+      matching_rows_for_number: (anyMatches ?? []).map((r) => ({
+        provider: r.provider,
+        status: r.status,
+      })),
+    });
     return;
   }
   if (!phoneNumber.organization_id) {
