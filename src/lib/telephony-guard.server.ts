@@ -18,6 +18,19 @@ type CallLogRow = Database["public"]["Tables"]["call_logs"]["Row"];
 
 export type CallDirection = "inbound" | "outbound";
 
+/**
+ * Masks a phone number for safe diagnostic logging — keeps only the last 4
+ * digits, e.g. "+919876543210" -> "*********3210". Never log a raw number
+ * (customer/caller PII); this is the shared helper every telephony log site
+ * should use instead of hand-rolling its own masking.
+ */
+export function maskPhoneNumber(e164: string | null | undefined): string {
+  if (!e164) return "(none)";
+  const digitsOnly = e164.replace(/\D/g, "");
+  if (digitsOnly.length <= 4) return "*".repeat(digitsOnly.length);
+  return "*".repeat(digitsOnly.length - 4) + digitsOnly.slice(-4);
+}
+
 /* ------------------------------------------------------------------ */
 /* Entitlement gate (spec §5)                                          */
 /* ------------------------------------------------------------------ */

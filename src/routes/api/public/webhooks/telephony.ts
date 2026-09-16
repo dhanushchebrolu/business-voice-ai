@@ -3,6 +3,7 @@ import {
   checkCallTransition,
   checkTelephonyAccess,
   finalizeCallBilling,
+  maskPhoneNumber,
   TERMINAL_CALL_STATUSES,
 } from "@/lib/telephony-guard.server";
 import { routeToAgentRuntime, terminateAgentRuntime } from "@/lib/telephony-runtime";
@@ -289,6 +290,8 @@ async function processTelephonyEvent(providerId: string, event: NormalizedCallEv
     console.error("telephony:call_rejected_by_gate", {
       provider: providerId,
       provider_call_id: event.providerCallId,
+      organization_id: phoneNumber.organization_id,
+      called_number: maskPhoneNumber(vaaniNumber),
       stage: "entitlement_gate",
       reason: gate.reason,
     });
@@ -362,6 +365,8 @@ async function processTelephonyEvent(providerId: string, event: NormalizedCallEv
     provider: providerId,
     provider_call_id: event.providerCallId,
     call_id: call.id,
+    organization_id: phoneNumber.organization_id,
+    called_number: maskPhoneNumber(vaaniNumber),
     status: call.status,
   });
 

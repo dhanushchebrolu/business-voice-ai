@@ -1,7 +1,42 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { handleExotelMediaUpgrade } from "./exotel-media-route.server.ts";
 import type { ExotelSocketLike } from "./exotel-media-bridge.server.ts";
+
+/**
+ * Live-call regression: this route previously required call_logs.status to
+ * already be exactly "answered" or "in_progress" before accepting Exotel's
+ * media WebSocket. The retry loop just above only waits for the call_logs
+ * ROW to exist, not for its status to reach one of those two values, and
+ * the row is very often created first (by the status-less "call-attempt"
+ * fallback event) at status "initiated" — well before Exotel's own
+ * "in-progress"/"answered" status webhook lands. That left a genuinely
+ * live, authorized call rejected here purely on timing. Source-scanned
+ * (rather than exercised end-to-end) because reaching this code path
+ * requires a live Supabase connection this sandbox cannot provide.
+ */
+const exotelMediaRouteSrc = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "exotel-media-route.server.ts"),
+  "utf8",
+);
+
+test("the media-session status check rejects only a call already in a TERMINAL status, not merely 'not yet answered'", () => {
+  assert.match(
+    exotelMediaRouteSrc,
+    /import \{ checkTelephonyAccess, TERMINAL_CALL_STATUSES \} from "\.\.\/telephony-guard\.server\.ts";/,
+  );
+  assert.doesNotMatch(
+    exotelMediaRouteSrc,
+    /call\.status !== "answered" && call\.status !== "in_progress"/,
+  );
+  const idx = exotelMediaRouteSrc.indexOf("if (!call) return reject(");
+  assert.ok(idx > -1);
+  const block = exotelMediaRouteSrc.slice(idx, idx + 1500);
+  assert.match(block, /TERMINAL_CALL_STATUSES\.includes\(/);
+});
 
 test("returns null (pass-through to the normal app router) for any non-media-stream path", async () => {
   const req = new Request("https://vaani.app/api/public/webhooks/telephony?provider=exotel", {

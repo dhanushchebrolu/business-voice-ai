@@ -43,7 +43,7 @@
 import { verifyMediaSessionToken } from "./media-session-token.ts";
 import { claimMediaSession, registerMediaBridge } from "./exotel-media-registry.server.ts";
 import { ExotelMediaBridge, type ExotelSocketLike } from "./exotel-media-bridge.server.ts";
-import { checkTelephonyAccess } from "../telephony-guard.server.ts";
+import { checkTelephonyAccess, TERMINAL_CALL_STATUSES } from "../telephony-guard.server.ts";
 
 const MEDIA_STREAM_PATH = "/api/public/media-stream/exotel";
 
@@ -192,8 +192,26 @@ export async function handleExotelMediaUpgrade(request: Request): Promise<Respon
       found: Boolean(call),
     });
     if (!call) return reject(`No known call for CallSid ${callSid}`);
-    if (call.status !== "answered" && call.status !== "in_progress") {
-      return reject(`Call ${call.id} is not eligible for a media session (status: ${call.status})`);
+    // BUGFIX: previously required call.status to already be exactly
+    // "answered" or "in_progress". The retry loop above only waits for the
+    // call_logs ROW to exist, not for its status to reach one of those two
+    // values — Exotel's own status webhook (the thing that actually writes
+    // "answered"/"in-progress") races independently against this WS
+    // connect, and the row is very often created first by the earlier,
+    // status-less "call-attempt" event at status "initiated" (see
+    // exotel-provider.ts's normalizeWebhookEvent). That left a live call
+    // rejected here — Exotel's Voicebot Applet connection refused — purely
+    // because the status webhook hadn't landed within this function's
+    // lookup window, even though the call was genuinely in progress. The
+    // real authorization (org/number/entitlement) is independently
+    // re-verified via checkTelephonyAccess a few lines below regardless of
+    // which status this row is at, so the only thing worth rejecting here
+    // is a call that has already reached a TERMINAL status (completed,
+    // failed, busy, no_answer, cancelled) — attaching live media to an
+    // already-ended call would be a real bug, never merely "not yet
+    // answered".
+    if (TERMINAL_CALL_STATUSES.includes(call.status as (typeof TERMINAL_CALL_STATUSES)[number])) {
+      return reject(`Call ${call.id} has already ended (status: ${call.status})`);
     }
     if (!call.phone_number_id) return reject(`Call ${call.id} has no associated phone number`);
 

@@ -55,6 +55,29 @@ test("normalizeWebhookEvent: form-urlencoded status callback parses correctly", 
   assert.equal(event?.durationSeconds, 42);
 });
 
+test("normalizeWebhookEvent: a literal 'answered' status maps to the 'answered' NormalizedCallStatus, not the unrecognized-status fallback", () => {
+  // Regression for the bug this fixes: STATUS_MAP previously had no entry
+  // for "answered" at all, so this exact payload fell back to "initiated"
+  // (normalizeWebhookEvent's own unrecognized-status fallback) instead of
+  // "answered" — and exotel-media-route.server.ts's WS authorization check
+  // requires call_logs.status to already be "answered" or "in_progress"
+  // before it accepts Exotel's media stream, so a call stuck at "initiated"
+  // had its Voicebot Applet connection rejected, ending as
+  // Status: FAILED, 0-second duration despite the number/entitlement checks
+  // having already passed.
+  const adapter = new ExotelTelephonyAdapter(config);
+  const body = new URLSearchParams({
+    CallSid: "CA-answered-1",
+    Status: "answered",
+    Direction: "inbound",
+    From: "+919876543210",
+    To: "+912222222222",
+  }).toString();
+  const event = adapter.normalizeWebhookEvent(body);
+  assert.ok(event);
+  assert.equal(event?.status, "answered");
+});
+
 describe("normalizeWebhookEvent: To/From number normalization (live-call regression — Exotel sends local Indian format, not E.164)", () => {
   test("Exotel's real observed local-format To number (09513886363) normalizes to E.164 (+919513886363), matching phone_numbers.e164's stored convention", () => {
     // Reproduces the exact live failure: Exotel's "To" field arrived as

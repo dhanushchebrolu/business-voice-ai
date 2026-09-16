@@ -264,7 +264,7 @@ describe("telephony webhook route — billing/entitlement reuse (requirement E: 
   test("still imports and calls the exact existing telephony-guard.server functions, not a parallel implementation", () => {
     assert.match(
       routeSrc,
-      /import\s*\{\s*\n?\s*checkCallTransition,\s*\n?\s*checkTelephonyAccess,\s*\n?\s*finalizeCallBilling,\s*\n?\s*TERMINAL_CALL_STATUSES,?\s*\n?\s*\}\s*from\s*"@\/lib\/telephony-guard\.server"/,
+      /import\s*\{\s*\n?\s*checkCallTransition,\s*\n?\s*checkTelephonyAccess,\s*\n?\s*finalizeCallBilling,\s*\n?\s*maskPhoneNumber,\s*\n?\s*TERMINAL_CALL_STATUSES,?\s*\n?\s*\}\s*from\s*"@\/lib\/telephony-guard\.server"/,
     );
     assert.match(routeSrc, /checkTelephonyAccess\(/);
     assert.match(routeSrc, /checkCallTransition\(/);

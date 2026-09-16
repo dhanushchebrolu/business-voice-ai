@@ -26,7 +26,7 @@
  * module doc for the provider-neutrality boundary this preserves.
  */
 
-import { checkTelephonyAccess } from "./telephony-guard.server";
+import { checkTelephonyAccess, maskPhoneNumber } from "./telephony-guard.server";
 import { getTelephonyAdapter } from "./telephony.server";
 import { getCallSessionStub } from "./telephony/cloudflare-env.server";
 import type {
@@ -75,6 +75,7 @@ export async function routeToAgentRuntime(
     callId: input.callId,
     organizationId: input.organizationId,
     direction: input.direction,
+    calledNumber: maskPhoneNumber(input.vaaniE164),
   });
 
   if (input.direction !== "inbound") {
@@ -163,6 +164,7 @@ export async function routeToAgentRuntime(
       stage: "agent_resolution",
       resolved: true,
       source: publishedVersion ? "published_version" : "live_snapshot",
+      agentVersion,
     });
 
     const rpcInput: StartRuntimeRpcInput = {
