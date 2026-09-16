@@ -194,7 +194,21 @@ export class ExotelTelephonyAdapter implements TelephonyProviderAdapter {
       "CallStatus",
       "status",
     ])?.toLowerCase();
-    if (!callSid || !rawStatus || !(rawStatus in STATUS_MAP)) return null;
+    if (!callSid || !rawStatus || !(rawStatus in STATUS_MAP)) {
+      // Diagnostic only — field NAMES the payload actually carried, never
+      // values (a phone number, a recording URL, etc. could be among them).
+      // This is exactly the signal needed to tell "Exotel sent a status
+      // value this STATUS_MAP doesn't recognize" apart from "Exotel names
+      // the field something other than Status/DialCallStatus/CallStatus" —
+      // both silently returned `null` before this log existed.
+      console.error("exotel_provider:webhook_payload_unrecognized", {
+        fieldsPresent: Object.keys(fields),
+        callSidFound: Boolean(callSid),
+        statusFieldFound: Boolean(rawStatus),
+        statusRecognized: Boolean(rawStatus && rawStatus in STATUS_MAP),
+      });
+      return null;
+    }
 
     const direction = firstString(fields, ["Direction", "direction"]);
     return {
