@@ -505,3 +505,126 @@ describe("Errors never leak secrets", () => {
     await terminateRuntimeSession(callId, "test cleanup");
   });
 });
+
+/** Captures every console.info call made during `fn`, restoring the real console.info afterward even if fn throws. */
+async function captureLogs(fn: () => Promise<void>): Promise<Record<string, unknown>[]> {
+  const original = console.info;
+  const captured: Record<string, unknown>[] = [];
+  console.info = (event: unknown, fields?: unknown) => {
+    if (typeof event === "string" && event.startsWith("voice_runtime:") && fields) {
+      captured.push({ event, ...(fields as Record<string, unknown>) });
+    }
+  };
+  try {
+    await fn();
+  } finally {
+    console.info = original;
+  }
+  return captured;
+}
+
+describe("Structured, redacted logs — stage coverage and no sensitive content", () => {
+  test("every log line carries call/session/org/agent correlation, and the pipeline stages required by this task are all present", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    const logs = await captureLogs(async () => {
+      await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+      h.bridge.emitInboundFrame(new Uint8Array([1, 2, 3]));
+      h.llm.setNextReply("We are open until 9pm.");
+      h.stt.speakUtterance("What time do you close?");
+      await drain();
+      h.tts.emit({ type: "flushed" });
+      await terminateRuntimeSession(callId, "test cleanup");
+    });
+
+    const events = new Set(logs.map((l) => l["event"]));
+    for (const required of [
+      "voice_runtime:runtime_started", // session ID
+      "voice_runtime:stt_connected", // provider connection
+      "voice_runtime:tts_connected", // provider connection
+      "voice_runtime:greeting_played", // greeting
+      "voice_runtime:first_inbound_audio_frame", // incoming audio
+      "voice_runtime:transcript_final", // STT result
+      "voice_runtime:llm_completed", // LLM result
+      "voice_runtime:tts_output", // TTS output
+      "voice_runtime:bridge_closed", // disconnect
+      "voice_runtime:persist_transcript_succeeded", // persistence result
+    ]) {
+      assert.ok(events.has(required), `expected a ${required} log line`);
+    }
+
+    for (const line of logs) {
+      assert.ok("call_id" in line, `${String(line["event"])} missing call_id`);
+      assert.ok(
+        "runtime_session_id" in line,
+        `${String(line["event"])} missing runtime_session_id`,
+      );
+      assert.ok("organization_id" in line, `${String(line["event"])} missing organization_id`);
+      assert.ok("agent_config_id" in line, `${String(line["event"])} missing agent_config_id`);
+    }
+  });
+
+  test("barge-in is logged as its own event", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    const logs = await captureLogs(async () => {
+      await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+      h.llm.setDelay(20);
+      h.stt.speakUtterance("First question");
+      await drain();
+      h.stt.emit({ type: "speech_start" });
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      await terminateRuntimeSession(callId, "test cleanup");
+    });
+    assert.ok(logs.some((l) => l["event"] === "voice_runtime:interruption"));
+  });
+
+  test("logs never contain the caller's spoken words, the agent's spoken reply text, or any API-key-shaped value", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    const callerUtterance = "My secret account number is nine nine nine";
+    const agentReply = "Thanks, I will note that down for you specifically.";
+    const logs = await captureLogs(async () => {
+      await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+      h.llm.setNextReply(agentReply);
+      h.stt.speakUtterance(callerUtterance);
+      await drain();
+      await terminateRuntimeSession(callId, "test cleanup");
+    });
+
+    const serialized = JSON.stringify(logs);
+    assert.doesNotMatch(serialized, /secret account number/i);
+    assert.doesNotMatch(serialized, /nine nine nine/i);
+    assert.doesNotMatch(serialized, /note that down/i);
+    assert.doesNotMatch(serialized, /sarvam_api_key|api-subscription-key/i);
+  });
+
+  test("first_inbound_audio_frame logs only a byte count, never the audio bytes themselves", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    const logs = await captureLogs(async () => {
+      await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+      h.bridge.emitInboundFrame(new Uint8Array([9, 9, 9, 9, 9]));
+      await terminateRuntimeSession(callId, "test cleanup");
+    });
+    const line = logs.find((l) => l["event"] === "voice_runtime:first_inbound_audio_frame");
+    assert.ok(line);
+    assert.equal(line["bytes"], 5);
+    assert.ok(!("data" in line), "must not log the raw audio payload");
+  });
+
+  test("tts_output logs only a byte count, never the synthesized audio bytes", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    const logs = await captureLogs(async () => {
+      await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+      h.tts.emitAudio(new Uint8Array([1, 2, 3, 4, 5, 6]));
+      h.tts.emit({ type: "flushed" });
+      await terminateRuntimeSession(callId, "test cleanup");
+    });
+    const line = logs.find((l) => l["event"] === "voice_runtime:tts_output");
+    assert.ok(line);
+    assert.ok(typeof line["bytes"] === "number" && (line["bytes"] as number) > 0);
+    assert.ok(!("data" in line) && !("audio" in line));
+  });
+});

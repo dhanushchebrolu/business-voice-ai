@@ -4,27 +4,57 @@
  * Speech-to-text: `saaras:v3-realtime` streaming API.
  * Text-to-speech: `bulbul:v3` streaming API.
  *
- * VERIFICATION NOTE: this environment's network egress is restricted to an
- * allowlisted proxy that does not reach docs.sarvam.ai, so the exact
- * message-level JSON schema below could not be confirmed against Sarvam's
- * live API reference at implementation time (only search-result summaries
- * of it were reachable — see PHASE_E_FINAL_REPORT.md §5 for what was and
- * wasn't confirmed, with sources). What IS used here is deliberately
- * limited to what those summaries actually stated:
- *   - auth via the `api-subscription-key.<key>` WebSocket subprotocol
- *     (the browser-compatible mechanism; Node's WebSocket global has the
- *     same constructor shape and cannot send arbitrary headers either)
- *   - STT: language_code as a connection query param, VAD auto mode by
- *     default, vad.speech_start / vad.speech_end events
- *   - TTS: a `config` message first, then `convert` / `flush` / `ping` /
- *     `close` client messages, `audio` server messages
+ * VERIFICATION NOTE (re-checked, still unresolved — see docs/voice-pipeline-testing.md):
+ * this sandbox's network egress cannot reach docs.sarvam.ai or any other
+ * documentation host directly (confirmed again on a second pass: WebFetch
+ * to docs.sarvam.ai, docs.pipecat.ai, docs.slng.ai, and a personal blog all
+ * returned EGRESS_BLOCKED). WebSearch itself works (routed differently) and
+ * a third-party community Rust SDK (github.com/skundu42/sarvam-rs) was
+ * reachable via raw.githubusercontent.com — neither is Sarvam's own primary
+ * documentation, so nothing below is "confirmed"; it is the most specific,
+ * sourced information obtainable without a live SARVAM_API_KEY call.
+ *
+ * CONFIRMED (converging from multiple independent sources):
+ *   - TTS: `wss://api.sarvam.ai/text-to-speech/ws`, config message first,
+ *     then `convert`/`flush`/`close` client message types, `bulbul:v3`.
+ *   - Auth: an `api-subscription-key` mechanism (this file uses it as a WS
+ *     subprotocol — the one auth-attachment method available to a browser-
+ *     compatible `WebSocket` constructor, which Node's global also is).
+ *
+ * NOT CONFIRMED — specific, actionable leads for the first live test
+ * (highest-value diagnostic: if STT connects but never emits a single
+ * transcript event for audio that is clearly being sent, check these in
+ * order):
+ *   1. STT WS path: this file uses `/speech-to-text/ws`. The
+ *      skundu42/sarvam-rs SDK's `stt_realtime_ws.rs` instead builds
+ *      `/speech-to-text-realtime/ws` specifically for `saaras:v3-realtime`
+ *      — a dedicated endpoint for the realtime model, distinct from
+ *      whatever `/speech-to-text/ws` actually serves.
+ *   2. STT audio transport: this file sends raw binary frames
+ *      (`socket.send(data)` on a `Uint8Array`). The same SDK instead
+ *      base64-encodes each chunk and sends a JSON **text** frame:
+ *      `{"event":"audio_input","audio":"<base64>"}`. If real audio frames
+ *      produce zero STT events, this is the first thing to try.
+ *   3. STT query param casing: this file sends `language-code`/
+ *      `sample-rate` (hyphenated). Two sources disagree here — a WebSearch
+ *      summary of Sarvam's own docs also said hyphenated `language-code`,
+ *      but the Rust SDK's query-building code uses `language_code`/
+ *      `sample_rate` (underscored). Not resolved either way.
+ *   4. TTS config field name: this file sends `target_language_code`
+ *      (matching a WebSearch summary of Sarvam's TTS docs). The Rust SDK's
+ *      `WsConfigData` struct instead uses `language_code`. Also not
+ *      resolved.
  * Every incoming message is parsed defensively (`normalizeSttMessage` /
- * normalizeTtsMessage`) against multiple plausible shapes rather than
+ * `normalizeTtsMessage`) against multiple plausible shapes rather than
  * assuming one is correct, and an unrecognized shape is surfaced as a
  * structured `unknown` event (logged, never thrown) instead of crashing the
- * call. This must be re-verified against the live docs — or, better, a real
- * session with SARVAM_API_KEY set — before relying on it in production;
- * see the Phase E report's "Real integration test status".
+ * call — this bounds the blast radius of any of the above being wrong, but
+ * does not fix a wrong connection URL or a wrong audio-transport shape,
+ * which need an actual code change once confirmed.
+ *
+ * See also sarvam.server.ts's own doc comment for the parallel, equally
+ * unresolved question of whether `SARVAM_MODELS.chat = "sarvam-m"` is
+ * still a valid chat-completions model.
  */
 
 const STT_WS_URL = "wss://api.sarvam.ai/speech-to-text/ws";

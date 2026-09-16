@@ -221,6 +221,10 @@ interface Session {
   pendingInboundFrames: AudioFrame[];
   /** Guards against a provider redelivering the exact same final_transcript event — see onSttEvent. */
   lastFinalTranscript: { text: string; at: number } | null;
+  /** Logged once, the first time caller audio actually arrives — see startRuntimeSession's onInboundFrame registration. */
+  firstInboundFrameLogged: boolean;
+  /** Bytes of synthesized audio received for the current utterance, reset per speak() call, logged (and reset) on Sarvam's "flushed" event — see onTtsEvent. */
+  ttsBytesInFlight: number;
 }
 
 const activeSessions = new Map<string, Session>();
@@ -310,6 +314,14 @@ async function endDueToSilence(session: Session) {
   await terminateRuntimeSession(session.input.callId, "caller_silence_timeout");
 }
 
+/**
+ * Every structured log line this file emits carries these five fields
+ * (call_id, runtime_session_id, organization_id, agent_config_id,
+ * provider) so a single call's logs can be correlated end to end and the
+ * organization/agent responsible for any given line is always visible —
+ * never an API key, auth header, or the caller's spoken words/transcript
+ * content (only counts/lengths/language, where logged at all).
+ */
 function log(
   event: string,
   session: Pick<Session, "input"> & { handle: { runtimeSessionId: string } },
@@ -319,6 +331,7 @@ function log(
     call_id: session.input.callId,
     runtime_session_id: session.handle.runtimeSessionId,
     organization_id: session.input.organizationId,
+    agent_config_id: session.input.agentConfigId,
     ...extra,
   });
 }
@@ -383,8 +396,9 @@ async function persistTranscript(session: Session) {
       language: session.detectedLanguage ?? session.input.snapshotAgent.primary_language,
       agentVersion: session.input.agentVersion,
     });
+    log("persist_transcript_succeeded", session, { turn_count: session.turns.length });
   } catch (err) {
-    console.error("voice_runtime:persist_transcript_failed", (err as Error).message);
+    log("persist_transcript_failed", session, { message: (err as Error).message });
   }
 }
 
@@ -535,6 +549,7 @@ function onSttEvent(session: Session, event: SttEvent) {
 function onTtsEvent(session: Session, event: TtsEvent) {
   switch (event.type) {
     case "audio": {
+      session.ttsBytesInFlight += event.data.length;
       const frame: AudioFrame = { data: event.data, timestampMs: Date.now() - session.startedAt };
       session.input.bridge.sendOutboundFrame(frame);
       break;
@@ -546,6 +561,12 @@ function onTtsEvent(session: Session, event: TtsEvent) {
       log("tts_disconnected", session, { code: event.code, reason: event.reason });
       break;
     case "flushed":
+      // One TTS output summary per flushed chunk — bytes only, never the
+      // spoken text itself (already logged, where relevant, at the point
+      // the reply/prompt text was decided).
+      log("tts_output", session, { bytes: session.ttsBytesInFlight });
+      session.ttsBytesInFlight = 0;
+      break;
     case "unknown":
       break;
   }
@@ -598,6 +619,8 @@ export async function startRuntimeSession(
     silencePromptSent: false,
     pendingInboundFrames: [],
     lastFinalTranscript: null,
+    firstInboundFrameLogged: false,
+    ttsBytesInFlight: 0,
   };
   activeSessions.set(input.callId, session);
   log("runtime_started", session);
@@ -613,6 +636,10 @@ export async function startRuntimeSession(
   // in flight must not lose it. Frames are buffered here (bounded by
   // MAX_PENDING_INBOUND_FRAMES) and flushed into STT the moment it connects.
   input.bridge.onInboundFrame((frame) => {
+    if (!session.firstInboundFrameLogged) {
+      session.firstInboundFrameLogged = true;
+      log("first_inbound_audio_frame", session, { bytes: frame.data.length });
+    }
     if (session.stt) {
       session.stt.sendAudioFrame(frame.data);
       return;

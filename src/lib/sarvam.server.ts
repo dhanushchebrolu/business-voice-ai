@@ -20,6 +20,24 @@
  * completion, matching the order of magnitude of
  * sarvam-realtime.server.ts's own CONNECT_TIMEOUT_MS for the streaming
  * STT/TTS sockets.
+ *
+ * MODEL NAME VERIFICATION NOTE — SARVAM_MODELS.chat = "sarvam-m" —
+ * genuinely unresolved, flagged rather than silently changed: docs.sarvam.ai
+ * is unreachable from this sandbox (confirmed again — see
+ * sarvam-realtime.server.ts's own note), so this was checked via WebSearch
+ * and a third-party community Rust SDK instead, and the two sources
+ * DISAGREE. WebSearch summaries of Sarvam's own docs (twice, independently)
+ * state sarvam-m has been deprecated and the Chat Completions API now
+ * rejects `model: "sarvam-m"`, recommending `sarvam-105b`. But
+ * github.com/skundu42/sarvam-rs's `ChatModel` enum (src/types/chat.rs)
+ * still lists `"sarvam-m"` as a valid variant alongside `"sarvam-105b"`/
+ * `"sarvam-30b"`, with no deprecation notice in that source — though a
+ * third-party SDK's enum can simply lag behind a provider's own API
+ * changes, so this doesn't resolve it either. NOT changed here because
+ * guessing wrong either way is an unforced error when the real answer is
+ * one API call away: this is exactly what docs/voice-pipeline-testing.md's
+ * Tier 3a smoke test is for — a rejected/deprecated-model error there means
+ * switch this constant to "sarvam-105b"; a normal reply means leave it.
  */
 
 const BASE_URL = "https://api.sarvam.ai";
