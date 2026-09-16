@@ -161,6 +161,35 @@ describe("telephony webhook route — reassignment safety (Phase 5 §8)", () => 
   });
 });
 
+describe("telephony webhook route — GET support (live-call regression: Exotel's Voicebot Passthru sends GET with fields in the query string, not POST)", () => {
+  test("both GET and POST are registered, routed to the same shared handler — not POST-only", () => {
+    assert.match(routeSrc, /GET:\s*\(\{\s*request\s*\}\)\s*=>\s*handleTelephonyWebhook\(request\)/);
+    assert.match(
+      routeSrc,
+      /POST:\s*\(\{\s*request\s*\}\)\s*=>\s*handleTelephonyWebhook\(request\)/,
+    );
+  });
+
+  test("a GET request's fields come from the URL query string, a POST's from the body — never the reverse", () => {
+    assert.match(
+      routeSrc,
+      /const raw = request\.method === "GET" \? url\.search\.replace\(\/\^\\\?\/, ""\) : await request\.text\(\);/,
+    );
+  });
+
+  test("verifyWebhookSignature/normalizeWebhookEvent are called on the shared `raw`, regardless of method — no separate GET-only code path bypasses either check", () => {
+    const fnSrc = routeSrc.slice(
+      routeSrc.indexOf("async function handleTelephonyWebhook"),
+      routeSrc.indexOf("async function processTelephonyEvent"),
+    );
+    const rawIdx = fnSrc.indexOf("const raw =");
+    const verifyIdx = fnSrc.indexOf("adapter.verifyWebhookSignature(raw");
+    const normalizeIdx = fnSrc.indexOf("adapter.normalizeWebhookEvent(raw");
+    assert.ok(rawIdx > -1 && verifyIdx > -1 && normalizeIdx > -1);
+    assert.ok(rawIdx < verifyIdx && verifyIdx < normalizeIdx);
+  });
+});
+
 describe("telephony webhook route — billing/entitlement reuse (requirement E: do not rewrite)", () => {
   test("still imports and calls the exact existing telephony-guard.server functions, not a parallel implementation", () => {
     assert.match(

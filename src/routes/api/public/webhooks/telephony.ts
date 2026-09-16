@@ -21,9 +21,25 @@ import type { CallTerminalStatus } from "@/lib/campaign-outcome";
  * Inbound telephony provider webhook — the single entry point every
  * provider event (inbound ring, outbound call status, mid-call updates)
  * arrives through. Provider is selected via `?provider=<id>` (each
- * provider's console is configured to POST to this URL with its own query
+ * provider's console is configured to hit this URL with its own query
  * string) so one route serves every configured provider without a
  * per-vendor endpoint.
+ *
+ * Both GET and POST are handled, sharing the exact same logic below —
+ * confirmed against a real live test call that Exotel's Voicebot Passthru
+ * step sends its callback as a GET request with every field in the URL
+ * query string, not a POST body (previously this route only registered a
+ * POST handler, so a live GET request matched the route but hit no
+ * handler at all — returning framework-default 200 without ever running
+ * signature verification, event normalization, or the call_logs insert;
+ * this silently dropped every Exotel webhook event). The method-specific
+ * part is only how `raw` is built: GET's query string (already
+ * `key=val&key2=val2` form-encoded, minus the leading "?") is handed to
+ * the exact same `URLSearchParams`-based parsing `ExotelTelephonyAdapter`
+ * already used for a POST's url-encoded body — no adapter changes needed.
+ * `verifyWebhookSignature` was already method-agnostic (Exotel's
+ * `verify_token` lives in the URL query string either way, never the
+ * body), so authentication is unaffected by this change.
  *
  * Mirrors the Razorpay webhook's structure: verify signature before
  * anything is trusted, dedupe via `webhook_events` before any side effect,
@@ -32,84 +48,91 @@ import type { CallTerminalStatus } from "@/lib/campaign-outcome";
 export const Route = createFileRoute("/api/public/webhooks/telephony")({
   server: {
     handlers: {
-      POST: async ({ request }) => {
-        const url = new URL(request.url);
-        const providerId = url.searchParams.get("provider");
-        if (!providerId) return new Response("Missing provider", { status: 400 });
-
-        const { getTelephonyAdapter } = await import("@/lib/telephony.server");
-        const adapter = getTelephonyAdapter(providerId);
-        if (!adapter) {
-          console.error("telephony:webhook_provider_not_configured", providerId);
-          return new Response("Not configured", { status: 503 });
-        }
-
-        const raw = await request.text();
-        const headers: Record<string, string | null> = {};
-        request.headers.forEach((value, key) => {
-          headers[key.toLowerCase()] = value;
-        });
-
-        if (!adapter.verifyWebhookSignature(raw, headers, url)) {
-          return new Response("Invalid signature", { status: 401 });
-        }
-
-        const event = adapter.normalizeWebhookEvent(raw, headers);
-        if (!event) return new Response("Invalid payload", { status: 400 });
-
-        const eventId =
-          event.eventId ?? `${event.providerCallId}:${event.status}:${event.occurredAt}`;
-
-        // Structured webhook-receipt log: provider/status/direction/call
-        // reference only — never the raw body or headers (which may carry
-        // the provider's verify_token/signature material).
-        console.info("telephony:webhook_received", {
-          provider: providerId,
-          event_id: eventId,
-          status: event.status,
-          direction: event.direction,
-          provider_call_id: event.providerCallId,
-        });
-
-        const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-
-        // Idempotency: the unique (provider, event_id) index rejects replays,
-        // exactly like the Razorpay webhook (spec §10/§Q/§O).
-        const { error: dedupeError } = await supabaseAdmin.from("webhook_events").insert({
-          provider: providerId,
-          event_id: eventId,
-          event_type: event.status,
-          payload: event.raw as never,
-        });
-        if (dedupeError) {
-          if ((dedupeError as { code?: string }).code === "23505")
-            return new Response("ok (duplicate)");
-          console.error("telephony:webhook_store_failed", dedupeError.message);
-          return new Response("Storage error", { status: 500 });
-        }
-
-        try {
-          await processTelephonyEvent(providerId, event);
-          await supabaseAdmin
-            .from("webhook_events")
-            .update({ processed_at: new Date().toISOString() })
-            .eq("provider", providerId)
-            .eq("event_id", eventId);
-        } catch (err) {
-          console.error("telephony:webhook_processing_failed", (err as Error).message);
-          await supabaseAdmin
-            .from("webhook_events")
-            .update({ error: (err as Error).message })
-            .eq("provider", providerId)
-            .eq("event_id", eventId);
-          return new Response("Processing error", { status: 500 });
-        }
-
-        return new Response("ok");
-      },
+      GET: ({ request }) => handleTelephonyWebhook(request),
+      POST: ({ request }) => handleTelephonyWebhook(request),
     },
   },
 });
+
+async function handleTelephonyWebhook(request: Request): Promise<Response> {
+  const url = new URL(request.url);
+  const providerId = url.searchParams.get("provider");
+  if (!providerId) return new Response("Missing provider", { status: 400 });
+
+  const { getTelephonyAdapter } = await import("@/lib/telephony.server");
+  const adapter = getTelephonyAdapter(providerId);
+  if (!adapter) {
+    console.error("telephony:webhook_provider_not_configured", providerId);
+    return new Response("Not configured", { status: 503 });
+  }
+
+  // GET's fields live entirely in the query string; POST's live in the
+  // body. Re-serializing url.search this way (rather than reading it
+  // directly in the adapter) keeps TelephonyProviderAdapter's interface
+  // unchanged — every adapter still only ever sees one "raw" string shaped
+  // like a url-encoded body, regardless of which HTTP method delivered it.
+  const raw = request.method === "GET" ? url.search.replace(/^\?/, "") : await request.text();
+  const headers: Record<string, string | null> = {};
+  request.headers.forEach((value, key) => {
+    headers[key.toLowerCase()] = value;
+  });
+
+  if (!adapter.verifyWebhookSignature(raw, headers, url)) {
+    return new Response("Invalid signature", { status: 401 });
+  }
+
+  const event = adapter.normalizeWebhookEvent(raw, headers);
+  if (!event) return new Response("Invalid payload", { status: 400 });
+
+  const eventId = event.eventId ?? `${event.providerCallId}:${event.status}:${event.occurredAt}`;
+
+  // Structured webhook-receipt log: method/provider/status/direction/call
+  // reference only — never the raw body/query string or headers (which may
+  // carry the provider's verify_token/signature material).
+  console.info("telephony:webhook_received", {
+    method: request.method,
+    provider: providerId,
+    event_id: eventId,
+    status: event.status,
+    direction: event.direction,
+    provider_call_id: event.providerCallId,
+  });
+
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+
+  // Idempotency: the unique (provider, event_id) index rejects replays,
+  // exactly like the Razorpay webhook (spec §10/§Q/§O).
+  const { error: dedupeError } = await supabaseAdmin.from("webhook_events").insert({
+    provider: providerId,
+    event_id: eventId,
+    event_type: event.status,
+    payload: event.raw as never,
+  });
+  if (dedupeError) {
+    if ((dedupeError as { code?: string }).code === "23505") return new Response("ok (duplicate)");
+    console.error("telephony:webhook_store_failed", dedupeError.message);
+    return new Response("Storage error", { status: 500 });
+  }
+
+  try {
+    await processTelephonyEvent(providerId, event);
+    await supabaseAdmin
+      .from("webhook_events")
+      .update({ processed_at: new Date().toISOString() })
+      .eq("provider", providerId)
+      .eq("event_id", eventId);
+  } catch (err) {
+    console.error("telephony:webhook_processing_failed", (err as Error).message);
+    await supabaseAdmin
+      .from("webhook_events")
+      .update({ error: (err as Error).message })
+      .eq("provider", providerId)
+      .eq("event_id", eventId);
+    return new Response("Processing error", { status: 500 });
+  }
+
+  return new Response("ok");
+}
 
 async function processTelephonyEvent(providerId: string, event: NormalizedCallEvent) {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
@@ -254,6 +277,12 @@ async function processTelephonyEvent(providerId: string, event: NormalizedCallEv
     .select("*")
     .single();
   if (insertError) throw insertError;
+  console.info("telephony:call_log_inserted", {
+    provider: providerId,
+    provider_call_id: event.providerCallId,
+    call_id: call.id,
+    status: call.status,
+  });
 
   if (!gate.allowed) return;
 

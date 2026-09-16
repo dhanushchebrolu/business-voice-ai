@@ -179,10 +179,18 @@ export async function handleExotelMediaUpgrade(request: Request): Promise<Respon
     const CALL_LOOKUP_ATTEMPTS = 5;
     const CALL_LOOKUP_DELAY_MS = 200;
     let call = await lookupCall();
+    let attemptsMade = 1;
     for (let attempt = 1; !call && attempt < CALL_LOOKUP_ATTEMPTS; attempt++) {
       await new Promise((r) => setTimeout(r, CALL_LOOKUP_DELAY_MS));
       call = await lookupCall();
+      attemptsMade++;
     }
+    // Safe: CallSid/attempt counts only — never a payload value, never a key.
+    console.info("exotel_media_route:call_log_lookup", {
+      callSid: sid,
+      attempts: attemptsMade,
+      found: Boolean(call),
+    });
     if (!call) return reject(`No known call for CallSid ${callSid}`);
     if (call.status !== "answered" && call.status !== "in_progress") {
       return reject(`Call ${call.id} is not eligible for a media session (status: ${call.status})`);
