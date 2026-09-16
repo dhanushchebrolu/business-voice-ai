@@ -82,7 +82,8 @@ describe("sarvam.runConversation — request shape and success path", () => {
       assert.equal(seenHeaders["api-subscription-key"], "super-secret-abc123");
       assert.equal(seenHeaders["authorization"], undefined);
       assert.ok(!seenUrl.includes("super-secret-abc123"), "API key must never appear in the URL");
-      assert.equal((seenBody as { model: string }).model, "sarvam-m");
+      assert.equal((seenBody as { model: string }).model, "sarvam-105b-conversations");
+      assert.equal((seenBody as { top_p: number }).top_p, 0.9);
     });
   });
 

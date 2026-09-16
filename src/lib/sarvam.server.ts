@@ -21,32 +21,59 @@
  * sarvam-realtime.server.ts's own CONNECT_TIMEOUT_MS for the streaming
  * STT/TTS sockets.
  *
- * MODEL NAME VERIFICATION NOTE — SARVAM_MODELS.chat = "sarvam-m" —
- * genuinely unresolved, flagged rather than silently changed: docs.sarvam.ai
- * is unreachable from this sandbox (confirmed again — see
- * sarvam-realtime.server.ts's own note), so this was checked via WebSearch
- * and a third-party community Rust SDK instead, and the two sources
- * DISAGREE. WebSearch summaries of Sarvam's own docs (twice, independently)
- * state sarvam-m has been deprecated and the Chat Completions API now
- * rejects `model: "sarvam-m"`, recommending `sarvam-105b`. But
- * github.com/skundu42/sarvam-rs's `ChatModel` enum (src/types/chat.rs)
- * still lists `"sarvam-m"` as a valid variant alongside `"sarvam-105b"`/
- * `"sarvam-30b"`, with no deprecation notice in that source — though a
- * third-party SDK's enum can simply lag behind a provider's own API
- * changes, so this doesn't resolve it either. NOT changed here because
- * guessing wrong either way is an unforced error when the real answer is
- * one API call away: this is exactly what docs/voice-pipeline-testing.md's
- * Tier 3a smoke test is for — a rejected/deprecated-model error there means
- * switch this constant to "sarvam-105b"; a normal reply means leave it.
+ * MODEL NAME UPDATE (chat = "sarvam-105b-conversations", stt = "saaras:v3") —
+ * this sandbox still cannot reach docs.sarvam.ai (network egress blocked;
+ * see sarvam-realtime.server.ts's own note for the re-tested confirmation),
+ * so these values were NOT independently verified against Sarvam's docs
+ * from here. They were supplied directly by the user from their own access
+ * to Sarvam's current documentation, which also matches this repo's own
+ * README.md spec section ("sarvam-105b-conversations for conversational
+ * voice workloads", "Saaras v3 / realtime where appropriate", "Bulbul v3")
+ * predating this change — two independent sources agreeing is stronger
+ * evidence than this repo previously had for the old "sarvam-m"/"saaras:v2.5"
+ * values. Still, "supplied + matches our own spec doc" is not the same as
+ * "confirmed by a real API call" — that confirmation is exactly what the
+ * live LLM/STT smoke tests (docs/voice-pipeline-testing.md Tier 3) are for,
+ * run separately after this change lands.
+ *
+ * `top_p` was added to the chat completion request body per the same
+ * user-supplied reference (previously omitted; only `temperature` and
+ * `max_tokens` were sent). No specific value was given, so 0.9 was chosen —
+ * a standard nucleus-sampling default — as the smallest change that adds
+ * the field without altering the existing low-temperature (0.3), fairly
+ * deterministic tone the receptionist prompt was tuned against. If the live
+ * smoke test's replies read differently than before, this is the first
+ * value to reconsider.
+ *
+ * STT REST field names (multipart "file", "model", "language_code"; JSON
+ * response "transcript") are UNCHANGED — only the "saaras:v2.5"->"saaras:v3"
+ * model string moved. No field-level STT REST spec was supplied this round,
+ * and inventing one (e.g. a transcription-mode field) is explicitly out of
+ * bounds per the user's own instruction — if "saaras:v3" turns out to need
+ * different fields, that is exactly the kind of error the STT smoke test
+ * surfaces (a 4xx naming an unexpected/missing field), not something to
+ * guess at now.
+ *
+ * `SARVAM_MODELS.tts = "bulbul:v3"` is unchanged (already correct per the
+ * same reference). Its response parsing (`data.audios[0]`, a base64 WAV
+ * string) is used only by the public web voice-widget path
+ * (public-assistant.functions.ts) — the live phone-call pipeline does not
+ * use this REST TTS function at all. It uses the separate realtime
+ * WebSocket TTS client in sarvam-realtime.server.ts instead, which
+ * negotiates `outputCodec`/`outputSampleRateHz` explicitly at connect time
+ * to match the Exotel media bridge's native format (linear16, 8kHz — see
+ * exotel-media-bridge.server.ts's NATIVE_FORMAT) and was already on
+ * `bulbul:v3` before this change. So "is TTS audio compatible with Exotel"
+ * is a question about that realtime client, not this REST one.
  */
 
 const BASE_URL = "https://api.sarvam.ai";
 const REQUEST_TIMEOUT_MS = 15_000;
 
 export const SARVAM_MODELS = {
-  chat: "sarvam-m",
+  chat: "sarvam-105b-conversations",
   tts: "bulbul:v3",
-  stt: "saaras:v2.5",
+  stt: "saaras:v3",
 } as const;
 
 export class ProviderError extends Error {
@@ -124,6 +151,7 @@ export const sarvam = {
       model: SARVAM_MODELS.chat,
       messages,
       temperature: 0.3,
+      top_p: 0.9,
       max_tokens: 400,
     });
     return {

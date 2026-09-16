@@ -59,8 +59,13 @@ current implementation or with each other — check these FIRST if 3a/3b/3c
 fail, since each is a specific, actionable candidate root cause rather than
 a generic "something's wrong":
 
-- `src/lib/sarvam.server.ts` — is `SARVAM_MODELS.chat = "sarvam-m"` still a
-  valid Chat Completions model, or has it been replaced by `sarvam-105b`?
+- `src/lib/sarvam.server.ts` — `SARVAM_MODELS.chat`/`stt` were updated to
+  `"sarvam-105b-conversations"`/`"saaras:v3"` (from `"sarvam-m"`/
+  `"saaras:v2.5"`) on a user-supplied reference that also matches this
+  repo's own README spec section — the model-name question itself is
+  resolved as far as this repo's sources go, but neither value has been
+  exercised against the live API yet. 3a is exactly that first live check;
+  a rejected/unknown-model error there is still the thing to report back.
 - `src/lib/sarvam-realtime.server.ts` — is the STT WebSocket path
   `/speech-to-text/ws` (current code) or `/speech-to-text-realtime/ws`? Is
   inbound audio sent as raw binary frames (current code) or base64-encoded
