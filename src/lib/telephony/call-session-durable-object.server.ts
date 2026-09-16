@@ -1,6 +1,7 @@
 import type { AudioMediaBridge } from "./audio-bridge.ts";
 import { ExotelMediaBridge, type ExotelSocketLike } from "./exotel-media-bridge.server.ts";
 import { verifyMediaSessionToken } from "./media-session-token.ts";
+import { isEligibleForMediaSession } from "./media-session-eligibility.ts";
 import { checkTelephonyAccess } from "../telephony-guard.server.ts";
 import {
   startRuntimeSession,
@@ -329,7 +330,7 @@ export class CallSessionDurableObject {
       found: Boolean(call),
     });
     if (!call) return reject(`No known call for CallSid ${callSid}`);
-    if (call.status !== "answered" && call.status !== "in_progress") {
+    if (!isEligibleForMediaSession(call.status)) {
       return reject(`Call ${call.id} is not eligible for a media session (status: ${call.status})`);
     }
     if (!call.phone_number_id) return reject(`Call ${call.id} has no associated phone number`);

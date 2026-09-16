@@ -1,5 +1,6 @@
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   CallSessionDurableObject,
   type DurableObjectState,
@@ -523,4 +524,33 @@ describe("CallSessionDurableObject", () => {
     // A succeeding independently, after B's unrelated call, confirms A's
     // internal maps were never touched by B.)
   });
+});
+
+test("REGRESSION (production incident: 'initiated' calls rejected by media-session auth): the call_logs status eligibility check delegates to the shared isEligibleForMediaSession helper, not a local re-implementation", () => {
+  // Same rationale as exotel-media-route.server.test.ts's equivalent
+  // source-scan — this sandbox cannot exercise the live-Supabase branch
+  // that rejected a real Exotel call stuck at status "initiated", so this
+  // proves the production Durable Object path uses the exact same shared
+  // eligibility check exotel-media-route.server.ts's local-dev fallback
+  // does, rather than a second, independently-editable copy of the
+  // "answered"/"in_progress"-only comparison that caused the incident.
+  const source = readFileSync(
+    new URL("./call-session-durable-object.server.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /import\s*\{\s*isEligibleForMediaSession\s*\}\s*from\s*["']\.\/media-session-eligibility\.ts["']/,
+    "expected call-session-durable-object.server.ts to import the shared eligibility helper",
+  );
+  assert.match(
+    source,
+    /if\s*\(\s*!isEligibleForMediaSession\(call\.status\)\s*\)/,
+    "expected the status-eligibility check to call the shared helper, not a local comparison",
+  );
+  assert.doesNotMatch(
+    source,
+    /call\.status\s*!==\s*["']answered["']/,
+    "expected no local 'answered'/'in_progress'-only comparison left behind in this file",
+  );
 });

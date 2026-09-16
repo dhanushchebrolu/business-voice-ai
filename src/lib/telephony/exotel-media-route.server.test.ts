@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { handleExotelMediaUpgrade } from "./exotel-media-route.server.ts";
 import type { ExotelSocketLike } from "./exotel-media-bridge.server.ts";
 
@@ -105,4 +106,32 @@ test("BUGFIX regression: a 'media' frame arriving in the same tick as 'start' do
     if (originalPair === undefined) delete (globalThis as Record<string, unknown>)["WebSocketPair"];
     else (globalThis as Record<string, unknown>)["WebSocketPair"] = originalPair;
   }
+});
+
+test("REGRESSION (production incident: 'initiated' calls rejected by media-session auth): the call_logs status eligibility check delegates to the shared isEligibleForMediaSession helper, not a local re-implementation", () => {
+  // This sandbox has no live Supabase connection (see this session's other
+  // source-scan tests), so the actual DB-backed branch that rejected a
+  // real Exotel call stuck at status "initiated" cannot be exercised
+  // end-to-end here. What this proves instead: the eligibility check is
+  // the single shared function (media-session-eligibility.test.ts covers
+  // its behavior directly, including "initiated" now being eligible), not
+  // a hand-rolled `status !== "answered" && status !== "in_progress"`
+  // comparison that could silently drift from call-session-durable-object.
+  // server.ts's copy again.
+  const source = readFileSync(new URL("./exotel-media-route.server.ts", import.meta.url), "utf8");
+  assert.match(
+    source,
+    /import\s*\{\s*isEligibleForMediaSession\s*\}\s*from\s*["']\.\/media-session-eligibility\.ts["']/,
+    "expected exotel-media-route.server.ts to import the shared eligibility helper",
+  );
+  assert.match(
+    source,
+    /if\s*\(\s*!isEligibleForMediaSession\(call\.status\)\s*\)/,
+    "expected the status-eligibility check to call the shared helper, not a local comparison",
+  );
+  assert.doesNotMatch(
+    source,
+    /call\.status\s*!==\s*["']answered["']/,
+    "expected no local 'answered'/'in_progress'-only comparison left behind in this file",
+  );
 });
