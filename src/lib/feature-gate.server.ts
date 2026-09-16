@@ -58,6 +58,30 @@ export async function checkFeatureAccess(
   feature: FeatureKey,
   rpc: (orgId: string, feature: FeatureKey) => Promise<FeatureRpcResult> = callFeatureLockedRpc,
 ): Promise<FeatureGateResult> {
+  // TEMPORARY BACKEND TESTING BYPASS — REMOVE BEFORE PRODUCTION BILLING ENABLEMENT
+  //
+  // This is the single, canonical entitlement resolver every feature/
+  // billing check in the app funnels through (see this file's own module
+  // doc). Short-circuiting it here — before the feature_locked() RPC is
+  // even called — is therefore sufficient to unblock telephony testing
+  // (checkTelephonyAccess's "phone" check, and every payment/setup-fee/
+  // lifecycle state feature_locked() itself resolves) without touching:
+  //   - billing/payment/subscription/feature-lock TABLES or ROWS (nothing
+  //     here writes anything; it only skips a read),
+  //   - checkTelephonyAccess's OTHER checks (phone_numbers existence,
+  //     status='active', inbound_enabled/outbound_enabled) — those live in
+  //     telephony-guard.server.ts, entirely separate from this function,
+  //   - agent-configuration validation (telephony-runtime.ts) or webhook
+  //     signature verification (exotel-provider.ts) — neither calls this
+  //     function at all.
+  // Sets `allowed: true` for every org/feature, unconditionally, whenever
+  // BYPASS_BILLING_GATES=true is set on the Worker. Must never be enabled
+  // in production; remove this block entirely once billing enforcement is
+  // ready to go live.
+  if (process.env["BYPASS_BILLING_GATES"] === "true") {
+    return { allowed: true, reason: null };
+  }
+
   const { data: locked, error } = await rpc(orgId, feature);
   if (error) {
     return {

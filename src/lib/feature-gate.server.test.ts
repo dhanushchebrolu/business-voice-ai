@@ -161,6 +161,100 @@ describe("checkFeatureAccess / assertFeatureUnlocked — RPC branching", () => {
   });
 });
 
+describe("BYPASS_BILLING_GATES — temporary backend testing bypass (do not enable in production)", () => {
+  async function withEnv<T>(
+    vars: Record<string, string | undefined>,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const prior: Record<string, string | undefined> = {};
+    for (const key of Object.keys(vars)) prior[key] = process.env[key];
+    try {
+      for (const [key, value] of Object.entries(vars)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      return await fn();
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  }
+
+  test("BYPASS_BILLING_GATES=true allows access even when the underlying feature_locked() RPC would say locked", async () => {
+    await withEnv({ BYPASS_BILLING_GATES: "true" }, async () => {
+      const gate = await checkFeatureAccess("org-1", "phone", fakeRpc({ data: true, error: null }));
+      assert.equal(gate.allowed, true);
+      assert.equal(gate.reason, null);
+    });
+  });
+
+  test("BYPASS_BILLING_GATES=true skips the RPC call entirely — never even reads the real entitlement state", async () => {
+    await withEnv({ BYPASS_BILLING_GATES: "true" }, async () => {
+      const { rpc, calls } = recordingRpc({ data: true, error: null });
+      await checkFeatureAccess("org-1", "phone", rpc);
+      assert.equal(
+        calls.length,
+        0,
+        "the underlying feature_locked() RPC must never be called while bypassed",
+      );
+    });
+  });
+
+  test("BYPASS_BILLING_GATES=true covers every platform feature (phone, voice, and everything else), not just one", async () => {
+    await withEnv({ BYPASS_BILLING_GATES: "true" }, async () => {
+      for (const { key } of PLATFORM_FEATURES) {
+        const gate = await checkFeatureAccess("org-1", key, fakeRpc({ data: true, error: null }));
+        assert.equal(gate.allowed, true, `${key} should be allowed while bypassed`);
+      }
+    });
+  });
+
+  test("assertFeatureUnlocked resolves without throwing while bypassed, even when the RPC says locked", async () => {
+    await withEnv({ BYPASS_BILLING_GATES: "true" }, async () => {
+      await assertFeatureUnlocked("org-1", "phone", fakeRpc({ data: true, error: null }));
+      // No throw = success.
+    });
+  });
+
+  test("unset (the production default) behaves exactly as before — locked stays locked", async () => {
+    await withEnv({ BYPASS_BILLING_GATES: undefined }, async () => {
+      const gate = await checkFeatureAccess("org-1", "phone", fakeRpc({ data: true, error: null }));
+      assert.equal(gate.allowed, false);
+    });
+  });
+
+  test("any value other than the exact string 'true' (e.g. '1', 'TRUE', 'yes') is NOT treated as enabling the bypass — fails closed on a typo, never open", async () => {
+    for (const notTrue of ["1", "TRUE", "yes", "false", ""]) {
+      await withEnv({ BYPASS_BILLING_GATES: notTrue }, async () => {
+        const gate = await checkFeatureAccess(
+          "org-1",
+          "phone",
+          fakeRpc({ data: true, error: null }),
+        );
+        assert.equal(gate.allowed, false, `"${notTrue}" must not enable the bypass`);
+      });
+    }
+  });
+});
+
+describe("checkTelephonyAccess's OTHER checks are untouched by the billing bypass (live-call regression: the bypass must only skip the entitlement/payment check, never phone-number validation)", () => {
+  test("the phone_numbers existence/status/inbound_enabled/outbound_enabled checks still run unconditionally after checkFeatureAccess, with no bypass-aware branching around them", () => {
+    const source = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "telephony-guard.server.ts"),
+      "utf8",
+    );
+    // telephony-guard.server.ts must not itself reference the bypass flag —
+    // the bypass lives in exactly one place (feature-gate.server.ts), never
+    // duplicated here.
+    assert.doesNotMatch(source, /BYPASS_BILLING_GATES/);
+    assert.match(source, /if \(number\.status !== "active"\)/);
+    assert.match(source, /if \(direction === "inbound" && !number\.inbound_enabled\)/);
+    assert.match(source, /if \(direction === "outbound" && !number\.outbound_enabled\)/);
+  });
+});
+
 describe("publishAgentVersion / rollbackAgentVersion — structural integration proof", () => {
   test("publishAgentVersion calls assertFeatureUnlocked for 'voice' before any mutating write", () => {
     const gateCallIdx = agentFunctionsSql.indexOf('assertFeatureUnlocked(organizationId, "voice")');
