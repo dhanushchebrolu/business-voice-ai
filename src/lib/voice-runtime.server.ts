@@ -25,7 +25,7 @@
  * second `deps` argument — the STT/TTS connectors, the LLM call, and
  * transcript persistence, defaulting to the real implementations
  * (`defaultRuntimeDeps`): Sarvam's realtime STT/TTS always, the LLM call
- * itself resolved by llm-provider.server.ts (Sarvam or Claude, by
+ * itself resolved by llm-provider.server.ts (Sarvam, Claude, or Gemini, by
  * VOICE_LLM_PROVIDER), and the real `call_logs` write. A test can supply a
  * deterministic fake for all four and drive this exact orchestration/
  * state-machine/persistence code end-to-end without a real network call or

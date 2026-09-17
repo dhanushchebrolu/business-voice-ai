@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { sarvam } from "./sarvam.server.ts";
 import { claude } from "./claude.server.ts";
+import { gemini } from "./gemini.server.ts";
 import { resolveVoiceLlmProvider, resolveGenerateReply } from "./llm-provider.server.ts";
 
 async function withEnv<T>(
@@ -26,7 +27,7 @@ async function withEnv<T>(
 }
 
 describe("resolveVoiceLlmProvider — defaults to Sarvam, never silently changes live behavior", () => {
-  test("defaults to 'sarvam' when VOICE_LLM_PROVIDER is unset — this production system runs on Sarvam today, and adding Claude must not flip that on its own", async () => {
+  test("defaults to 'sarvam' when VOICE_LLM_PROVIDER is unset — this production system runs on Sarvam today, and adding Claude/Gemini must not flip that on its own", async () => {
     await withEnv({ VOICE_LLM_PROVIDER: undefined }, () => {
       assert.equal(resolveVoiceLlmProvider(), "sarvam");
       return Promise.resolve();
@@ -37,6 +38,15 @@ describe("resolveVoiceLlmProvider — defaults to Sarvam, never silently changes
     for (const raw of ["claude", "Claude", "CLAUDE", " claude "]) {
       await withEnv({ VOICE_LLM_PROVIDER: raw }, () => {
         assert.equal(resolveVoiceLlmProvider(), "claude", `expected "${raw}" to select claude`);
+        return Promise.resolve();
+      });
+    }
+  });
+
+  test("VOICE_LLM_PROVIDER=gemini (any casing/whitespace) selects Gemini", async () => {
+    for (const raw of ["gemini", "Gemini", "GEMINI", " gemini "]) {
+      await withEnv({ VOICE_LLM_PROVIDER: raw }, () => {
+        assert.equal(resolveVoiceLlmProvider(), "gemini", `expected "${raw}" to select gemini`);
         return Promise.resolve();
       });
     }
@@ -61,6 +71,13 @@ describe("resolveGenerateReply — returns the exact function reference for the 
   test("resolves to claude.runConversation when selected", async () => {
     await withEnv({ VOICE_LLM_PROVIDER: "claude" }, () => {
       assert.equal(resolveGenerateReply(), claude.runConversation);
+      return Promise.resolve();
+    });
+  });
+
+  test("resolves to gemini.runConversation when selected", async () => {
+    await withEnv({ VOICE_LLM_PROVIDER: "gemini" }, () => {
+      assert.equal(resolveGenerateReply(), gemini.runConversation);
       return Promise.resolve();
     });
   });
