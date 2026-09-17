@@ -284,7 +284,7 @@ describe("telephony webhook route — billing/entitlement reuse (requirement E: 
 describe("telephony webhook route — Exotel 'initiated' runtime handoff (production incident: media session accepted, but the caller never heard Klyro's greeting)", () => {
   test("the new-call insert path routes to the agent runtime on 'initiated' too, but ONLY when providerId is exotel — not for every provider", () => {
     const idx = routeSrc.indexOf("if (!gate.allowed) return;");
-    const insertBranch = routeSrc.slice(idx, routeSrc.indexOf("await routeToAgentRuntime({", idx));
+    const insertBranch = routeSrc.slice(idx, routeSrc.indexOf("routeToAgentRuntime({", idx));
     assert.match(insertBranch, /event\.status === "answered"/);
     assert.match(insertBranch, /event\.status === "in_progress"/);
     assert.match(
@@ -321,5 +321,45 @@ describe("telephony webhook route — Exotel 'initiated' runtime handoff (produc
       applyCallEventSrc,
       /event\.status === "answered" \|\| event\.status === "in_progress"/,
     );
+  });
+});
+
+describe("telephony webhook route — Exotel Passthru/Voicebot deadlock fix (production incident: media session accepted... no — call goes silent and hangs up within a few seconds, before any WebSocket ever arrives)", () => {
+  test("the 'initiated'/'answered'/'in_progress' runtime-handoff call is backgrounded (runInBackground), never awaited directly — awaiting it here re-creates the exact deadlock this fix resolves", () => {
+    const idx = routeSrc.indexOf("if (!gate.allowed) return;");
+    const triggerIdx = routeSrc.indexOf(
+      'providerId === "exotel" && event.status === "initiated"',
+      idx,
+    );
+    const callSite = routeSrc.slice(
+      triggerIdx,
+      routeSrc.indexOf("providerCallId: event.providerCallId,\n      }),", triggerIdx),
+    );
+    assert.match(callSite, /runInBackground\(\s*routeToAgentRuntime\(/);
+    assert.doesNotMatch(
+      callSite,
+      /await routeToAgentRuntime\(/,
+      "must not synchronously await routeToAgentRuntime here — Exotel's Voicebot Applet only opens the media WebSocket this call waits on AFTER this webhook responds, so awaiting it deadlocks the response",
+    );
+  });
+
+  test("handleTelephonyWebhook reads waitUntil off the request and threads it into processTelephonyEvent, so runInBackground can register the handoff with Cloudflare's ExecutionContext", () => {
+    assert.match(
+      routeSrc,
+      /import\s*\{\s*getRequestWaitUntil,\s*runInBackground,\s*type WaitUntil\s*\}\s*from\s*["']@\/lib\/background-task\.server["']/,
+    );
+    const handlerIdx = routeSrc.indexOf("async function handleTelephonyWebhook");
+    const handlerSrc = routeSrc.slice(
+      handlerIdx,
+      routeSrc.indexOf("async function processTelephonyEvent"),
+    );
+    assert.match(handlerSrc, /const waitUntil = getRequestWaitUntil\(request\);/);
+    assert.match(handlerSrc, /processTelephonyEvent\(providerId, event, waitUntil\)/);
+  });
+
+  test("processTelephonyEvent accepts waitUntil as an explicit parameter, not a module-level/global — a global would race across concurrent in-flight requests on the same Worker isolate", () => {
+    const sigIdx = routeSrc.indexOf("async function processTelephonyEvent(");
+    const sig = routeSrc.slice(sigIdx, routeSrc.indexOf(")", routeSrc.indexOf("{", sigIdx)));
+    assert.match(sig, /waitUntil:\s*WaitUntil\s*\|\s*undefined/);
   });
 });

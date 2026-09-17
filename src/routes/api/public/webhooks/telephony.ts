@@ -6,6 +6,7 @@ import {
   TERMINAL_CALL_STATUSES,
 } from "@/lib/telephony-guard.server";
 import { routeToAgentRuntime, terminateAgentRuntime } from "@/lib/telephony-runtime";
+import { getRequestWaitUntil, runInBackground, type WaitUntil } from "@/lib/background-task.server";
 import type { NormalizedCallEvent } from "@/lib/telephony/adapter";
 import {
   buildProviderMetadata,
@@ -58,6 +59,7 @@ async function handleTelephonyWebhook(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const providerId = url.searchParams.get("provider");
   if (!providerId) return new Response("Missing provider", { status: 400 });
+  const waitUntil = getRequestWaitUntil(request);
 
   const { getTelephonyAdapter } = await import("@/lib/telephony.server");
   const adapter = getTelephonyAdapter(providerId);
@@ -115,7 +117,7 @@ async function handleTelephonyWebhook(request: Request): Promise<Response> {
   }
 
   try {
-    await processTelephonyEvent(providerId, event);
+    await processTelephonyEvent(providerId, event, waitUntil);
     await supabaseAdmin
       .from("webhook_events")
       .update({ processed_at: new Date().toISOString() })
@@ -134,7 +136,11 @@ async function handleTelephonyWebhook(request: Request): Promise<Response> {
   return new Response("ok");
 }
 
-async function processTelephonyEvent(providerId: string, event: NormalizedCallEvent) {
+async function processTelephonyEvent(
+  providerId: string,
+  event: NormalizedCallEvent,
+  waitUntil: WaitUntil | undefined,
+) {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
   const { data: existingCall } = await supabaseAdmin
@@ -395,23 +401,50 @@ async function processTelephonyEvent(providerId: string, event: NormalizedCallEv
   // to handled: false") would otherwise pay a wasted ~15s Durable Object
   // bridge-await timeout (DEFAULT_BRIDGE_TIMEOUT_MS) on every single
   // "initiated" event for no benefit.
+  //
+  // SECOND PRODUCTION INCIDENT, found after the fix above shipped: this
+  // exact call site is Exotel's own Passthru webhook callback — the call
+  // flow (App Bazaar) only advances to its Voicebot Applet step, which is
+  // what opens the media WebSocket routeToAgentRuntime is about to wait up
+  // to 15s for (DEFAULT_BRIDGE_TIMEOUT_MS), once THIS webhook responds
+  // 200. Awaiting routeToAgentRuntime here was a deadlock: the socket
+  // can't open until this handler returns, and this handler wouldn't
+  // return until the socket opened (or the full 15s elapsed). Exotel's own
+  // Passthru step has a much shorter timeout than that, so in practice it
+  // gave up and took the call-flow's "if the URL returns anything else"
+  // branch — silence, then hangup — before our 200 ever arrived, no matter
+  // how long it eventually took. Fix: fire this in the background
+  // (runInBackground/waitUntil — see background-task.server.ts) so the
+  // webhook response goes out immediately and Exotel can reach the
+  // Voicebot Applet step — opening the very socket this wait is blocking
+  // on — while routeToAgentRuntime's own bridge wait is still in flight.
+  // Not applied to the "answered"/"in_progress" trigger in applyCallEvent
+  // below: that fires on a later, separate webhook delivery, by which
+  // point (for Exotel) the runtime this fast path starts is normally
+  // already active, so startRuntimeSession's own idempotency makes that a
+  // fast no-op rather than another 15s wait — it was never part of this
+  // deadlock.
   if (
     event.status === "answered" ||
     event.status === "in_progress" ||
     (providerId === "exotel" && event.status === "initiated")
   ) {
-    await routeToAgentRuntime({
-      callId: call.id,
-      organizationId: phoneNumber.organization_id,
-      businessId: phoneNumber.business_id,
-      agentConfigId: phoneNumber.agent_config_id,
-      phoneNumberId: phoneNumber.id,
-      vaaniE164: phoneNumber.e164,
-      callerE164: event.fromE164 ?? null,
-      direction: "inbound",
-      provider: providerId,
-      providerCallId: event.providerCallId,
-    });
+    runInBackground(
+      routeToAgentRuntime({
+        callId: call.id,
+        organizationId: phoneNumber.organization_id,
+        businessId: phoneNumber.business_id,
+        agentConfigId: phoneNumber.agent_config_id,
+        phoneNumberId: phoneNumber.id,
+        vaaniE164: phoneNumber.e164,
+        callerE164: event.fromE164 ?? null,
+        direction: "inbound",
+        provider: providerId,
+        providerCallId: event.providerCallId,
+      }),
+      waitUntil,
+      "telephony:runtime_handoff_background_failed",
+    );
   }
 
   if (TERMINAL_CALL_STATUSES.includes(event.status)) {
