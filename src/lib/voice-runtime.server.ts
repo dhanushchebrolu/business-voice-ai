@@ -23,8 +23,10 @@
  *
  * TESTABILITY (`RuntimeDeps`): `startRuntimeSession` takes an optional
  * second `deps` argument — the STT/TTS connectors, the LLM call, and
- * transcript persistence, defaulting to the real Sarvam implementations and
- * the real `call_logs` write (`defaultRuntimeDeps`). A test can supply a
+ * transcript persistence, defaulting to the real implementations
+ * (`defaultRuntimeDeps`): Sarvam's realtime STT/TTS always, the LLM call
+ * itself resolved by llm-provider.server.ts (Sarvam or Claude, by
+ * VOICE_LLM_PROVIDER), and the real `call_logs` write. A test can supply a
  * deterministic fake for all four and drive this exact orchestration/
  * state-machine/persistence code end-to-end without a real network call or
  * a live database — see ./telephony/voice-runtime-test-harness.ts and
@@ -76,7 +78,8 @@ import {
   type SttEvent,
   type TtsEvent,
 } from "./sarvam-realtime.server.ts";
-import { sarvam, ProviderError, type ChatMessage } from "./sarvam.server.ts";
+import { ProviderError, type ChatMessage } from "./sarvam.server.ts";
+import { resolveGenerateReply } from "./llm-provider.server.ts";
 import type { AgentSnapshot } from "./agent-instructions.ts";
 
 /**
@@ -200,7 +203,11 @@ async function persistTranscriptToCallLogs(record: TranscriptRecord): Promise<vo
 export const defaultRuntimeDeps: RuntimeDeps = {
   connectStt: connectSarvamStt,
   connectTts: connectSarvamTts,
-  generateReply: sarvam.runConversation,
+  // Sarvam or Claude, chosen by VOICE_LLM_PROVIDER — see
+  // llm-provider.server.ts's own doc comment. STT/TTS above are always
+  // Sarvam's realtime clients regardless of this choice; only the
+  // text-in/text-out reasoning step changes.
+  generateReply: resolveGenerateReply(),
   persistTranscript: persistTranscriptToCallLogs,
 };
 
