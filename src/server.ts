@@ -7,6 +7,7 @@ import {
   CALL_SESSION_COORDINATOR_NAME,
   type CloudflareEnv,
 } from "./lib/telephony/cloudflare-env.server";
+import { EXOTEL_MEDIA_STREAM_PATH as MEDIA_STREAM_PATH } from "./lib/telephony/exotel-media-stream-path";
 
 // The CallSessionDurableObject class itself is exported to the Cloudflare
 // Worker entrypoint from ../exports.cloudflare.ts (Nitro's documented
@@ -15,8 +16,6 @@ import {
 // chunk, not Nitro's actual `main` entry module, so a normal `export`
 // here never reaches the entry Wrangler resolves Durable Object class
 // names against).
-
-const MEDIA_STREAM_PATH = "/api/public/media-stream/exotel";
 
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;

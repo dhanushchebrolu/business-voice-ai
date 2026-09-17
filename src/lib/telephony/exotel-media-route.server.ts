@@ -45,8 +45,7 @@ import { isEligibleForMediaSession } from "./media-session-eligibility.ts";
 import { claimMediaSession, registerMediaBridge } from "./exotel-media-registry.server.ts";
 import { ExotelMediaBridge, type ExotelSocketLike } from "./exotel-media-bridge.server.ts";
 import { checkTelephonyAccess } from "../telephony-guard.server.ts";
-
-const MEDIA_STREAM_PATH = "/api/public/media-stream/exotel";
+import { EXOTEL_MEDIA_STREAM_PATH as MEDIA_STREAM_PATH } from "./exotel-media-stream-path.ts";
 
 interface CloudflareWebSocketPair {
   0: ExotelSocketLike & { accept(): void };

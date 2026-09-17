@@ -108,6 +108,38 @@ test("BUGFIX regression: a 'media' frame arriving in the same tick as 'start' do
   }
 });
 
+test("TASK 7 (reject invalid provider/call identifiers): a 'start' event with no CallSid at all is rejected — socket closed 1008, never left hanging waiting for a database lookup that has nothing to look up", async () => {
+  const originalPair = (globalThis as Record<string, unknown>)["WebSocketPair"];
+  FakeWebSocketPair.instances = [];
+  (globalThis as Record<string, unknown>)["WebSocketPair"] = FakeWebSocketPair;
+  try {
+    await assert.rejects(() =>
+      handleExotelMediaUpgrade(
+        new Request("https://vaani.app/api/public/media-stream/exotel", {
+          headers: { upgrade: "websocket" },
+        }),
+      ),
+    );
+    const serverSocket = FakeWebSocketPair.instances[0]![0];
+
+    // "start" with a stream_sid but deliberately no call_sid/CallSid/callSid
+    // anywhere — the exact shape a misconfigured or spoofed client could
+    // send, and the one this route's own CallSid-required check exists for.
+    serverSocket.emit("message", {
+      data: JSON.stringify({ event: "start", start: { stream_sid: "STnoSid" } }),
+    } as never);
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    assert.ok(serverSocket.closedWith, "expected the socket to be closed, not left open");
+    assert.equal(serverSocket.closedWith!.code, 1008);
+    assert.equal(serverSocket.closedWith!.reason, "unauthorized");
+  } finally {
+    if (originalPair === undefined) delete (globalThis as Record<string, unknown>)["WebSocketPair"];
+    else (globalThis as Record<string, unknown>)["WebSocketPair"] = originalPair;
+  }
+});
+
 test("REGRESSION (production incident: 'initiated' calls rejected by media-session auth): the call_logs status eligibility check delegates to the shared isEligibleForMediaSession helper, not a local re-implementation", () => {
   // This sandbox has no live Supabase connection (see this session's other
   // source-scan tests), so the actual DB-backed branch that rejected a

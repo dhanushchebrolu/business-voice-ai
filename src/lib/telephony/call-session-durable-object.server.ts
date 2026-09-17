@@ -3,6 +3,7 @@ import { ExotelMediaBridge, type ExotelSocketLike } from "./exotel-media-bridge.
 import { verifyMediaSessionToken } from "./media-session-token.ts";
 import { isEligibleForMediaSession } from "./media-session-eligibility.ts";
 import { checkTelephonyAccess } from "../telephony-guard.server.ts";
+import { EXOTEL_MEDIA_STREAM_PATH as MEDIA_STREAM_PATH } from "./exotel-media-stream-path.ts";
 import {
   startRuntimeSession,
   terminateRuntimeSession,
@@ -61,7 +62,6 @@ import {
  * the code this replaces.
  */
 
-const MEDIA_STREAM_PATH = "/api/public/media-stream/exotel";
 const ARRIVAL_TTL_MS = 30_000;
 const DEFAULT_BRIDGE_TIMEOUT_MS = 15_000;
 

@@ -484,6 +484,36 @@ describe("CallSessionDurableObject", () => {
     }
   });
 
+  test("TASK 7 (reject invalid provider/call identifiers): a 'start' event with no CallSid at all is rejected — socket closed 1008, never left hanging waiting for a database lookup that has nothing to look up", async () => {
+    const originalPair = (globalThis as Record<string, unknown>)["WebSocketPair"];
+    FakeWebSocketPair.instances = [];
+    (globalThis as Record<string, unknown>)["WebSocketPair"] = FakeWebSocketPair;
+    try {
+      const doInstance = new CallSessionDurableObject(fakeState("t13"), {});
+      await doInstance.fetch(
+        new Request("https://call-session/api/public/media-stream/exotel", {
+          headers: { upgrade: "websocket" },
+        }),
+      );
+      const serverSocket = FakeWebSocketPair.instances[0]![0];
+
+      // "start" with a stream_sid but deliberately no call_sid/CallSid/callSid.
+      serverSocket.emit("message", {
+        data: JSON.stringify({ event: "start", start: { stream_sid: "STnoSid" } }),
+      } as never);
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      assert.ok(serverSocket.closedWith, "expected the socket to be closed, not left open");
+      assert.equal(serverSocket.closedWith!.code, 1008);
+      assert.equal(serverSocket.closedWith!.reason, "unauthorized");
+    } finally {
+      if (originalPair === undefined)
+        delete (globalThis as Record<string, unknown>)["WebSocketPair"];
+      else (globalThis as Record<string, unknown>)["WebSocketPair"] = originalPair;
+    }
+  });
+
   test("PROOF: two Durable Object instances never share bridge-rendezvous state", async () => {
     const instanceA = new CallSessionDurableObject(fakeState("shard-a"), {}) as unknown as {
       registerBridge: (id: string, bridge: AudioMediaBridge) => void;
