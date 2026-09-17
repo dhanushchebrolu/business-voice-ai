@@ -4,7 +4,7 @@
 //     nitro (build-only using cloudflare as a default target), VITE_* env injection, @ path alias,
 //     React/TanStack dedupe, error logger plugins, and sandbox detection (port/host/strictPort).
 // You can pass additional config via defineConfig({ vite: { ... }, etc... }) if needed.
-import { defineConfig } from "@lovable.dev/vite-tanstack-config";
+import { defineConfig, type LovableViteTanstackOptions } from "@lovable.dev/vite-tanstack-config";
 import { loadEnv, type Plugin } from "vite";
 
 /**
@@ -91,4 +91,28 @@ export default defineConfig({
     server: { entry: "server" },
   },
   plugins: [validateSupabasePublicEnv()],
+  // Pins Nitro's own `compatibilityDate` option (the build-time knob that
+  // feeds writeWranglerConfig's `defaults.compatibility_date` fallback —
+  // see node_modules/nitro/dist/_presets.mjs and
+  // node_modules/nitro/dist/_libs/compatx.mjs) away from its "latest"
+  // default, which `normalizeDate()` resolves to `new Date()` — literally
+  // whatever date the build machine's system clock reads. wrangler.json's
+  // own explicit "compatibility_date" already wins this value in Nitro's
+  // `defu(overrides, ctxConfig, userConfig, defaults)` merge (`defaults` is
+  // last-priority), so this is defense-in-depth, not the primary fix — but
+  // it removes the one remaining place in this build's dependency chain
+  // that ever computes "today" at all, so nothing here can silently regress
+  // to a future/unsupported Cloudflare compatibility date again.
+  //
+  // `@lovable.dev/vite-tanstack-config`'s own `nitro` option type
+  // deliberately narrows to { preset, output, cloudflare } (see its own
+  // docstring: "the option surface is narrow on purpose"), but its runtime
+  // implementation spreads this object directly into Nitro's own options
+  // (`{ defaultPreset: "cloudflare-module", ...userNitroOpts }`), so an
+  // extra, Nitro-recognized key like `compatibilityDate` is honored at
+  // build time even though the package's own .d.ts doesn't declare it —
+  // hence the cast.
+  nitro: {
+    compatibilityDate: "2026-09-16",
+  } as NonNullable<LovableViteTanstackOptions["nitro"]>,
 });
