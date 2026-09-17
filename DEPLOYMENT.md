@@ -9,12 +9,43 @@ so a deploy never wipes dashboard-managed variables/secrets again.
 | Where | What goes here | Example |
 |---|---|---|
 | **Repo: `wrangler.json`** | Non-secret, deploy-shape config that must be identical on every deploy: Worker name, Durable Object bindings, migrations, `keep_vars`, and the *names* (never values) of required secrets. | `name`, `durable_objects`, `migrations`, `keep_vars`, `secrets.required` |
-| **Repo: build-time public vars** | `VITE_*`-prefixed variables, inlined into the client bundle at `vite build` time via `import.meta.env`. These are public by design (shipped to every browser) and are **not** secrets. | `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY` |
+| **Build-time public vars — set locally AND in Cloudflare Workers Builds, never committed** | `VITE_*`-prefixed variables, inlined into the client bundle at `vite build` time via `import.meta.env`. Public by design (shipped to every browser) and **not** secrets — but still not committed, since each environment (your machine, a Cloudflare preview, production) may point at a different Supabase project. | `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY` |
 | **Cloudflare Dashboard only** | Every runtime value the server reads via `process.env` at request time: the Supabase service-role key, provider API keys/webhook secrets, the admin bootstrap secret, etc. **Never committed, never put in `wrangler.json`'s `[vars]`, never printed.** | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `PLATFORM_ADMIN_BOOTSTRAP_SECRET`, `RAZORPAY_KEY_ID`/`RAZORPAY_KEY_SECRET`/`RAZORPAY_WEBHOOK_SECRET`, `SARVAM_API_KEY`/`SARVAM_ORG_ID`/`SARVAM_WORKSPACE_ID`/`SARVAM_WEBHOOK_SECRET`, `EXOTEL_SID`/`EXOTEL_API_KEY`/`EXOTEL_TOKEN`/`EXOTEL_SUBDOMAIN`/`EXOTEL_WEBHOOK_SECRET`, `MEDIA_SESSION_TOKEN_SECRET`, `TELEPHONY_WEBHOOK_BASE_URL` |
 
 `wrangler.json` intentionally has **no `[vars]` block**. Runtime secrets/variables
 are managed exclusively through the Cloudflare dashboard (or `wrangler secret put`),
 never through the repo — that's what keeps real values out of git.
+
+### Build-time public vars: where they actually need to be set
+
+`VITE_SUPABASE_URL` / `VITE_SUPABASE_PUBLISHABLE_KEY` are baked into the client
+bundle as literal strings the moment `vite build` runs — `vite.config.ts`'s
+`validateSupabasePublicEnv` plugin fails the build immediately if either is
+missing, specifically because nothing set *after* the build (a Cloudflare
+Worker runtime variable, a dashboard secret, `keep_vars`) can retroactively fix
+an already-built bundle. This means they must be present at **every** place a
+build actually runs, independently:
+
+- **Local `npm run build`** — read from a gitignored `.env`/`.env.local` in the
+  repo root (Vite's own `loadEnv`, both files covered by `.gitignore`). Copy
+  `.env.example`, fill in the two `VITE_*` values from your Supabase project's
+  dashboard (Project Settings → API), never commit the filled-in file.
+- **Cloudflare Workers Builds** (the CI pipeline that runs on every push, if
+  configured) — runs its own fresh build on Cloudflare's infrastructure, which
+  has no access to your local `.env`. These two variables must be added
+  separately, in the Cloudflare dashboard, under the Workers Build project's
+  own **build-time environment variables** (Workers & Pages → the `klyro`
+  project → Settings → Build → Environment variables in the current
+  Cloudflare dashboard layout — the exact label may move as Cloudflare updates
+  their UI, but it is always a *build*-scoped setting, distinct from the
+  Worker's runtime "Variables and Secrets" panel referenced in the row below).
+  Leaving them unset there does not fail loudly the same way — the build
+  simply throws the same `Build-time environment variable(s) missing` error
+  this project's build log already reports, and no build artifact is produced
+  until they're added there too.
+- **Manual `npx wrangler deploy` from a local machine** — same as local
+  `npm run build` above: you must run the build locally first (with your local
+  `.env` populated) before deploying the resulting `.output/`.
 
 See `.env.example` for the full, currently-known list of variable *names* the
 server code reads (kept in sync with `src/**/*.server.ts` — it documents names
