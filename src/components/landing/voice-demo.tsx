@@ -3,22 +3,23 @@ import { Play, Pause, RotateCcw } from "lucide-react";
 import { ParticleWave } from "./particle-wave";
 
 /**
- * The AI Receptionist voice demo. A real, playable local audio asset
- * (public/audio/ai-receptionist-demo.mp3 — a tasteful ambient tone
- * sequence generated for this build, not a recording of anyone's voice
- * and not an ffmpeg-faked "player") drives a genuine Web Audio API
- * AnalyserNode, so the waveform bars and the small ParticleWave behind
- * this section are truly audio-reactive, not a canned animation loop
- * pretending to react. The four-line conversation transcript is
- * synchronized to fixed cue timestamps that match the track's four
- * tonal beats.
+ * A real, playable local audio asset (public/audio/ai-receptionist-demo.mp3
+ * — a tasteful ambient tone sequence generated for this build, not a
+ * recording of anyone's voice and not a faked "player") drives a genuine
+ * Web Audio API AnalyserNode, so the waveform bars and the small
+ * ParticleWave behind this card are truly audio-reactive. The two-line
+ * conversation snippet is synchronized to fixed cue timestamps that match
+ * the track's tonal beats.
  *
  * Every control is real: play/pause toggles actual playback, the bar is
  * click/drag-seekable against the real <audio> element's currentTime,
- * duration/progress come from real media events, and replay restarts
- * from zero. Autoplay is never attempted — playback only starts from a
- * user click. Load/decoding failures are caught and shown as a plain
- * inline message rather than a broken/silent control.
+ * duration/progress come from real media events, and replay restarts from
+ * zero. Autoplay is never attempted — playback only starts from a user
+ * click. Load/decoding failures are caught and shown as a plain inline
+ * message rather than a broken/silent control.
+ *
+ * Styled as a compact, embeddable card (not a full section) so it fits
+ * inside the light feature-showcase pair alongside the WhatsApp AI card.
  */
 
 const TRANSCRIPT: { speaker: "Caller" | "ClickAI"; line: string; cueAt: number }[] = [
@@ -28,7 +29,7 @@ const TRANSCRIPT: { speaker: "Caller" | "ClickAI"; line: string; cueAt: number }
   { speaker: "ClickAI", line: "4 PM is available. I've booked it for you.", cueAt: 12.8 },
 ];
 
-const BAR_COUNT = 56;
+const BAR_COUNT = 28;
 /** A fixed, non-random envelope so the resting (unplayed) bar heights are visually pleasant and stable across renders — not a literal decode of the audio file, just a static base shape the live analyser data modulates on top of during playback. */
 const BASE_ENVELOPE = Array.from({ length: BAR_COUNT }, (_, i) => {
   const wave = Math.sin((i / BAR_COUNT) * Math.PI * 3.2) * 0.5 + 0.5;
@@ -145,52 +146,41 @@ export function VoiceDemo() {
 
   const progressFraction = duration > 0 ? currentTime / duration : 0;
   const activeLineIndex = [...TRANSCRIPT].reverse().findIndex((line) => currentTime >= line.cueAt);
-  const activeIndex = activeLineIndex === -1 ? -1 : TRANSCRIPT.length - 1 - activeLineIndex;
+  const activeIndex = activeLineIndex === -1 ? 0 : TRANSCRIPT.length - 1 - activeLineIndex;
+  const activeLine = TRANSCRIPT[activeIndex]!;
 
   return (
-    <section id="voice-demo" className="relative overflow-hidden bg-[#0a0a0d] py-24 sm:py-32">
-      <div className="pointer-events-none absolute inset-0 opacity-40">
+    <div id="voice-demo" className="relative overflow-hidden rounded-2xl bg-[#f0edf6] p-6">
+      <div className="pointer-events-none absolute inset-0 opacity-70">
         <ParticleWave
-          tone="on-dark"
+          tone="on-light"
           variant="subtle"
           amplitude={amplitude}
           className="h-full w-full"
         />
       </div>
 
-      <div className="relative mx-auto max-w-[1000px] px-5 sm:px-8">
-        <p className="text-center text-[11px] font-medium uppercase tracking-[0.2em] text-white/45">
-          AI Receptionist
+      <div className="relative">
+        <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-[#14141a]/40">
+          [2/2]
         </p>
-        <h2 className="mx-auto mt-4 max-w-xl text-center font-serif text-4xl leading-tight text-white sm:text-5xl">
-          Hear it answer a real request.
-        </h2>
+        <h3 className="mt-3 text-xl font-semibold tracking-tight text-[#14141a]">Voice AI</h3>
+        <p className="mt-2 text-sm leading-relaxed text-[#14141a]/55">
+          Real-time voice conversations, handled end to end.
+        </p>
 
         <div
-          className="mx-auto mt-14 max-w-xl space-y-5"
+          className="mt-5 rounded-xl border border-[#14141a]/10 bg-white/70 px-3.5 py-3 text-xs leading-relaxed text-[#14141a]/70 transition-colors duration-300"
           role="log"
           aria-label="Sample conversation"
         >
-          {TRANSCRIPT.map((entry, i) => (
-            <div
-              key={entry.line}
-              className={`flex flex-col gap-1 rounded-2xl border px-5 py-4 transition-colors duration-500 ${
-                entry.speaker === "Caller" ? "items-start" : "items-end"
-              } ${
-                i === activeIndex
-                  ? "border-white/25 bg-white/[0.06]"
-                  : "border-white/10 bg-white/[0.02]"
-              }`}
-            >
-              <span className="text-[10px] font-medium uppercase tracking-[0.14em] text-white/40">
-                {entry.speaker}
-              </span>
-              <p className="text-sm text-white/85 sm:text-base">{entry.line}</p>
-            </div>
-          ))}
+          <span className="text-[10px] font-medium uppercase tracking-[0.12em] text-[#14141a]/35">
+            {activeLine.speaker}
+          </span>
+          <p className="mt-1">{activeLine.line}</p>
         </div>
 
-        <div className="mx-auto mt-10 max-w-xl rounded-2xl border border-white/10 bg-white/[0.03] p-5">
+        <div className="mt-4 rounded-xl border border-[#14141a]/10 bg-white p-3.5">
           <audio
             ref={audioRef}
             src="/audio/ai-receptionist-demo.mp3"
@@ -212,19 +202,19 @@ export function VoiceDemo() {
             onError={() => setError("This demo audio couldn't be loaded.")}
           />
 
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3">
             <button
               type="button"
               onClick={handlePlayPause}
               aria-label={isPlaying ? "Pause demo" : "Play demo"}
-              className="grid size-11 shrink-0 place-items-center rounded-full bg-white text-[#0a0a0d] transition-transform hover:scale-105"
+              className="grid size-9 shrink-0 place-items-center rounded-full bg-[#14141a] text-white transition-transform hover:scale-105"
             >
-              {isPlaying ? <Pause className="size-4" /> : <Play className="ml-0.5 size-4" />}
+              {isPlaying ? <Pause className="size-3.5" /> : <Play className="ml-0.5 size-3.5" />}
             </button>
 
             <div
               ref={barsRef}
-              className="relative flex h-11 flex-1 cursor-pointer items-center gap-[3px]"
+              className="relative flex h-9 flex-1 cursor-pointer items-center gap-[2px]"
               role="slider"
               aria-label="Seek demo audio"
               aria-valuemin={0}
@@ -245,8 +235,8 @@ export function VoiceDemo() {
                 return (
                   <span
                     key={i}
-                    className={`w-full rounded-full transition-colors ${played ? "bg-white" : "bg-white/20"}`}
-                    style={{ height: `${Math.max(8, level * 100)}%` }}
+                    className={`w-full rounded-full transition-colors ${played ? "bg-[#14141a]" : "bg-[#14141a]/15"}`}
+                    style={{ height: `${Math.max(10, level * 100)}%` }}
                   />
                 );
               })}
@@ -256,19 +246,19 @@ export function VoiceDemo() {
               type="button"
               onClick={handleReplay}
               aria-label="Replay demo"
-              className="grid size-9 shrink-0 place-items-center rounded-full border border-white/15 text-white/70 transition-colors hover:text-white"
+              className="grid size-7 shrink-0 place-items-center rounded-full border border-[#14141a]/15 text-[#14141a]/60 transition-colors hover:text-[#14141a]"
             >
-              <RotateCcw className="size-3.5" />
+              <RotateCcw className="size-3" />
             </button>
 
-            <span className="w-16 shrink-0 text-right font-mono text-xs tabular-nums text-white/50">
+            <span className="w-14 shrink-0 text-right font-mono text-[10px] tabular-nums text-[#14141a]/45">
               {formatTime(currentTime)} / {formatTime(duration)}
             </span>
           </div>
 
-          {error ? <p className="mt-3 text-xs text-red-400">{error}</p> : null}
+          {error ? <p className="mt-2 text-[11px] text-red-600">{error}</p> : null}
         </div>
       </div>
-    </section>
+    </div>
   );
 }

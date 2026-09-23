@@ -1,10 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { LandingNav } from "@/components/landing/landing-nav";
 import { Hero } from "@/components/landing/hero";
-import { VoiceDemo } from "@/components/landing/voice-demo";
 import { ValuePropositions } from "@/components/landing/value-propositions";
-import { ChannelSection } from "@/components/landing/channel-section";
-import { WhiteLabelSection } from "@/components/landing/white-label-section";
+import { FeatureShowcase } from "@/components/landing/feature-showcase";
 import { MetricsSection } from "@/components/landing/metrics-section";
 import { IntegrationsSection } from "@/components/landing/integrations-section";
 import { FinalCta } from "@/components/landing/final-cta";
@@ -46,10 +44,8 @@ function Landing() {
     <div className="min-h-screen bg-[#0a0a0d]">
       <LandingNav />
       <Hero />
-      <VoiceDemo />
       <ValuePropositions />
-      <ChannelSection />
-      <WhiteLabelSection />
+      <FeatureShowcase />
       <MetricsSection />
       <IntegrationsSection />
       <FinalCta />
