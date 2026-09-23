@@ -13,6 +13,11 @@
 @theme inline {
   --font-sans: "Manrope", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  /* Landing-page display serif only (ClickAI marketing headlines) — the
+     rest of the app (dashboard, admin) stays on --font-sans. Loaded via
+     the / route's own head() link, not here, so it never ships to pages
+     that don't use it. */
+  --font-serif: "Instrument Serif", Georgia, "Times New Roman", serif;
 
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
