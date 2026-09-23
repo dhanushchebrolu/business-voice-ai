@@ -17,6 +17,7 @@ import {
   ChevronDown,
   Megaphone,
   Contact,
+  MessageCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Logo, StatusPill } from "./primitives";
@@ -53,6 +54,7 @@ const NAV: {
       { to: "/app/knowledge", label: "Knowledge base", icon: BookOpen },
       { to: "/app/agent", label: "AI Receptionist", icon: Bot },
       { to: "/app/numbers", label: "Phone numbers", icon: Hash },
+      { to: "/app/whatsapp", label: "WhatsApp", icon: MessageCircle },
     ],
   },
   {
