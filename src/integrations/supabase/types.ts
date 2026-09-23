@@ -2474,6 +2474,241 @@ export type Database = {
         };
         Relationships: [];
       };
+      whatsapp_connections: {
+        Row: {
+          access_token_ciphertext: string | null;
+          agent_config_id: string | null;
+          business_id: string | null;
+          business_name: string | null;
+          created_at: string;
+          disconnected_at: string | null;
+          display_phone_number: string | null;
+          id: string;
+          last_connected_at: string | null;
+          last_error: string | null;
+          metadata: Json;
+          organization_id: string;
+          phone_number_id: string;
+          status: string;
+          two_step_pin_ciphertext: string | null;
+          updated_at: string;
+          verified_name: string | null;
+          waba_id: string;
+          webhook_subscribed: boolean;
+        };
+        Insert: {
+          access_token_ciphertext?: string | null;
+          agent_config_id?: string | null;
+          business_id?: string | null;
+          business_name?: string | null;
+          created_at?: string;
+          disconnected_at?: string | null;
+          display_phone_number?: string | null;
+          id?: string;
+          last_connected_at?: string | null;
+          last_error?: string | null;
+          metadata?: Json;
+          organization_id: string;
+          phone_number_id: string;
+          status?: string;
+          two_step_pin_ciphertext?: string | null;
+          updated_at?: string;
+          verified_name?: string | null;
+          waba_id: string;
+          webhook_subscribed?: boolean;
+        };
+        Update: {
+          access_token_ciphertext?: string | null;
+          agent_config_id?: string | null;
+          business_id?: string | null;
+          business_name?: string | null;
+          created_at?: string;
+          disconnected_at?: string | null;
+          display_phone_number?: string | null;
+          id?: string;
+          last_connected_at?: string | null;
+          last_error?: string | null;
+          metadata?: Json;
+          organization_id?: string;
+          phone_number_id?: string;
+          status?: string;
+          two_step_pin_ciphertext?: string | null;
+          updated_at?: string;
+          verified_name?: string | null;
+          waba_id?: string;
+          webhook_subscribed?: boolean;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "whatsapp_connections_agent_config_id_fkey";
+            columns: ["agent_config_id"];
+            isOneToOne: false;
+            referencedRelation: "agent_configs";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "whatsapp_connections_business_id_fkey";
+            columns: ["business_id"];
+            isOneToOne: false;
+            referencedRelation: "businesses";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "whatsapp_connections_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      whatsapp_conversations: {
+        Row: {
+          contact_id: string | null;
+          created_at: string;
+          customer_display_name: string | null;
+          id: string;
+          last_message_at: string | null;
+          last_message_preview: string | null;
+          organization_id: string;
+          status: string;
+          unread_count: number;
+          updated_at: string;
+          wa_id: string;
+          whatsapp_connection_id: string;
+        };
+        Insert: {
+          contact_id?: string | null;
+          created_at?: string;
+          customer_display_name?: string | null;
+          id?: string;
+          last_message_at?: string | null;
+          last_message_preview?: string | null;
+          organization_id: string;
+          status?: string;
+          unread_count?: number;
+          updated_at?: string;
+          wa_id: string;
+          whatsapp_connection_id: string;
+        };
+        Update: {
+          contact_id?: string | null;
+          created_at?: string;
+          customer_display_name?: string | null;
+          id?: string;
+          last_message_at?: string | null;
+          last_message_preview?: string | null;
+          organization_id?: string;
+          status?: string;
+          unread_count?: number;
+          updated_at?: string;
+          wa_id?: string;
+          whatsapp_connection_id?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "whatsapp_conversations_contact_id_fkey";
+            columns: ["contact_id"];
+            isOneToOne: false;
+            referencedRelation: "contacts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "whatsapp_conversations_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "whatsapp_conversations_whatsapp_connection_id_fkey";
+            columns: ["whatsapp_connection_id"];
+            isOneToOne: false;
+            referencedRelation: "whatsapp_connections";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      whatsapp_messages: {
+        Row: {
+          contact_id: string | null;
+          content: string | null;
+          conversation_id: string;
+          created_at: string;
+          direction: string;
+          error_message: string | null;
+          id: string;
+          message_type: string;
+          metadata: Json;
+          occurred_at: string;
+          organization_id: string;
+          status: string;
+          wa_message_id: string | null;
+          whatsapp_connection_id: string;
+        };
+        Insert: {
+          contact_id?: string | null;
+          content?: string | null;
+          conversation_id: string;
+          created_at?: string;
+          direction: string;
+          error_message?: string | null;
+          id?: string;
+          message_type?: string;
+          metadata?: Json;
+          occurred_at?: string;
+          organization_id: string;
+          status?: string;
+          wa_message_id?: string | null;
+          whatsapp_connection_id: string;
+        };
+        Update: {
+          contact_id?: string | null;
+          content?: string | null;
+          conversation_id?: string;
+          created_at?: string;
+          direction?: string;
+          error_message?: string | null;
+          id?: string;
+          message_type?: string;
+          metadata?: Json;
+          occurred_at?: string;
+          organization_id?: string;
+          status?: string;
+          wa_message_id?: string | null;
+          whatsapp_connection_id?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "whatsapp_messages_contact_id_fkey";
+            columns: ["contact_id"];
+            isOneToOne: false;
+            referencedRelation: "contacts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "whatsapp_messages_conversation_id_fkey";
+            columns: ["conversation_id"];
+            isOneToOne: false;
+            referencedRelation: "whatsapp_conversations";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "whatsapp_messages_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "whatsapp_messages_whatsapp_connection_id_fkey";
+            columns: ["whatsapp_connection_id"];
+            isOneToOne: false;
+            referencedRelation: "whatsapp_connections";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
     };
     Views: {
       [_ in never]: never;
