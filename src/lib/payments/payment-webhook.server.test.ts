@@ -41,11 +41,26 @@ function makeFakeSupabase(script: { table: string; op: string; result: unknown }
         },
         update(payload: unknown) {
           const filters: Record<string, unknown> = {};
+          const notFilters: Record<string, unknown> = {};
           const chain = {
             eq(col: string, val: unknown) {
               filters[col] = val;
               return chain;
             },
+            neq(col: string, val: unknown) {
+              notFilters[col] = val;
+              return chain;
+            },
+            in(col: string, val: unknown) {
+              filters[col] = val;
+              return chain;
+            },
+            select: () => ({
+              maybeSingle: () =>
+                Promise.resolve(
+                  next(table, "update.select.maybeSingle", payload, filters, notFilters),
+                ),
+            }),
             then(resolve: (v: unknown) => void) {
               resolve(next(table, "update", payload, filters));
             },
@@ -237,7 +252,11 @@ describe("processRazorpayPaymentWebhook — capture happy path", () => {
         result: { data: BASE_PAYMENT_REQUEST, error: null },
       },
       { table: "payment_webhook_events", op: "update", result: { error: null } },
-      { table: "payment_requests", op: "update", result: { error: null } },
+      {
+        table: "payment_requests",
+        op: "update.select.maybeSingle",
+        result: { data: { id: "pr-1" }, error: null },
+      },
       {
         table: "bookings",
         op: "select.maybeSingle",
@@ -276,7 +295,9 @@ describe("processRazorpayPaymentWebhook — capture happy path", () => {
     );
     assert.equal(result.outcome, "captured");
     assert.equal(result.domainEvent?.event_type, "PAYMENT_CAPTURED");
-    const captureUpdate = calls.find((c) => c.table === "payment_requests" && c.op === "update");
+    const captureUpdate = calls.find(
+      (c) => c.table === "payment_requests" && c.op === "update.select.maybeSingle",
+    );
     const payload = captureUpdate!.args[0] as Record<string, unknown>;
     assert.equal(payload["status"], "CAPTURED");
     assert.equal(payload["provider_payment_id"], "pay_xyz");
@@ -291,7 +312,11 @@ describe("processRazorpayPaymentWebhook — capture happy path", () => {
         result: { data: BASE_PAYMENT_REQUEST, error: null },
       },
       { table: "payment_webhook_events", op: "update", result: { error: null } },
-      { table: "payment_requests", op: "update", result: { error: null } },
+      {
+        table: "payment_requests",
+        op: "update.select.maybeSingle",
+        result: { data: { id: "pr-1" }, error: null },
+      },
       {
         table: "bookings",
         op: "select.maybeSingle",
@@ -329,6 +354,56 @@ describe("processRazorpayPaymentWebhook — capture happy path", () => {
     );
     assert.equal(result.outcome, "captured");
     assert.equal(result.domainEvent?.event_type, "PAYMENT_CAPTURED_AFTER_EXPIRY");
+  });
+});
+
+describe("processRazorpayPaymentWebhook — concurrent-capture race (two webhook deliveries, one underlying transaction)", () => {
+  test("a second, concurrently-processed webhook delivery for the same capture (different event_id, e.g. payment_link.paid vs payment.captured) never double-dispatches — loses the DB race and reports already_captured", async () => {
+    // Both deliveries read the row as still PENDING (neither has committed
+    // yet) — this is exactly the scenario the outer payment_webhook_events
+    // (provider, event_id) dedupe does NOT catch, since Razorpay assigns a
+    // distinct event_id to each event type even when they describe the
+    // same payment. The conditional `.neq("status", "CAPTURED")` update is
+    // what actually closes this race: the fake client's scripted response
+    // for this call simulates the "lost the race" outcome directly
+    // (maybeSingle() returns null), exactly as the real conditional UPDATE
+    // would when a concurrent writer already flipped the row first.
+    const { client, calls } = makeFakeSupabase([
+      { table: "payment_webhook_events", op: "insert", result: { error: null } },
+      {
+        table: "payment_requests",
+        op: "select.maybeSingle",
+        result: { data: BASE_PAYMENT_REQUEST, error: null }, // still PENDING as read by this delivery
+      },
+      { table: "payment_webhook_events", op: "update", result: { error: null } },
+      {
+        table: "payment_requests",
+        op: "update.select.maybeSingle",
+        result: { data: null, error: null }, // lost the race: 0 rows matched .neq("status","CAPTURED")
+      },
+      { table: "payment_webhook_events", op: "update", result: { error: null } },
+    ]);
+    const result = await processRazorpayPaymentWebhook(
+      client,
+      {
+        rawBody: razorpayLinkPaidPayload({
+          paymentLinkId: "plink_abc",
+          status: "paid",
+          amountPaid: 50000,
+          currency: "INR",
+          paymentId: "pay_xyz",
+        }),
+        eventId: "evt-race-2",
+      },
+      {},
+    );
+    assert.equal(result.outcome, "already_captured");
+    // No domain event insert must ever be attempted for the losing side of
+    // the race — a second PaymentCaptured event would double-dispatch to
+    // the calendar/WhatsApp/voice consumers (a second Google Calendar
+    // event, a duplicate confirmation message, etc.).
+    assert.ok(!calls.some((c) => c.table === "payment_domain_events"));
+    assert.ok(!calls.some((c) => c.table === "bookings"));
   });
 });
 
@@ -418,7 +493,11 @@ describe("processRazorpayPaymentWebhook — link closed (expired/cancelled)", ()
         result: { data: BASE_PAYMENT_REQUEST, error: null },
       },
       { table: "payment_webhook_events", op: "update", result: { error: null } },
-      { table: "payment_requests", op: "update", result: { error: null } },
+      {
+        table: "payment_requests",
+        op: "update.select.maybeSingle",
+        result: { data: { id: "pr-1" }, error: null },
+      },
       {
         table: "payment_domain_events",
         op: "insert.select.single",
@@ -450,7 +529,9 @@ describe("processRazorpayPaymentWebhook — link closed (expired/cancelled)", ()
       {},
     );
     assert.equal(result.outcome, "expired");
-    const updateCall = calls.find((c) => c.table === "payment_requests" && c.op === "update");
+    const updateCall = calls.find(
+      (c) => c.table === "payment_requests" && c.op === "update.select.maybeSingle",
+    );
     const payload = updateCall!.args[0] as Record<string, unknown>;
     assert.equal(payload["status"], "CANCELLED");
   });
@@ -464,7 +545,11 @@ describe("processRazorpayPaymentWebhook — link closed (expired/cancelled)", ()
         result: { data: BASE_PAYMENT_REQUEST, error: null },
       },
       { table: "payment_webhook_events", op: "update", result: { error: null } },
-      { table: "payment_requests", op: "update", result: { error: null } },
+      {
+        table: "payment_requests",
+        op: "update.select.maybeSingle",
+        result: { data: { id: "pr-1" }, error: null },
+      },
       {
         table: "payment_domain_events",
         op: "insert.select.single",
@@ -497,6 +582,38 @@ describe("processRazorpayPaymentWebhook — link closed (expired/cancelled)", ()
     );
     assert.equal(result.outcome, "expired");
     assert.equal(result.domainEvent?.event_type, "PAYMENT_EXPIRED");
+  });
+
+  test("a second, concurrently-processed webhook delivery for the same closure never double-dispatches PAYMENT_EXPIRED — loses the DB race and is ignored", async () => {
+    const { client, calls } = makeFakeSupabase([
+      { table: "payment_webhook_events", op: "insert", result: { error: null } },
+      {
+        table: "payment_requests",
+        op: "select.maybeSingle",
+        result: { data: BASE_PAYMENT_REQUEST, error: null }, // still PENDING as read by this delivery
+      },
+      { table: "payment_webhook_events", op: "update", result: { error: null } },
+      {
+        table: "payment_requests",
+        op: "update.select.maybeSingle",
+        result: { data: null, error: null }, // lost the race: 0 rows matched .in("status",["CREATED","PENDING"])
+      },
+    ]);
+    const result = await processRazorpayPaymentWebhook(
+      client,
+      {
+        rawBody: razorpayLinkPaidPayload({
+          paymentLinkId: "plink_abc",
+          status: "expired",
+          amountPaid: 0,
+          currency: "INR",
+        }),
+        eventId: "evt-race-expire-2",
+      },
+      {},
+    );
+    assert.equal(result.outcome, "ignored");
+    assert.ok(!calls.some((c) => c.table === "payment_domain_events"));
   });
 });
 

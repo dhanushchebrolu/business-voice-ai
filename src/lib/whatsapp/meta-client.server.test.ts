@@ -311,12 +311,15 @@ describe("sendTextMessage", () => {
     assert.equal(capturedBody?.["messaging_product"], "whatsapp");
     assert.equal(capturedBody?.["to"], "+919876543210");
     assert.equal(capturedBody?.["type"], "text");
-    assert.deepEqual(capturedBody?.["text"], { body: "Here is your payment link: https://rzp.io/i/abc" });
+    assert.deepEqual(capturedBody?.["text"], {
+      body: "Here is your payment link: https://rzp.io/i/abc",
+    });
     assert.equal(capturedAuth, "Bearer access-token-xyz");
   });
 
   test("throws MetaApiError (never fabricates a message id) when the response has no messages array", async () => {
-    const fetchImpl = (async () => jsonResponse(200, { messaging_product: "whatsapp" })) as typeof fetch;
+    const fetchImpl = (async () =>
+      jsonResponse(200, { messaging_product: "whatsapp" })) as typeof fetch;
     const client = makeClient(fetchImpl);
     await assert.rejects(
       () => client.sendTextMessage("phone-id", "+91123", "hi", "token"),
@@ -360,7 +363,14 @@ describe("sendTemplateMessage", () => {
       return jsonResponse(200, { messages: [{ id: "wamid.TEMPLATE2" }] });
     }) as typeof fetch;
     const client = makeClient(fetchImpl);
-    await client.sendTemplateMessage("phone-id", "+91123", "generic_notice", "en_US", undefined, "token");
+    await client.sendTemplateMessage(
+      "phone-id",
+      "+91123",
+      "generic_notice",
+      "en_US",
+      undefined,
+      "token",
+    );
     const template = capturedBody?.["template"] as Record<string, unknown>;
     assert.equal("components" in template, false);
   });

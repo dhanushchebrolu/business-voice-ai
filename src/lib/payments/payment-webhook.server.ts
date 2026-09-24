@@ -272,15 +272,43 @@ export async function processRazorpayPaymentWebhook(
       return { outcome: "currency_mismatch" };
     }
 
-    const { error: captureError } = await supabaseAdmin
+    // Conditional on NOT already CAPTURED (rather than an unconditional
+    // update): Razorpay fires more than one webhook event per underlying
+    // transaction (e.g. payment_link.paid and payment.captured/order.paid
+    // each carry their own event_id, so the outer payment_webhook_events
+    // dedupe does not catch them as literal duplicates), and two such
+    // deliveries for the same capture can be processed concurrently — both
+    // reading this row as still PENDING before either write commits. This
+    // guard makes only the first writer actually apply the CAPTURED
+    // transition; the loser below is treated as already_captured, so a
+    // PaymentCaptured domain event (and the calendar/WhatsApp/voice
+    // dispatch it triggers) is never recorded twice for one payment.
+    // Scoped to `<> CAPTURED` specifically (not the exact previously-read
+    // status) so this never interferes with the unrelated, legitimate race
+    // against the expiration sweep — that transition targets EXPIRED, not
+    // CAPTURED, and PAYMENT_CAPTURED_AFTER_EXPIRY already handles a booking
+    // that has since moved on.
+    const { data: capturedRow, error: captureError } = await supabaseAdmin
       .from("payment_requests")
       .update({
         status: "CAPTURED",
         provider_payment_id: entity.paymentId ?? paymentRequest.provider_payment_id,
         captured_at: new Date().toISOString(),
       })
-      .eq("id", paymentRequest.id);
+      .eq("id", paymentRequest.id)
+      .neq("status", "CAPTURED")
+      .select("id")
+      .maybeSingle();
     if (captureError) throw captureError;
+    if (!capturedRow) {
+      // Lost the race to a concurrent webhook delivery for the same
+      // underlying transaction — the other delivery already completed
+      // this exact capture. Never double-record/double-dispatch.
+      await markWebhookEvent(supabaseAdmin, input.eventId, {
+        error: "Payment was already captured by a concurrent webhook delivery.",
+      });
+      return { outcome: "already_captured" };
+    }
 
     const { data: booking, error: bookingError } = await supabaseAdmin
       .from("bookings")
@@ -307,11 +335,25 @@ export async function processRazorpayPaymentWebhook(
   // CANCELLED specifically; it's recorded as PAYMENT_EXPIRED (the
   // meaningful distinction for downstream consumers is "no money moved,
   // this attempt is over", not why it ended).
-  const { error: updateError } = await supabaseAdmin
+  //
+  // Same conditional-update race guard as the CAPTURED branch above (e.g.
+  // Razorpay sending both payment_link.expired and payment_link.cancelled,
+  // or a redelivery with a different event_id, for the same closed link):
+  // only the first delivery to reach a still-CREATED/PENDING row actually
+  // applies the transition and records/dispatches the domain event; a
+  // second, concurrently-processed delivery for the same closure is a
+  // no-op rather than a duplicate WhatsApp/voice notification.
+  const { data: closedRow, error: updateError } = await supabaseAdmin
     .from("payment_requests")
     .update({ status: mappedStatus })
-    .eq("id", paymentRequest.id);
+    .eq("id", paymentRequest.id)
+    .in("status", ["CREATED", "PENDING"])
+    .select("id")
+    .maybeSingle();
   if (updateError) throw updateError;
+  if (!closedRow) {
+    return { outcome: "ignored" };
+  }
 
   const domainEvent = await recordPaymentDomainEvent(supabaseAdmin, {
     eventType: "PAYMENT_EXPIRED",
