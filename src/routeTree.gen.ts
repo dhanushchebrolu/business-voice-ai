@@ -55,6 +55,7 @@ import { Route as AdminCustomersOrgIdRouteImport } from './routes/admin.customer
 import { Route as AppCampaignsCampaignIdRouteImport } from './routes/app.campaigns.$campaignId'
 import { Route as AppCampaignsNewRouteImport } from './routes/app.campaigns.new'
 import { Route as ApiPublicCronDispatchCampaignsRouteImport } from './routes/api/public/cron/dispatch-campaigns'
+import { Route as ApiPublicCronExpirePaymentsRouteImport } from './routes/api/public/cron/expire-payments'
 import { Route as ApiPublicSarvamClientContextRouteImport } from './routes/api/public/sarvam/client-context'
 import { Route as ApiPublicWebhooksRazorpayRouteImport } from './routes/api/public/webhooks/razorpay'
 import { Route as ApiPublicWebhooksRazorpayPaymentsRouteImport } from './routes/api/public/webhooks/razorpay-payments'
@@ -295,6 +296,12 @@ const ApiPublicCronDispatchCampaignsRoute =
     path: '/api/public/cron/dispatch-campaigns',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicCronExpirePaymentsRoute =
+  ApiPublicCronExpirePaymentsRouteImport.update({
+    id: '/api/public/cron/expire-payments',
+    path: '/api/public/cron/expire-payments',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicSarvamClientContextRoute =
   ApiPublicSarvamClientContextRouteImport.update({
     id: '/api/public/sarvam/client-context',
@@ -391,6 +398,7 @@ export interface FileRoutesByFullPath {
   '/app/campaigns/new': typeof AppCampaignsNewRoute
   '/admin/customers/': typeof AdminCustomersIndexRoute
   '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
+  '/api/public/cron/expire-payments': typeof ApiPublicCronExpirePaymentsRoute
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/razorpay-payments': typeof ApiPublicWebhooksRazorpayPaymentsRoute
@@ -443,6 +451,7 @@ export interface FileRoutesByTo {
   '/app/campaigns/new': typeof AppCampaignsNewRoute
   '/admin/customers': typeof AdminCustomersIndexRoute
   '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
+  '/api/public/cron/expire-payments': typeof ApiPublicCronExpirePaymentsRoute
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/razorpay-payments': typeof ApiPublicWebhooksRazorpayPaymentsRoute
@@ -500,6 +509,7 @@ export interface FileRoutesById {
   '/app/campaigns/new': typeof AppCampaignsNewRoute
   '/admin/customers/': typeof AdminCustomersIndexRoute
   '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
+  '/api/public/cron/expire-payments': typeof ApiPublicCronExpirePaymentsRoute
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/razorpay-payments': typeof ApiPublicWebhooksRazorpayPaymentsRoute
@@ -558,6 +568,7 @@ export interface FileRouteTypes {
     | '/app/campaigns/new'
     | '/admin/customers/'
     | '/api/public/cron/dispatch-campaigns'
+    | '/api/public/cron/expire-payments'
     | '/api/public/sarvam/client-context'
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/razorpay-payments'
@@ -610,6 +621,7 @@ export interface FileRouteTypes {
     | '/app/campaigns/new'
     | '/admin/customers'
     | '/api/public/cron/dispatch-campaigns'
+    | '/api/public/cron/expire-payments'
     | '/api/public/sarvam/client-context'
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/razorpay-payments'
@@ -666,6 +678,7 @@ export interface FileRouteTypes {
     | '/app/campaigns/new'
     | '/admin/customers/'
     | '/api/public/cron/dispatch-campaigns'
+    | '/api/public/cron/expire-payments'
     | '/api/public/sarvam/client-context'
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/razorpay-payments'
@@ -686,6 +699,7 @@ export interface RootRouteChildren {
   PricingRoute: typeof PricingRoute
   ResetPasswordRoute: typeof ResetPasswordRoute
   ApiPublicCronDispatchCampaignsRoute: typeof ApiPublicCronDispatchCampaignsRoute
+  ApiPublicCronExpirePaymentsRoute: typeof ApiPublicCronExpirePaymentsRoute
   ApiPublicSarvamClientContextRoute: typeof ApiPublicSarvamClientContextRoute
   ApiPublicWebhooksRazorpayRoute: typeof ApiPublicWebhooksRazorpayRoute
   ApiPublicWebhooksRazorpayPaymentsRoute: typeof ApiPublicWebhooksRazorpayPaymentsRoute
@@ -1020,6 +1034,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicCronDispatchCampaignsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/cron/expire-payments': {
+      id: '/api/public/cron/expire-payments'
+      path: '/api/public/cron/expire-payments'
+      fullPath: '/api/public/cron/expire-payments'
+      preLoaderRoute: typeof ApiPublicCronExpirePaymentsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/sarvam/client-context': {
       id: '/api/public/sarvam/client-context'
       path: '/api/public/sarvam/client-context'
@@ -1216,6 +1237,7 @@ const rootRouteChildren: RootRouteChildren = {
   PricingRoute: PricingRoute,
   ResetPasswordRoute: ResetPasswordRoute,
   ApiPublicCronDispatchCampaignsRoute: ApiPublicCronDispatchCampaignsRoute,
+  ApiPublicCronExpirePaymentsRoute: ApiPublicCronExpirePaymentsRoute,
   ApiPublicSarvamClientContextRoute: ApiPublicSarvamClientContextRoute,
   ApiPublicWebhooksRazorpayRoute: ApiPublicWebhooksRazorpayRoute,
   ApiPublicWebhooksRazorpayPaymentsRoute:
