@@ -40,7 +40,7 @@ export interface ToolExecutionContext {
   agentConfigId: string | null;
   /** The live call this turn belongs to, if any — threaded through to create_payment_required_booking so a later PaymentCaptured event can find the right in-progress call. */
   callId?: string | undefined;
-  source: "voice" | "whatsapp" | "website" | "manual";
+  source: "voice" | "whatsapp" | "website" | "manual" | "instagram";
   fetchImpl?: typeof fetch;
 }
 

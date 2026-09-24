@@ -58,11 +58,13 @@ import { Route as AppCampaignsNewRouteImport } from './routes/app.campaigns.new'
 import { Route as ApiPublicCronDispatchCampaignsRouteImport } from './routes/api/public/cron/dispatch-campaigns'
 import { Route as ApiPublicCronExpirePaymentsRouteImport } from './routes/api/public/cron/expire-payments'
 import { Route as ApiPublicSarvamClientContextRouteImport } from './routes/api/public/sarvam/client-context'
+import { Route as ApiPublicWebhooksInstagramRouteImport } from './routes/api/public/webhooks/instagram'
 import { Route as ApiPublicWebhooksRazorpayRouteImport } from './routes/api/public/webhooks/razorpay'
 import { Route as ApiPublicWebhooksRazorpayPaymentsRouteImport } from './routes/api/public/webhooks/razorpay-payments'
 import { Route as ApiPublicWebhooksTelephonyRouteImport } from './routes/api/public/webhooks/telephony'
 import { Route as ApiPublicWebhooksWhatsappRouteImport } from './routes/api/public/webhooks/whatsapp'
 import { Route as ApiPublicIntegrationsGoogleCalendarCallbackRouteImport } from './routes/api/public/integrations/google-calendar/callback'
+import { Route as ApiPublicIntegrationsInstagramCallbackRouteImport } from './routes/api/public/integrations/instagram/callback'
 import { Route as ApiPublicIntegrationsRazorpayCallbackRouteImport } from './routes/api/public/integrations/razorpay/callback'
 import { Route as ApiPublicWebhooksExotelMediaTokenRouteImport } from './routes/api/public/webhooks/exotel.media-token'
 
@@ -314,6 +316,12 @@ const ApiPublicSarvamClientContextRoute =
     path: '/api/public/sarvam/client-context',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicWebhooksInstagramRoute =
+  ApiPublicWebhooksInstagramRouteImport.update({
+    id: '/api/public/webhooks/instagram',
+    path: '/api/public/webhooks/instagram',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicWebhooksRazorpayRoute =
   ApiPublicWebhooksRazorpayRouteImport.update({
     id: '/api/public/webhooks/razorpay',
@@ -342,6 +350,12 @@ const ApiPublicIntegrationsGoogleCalendarCallbackRoute =
   ApiPublicIntegrationsGoogleCalendarCallbackRouteImport.update({
     id: '/api/public/integrations/google-calendar/callback',
     path: '/api/public/integrations/google-calendar/callback',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicIntegrationsInstagramCallbackRoute =
+  ApiPublicIntegrationsInstagramCallbackRouteImport.update({
+    id: '/api/public/integrations/instagram/callback',
+    path: '/api/public/integrations/instagram/callback',
     getParentRoute: () => rootRouteImport,
   } as any)
 const ApiPublicIntegrationsRazorpayCallbackRoute =
@@ -407,11 +421,13 @@ export interface FileRoutesByFullPath {
   '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
   '/api/public/cron/expire-payments': typeof ApiPublicCronExpirePaymentsRoute
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
+  '/api/public/webhooks/instagram': typeof ApiPublicWebhooksInstagramRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/razorpay-payments': typeof ApiPublicWebhooksRazorpayPaymentsRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
   '/api/public/webhooks/whatsapp': typeof ApiPublicWebhooksWhatsappRoute
   '/api/public/integrations/google-calendar/callback': typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
+  '/api/public/integrations/instagram/callback': typeof ApiPublicIntegrationsInstagramCallbackRoute
   '/api/public/integrations/razorpay/callback': typeof ApiPublicIntegrationsRazorpayCallbackRoute
   '/api/public/webhooks/exotel/media-token': typeof ApiPublicWebhooksExotelMediaTokenRoute
 }
@@ -461,11 +477,13 @@ export interface FileRoutesByTo {
   '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
   '/api/public/cron/expire-payments': typeof ApiPublicCronExpirePaymentsRoute
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
+  '/api/public/webhooks/instagram': typeof ApiPublicWebhooksInstagramRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/razorpay-payments': typeof ApiPublicWebhooksRazorpayPaymentsRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
   '/api/public/webhooks/whatsapp': typeof ApiPublicWebhooksWhatsappRoute
   '/api/public/integrations/google-calendar/callback': typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
+  '/api/public/integrations/instagram/callback': typeof ApiPublicIntegrationsInstagramCallbackRoute
   '/api/public/integrations/razorpay/callback': typeof ApiPublicIntegrationsRazorpayCallbackRoute
   '/api/public/webhooks/exotel/media-token': typeof ApiPublicWebhooksExotelMediaTokenRoute
 }
@@ -520,11 +538,13 @@ export interface FileRoutesById {
   '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
   '/api/public/cron/expire-payments': typeof ApiPublicCronExpirePaymentsRoute
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
+  '/api/public/webhooks/instagram': typeof ApiPublicWebhooksInstagramRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/razorpay-payments': typeof ApiPublicWebhooksRazorpayPaymentsRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
   '/api/public/webhooks/whatsapp': typeof ApiPublicWebhooksWhatsappRoute
   '/api/public/integrations/google-calendar/callback': typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
+  '/api/public/integrations/instagram/callback': typeof ApiPublicIntegrationsInstagramCallbackRoute
   '/api/public/integrations/razorpay/callback': typeof ApiPublicIntegrationsRazorpayCallbackRoute
   '/api/public/webhooks/exotel/media-token': typeof ApiPublicWebhooksExotelMediaTokenRoute
 }
@@ -580,11 +600,13 @@ export interface FileRouteTypes {
     | '/api/public/cron/dispatch-campaigns'
     | '/api/public/cron/expire-payments'
     | '/api/public/sarvam/client-context'
+    | '/api/public/webhooks/instagram'
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/razorpay-payments'
     | '/api/public/webhooks/telephony'
     | '/api/public/webhooks/whatsapp'
     | '/api/public/integrations/google-calendar/callback'
+    | '/api/public/integrations/instagram/callback'
     | '/api/public/integrations/razorpay/callback'
     | '/api/public/webhooks/exotel/media-token'
   fileRoutesByTo: FileRoutesByTo
@@ -634,11 +656,13 @@ export interface FileRouteTypes {
     | '/api/public/cron/dispatch-campaigns'
     | '/api/public/cron/expire-payments'
     | '/api/public/sarvam/client-context'
+    | '/api/public/webhooks/instagram'
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/razorpay-payments'
     | '/api/public/webhooks/telephony'
     | '/api/public/webhooks/whatsapp'
     | '/api/public/integrations/google-calendar/callback'
+    | '/api/public/integrations/instagram/callback'
     | '/api/public/integrations/razorpay/callback'
     | '/api/public/webhooks/exotel/media-token'
   id:
@@ -692,11 +716,13 @@ export interface FileRouteTypes {
     | '/api/public/cron/dispatch-campaigns'
     | '/api/public/cron/expire-payments'
     | '/api/public/sarvam/client-context'
+    | '/api/public/webhooks/instagram'
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/razorpay-payments'
     | '/api/public/webhooks/telephony'
     | '/api/public/webhooks/whatsapp'
     | '/api/public/integrations/google-calendar/callback'
+    | '/api/public/integrations/instagram/callback'
     | '/api/public/integrations/razorpay/callback'
     | '/api/public/webhooks/exotel/media-token'
   fileRoutesById: FileRoutesById
@@ -713,11 +739,13 @@ export interface RootRouteChildren {
   ApiPublicCronDispatchCampaignsRoute: typeof ApiPublicCronDispatchCampaignsRoute
   ApiPublicCronExpirePaymentsRoute: typeof ApiPublicCronExpirePaymentsRoute
   ApiPublicSarvamClientContextRoute: typeof ApiPublicSarvamClientContextRoute
+  ApiPublicWebhooksInstagramRoute: typeof ApiPublicWebhooksInstagramRoute
   ApiPublicWebhooksRazorpayRoute: typeof ApiPublicWebhooksRazorpayRoute
   ApiPublicWebhooksRazorpayPaymentsRoute: typeof ApiPublicWebhooksRazorpayPaymentsRoute
   ApiPublicWebhooksTelephonyRoute: typeof ApiPublicWebhooksTelephonyRoute
   ApiPublicWebhooksWhatsappRoute: typeof ApiPublicWebhooksWhatsappRoute
   ApiPublicIntegrationsGoogleCalendarCallbackRoute: typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
+  ApiPublicIntegrationsInstagramCallbackRoute: typeof ApiPublicIntegrationsInstagramCallbackRoute
   ApiPublicIntegrationsRazorpayCallbackRoute: typeof ApiPublicIntegrationsRazorpayCallbackRoute
   ApiPublicWebhooksExotelMediaTokenRoute: typeof ApiPublicWebhooksExotelMediaTokenRoute
 }
@@ -1067,6 +1095,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicSarvamClientContextRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/webhooks/instagram': {
+      id: '/api/public/webhooks/instagram'
+      path: '/api/public/webhooks/instagram'
+      fullPath: '/api/public/webhooks/instagram'
+      preLoaderRoute: typeof ApiPublicWebhooksInstagramRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/webhooks/razorpay': {
       id: '/api/public/webhooks/razorpay'
       path: '/api/public/webhooks/razorpay'
@@ -1100,6 +1135,13 @@ declare module '@tanstack/react-router' {
       path: '/api/public/integrations/google-calendar/callback'
       fullPath: '/api/public/integrations/google-calendar/callback'
       preLoaderRoute: typeof ApiPublicIntegrationsGoogleCalendarCallbackRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/integrations/instagram/callback': {
+      id: '/api/public/integrations/instagram/callback'
+      path: '/api/public/integrations/instagram/callback'
+      fullPath: '/api/public/integrations/instagram/callback'
+      preLoaderRoute: typeof ApiPublicIntegrationsInstagramCallbackRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/public/integrations/razorpay/callback': {
@@ -1260,6 +1302,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicCronDispatchCampaignsRoute: ApiPublicCronDispatchCampaignsRoute,
   ApiPublicCronExpirePaymentsRoute: ApiPublicCronExpirePaymentsRoute,
   ApiPublicSarvamClientContextRoute: ApiPublicSarvamClientContextRoute,
+  ApiPublicWebhooksInstagramRoute: ApiPublicWebhooksInstagramRoute,
   ApiPublicWebhooksRazorpayRoute: ApiPublicWebhooksRazorpayRoute,
   ApiPublicWebhooksRazorpayPaymentsRoute:
     ApiPublicWebhooksRazorpayPaymentsRoute,
@@ -1267,6 +1310,8 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicWebhooksWhatsappRoute: ApiPublicWebhooksWhatsappRoute,
   ApiPublicIntegrationsGoogleCalendarCallbackRoute:
     ApiPublicIntegrationsGoogleCalendarCallbackRoute,
+  ApiPublicIntegrationsInstagramCallbackRoute:
+    ApiPublicIntegrationsInstagramCallbackRoute,
   ApiPublicIntegrationsRazorpayCallbackRoute:
     ApiPublicIntegrationsRazorpayCallbackRoute,
   ApiPublicWebhooksExotelMediaTokenRoute:

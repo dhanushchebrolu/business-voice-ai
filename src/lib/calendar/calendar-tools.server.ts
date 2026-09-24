@@ -220,7 +220,7 @@ export interface CreateCalendarEventInput {
   customerEmail?: string | undefined;
   startIso: string;
   endIso: string;
-  source: "voice" | "whatsapp" | "website" | "manual";
+  source: "voice" | "whatsapp" | "website" | "manual" | "instagram";
   idempotencyKey?: string | undefined;
   notes?: string | undefined;
 }

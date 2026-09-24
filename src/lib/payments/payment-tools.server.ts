@@ -62,7 +62,7 @@ export interface CreatePaymentRequiredBookingToolInput {
   customerEmail?: string | undefined;
   startIso: string;
   endIso: string;
-  source: "voice" | "whatsapp" | "website" | "manual";
+  source: "voice" | "whatsapp" | "website" | "manual" | "instagram";
   idempotencyKey: string;
   callId?: string | undefined;
 }

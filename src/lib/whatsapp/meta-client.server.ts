@@ -1,6 +1,11 @@
 /**
- * Centralized HTTP client for Meta's WhatsApp Business Platform Graph API
- * — the only place in this codebase that talks to graph.facebook.com.
+ * WhatsApp-specific Meta Graph API client — the only place in this
+ * codebase that talks to WhatsApp Cloud API endpoints. Generic HTTP/error
+ * handling now lives in meta-graph-client.server.ts's MetaGraphClientBase
+ * (extracted in Phase 5 so Instagram's client can share it — see that
+ * file's module doc for the extraction rationale). This file's own public
+ * API, request shapes, and error mapping are unchanged from before that
+ * extraction: meta-client.server.test.ts (Phase 2) passes unmodified.
  *
  * VERIFICATION STATUS (read before touching this file): WebFetch is fully
  * blocked in this environment for every external domain, including
@@ -59,156 +64,24 @@
  * corroborating consistency than the narrower onboarding endpoints above.
  */
 
-export class MetaApiError extends Error {
-  status: number;
-  constructor(message: string, status = 502) {
-    super(message);
-    this.status = status;
-  }
-}
+import { MetaGraphClientBase, MetaApiError } from "../meta/meta-graph-client.server.ts";
+import type { MetaGraphClientConfig } from "../meta/meta-graph-client.server.ts";
 
-export interface MetaWhatsAppClientConfig {
-  appId: string;
-  appSecret: string;
-  /** Graph API version, e.g. "v23.0" — see meta-config.server.ts's doc comment on why this has no hardcoded default. */
-  graphApiVersion: string;
-  /** Defaults to global fetch — injectable so tests never hit a real network. */
-  fetchImpl?: typeof fetch | undefined;
-  /** Defaults to 15000ms. */
-  timeoutMs?: number | undefined;
-}
+export { MetaApiError };
 
-const GRAPH_BASE_URL = "https://graph.facebook.com";
-const DEFAULT_TIMEOUT_MS = 15_000;
+export type MetaWhatsAppClientConfig = MetaGraphClientConfig;
 
-function asPlainObject(v: unknown): Record<string, unknown> | undefined {
-  return v && typeof v === "object" && !Array.isArray(v)
-    ? (v as Record<string, unknown>)
-    : undefined;
-}
-
-/**
- * Meta's error envelope is consistently `{ error: { message, type, code,
- * error_subcode?, fbtrace_id? } }`. Extracts just `message`, truncated —
- * this is Meta's own text describing what was wrong with OUR request, not
- * a reflection of anything secret we sent, so it is safe to surface, but
- * still capped in length defensively.
- */
-function extractSafeErrorMessage(parsed: unknown): string | undefined {
-  const obj = asPlainObject(parsed);
-  const errorObj = asPlainObject(obj?.["error"]);
-  const message = errorObj?.["message"];
-  return typeof message === "string" && message ? message.slice(0, 300) : undefined;
-}
-
-function mapErrorResponse(status: number, parsed: unknown, rawText: string): MetaApiError {
-  const safeDetail = extractSafeErrorMessage(parsed) ?? rawText.slice(0, 200);
-  const suffix = safeDetail ? ` ${safeDetail}` : "";
-  switch (status) {
-    case 400:
-      return new MetaApiError(`Meta rejected the request as invalid.${suffix}`, 400);
-    case 401:
-      return new MetaApiError("Meta rejected the credential as invalid or expired.", 401);
-    case 403:
-      return new MetaApiError(
-        `Meta denied access to this WhatsApp asset — the granted permissions may not cover it.${suffix}`,
-        403,
-      );
-    case 429:
-      return new MetaApiError("Meta rate-limited this request. Please retry shortly.", 429);
-    case 500:
-    case 502:
-    case 503:
-    case 504:
-      return new MetaApiError("Meta is temporarily unavailable. Please retry.", 503);
-    default:
-      return new MetaApiError(`Meta returned an unexpected error (${status}).${suffix}`, status);
-  }
-}
-
-interface RequestOptions {
-  query?: Record<string, string> | undefined;
-  body?: Record<string, unknown> | undefined;
-  accessToken?: string | undefined;
-}
-
-export class MetaWhatsAppClient {
-  private readonly config: MetaWhatsAppClientConfig;
-
-  constructor(config: MetaWhatsAppClientConfig) {
-    this.config = config;
-  }
-
-  private async request<T>(
-    method: "GET" | "POST",
-    path: string,
-    options: RequestOptions = {},
-  ): Promise<T> {
-    const fetchImpl = this.config.fetchImpl ?? fetch;
-    const url = new URL(`${GRAPH_BASE_URL}/${this.config.graphApiVersion}${path}`);
-    for (const [key, value] of Object.entries(options.query ?? {})) {
-      url.searchParams.set(key, value);
-    }
-
-    const headers: Record<string, string> = {};
-    if (options.accessToken) headers["Authorization"] = `Bearer ${options.accessToken}`;
-    if (options.body !== undefined) headers["Content-Type"] = "application/json";
-
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.config.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-
-    let res: Response;
-    try {
-      res = await fetchImpl(url.toString(), {
-        method,
-        headers,
-        ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
-        signal: controller.signal,
-      });
-    } catch (err) {
-      if (err instanceof Error && err.name === "AbortError") {
-        throw new MetaApiError("Meta did not respond in time. Please retry.", 503);
-      }
-      throw new MetaApiError("Could not reach Meta. Please retry.", 503);
-    } finally {
-      clearTimeout(timer);
-    }
-
-    const rawText = await res.text().catch(() => "");
-    let parsed: unknown;
-    try {
-      parsed = rawText ? JSON.parse(rawText) : undefined;
-    } catch {
-      parsed = undefined;
-    }
-
-    if (!res.ok) throw mapErrorResponse(res.status, parsed, rawText);
-    return parsed as T;
-  }
-
+export class MetaWhatsAppClient extends MetaGraphClientBase {
   /**
    * Exchanges the short-lived authorization code Embedded Signup v4
    * returned to the browser for a Business Integration System User access
    * token, scoped to exactly the WhatsApp assets the customer granted
-   * during signup. appSecret is sent only here, only in this one request's
-   * query string — never logged, never echoed in a thrown error.
+   * during signup.
    */
   async exchangeAuthorizationCode(
     code: string,
   ): Promise<{ accessToken: string; tokenType: string | null; expiresIn: number | null }> {
-    const parsed = await this.request<Record<string, unknown>>("GET", "/oauth/access_token", {
-      query: { client_id: this.config.appId, client_secret: this.config.appSecret, code },
-    });
-    const accessToken = parsed["access_token"];
-    if (typeof accessToken !== "string" || !accessToken) {
-      throw new MetaApiError(
-        "Meta accepted the authorization code but did not return an access token.",
-        502,
-      );
-    }
-    const tokenType = typeof parsed["token_type"] === "string" ? parsed["token_type"] : null;
-    const expiresIn = typeof parsed["expires_in"] === "number" ? parsed["expires_in"] : null;
-    return { accessToken, tokenType, expiresIn };
+    return this.exchangeAuthorizationCodeCore(code);
   }
 
   /**
@@ -251,7 +124,7 @@ export class MetaWhatsAppClient {
   }
 
   /**
-   * Registers the phone number for Cloud API messaging with a Klyro-
+   * Registers the phone number for Cloud API messaging with a ClickAI-
    * generated 6-digit two-step-verification PIN. Must happen within 14
    * days of Embedded Signup completing (Meta's own requirement — this
    * client does not enforce that window itself; the caller is responsible

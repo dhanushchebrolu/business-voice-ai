@@ -109,7 +109,7 @@ export interface CreateBookingInput {
   startIso: string;
   endIso: string;
   timezone: string;
-  source: "voice" | "whatsapp" | "website" | "manual";
+  source: "voice" | "whatsapp" | "website" | "manual" | "instagram";
   idempotencyKey?: string | undefined;
   notes?: string | undefined;
   businessName: string; // for the Google event description
@@ -404,7 +404,7 @@ export interface CreatePaymentRequiredBookingInput {
   startIso: string;
   endIso: string;
   timezone: string;
-  source: "voice" | "whatsapp" | "website" | "manual";
+  source: "voice" | "whatsapp" | "website" | "manual" | "instagram";
   /** Required (unlike createBooking()'s optional field) — a payment hold must always be safely retryable, since the AI/customer flow may retry after a network hiccup before any payment has been requested. */
   idempotencyKey: string;
   /** How long the hold is honored before the expiration sweep releases it. Defaults to DEFAULT_HOLD_DURATION_MINUTES. */

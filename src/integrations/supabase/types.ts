@@ -3271,6 +3271,363 @@ export type Database = {
           },
         ];
       };
+      instagram_connections: {
+        Row: {
+          access_token_ciphertext: string | null;
+          agent_config_id: string | null;
+          business_id: string | null;
+          created_at: string;
+          disconnected_at: string | null;
+          display_name: string | null;
+          facebook_page_id: string;
+          id: string;
+          instagram_business_account_id: string;
+          last_connected_at: string | null;
+          last_error: string | null;
+          metadata: Json;
+          organization_id: string;
+          profile_picture_url: string | null;
+          status: string;
+          updated_at: string;
+          username: string | null;
+          webhook_subscribed: boolean;
+        };
+        Insert: {
+          access_token_ciphertext?: string | null;
+          agent_config_id?: string | null;
+          business_id?: string | null;
+          created_at?: string;
+          disconnected_at?: string | null;
+          display_name?: string | null;
+          facebook_page_id: string;
+          id?: string;
+          instagram_business_account_id: string;
+          last_connected_at?: string | null;
+          last_error?: string | null;
+          metadata?: Json;
+          organization_id: string;
+          profile_picture_url?: string | null;
+          status?: string;
+          updated_at?: string;
+          username?: string | null;
+          webhook_subscribed?: boolean;
+        };
+        Update: {
+          access_token_ciphertext?: string | null;
+          agent_config_id?: string | null;
+          business_id?: string | null;
+          created_at?: string;
+          disconnected_at?: string | null;
+          display_name?: string | null;
+          facebook_page_id?: string;
+          id?: string;
+          instagram_business_account_id?: string;
+          last_connected_at?: string | null;
+          last_error?: string | null;
+          metadata?: Json;
+          organization_id?: string;
+          profile_picture_url?: string | null;
+          status?: string;
+          updated_at?: string;
+          username?: string | null;
+          webhook_subscribed?: boolean;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "instagram_connections_agent_config_id_fkey";
+            columns: ["agent_config_id"];
+            isOneToOne: false;
+            referencedRelation: "agent_configs";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "instagram_connections_business_id_fkey";
+            columns: ["business_id"];
+            isOneToOne: false;
+            referencedRelation: "businesses";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "instagram_connections_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      instagram_conversations: {
+        Row: {
+          contact_id: string | null;
+          created_at: string;
+          customer_display_name: string | null;
+          customer_username: string | null;
+          id: string;
+          ig_scoped_id: string;
+          instagram_connection_id: string;
+          last_message_at: string | null;
+          last_message_preview: string | null;
+          organization_id: string;
+          status: string;
+          unread_count: number;
+          updated_at: string;
+        };
+        Insert: {
+          contact_id?: string | null;
+          created_at?: string;
+          customer_display_name?: string | null;
+          customer_username?: string | null;
+          id?: string;
+          ig_scoped_id: string;
+          instagram_connection_id: string;
+          last_message_at?: string | null;
+          last_message_preview?: string | null;
+          organization_id: string;
+          status?: string;
+          unread_count?: number;
+          updated_at?: string;
+        };
+        Update: {
+          contact_id?: string | null;
+          created_at?: string;
+          customer_display_name?: string | null;
+          customer_username?: string | null;
+          id?: string;
+          ig_scoped_id?: string;
+          instagram_connection_id?: string;
+          last_message_at?: string | null;
+          last_message_preview?: string | null;
+          organization_id?: string;
+          status?: string;
+          unread_count?: number;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "instagram_conversations_contact_id_fkey";
+            columns: ["contact_id"];
+            isOneToOne: false;
+            referencedRelation: "contacts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "instagram_conversations_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "instagram_conversations_instagram_connection_id_fkey";
+            columns: ["instagram_connection_id"];
+            isOneToOne: false;
+            referencedRelation: "instagram_connections";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      instagram_messages: {
+        Row: {
+          contact_id: string | null;
+          content: string | null;
+          conversation_id: string;
+          created_at: string;
+          direction: string;
+          error_message: string | null;
+          id: string;
+          ig_message_id: string | null;
+          instagram_connection_id: string;
+          is_echo: boolean;
+          message_type: string;
+          metadata: Json;
+          occurred_at: string;
+          organization_id: string;
+          status: string;
+        };
+        Insert: {
+          contact_id?: string | null;
+          content?: string | null;
+          conversation_id: string;
+          created_at?: string;
+          direction: string;
+          error_message?: string | null;
+          id?: string;
+          ig_message_id?: string | null;
+          instagram_connection_id: string;
+          is_echo?: boolean;
+          message_type?: string;
+          metadata?: Json;
+          occurred_at?: string;
+          organization_id: string;
+          status?: string;
+        };
+        Update: {
+          contact_id?: string | null;
+          content?: string | null;
+          conversation_id?: string;
+          created_at?: string;
+          direction?: string;
+          error_message?: string | null;
+          id?: string;
+          ig_message_id?: string | null;
+          instagram_connection_id?: string;
+          is_echo?: boolean;
+          message_type?: string;
+          metadata?: Json;
+          occurred_at?: string;
+          organization_id?: string;
+          status?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "instagram_messages_contact_id_fkey";
+            columns: ["contact_id"];
+            isOneToOne: false;
+            referencedRelation: "contacts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "instagram_messages_conversation_id_fkey";
+            columns: ["conversation_id"];
+            isOneToOne: false;
+            referencedRelation: "instagram_conversations";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "instagram_messages_instagram_connection_id_fkey";
+            columns: ["instagram_connection_id"];
+            isOneToOne: false;
+            referencedRelation: "instagram_connections";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "instagram_messages_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      instagram_automation_rules: {
+        Row: {
+          action_config: Json;
+          action_type: string;
+          business_id: string | null;
+          created_at: string;
+          enabled: boolean;
+          id: string;
+          instagram_connection_id: string;
+          name: string;
+          organization_id: string;
+          trigger_config: Json;
+          trigger_type: string;
+          updated_at: string;
+        };
+        Insert: {
+          action_config?: Json;
+          action_type: string;
+          business_id?: string | null;
+          created_at?: string;
+          enabled?: boolean;
+          id?: string;
+          instagram_connection_id: string;
+          name?: string;
+          organization_id: string;
+          trigger_config?: Json;
+          trigger_type: string;
+          updated_at?: string;
+        };
+        Update: {
+          action_config?: Json;
+          action_type?: string;
+          business_id?: string | null;
+          created_at?: string;
+          enabled?: boolean;
+          id?: string;
+          instagram_connection_id?: string;
+          name?: string;
+          organization_id?: string;
+          trigger_config?: Json;
+          trigger_type?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "instagram_automation_rules_business_id_fkey";
+            columns: ["business_id"];
+            isOneToOne: false;
+            referencedRelation: "businesses";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "instagram_automation_rules_instagram_connection_id_fkey";
+            columns: ["instagram_connection_id"];
+            isOneToOne: false;
+            referencedRelation: "instagram_connections";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "instagram_automation_rules_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      instagram_comment_events: {
+        Row: {
+          action_taken: string;
+          comment_id: string;
+          created_at: string;
+          id: string;
+          instagram_connection_id: string;
+          matched_rule_id: string | null;
+          organization_id: string;
+        };
+        Insert: {
+          action_taken?: string;
+          comment_id: string;
+          created_at?: string;
+          id?: string;
+          instagram_connection_id: string;
+          matched_rule_id?: string | null;
+          organization_id: string;
+        };
+        Update: {
+          action_taken?: string;
+          comment_id?: string;
+          created_at?: string;
+          id?: string;
+          instagram_connection_id?: string;
+          matched_rule_id?: string | null;
+          organization_id?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "instagram_comment_events_instagram_connection_id_fkey";
+            columns: ["instagram_connection_id"];
+            isOneToOne: false;
+            referencedRelation: "instagram_connections";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "instagram_comment_events_matched_rule_id_fkey";
+            columns: ["matched_rule_id"];
+            isOneToOne: false;
+            referencedRelation: "instagram_automation_rules";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "instagram_comment_events_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
     };
     Views: {
       [_ in never]: never;

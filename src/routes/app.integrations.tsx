@@ -10,6 +10,11 @@ import {
   type GoogleCalendarOption,
 } from "@/components/integrations/GoogleCalendarCard";
 import { RazorpayCard } from "@/components/integrations/RazorpayCard";
+import { InstagramCard } from "@/components/integrations/InstagramCard";
+import {
+  InstagramAutomationRules,
+  type InstagramAutomationRuleSummary,
+} from "@/components/integrations/InstagramAutomationRules";
 import {
   listGoogleCalendarConnections,
   listOrgBusinessesForCalendar,
@@ -26,10 +31,23 @@ import {
   verifyRazorpayConnection,
   disconnectRazorpayConnection,
 } from "@/lib/razorpay.functions";
+import {
+  listInstagramConnections,
+  listOrgBusinessesForInstagram,
+  getInstagramIntegrationStatus,
+  startInstagramConnection,
+  assignInstagramBot,
+  disconnectInstagramConnection,
+  listInstagramAutomationRules,
+  upsertInstagramAutomationRule,
+  toggleInstagramAutomationRule,
+  deleteInstagramAutomationRule,
+} from "@/lib/instagram.functions";
 
 const searchSchema = z.object({
   google_calendar: z.enum(["connected", "error"]).optional(),
   razorpay: z.enum(["connected", "error"]).optional(),
+  instagram: z.enum(["connected", "error"]).optional(),
   reason: z.string().optional(),
   connection_id: z.string().optional(),
 });
@@ -66,6 +84,26 @@ const razorpayStatusQuery = queryOptions({
   queryFn: () => getRazorpayIntegrationStatus(),
 });
 
+const instagramBusinessesQuery = queryOptions({
+  queryKey: ["instagram-businesses"],
+  queryFn: () => listOrgBusinessesForInstagram(),
+});
+
+const instagramConnectionsQuery = queryOptions({
+  queryKey: ["instagram-connections"],
+  queryFn: () => listInstagramConnections(),
+});
+
+const instagramStatusQuery = queryOptions({
+  queryKey: ["instagram-integration-status"],
+  queryFn: () => getInstagramIntegrationStatus(),
+});
+
+const instagramAutomationRulesQuery = queryOptions({
+  queryKey: ["instagram-automation-rules"],
+  queryFn: () => listInstagramAutomationRules(),
+});
+
 function IntegrationsPage() {
   const search = useSearch({ from: "/app/integrations" });
   const queryClient = useQueryClient();
@@ -80,10 +118,21 @@ function IntegrationsPage() {
   const verifyRazorpayFn = useServerFn(verifyRazorpayConnection);
   const disconnectRazorpayFn = useServerFn(disconnectRazorpayConnection);
 
+  const startInstagramFn = useServerFn(startInstagramConnection);
+  const assignInstagramBotFn = useServerFn(assignInstagramBot);
+  const disconnectInstagramFn = useServerFn(disconnectInstagramConnection);
+  const upsertInstagramRuleFn = useServerFn(upsertInstagramAutomationRule);
+  const toggleInstagramRuleFn = useServerFn(toggleInstagramAutomationRule);
+  const deleteInstagramRuleFn = useServerFn(deleteInstagramAutomationRule);
+
   const businessesRes = useQuery(businessesQuery);
   const connectionsRes = useQuery(connectionsQuery);
   const razorpayConnectionsRes = useQuery(razorpayConnectionsQuery);
   const razorpayStatusRes = useQuery(razorpayStatusQuery);
+  const instagramBusinessesRes = useQuery(instagramBusinessesQuery);
+  const instagramConnectionsRes = useQuery(instagramConnectionsQuery);
+  const instagramStatusRes = useQuery(instagramStatusQuery);
+  const instagramAutomationRulesRes = useQuery(instagramAutomationRulesQuery);
 
   const [connectingBusinessId, setConnectingBusinessId] = useState<string | null>(null);
   const [loadingCalendarsFor, setLoadingCalendarsFor] = useState<string | null>(null);
@@ -97,6 +146,12 @@ function IntegrationsPage() {
   const [reconnectingRazorpayId, setReconnectingRazorpayId] = useState<string | null>(null);
   const [verifyingRazorpayId, setVerifyingRazorpayId] = useState<string | null>(null);
   const [disconnectingRazorpayId, setDisconnectingRazorpayId] = useState<string | null>(null);
+
+  const [connectingInstagram, setConnectingInstagram] = useState(false);
+  const [assigningInstagramId, setAssigningInstagramId] = useState<string | null>(null);
+  const [disconnectingInstagramId, setDisconnectingInstagramId] = useState<string | null>(null);
+  const [savingInstagramRule, setSavingInstagramRule] = useState(false);
+  const [deletingInstagramRuleId, setDeletingInstagramRuleId] = useState<string | null>(null);
 
   useEffect(() => {
     if (search.google_calendar === "connected") {
@@ -119,6 +174,25 @@ function IntegrationsPage() {
         reason === "denied"
           ? "Razorpay connection was cancelled."
           : "Couldn't connect Razorpay. Please try again.",
+      );
+    }
+    if (search.instagram === "connected") {
+      toast.success(
+        search.reason === "needs_attention"
+          ? "Instagram connected, but needs attention — see the connection below."
+          : "Instagram connected.",
+      );
+      void queryClient.invalidateQueries({ queryKey: ["instagram-connections"] });
+    } else if (search.instagram === "error") {
+      const reason = search.reason ?? "unknown_error";
+      toast.error(
+        reason === "denied"
+          ? "Instagram connection was cancelled."
+          : reason === "no_instagram_account"
+            ? "No Instagram professional account is linked to the Facebook Page(s) you granted access to."
+            : reason === "ambiguous_account"
+              ? "You granted access to more than one Instagram account. Please reconnect and grant access to only one."
+              : "Couldn't connect Instagram. Please try again.",
       );
     }
     // Intentionally only reacts to the query params present on the initial
@@ -242,6 +316,106 @@ function IntegrationsPage() {
     }
   }
 
+  async function handleConnectInstagram() {
+    setConnectingInstagram(true);
+    try {
+      const businessId = instagramBusinessesRes.data?.[0]?.id ?? null;
+      const result = await startInstagramFn({ data: { businessId } });
+      window.location.href = result.authorizationUrl;
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't start the Instagram connection.");
+      setConnectingInstagram(false);
+    }
+  }
+
+  async function handleAssignInstagramBot(connectionId: string, agentConfigId: string | null) {
+    setAssigningInstagramId(connectionId);
+    try {
+      await assignInstagramBotFn({ data: { connectionId, agentConfigId } });
+      toast.success("Bot assignment updated.");
+      await queryClient.invalidateQueries({ queryKey: ["instagram-connections"] });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't update the bot assignment.");
+    } finally {
+      setAssigningInstagramId(null);
+    }
+  }
+
+  async function handleDisconnectInstagram(connectionId: string) {
+    setDisconnectingInstagramId(connectionId);
+    try {
+      await disconnectInstagramFn({ data: { connectionId } });
+      toast.success("Instagram disconnected.");
+      await queryClient.invalidateQueries({ queryKey: ["instagram-connections"] });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't disconnect Instagram.");
+    } finally {
+      setDisconnectingInstagramId(null);
+    }
+  }
+
+  async function handleSaveInstagramRule(input: {
+    instagramConnectionId: string;
+    name: string;
+    triggerType: "comment_keyword" | "comment_any";
+    keywords: string;
+    actionType: "public_reply" | "private_dm" | "ai_dm";
+    replyText: string;
+    dmText: string;
+  }) {
+    setSavingInstagramRule(true);
+    try {
+      await upsertInstagramRuleFn({
+        data: {
+          instagramConnectionId: input.instagramConnectionId,
+          name: input.name,
+          triggerType: input.triggerType,
+          triggerConfig: {
+            keywords:
+              input.triggerType === "comment_keyword"
+                ? input.keywords
+                    .split(",")
+                    .map((k) => k.trim())
+                    .filter(Boolean)
+                : undefined,
+          },
+          actionType: input.actionType,
+          actionConfig: {
+            replyText: input.actionType === "public_reply" ? input.replyText : undefined,
+            dmText: input.actionType === "private_dm" ? input.dmText : undefined,
+          },
+        },
+      });
+      toast.success("Automation rule added.");
+      await queryClient.invalidateQueries({ queryKey: ["instagram-automation-rules"] });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't save that automation rule.");
+    } finally {
+      setSavingInstagramRule(false);
+    }
+  }
+
+  async function handleToggleInstagramRule(id: string, enabled: boolean) {
+    try {
+      await toggleInstagramRuleFn({ data: { id, enabled } });
+      await queryClient.invalidateQueries({ queryKey: ["instagram-automation-rules"] });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't update that rule.");
+    }
+  }
+
+  async function handleDeleteInstagramRule(id: string) {
+    setDeletingInstagramRuleId(id);
+    try {
+      await deleteInstagramRuleFn({ data: { id } });
+      await queryClient.invalidateQueries({ queryKey: ["instagram-automation-rules"] });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't delete that rule.");
+    } finally {
+      setDeletingInstagramRuleId(null);
+    }
+  }
+
   const loading = businessesRes.isLoading || connectionsRes.isLoading;
 
   return (
@@ -318,6 +492,41 @@ function IntegrationsPage() {
           </div>
         </>
       )}
+
+      {(instagramBusinessesRes.data?.length ?? 0) > 0 ? (
+        <div className="grid gap-4 sm:grid-cols-2">
+          <InstagramCard
+            businessName={instagramBusinessesRes.data?.[0]?.name ?? "Your business"}
+            configured={instagramStatusRes.data?.configured ?? false}
+            connections={instagramConnectionsRes.data ?? []}
+            businesses={instagramBusinessesRes.data ?? []}
+            connecting={connectingInstagram}
+            onConnect={handleConnectInstagram}
+            assigningId={assigningInstagramId}
+            onAssignBot={handleAssignInstagramBot}
+            disconnectingId={disconnectingInstagramId}
+            onDisconnect={handleDisconnectInstagram}
+          />
+        </div>
+      ) : null}
+
+      {(instagramConnectionsRes.data?.length ?? 0) > 0 ? (
+        <InstagramAutomationRules
+          connections={(instagramConnectionsRes.data ?? []).map((c) => ({
+            id: c.id,
+            username: c.username,
+            instagram_business_account_id: c.instagram_business_account_id,
+          }))}
+          rules={
+            (instagramAutomationRulesRes.data ?? []) as unknown as InstagramAutomationRuleSummary[]
+          }
+          saving={savingInstagramRule}
+          onSave={handleSaveInstagramRule}
+          deletingId={deletingInstagramRuleId}
+          onDelete={handleDeleteInstagramRule}
+          onToggle={handleToggleInstagramRule}
+        />
+      ) : null}
     </div>
   );
 }
