@@ -15,11 +15,10 @@ import { createFileRoute } from "@tanstack/react-router";
  * HMAC-SHA256 helper the platform-billing webhook uses (not
  * payment-transaction-specific, safe to share).
  *
- * The actual calendar/WhatsApp/voice consumers are wired in additively as
- * those subsystems are built (see payment-events.server.ts's
- * DispatchConsumers) — this route always calls processRazorpayPaymentWebhook
- * with whatever consumers currently exist; an unwired consumer is simply
- * skipped, never an error.
+ * The calendar/WhatsApp/voice consumers (see payment-events.server.ts's
+ * DispatchConsumers) are all wired in now — this route always calls
+ * processRazorpayPaymentWebhook with whatever consumers currently exist;
+ * an unwired consumer would simply be skipped, never an error.
  */
 export const Route = createFileRoute("/api/public/webhooks/razorpay-payments")({
   server: {
@@ -52,12 +51,18 @@ export const Route = createFileRoute("/api/public/webhooks/razorpay-payments")({
           await import("@/lib/payments/payment-calendar-consumer.server");
         const { handlePaymentEventForWhatsApp } =
           await import("@/lib/payments/payment-whatsapp-consumer.server");
+        const { handlePaymentEventForVoice } =
+          await import("@/lib/payments/payment-voice-consumer.server");
 
         try {
           const result = await processRazorpayPaymentWebhook(
             supabaseAdmin,
             { rawBody: raw, eventId },
-            { calendar: handlePaymentCapturedForCalendar, whatsapp: handlePaymentEventForWhatsApp },
+            {
+              calendar: handlePaymentCapturedForCalendar,
+              whatsapp: handlePaymentEventForWhatsApp,
+              voice: handlePaymentEventForVoice,
+            },
           );
           return new Response(JSON.stringify({ outcome: result.outcome }), {
             headers: { "content-type": "application/json" },

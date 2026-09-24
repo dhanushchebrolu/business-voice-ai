@@ -68,8 +68,9 @@ describe("failure handling never returns a raw/unhandled error", () => {
 });
 
 describe("consumer wiring is additive, not hardcoded to assume every subsystem exists", () => {
-  test("passes the calendar and whatsapp consumers explicitly, leaving voice to be added later without touching signature/idempotency logic", () => {
+  test("passes the calendar, whatsapp, and voice consumers explicitly", () => {
     assert.match(src, /calendar: handlePaymentCapturedForCalendar/);
     assert.match(src, /whatsapp: handlePaymentEventForWhatsApp/);
+    assert.match(src, /voice: handlePaymentEventForVoice/);
   });
 });

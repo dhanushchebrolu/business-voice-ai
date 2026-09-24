@@ -253,13 +253,13 @@ describe("silence/timeout handling — wiring", () => {
     assert.match(caseBody, /setState\(session, "interrupted"\);/);
   });
 
-  test("speech_start while listening moves to transcribing (a distinct, explicit state)", () => {
+  test("speech_start while listening (or waiting_on_payment, Phase 4) moves to transcribing (a distinct, explicit state)", () => {
     const caseStart = src.indexOf('case "speech_start": {');
     const caseEnd = src.indexOf('case "speech_end":', caseStart);
     const caseBody = src.slice(caseStart, caseEnd);
     assert.match(
       caseBody,
-      /else if \(state === "listening"\) \{\s*\n\s*setState\(session, "transcribing"\);/,
+      /else if \(state === "listening" \|\| state === "waiting_on_payment"\) \{\s*\n\s*setState\(session, "transcribing"\);/,
     );
   });
 

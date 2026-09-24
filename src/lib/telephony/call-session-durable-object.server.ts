@@ -8,6 +8,7 @@ import {
   startRuntimeSession,
   terminateRuntimeSession,
   getActiveSession,
+  injectPaymentEvent,
   type StartRuntimeSessionInput,
 } from "../voice-runtime.server.ts";
 
@@ -150,6 +151,9 @@ export class CallSessionDurableObject {
       }
       if (url.pathname === "/internal/terminate-runtime" && request.method === "POST") {
         return await this.handleTerminateRuntime(request);
+      }
+      if (url.pathname === "/internal/payment-event" && request.method === "POST") {
+        return await this.handlePaymentEvent(request);
       }
       if (url.pathname === "/internal/status" && request.method === "GET") {
         return this.handleStatus(url);
@@ -540,6 +544,28 @@ export class CallSessionDurableObject {
     // already-ending/ended/nonexistent session is a documented no-op).
     await terminateRuntimeSession(body.callId, body.reason);
     return jsonResponse({ ok: true });
+  }
+
+  /**
+   * Phase 4: the "Durable Object RPC" leg of the payment event
+   * architecture — payment-voice-consumer.server.ts calls this once a
+   * Razorpay webhook has verified a payment and dispatched the
+   * corresponding domain event. `message` is an already-composed,
+   * plain-text string (this class has no payment-domain knowledge, same
+   * as voice-runtime.server.ts's injectPaymentEvent it delegates to).
+   * {handled:false} means no active session exists for this callId
+   * (already ended, or never started) — the documented, expected
+   * ended-call fallback, not an error.
+   */
+  private async handlePaymentEvent(request: Request): Promise<Response> {
+    const body = (await request.json()) as { callId: string; message: string };
+    const result = await injectPaymentEvent(body.callId, body.message);
+    console.info("call_session_do:payment_event", {
+      doId: this.state.id.toString(),
+      callId: body.callId,
+      handled: result.handled,
+    });
+    return jsonResponse(result);
   }
 
   private handleStatus(url: URL): Response {

@@ -102,6 +102,18 @@ export type RuntimeState =
   | "thinking"
   | "speaking"
   | "interrupted"
+  // Phase 4: entered right after a turn whose AI tool call successfully
+  // requested a payment (request_payment) — the caller can still speak
+  // normally (treated like "listening" for STT/barge-in purposes; see
+  // isAwaitingCaller), but a separate, bounded payment-wait timer is also
+  // running (see armPaymentWaitTimer). It resolves one of three ways: a
+  // PaymentCaptured/Failed/Expired domain event is injected
+  // (injectPaymentEvent, from the Razorpay webhook via the voice domain-
+  // event consumer), the bounded timeout elapses (a graceful "still
+  // waiting" fallback is spoken and the runtime returns to listening), or
+  // the caller simply keeps talking (cancels the wait like any other
+  // utterance).
+  | "waiting_on_payment"
   | "ending"
   | "ended"
   | "failed";
@@ -116,18 +128,47 @@ export type RuntimeState =
 const RUNTIME_TRANSITIONS: Record<RuntimeState, RuntimeState[]> = {
   created: ["connecting", "failed", "ending"],
   connecting: ["greeting", "failed", "ending"],
-  greeting: ["listening", "interrupted", "failed", "ending"],
+  // greeting -> speaking: the rare case where a PaymentCaptured/Failed/
+  // Expired event is injected (injectPaymentEvent) while the initial
+  // greeting is still being spoken — the injected message takes over as
+  // an ordinary "speaking" turn rather than being dropped.
+  greeting: ["listening", "speaking", "interrupted", "failed", "ending"],
   // listening/transcribing/interrupted -> speaking: not only via an LLM
   // turn (thinking -> speaking) — the silence-prompt ("are you still
   // there?") and silence-goodbye messages are canned speech spoken
   // directly from whichever of these three states the runtime was waiting
   // on the caller in (see speakSilencePrompt/endDueToSilence), with no
   // LLM call involved.
-  listening: ["transcribing", "thinking", "interrupted", "speaking", "failed", "ending"],
+  listening: [
+    "transcribing",
+    "thinking",
+    "interrupted",
+    "speaking",
+    "waiting_on_payment",
+    "failed",
+    "ending",
+  ],
   transcribing: ["thinking", "listening", "speaking", "failed", "ending"],
   thinking: ["speaking", "listening", "interrupted", "failed", "ending"],
-  speaking: ["listening", "interrupted", "failed", "ending"],
+  // speaking -> waiting_on_payment: handleUserUtterance's own post-speak
+  // transition when the turn just spoken included a successful
+  // request_payment tool call (see getReply's enteredPaymentWait).
+  speaking: ["listening", "waiting_on_payment", "interrupted", "failed", "ending"],
   interrupted: ["thinking", "listening", "transcribing", "speaking", "failed", "ending"],
+  // waiting_on_payment behaves like listening for caller-speech purposes
+  // (isAwaitingCaller includes it) — same onward transitions listening
+  // itself allows, plus back to listening once the bounded wait resolves
+  // one way or another (armPaymentWaitTimer's own timeout, or
+  // injectPaymentEvent).
+  waiting_on_payment: [
+    "transcribing",
+    "thinking",
+    "interrupted",
+    "speaking",
+    "listening",
+    "failed",
+    "ending",
+  ],
   ending: ["ended", "failed"],
   ended: [],
   failed: [],
@@ -304,6 +345,8 @@ interface Session {
   accumulatingUserText: string;
   silenceTimer: ReturnType<typeof setTimeout> | null;
   silencePromptSent: boolean;
+  /** Bounded wait for a PaymentCaptured/Failed/Expired event, armed only while state is "waiting_on_payment" — see armPaymentWaitTimer. */
+  paymentWaitTimer: ReturnType<typeof setTimeout> | null;
   /** Frames arriving after the bridge exists but before STT has connected — see startRuntimeSession. */
   pendingInboundFrames: AudioFrame[];
   /** Guards against a provider redelivering the exact same final_transcript event — see onSttEvent. */
@@ -335,8 +378,25 @@ const DUPLICATE_TRANSCRIPT_WINDOW_MS = 2_000;
 const SILENCE_PROMPT_MS = 12_000;
 const SILENCE_HANGUP_MS = 10_000;
 
+/**
+ * How long the runtime waits, after successfully requesting a payment,
+ * before giving up on hearing back from a PaymentCaptured/Failed/Expired
+ * event and speaking a graceful fallback instead. A conservative default,
+ * not validated against live customer payment-completion latency (UPI
+ * app switches, OTP entry, etc.) — deliberately configurable rather than
+ * hardcoded elsewhere, but not yet exposed as its own env var since no
+ * other per-call timeout in this file is either (see SILENCE_PROMPT_MS/
+ * SILENCE_HANGUP_MS for the existing precedent this follows).
+ */
+const PAYMENT_WAIT_TIMEOUT_MS = 90_000;
+
 function isAwaitingCaller(state: RuntimeState): boolean {
-  return state === "listening" || state === "transcribing" || state === "interrupted";
+  return (
+    state === "listening" ||
+    state === "transcribing" ||
+    state === "interrupted" ||
+    state === "waiting_on_payment"
+  );
 }
 
 /** Reads current state through a function boundary so a stale narrowing from before an `await` can't linger. */
@@ -370,6 +430,36 @@ function armSilenceTimer(session: Session) {
     if (session.silencePromptSent) void endDueToSilence(session);
     else void speakSilencePrompt(session);
   }, delay);
+}
+
+function clearPaymentWaitTimer(session: Session) {
+  if (session.paymentWaitTimer) {
+    clearTimeout(session.paymentWaitTimer);
+    session.paymentWaitTimer = null;
+  }
+}
+
+/** Armed only right after entering "waiting_on_payment" (see handleUserUtterance). Fires the bounded fallback exactly once; a PaymentCaptured/Failed/Expired injection (injectPaymentEvent) or any further caller speech clears this timer first, so it never fires after the wait has already resolved another way. */
+function armPaymentWaitTimer(session: Session) {
+  clearPaymentWaitTimer(session);
+  session.paymentWaitTimer = setTimeout(() => {
+    void speakPaymentWaitTimeout(session);
+  }, PAYMENT_WAIT_TIMEOUT_MS);
+}
+
+async function speakPaymentWaitTimeout(session: Session) {
+  if (stateOf(session) !== "waiting_on_payment") return; // already resolved another way
+  log("payment_wait_timeout", session);
+  try {
+    await speak(
+      session,
+      "I haven't received confirmation of your payment yet. I'll text you as soon as it comes through — is there anything else I can help with in the meantime?",
+    );
+  } catch (err) {
+    log("payment_wait_timeout_speech_failed", session, { message: (err as Error).message });
+  }
+  if (stateOf(session) === "speaking") setState(session, "listening");
+  armSilenceTimer(session);
 }
 
 async function speakSilencePrompt(session: Session) {
@@ -509,7 +599,10 @@ async function speak(
  * zero permitted tools (the common case: no capabilities granted) still
  * takes the exact same plain-generateReply path as before tools existed.
  */
-async function getReply(session: Session, messages: ChatMessage[]): Promise<{ reply: string }> {
+async function getReply(
+  session: Session,
+  messages: ChatMessage[],
+): Promise<{ reply: string; enteredPaymentWait: boolean }> {
   const { generateReplyWithTools, resolveAvailableTools, executeTool } = session.deps;
   if (generateReplyWithTools && resolveAvailableTools && executeTool) {
     const tools = await resolveAvailableTools(
@@ -531,14 +624,26 @@ async function getReply(session: Session, messages: ChatMessage[]): Promise<{ re
           tools: result.toolCalls.map((t) => ({ name: t.name, is_error: t.isError })),
         });
       }
-      return { reply: result.reply };
+      // A successful request_payment call means the runtime should switch
+      // to the bounded waiting_on_payment state after this reply is
+      // spoken, rather than plain listening — see handleUserUtterance.
+      const enteredPaymentWait = result.toolCalls.some(
+        (t) => t.name === "request_payment" && !t.isError,
+      );
+      return { reply: result.reply, enteredPaymentWait };
     }
   }
-  return session.deps.generateReply(messages);
+  const { reply } = await session.deps.generateReply(messages);
+  return { reply, enteredPaymentWait: false };
 }
 
 async function handleUserUtterance(session: Session, text: string) {
   session.turns.push({ role: "user", text, at: new Date().toISOString() });
+  // Whatever payment wait was pending no longer applies — the caller is
+  // actively talking again now, and this turn will address whatever they
+  // said (possibly re-arming a fresh wait itself, if it results in another
+  // request_payment call).
+  clearPaymentWaitTimer(session);
   setState(session, "thinking");
   const generation = ++session.generation;
   const requestStarted = Date.now();
@@ -549,7 +654,7 @@ async function handleUserUtterance(session: Session, text: string) {
   ];
 
   try {
-    const { reply } = await getReply(session, messages);
+    const { reply, enteredPaymentWait } = await getReply(session, messages);
     log("llm_completed", session, { latency_ms: Date.now() - requestStarted });
 
     // Soft cancellation: if the caller interrupted (or spoke again) while
@@ -571,8 +676,13 @@ async function handleUserUtterance(session: Session, text: string) {
     session.turns.push({ role: "assistant", text: reply, at: new Date().toISOString() });
     await speak(session, reply);
     if (generation === session.generation) {
-      setState(session, "listening");
-      armSilenceTimer(session);
+      if (enteredPaymentWait) {
+        setState(session, "waiting_on_payment");
+        armPaymentWaitTimer(session);
+      } else {
+        setState(session, "listening");
+        armSilenceTimer(session);
+      }
     }
   } catch (err) {
     log("llm_error", session, { message: (err as Error).message });
@@ -601,7 +711,11 @@ function onSttEvent(session: Session, event: SttEvent) {
     case "speech_start": {
       // The caller is audibly speaking — whatever silence has accumulated
       // so far no longer counts, regardless of which state this arrives in.
+      // Same for a pending payment wait: the caller is engaging again, so
+      // the bounded wait no longer applies as-is (this turn's own reply
+      // may re-arm a fresh one via enteredPaymentWait).
       clearSilenceTimer(session);
+      clearPaymentWaitTimer(session);
       session.silencePromptSent = false;
       const state = stateOf(session);
       if (state === "greeting" || state === "speaking" || state === "thinking") {
@@ -612,7 +726,7 @@ function onSttEvent(session: Session, event: SttEvent) {
         session.tts?.flush();
         setState(session, "interrupted");
         log("interruption", session);
-      } else if (state === "listening") {
+      } else if (state === "listening" || state === "waiting_on_payment") {
         setState(session, "transcribing");
       }
       break;
@@ -739,6 +853,7 @@ export async function startRuntimeSession(
     accumulatingUserText: "",
     silenceTimer: null,
     silencePromptSent: false,
+    paymentWaitTimer: null,
     pendingInboundFrames: [],
     lastFinalTranscript: null,
     firstInboundFrameLogged: false,
@@ -873,6 +988,7 @@ export async function terminateRuntimeSession(callId: string, reason: string): P
 
   session.generation++; // discard any in-flight LLM work
   clearSilenceTimer(session);
+  clearPaymentWaitTimer(session);
   try {
     session.stt?.close();
   } catch {
@@ -894,4 +1010,65 @@ export async function terminateRuntimeSession(callId: string, reason: string): P
   if (!hadError) setState(session, "ended");
   activeSessions.delete(callId);
   log("runtime_terminated", session, { reason });
+}
+
+export interface InjectPaymentEventResult {
+  /** false means "this call has no active voice session" (already ended, or never started) — the ended-call fallback: expected, not an error. Payment/booking truth never depends on this. */
+  handled: boolean;
+}
+
+/**
+ * Speaks an already-composed payment-event message (confirmation,
+ * failure, or expiration) into a still-active call, if one exists for
+ * `callId` — the "Durable Object RPC -> voice runtime -> PAYMENT_CAPTURED
+ * event -> AI/voice layer -> customer hears confirmation" leg of the
+ * event architecture. Called from payment-voice-consumer.server.ts, never
+ * directly from the Razorpay webhook (see that module's own doc comment
+ * for the full dispatch chain).
+ *
+ * Composing the message text is deliberately NOT this function's job —
+ * it takes a plain string, exactly like speakFallback/speakSilencePrompt
+ * do for their own canned messages, so this file stays free of any
+ * payment-domain knowledge (event types, amounts, currencies).
+ *
+ * If the call has already ended (handled: false), this is a no-op by
+ * design — payment/booking state is already durably correct via the
+ * webhook regardless, and the WhatsApp consumer (a separate, independent
+ * DispatchConsumers slot) still delivers its own confirmation.
+ */
+export async function injectPaymentEvent(
+  callId: string,
+  message: string,
+): Promise<InjectPaymentEventResult> {
+  const session = activeSessions.get(callId);
+  if (!session) return { handled: false };
+
+  const state = stateOf(session);
+  if (state === "ended" || state === "failed" || state === "ending") return { handled: false };
+
+  // Soft-cancel any in-flight LLM turn and stop whatever audio is queued —
+  // same mechanism barge-in uses (onSttEvent's speech_start case) — so the
+  // payment message is heard promptly rather than queued behind it.
+  session.generation++;
+  clearSilenceTimer(session);
+  clearPaymentWaitTimer(session);
+  if (state === "greeting" || state === "speaking" || state === "thinking") {
+    try {
+      session.input.bridge.clearOutboundBuffer();
+      session.tts?.flush();
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  log("payment_event_injected", session);
+  session.turns.push({ role: "assistant", text: message, at: new Date().toISOString() });
+  await speak(session, message);
+
+  const finalState = stateOf(session);
+  if (finalState !== "ended" && finalState !== "failed" && finalState !== "ending") {
+    setState(session, "listening");
+    armSilenceTimer(session);
+  }
+  return { handled: true };
 }
