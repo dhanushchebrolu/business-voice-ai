@@ -57,7 +57,9 @@ import { Route as AppCampaignsNewRouteImport } from './routes/app.campaigns.new'
 import { Route as ApiPublicCronDispatchCampaignsRouteImport } from './routes/api/public/cron/dispatch-campaigns'
 import { Route as ApiPublicSarvamClientContextRouteImport } from './routes/api/public/sarvam/client-context'
 import { Route as ApiPublicWebhooksRazorpayRouteImport } from './routes/api/public/webhooks/razorpay'
+import { Route as ApiPublicWebhooksRazorpayPaymentsRouteImport } from './routes/api/public/webhooks/razorpay-payments'
 import { Route as ApiPublicWebhooksTelephonyRouteImport } from './routes/api/public/webhooks/telephony'
+import { Route as ApiPublicWebhooksWhatsappRouteImport } from './routes/api/public/webhooks/whatsapp'
 import { Route as ApiPublicIntegrationsGoogleCalendarCallbackRouteImport } from './routes/api/public/integrations/google-calendar/callback'
 import { Route as ApiPublicIntegrationsRazorpayCallbackRouteImport } from './routes/api/public/integrations/razorpay/callback'
 import { Route as ApiPublicWebhooksExotelMediaTokenRouteImport } from './routes/api/public/webhooks/exotel.media-token'
@@ -305,10 +307,22 @@ const ApiPublicWebhooksRazorpayRoute =
     path: '/api/public/webhooks/razorpay',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicWebhooksRazorpayPaymentsRoute =
+  ApiPublicWebhooksRazorpayPaymentsRouteImport.update({
+    id: '/api/public/webhooks/razorpay-payments',
+    path: '/api/public/webhooks/razorpay-payments',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicWebhooksTelephonyRoute =
   ApiPublicWebhooksTelephonyRouteImport.update({
     id: '/api/public/webhooks/telephony',
     path: '/api/public/webhooks/telephony',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicWebhooksWhatsappRoute =
+  ApiPublicWebhooksWhatsappRouteImport.update({
+    id: '/api/public/webhooks/whatsapp',
+    path: '/api/public/webhooks/whatsapp',
     getParentRoute: () => rootRouteImport,
   } as any)
 const ApiPublicIntegrationsGoogleCalendarCallbackRoute =
@@ -379,7 +393,9 @@ export interface FileRoutesByFullPath {
   '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
+  '/api/public/webhooks/razorpay-payments': typeof ApiPublicWebhooksRazorpayPaymentsRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
+  '/api/public/webhooks/whatsapp': typeof ApiPublicWebhooksWhatsappRoute
   '/api/public/integrations/google-calendar/callback': typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
   '/api/public/integrations/razorpay/callback': typeof ApiPublicIntegrationsRazorpayCallbackRoute
   '/api/public/webhooks/exotel/media-token': typeof ApiPublicWebhooksExotelMediaTokenRoute
@@ -429,7 +445,9 @@ export interface FileRoutesByTo {
   '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
+  '/api/public/webhooks/razorpay-payments': typeof ApiPublicWebhooksRazorpayPaymentsRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
+  '/api/public/webhooks/whatsapp': typeof ApiPublicWebhooksWhatsappRoute
   '/api/public/integrations/google-calendar/callback': typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
   '/api/public/integrations/razorpay/callback': typeof ApiPublicIntegrationsRazorpayCallbackRoute
   '/api/public/webhooks/exotel/media-token': typeof ApiPublicWebhooksExotelMediaTokenRoute
@@ -484,7 +502,9 @@ export interface FileRoutesById {
   '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
+  '/api/public/webhooks/razorpay-payments': typeof ApiPublicWebhooksRazorpayPaymentsRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
+  '/api/public/webhooks/whatsapp': typeof ApiPublicWebhooksWhatsappRoute
   '/api/public/integrations/google-calendar/callback': typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
   '/api/public/integrations/razorpay/callback': typeof ApiPublicIntegrationsRazorpayCallbackRoute
   '/api/public/webhooks/exotel/media-token': typeof ApiPublicWebhooksExotelMediaTokenRoute
@@ -540,7 +560,9 @@ export interface FileRouteTypes {
     | '/api/public/cron/dispatch-campaigns'
     | '/api/public/sarvam/client-context'
     | '/api/public/webhooks/razorpay'
+    | '/api/public/webhooks/razorpay-payments'
     | '/api/public/webhooks/telephony'
+    | '/api/public/webhooks/whatsapp'
     | '/api/public/integrations/google-calendar/callback'
     | '/api/public/integrations/razorpay/callback'
     | '/api/public/webhooks/exotel/media-token'
@@ -590,7 +612,9 @@ export interface FileRouteTypes {
     | '/api/public/cron/dispatch-campaigns'
     | '/api/public/sarvam/client-context'
     | '/api/public/webhooks/razorpay'
+    | '/api/public/webhooks/razorpay-payments'
     | '/api/public/webhooks/telephony'
+    | '/api/public/webhooks/whatsapp'
     | '/api/public/integrations/google-calendar/callback'
     | '/api/public/integrations/razorpay/callback'
     | '/api/public/webhooks/exotel/media-token'
@@ -644,7 +668,9 @@ export interface FileRouteTypes {
     | '/api/public/cron/dispatch-campaigns'
     | '/api/public/sarvam/client-context'
     | '/api/public/webhooks/razorpay'
+    | '/api/public/webhooks/razorpay-payments'
     | '/api/public/webhooks/telephony'
+    | '/api/public/webhooks/whatsapp'
     | '/api/public/integrations/google-calendar/callback'
     | '/api/public/integrations/razorpay/callback'
     | '/api/public/webhooks/exotel/media-token'
@@ -662,7 +688,9 @@ export interface RootRouteChildren {
   ApiPublicCronDispatchCampaignsRoute: typeof ApiPublicCronDispatchCampaignsRoute
   ApiPublicSarvamClientContextRoute: typeof ApiPublicSarvamClientContextRoute
   ApiPublicWebhooksRazorpayRoute: typeof ApiPublicWebhooksRazorpayRoute
+  ApiPublicWebhooksRazorpayPaymentsRoute: typeof ApiPublicWebhooksRazorpayPaymentsRoute
   ApiPublicWebhooksTelephonyRoute: typeof ApiPublicWebhooksTelephonyRoute
+  ApiPublicWebhooksWhatsappRoute: typeof ApiPublicWebhooksWhatsappRoute
   ApiPublicIntegrationsGoogleCalendarCallbackRoute: typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
   ApiPublicIntegrationsRazorpayCallbackRoute: typeof ApiPublicIntegrationsRazorpayCallbackRoute
   ApiPublicWebhooksExotelMediaTokenRoute: typeof ApiPublicWebhooksExotelMediaTokenRoute
@@ -1006,11 +1034,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicWebhooksRazorpayRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/webhooks/razorpay-payments': {
+      id: '/api/public/webhooks/razorpay-payments'
+      path: '/api/public/webhooks/razorpay-payments'
+      fullPath: '/api/public/webhooks/razorpay-payments'
+      preLoaderRoute: typeof ApiPublicWebhooksRazorpayPaymentsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/webhooks/telephony': {
       id: '/api/public/webhooks/telephony'
       path: '/api/public/webhooks/telephony'
       fullPath: '/api/public/webhooks/telephony'
       preLoaderRoute: typeof ApiPublicWebhooksTelephonyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/webhooks/whatsapp': {
+      id: '/api/public/webhooks/whatsapp'
+      path: '/api/public/webhooks/whatsapp'
+      fullPath: '/api/public/webhooks/whatsapp'
+      preLoaderRoute: typeof ApiPublicWebhooksWhatsappRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/public/integrations/google-calendar/callback': {
@@ -1176,7 +1218,10 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicCronDispatchCampaignsRoute: ApiPublicCronDispatchCampaignsRoute,
   ApiPublicSarvamClientContextRoute: ApiPublicSarvamClientContextRoute,
   ApiPublicWebhooksRazorpayRoute: ApiPublicWebhooksRazorpayRoute,
+  ApiPublicWebhooksRazorpayPaymentsRoute:
+    ApiPublicWebhooksRazorpayPaymentsRoute,
   ApiPublicWebhooksTelephonyRoute: ApiPublicWebhooksTelephonyRoute,
+  ApiPublicWebhooksWhatsappRoute: ApiPublicWebhooksWhatsappRoute,
   ApiPublicIntegrationsGoogleCalendarCallbackRoute:
     ApiPublicIntegrationsGoogleCalendarCallbackRoute,
   ApiPublicIntegrationsRazorpayCallbackRoute:

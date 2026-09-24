@@ -343,3 +343,216 @@ describe("RazorpayPaymentProvider.verifyConnection / getValidAccessToken", () =>
     assert.equal(provider.getConnectionStatus(), "REAUTH_REQUIRED");
   });
 });
+
+// A function, not a top-level constant: encryptCredential() requires
+// RAZORPAY_CREDENTIAL_ENCRYPTION_KEY, which beforeEach only sets once a
+// test is actually running — a top-level call would execute at module
+// load time, before any beforeEach hook.
+function makeStillValidCredentialsRow() {
+  return {
+    id: "conn-1",
+    connection_status: "CONNECTED",
+    encrypted_credentials: encryptCredential(
+      JSON.stringify({ accessToken: "cached-access", refreshToken: "stored-refresh" }),
+    ),
+    token_expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+  };
+}
+
+describe("RazorpayPaymentProvider.createPaymentRequest", () => {
+  test("creates a real payment link and never returns a CAPTURED status", async () => {
+    const { client } = makeFakeSupabase([
+      {
+        table: "razorpay_connections",
+        op: "select.maybeSingle",
+        result: { data: makeStillValidCredentialsRow(), error: null },
+      },
+      {
+        table: "razorpay_connections",
+        op: "select.maybeSingle",
+        result: { data: { razorpay_account_id: "acc_connected_123" }, error: null },
+      },
+    ]);
+    const fetchImpl = fakeFetchSequence([
+      {
+        status: 200,
+        body: { id: "plink_abc", short_url: "https://rzp.io/i/abc", status: "created" },
+      },
+    ]);
+    const provider = new RazorpayPaymentProvider(
+      {
+        supabaseAdmin: client,
+        organizationId: "org-1",
+        businessId: "biz-1",
+        connectionId: "conn-1",
+        fetchImpl,
+      },
+      "CONNECTED",
+    );
+    const result = await provider.createPaymentRequest({
+      amountMinorUnits: 50000,
+      currency: "INR",
+      description: "Appointment deposit",
+      customerName: "Priya Sharma",
+      customerPhone: "+919876543210",
+      customerEmail: undefined,
+      idempotencyKey: "booking-abc-123",
+      notes: { booking_id: "booking-abc-123" },
+    });
+    assert.equal(result.providerPaymentLinkId, "plink_abc");
+    assert.equal(result.paymentLinkUrl, "https://rzp.io/i/abc");
+    assert.notEqual(result.status, "CAPTURED");
+    assert.equal(result.status, "PENDING");
+  });
+
+  test("throws MERCHANT_NOT_FOUND when no connection exists yet (never fabricates a link)", async () => {
+    const { client } = makeFakeSupabase([]);
+    const provider = new RazorpayPaymentProvider({
+      supabaseAdmin: client,
+      organizationId: "org-1",
+      businessId: "biz-1",
+      connectionId: undefined,
+    });
+    await assert.rejects(
+      () =>
+        provider.createPaymentRequest({
+          amountMinorUnits: 50000,
+          currency: "INR",
+          description: "x",
+          customerName: undefined,
+          customerPhone: undefined,
+          customerEmail: undefined,
+          idempotencyKey: "k",
+          notes: {},
+        }),
+      (err: unknown) => {
+        assert.ok(err instanceof PaymentProviderError);
+        assert.equal(err.code, "MERCHANT_NOT_FOUND");
+        return true;
+      },
+    );
+  });
+
+  test("maps a provider 401 to AUTH_REQUIRED and updates connection status to REAUTH_REQUIRED", async () => {
+    const { client } = makeFakeSupabase([
+      {
+        table: "razorpay_connections",
+        op: "select.maybeSingle",
+        result: { data: makeStillValidCredentialsRow(), error: null },
+      },
+      {
+        table: "razorpay_connections",
+        op: "select.maybeSingle",
+        result: { data: { razorpay_account_id: "acc_connected_123" }, error: null },
+      },
+    ]);
+    const fetchImpl = fakeFetchSequence([
+      { status: 401, body: { error: { description: "invalid token" } } },
+    ]);
+    const provider = new RazorpayPaymentProvider(
+      {
+        supabaseAdmin: client,
+        organizationId: "org-1",
+        businessId: "biz-1",
+        connectionId: "conn-1",
+        fetchImpl,
+      },
+      "CONNECTED",
+    );
+    await assert.rejects(
+      () =>
+        provider.createPaymentRequest({
+          amountMinorUnits: 50000,
+          currency: "INR",
+          description: "x",
+          customerName: undefined,
+          customerPhone: undefined,
+          customerEmail: undefined,
+          idempotencyKey: "k",
+          notes: {},
+        }),
+      (err: unknown) => {
+        assert.ok(err instanceof PaymentProviderError);
+        assert.equal(err.code, "AUTH_REQUIRED");
+        return true;
+      },
+    );
+    assert.equal(provider.getConnectionStatus(), "REAUTH_REQUIRED");
+  });
+
+  test("never leaks the access token into a thrown error message", async () => {
+    const { client } = makeFakeSupabase([
+      {
+        table: "razorpay_connections",
+        op: "select.maybeSingle",
+        result: { data: makeStillValidCredentialsRow(), error: null },
+      },
+      {
+        table: "razorpay_connections",
+        op: "select.maybeSingle",
+        result: { data: { razorpay_account_id: "acc_connected_123" }, error: null },
+      },
+    ]);
+    const fetchImpl = fakeFetchSequence([
+      { status: 400, body: { error: { description: "bad request" } } },
+    ]);
+    const provider = new RazorpayPaymentProvider(
+      {
+        supabaseAdmin: client,
+        organizationId: "org-1",
+        businessId: "biz-1",
+        connectionId: "conn-1",
+        fetchImpl,
+      },
+      "CONNECTED",
+    );
+    try {
+      await provider.createPaymentRequest({
+        amountMinorUnits: 50000,
+        currency: "INR",
+        description: "x",
+        customerName: undefined,
+        customerPhone: undefined,
+        customerEmail: undefined,
+        idempotencyKey: "k",
+        notes: {},
+      });
+      assert.fail("expected createPaymentRequest to throw");
+    } catch (err) {
+      assert.doesNotMatch((err as Error).message, /cached-access/);
+    }
+  });
+});
+
+describe("RazorpayPaymentProvider.getPaymentRequestStatus", () => {
+  test("reflects Razorpay's own reported status (read-only, never mutates)", async () => {
+    const { client } = makeFakeSupabase([
+      {
+        table: "razorpay_connections",
+        op: "select.maybeSingle",
+        result: { data: makeStillValidCredentialsRow(), error: null },
+      },
+      {
+        table: "razorpay_connections",
+        op: "select.maybeSingle",
+        result: { data: { razorpay_account_id: "acc_connected_123" }, error: null },
+      },
+    ]);
+    const fetchImpl = fakeFetchSequence([
+      { status: 200, body: { id: "plink_abc", status: "paid", amount_paid: 50000 } },
+    ]);
+    const provider = new RazorpayPaymentProvider(
+      {
+        supabaseAdmin: client,
+        organizationId: "org-1",
+        businessId: "biz-1",
+        connectionId: "conn-1",
+        fetchImpl,
+      },
+      "CONNECTED",
+    );
+    const result = await provider.getPaymentRequestStatus("plink_abc");
+    assert.equal(result.status, "CAPTURED");
+    assert.equal(result.amountPaidMinorUnits, 50000);
+  });
+});

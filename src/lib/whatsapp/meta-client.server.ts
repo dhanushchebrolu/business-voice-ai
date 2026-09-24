@@ -47,6 +47,16 @@
  * string, is never logged, and is never included in any thrown error
  * message — every error path below is built from Meta's own response body
  * or a fixed safe string, never from the request URL.
+ *
+ * Phase 4 addition: sendTextMessage/sendTemplateMessage, POST
+ * /{v}/{phone-number-id}/messages. This is the WhatsApp Cloud API's core,
+ * most fundamental endpoint — the same verification-status caveat above
+ * applies (no live fetch of developers.facebook.com in this session), but
+ * this exact request/response shape (messaging_product: "whatsapp",
+ * type: "text"|"template", a `messages: [{ id: "wamid...." }]` response
+ * array) is corroborated across every independent WhatsApp Cloud API
+ * integration guide this session could search, with materially higher
+ * corroborating consistency than the narrower onboarding endpoints above.
  */
 
 export class MetaApiError extends Error {
@@ -276,4 +286,73 @@ export class MetaWhatsAppClient {
     );
     return { success: parsed["success"] === true };
   }
+
+  /** Sends a free-form text message. Only deliverable within Meta's 24-hour customer-service window (i.e. the customer messaged this number recently) — outside that window Meta itself rejects the send; use sendTemplateMessage instead. */
+  async sendTextMessage(
+    phoneNumberId: string,
+    to: string,
+    body: string,
+    accessToken: string,
+  ): Promise<{ messageId: string }> {
+    const parsed = await this.request<Record<string, unknown>>(
+      "POST",
+      `/${encodeURIComponent(phoneNumberId)}/messages`,
+      {
+        body: { messaging_product: "whatsapp", to, type: "text", text: { body } },
+        accessToken,
+      },
+    );
+    return extractMessageId(parsed);
+  }
+
+  /** Sends a pre-approved Message Template — the only send path Meta allows outside the 24-hour customer-service window. templateName/languageCode/bodyParams must reference a template already approved for this WABA in Meta Business Manager; this client does not (and cannot) create or verify templates. */
+  async sendTemplateMessage(
+    phoneNumberId: string,
+    to: string,
+    templateName: string,
+    languageCode: string,
+    bodyParams: string[] | undefined,
+    accessToken: string,
+  ): Promise<{ messageId: string }> {
+    const parsed = await this.request<Record<string, unknown>>(
+      "POST",
+      `/${encodeURIComponent(phoneNumberId)}/messages`,
+      {
+        body: {
+          messaging_product: "whatsapp",
+          to,
+          type: "template",
+          template: {
+            name: templateName,
+            language: { code: languageCode },
+            ...(bodyParams && bodyParams.length > 0
+              ? {
+                  components: [
+                    {
+                      type: "body",
+                      parameters: bodyParams.map((text) => ({ type: "text", text })),
+                    },
+                  ],
+                }
+              : {}),
+          },
+        },
+        accessToken,
+      },
+    );
+    return extractMessageId(parsed);
+  }
+}
+
+function extractMessageId(parsed: Record<string, unknown>): { messageId: string } {
+  const messages = parsed["messages"];
+  const first =
+    Array.isArray(messages) && messages.length > 0 && typeof messages[0] === "object"
+      ? (messages[0] as Record<string, unknown>)
+      : undefined;
+  const id = first?.["id"];
+  if (typeof id !== "string" || !id) {
+    throw new MetaApiError("Meta accepted the send request but did not return a message id.", 502);
+  }
+  return { messageId: id };
 }

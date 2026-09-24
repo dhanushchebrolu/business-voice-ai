@@ -352,3 +352,105 @@ export async function getBooking(
   if (!data || data.organization_id !== input.organizationId) return null;
   return toRecord(data);
 }
+
+/**
+ * Phase 4: the AI/customer payment-required booking path (spec: "check
+ * availability, create a temporary PENDING_PAYMENT booking/hold, do NOT
+ * create the final Google Calendar event yet"). Deliberately a SEPARATE
+ * function from createBooking() above, not a parameterized variant of it —
+ * the existing manual/staff booking path (createBookingManual in
+ * bookings.functions.ts, which calls createBooking()) must keep working
+ * exactly as it does today, completely unaffected by this addition.
+ *
+ * Unlike createBooking()'s JS-level check-then-insert (adequate for a
+ * booking that resolves to CONFIRMED within the same function call), a
+ * payment hold can sit open for several minutes, which widens the
+ * double-booking race window significantly. This calls the
+ * create_booking_payment_hold Postgres function (see the Phase 4 DB
+ * migration's own doc comment for exactly why a JS-level advisory lock
+ * cannot provide this guarantee across separate PostgREST calls) so the
+ * idempotency check, the advisory lock, the full time-range overlap
+ * re-check, and the insert all run inside one database transaction.
+ */
+export type PaymentHoldRecord = BookingRecord & {
+  holdExpiresAt: string | null;
+  callId: string | null;
+};
+
+function toPaymentHoldRecord(row: {
+  id: string;
+  status: string;
+  start_at: string;
+  end_at: string;
+  timezone: string;
+  google_event_id: string | null;
+  contact_id: string | null;
+  hold_expires_at: string | null;
+  call_id: string | null;
+}): PaymentHoldRecord {
+  return { ...toRecord(row), holdExpiresAt: row.hold_expires_at, callId: row.call_id };
+}
+
+export interface CreatePaymentRequiredBookingInput {
+  organizationId: string;
+  businessId: string;
+  calendarConnectionId: string;
+  serviceId?: string | null;
+  agentConfigId?: string | null;
+  contactId?: string | null;
+  customerName?: string | undefined;
+  customerPhone?: string | undefined;
+  customerEmail?: string | undefined;
+  startIso: string;
+  endIso: string;
+  timezone: string;
+  source: "voice" | "whatsapp" | "website" | "manual";
+  /** Required (unlike createBooking()'s optional field) — a payment hold must always be safely retryable, since the AI/customer flow may retry after a network hiccup before any payment has been requested. */
+  idempotencyKey: string;
+  /** How long the hold is honored before the expiration sweep releases it. Defaults to DEFAULT_HOLD_DURATION_MINUTES. */
+  holdDurationMinutes?: number;
+  /** The live voice call this hold was created from, if any — lets a later PaymentCaptured event find the right in-progress call to notify. */
+  callId?: string | undefined;
+}
+
+const DEFAULT_HOLD_DURATION_MINUTES = 15;
+
+export async function createPaymentRequiredBooking(
+  supabaseAdmin: Client,
+  input: CreatePaymentRequiredBookingInput,
+): Promise<PaymentHoldRecord> {
+  if (new Date(input.endIso).getTime() <= new Date(input.startIso).getTime()) {
+    throw new BookingError("End time must be after start time.", "INVALID_INPUT");
+  }
+
+  const contactId = await resolveContactId(supabaseAdmin, input);
+  const holdExpiresAt = new Date(
+    Date.now() + (input.holdDurationMinutes ?? DEFAULT_HOLD_DURATION_MINUTES) * 60_000,
+  ).toISOString();
+
+  const { data, error } = await supabaseAdmin.rpc("create_booking_payment_hold", {
+    p_organization_id: input.organizationId,
+    p_business_id: input.businessId,
+    p_calendar_connection_id: input.calendarConnectionId,
+    p_service_id: input.serviceId ?? null,
+    p_agent_config_id: input.agentConfigId ?? null,
+    p_contact_id: contactId,
+    p_start_at: input.startIso,
+    p_end_at: input.endIso,
+    p_timezone: input.timezone,
+    p_customer_name: input.customerName ?? null,
+    p_customer_phone: input.customerPhone ?? null,
+    p_customer_email: input.customerEmail ?? null,
+    p_source: input.source,
+    p_idempotency_key: input.idempotencyKey,
+    p_hold_expires_at: holdExpiresAt,
+    p_call_id: input.callId ?? null,
+  });
+  if (error) {
+    if (error.message?.includes("SLOT_NO_LONGER_AVAILABLE")) {
+      throw new BookingError("That time slot is no longer available.", "SLOT_NO_LONGER_AVAILABLE");
+    }
+    throw error;
+  }
+  return toPaymentHoldRecord(data);
+}

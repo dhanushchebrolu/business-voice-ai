@@ -281,3 +281,87 @@ describe("secret handling", () => {
     }
   });
 });
+
+describe("sendTextMessage", () => {
+  test("POSTs /{version}/{phone-number-id}/messages with messaging_product/to/type=text/text.body", async () => {
+    let capturedUrl: URL | undefined;
+    let capturedBody: Record<string, unknown> | undefined;
+    let capturedAuth: string | null = null;
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      capturedUrl = new URL(String(input));
+      capturedBody = JSON.parse(String(init?.body));
+      capturedAuth = (init?.headers as Record<string, string>)["Authorization"] ?? null;
+      return jsonResponse(200, {
+        messaging_product: "whatsapp",
+        contacts: [{ input: "+919876543210", wa_id: "919876543210" }],
+        messages: [{ id: "wamid.ABC123" }],
+      });
+    }) as typeof fetch;
+
+    const client = makeClient(fetchImpl);
+    const result = await client.sendTextMessage(
+      "phone-number-id-1",
+      "+919876543210",
+      "Here is your payment link: https://rzp.io/i/abc",
+      "access-token-xyz",
+    );
+
+    assert.equal(result.messageId, "wamid.ABC123");
+    assert.equal(capturedUrl?.pathname, "/v23.0/phone-number-id-1/messages");
+    assert.equal(capturedBody?.["messaging_product"], "whatsapp");
+    assert.equal(capturedBody?.["to"], "+919876543210");
+    assert.equal(capturedBody?.["type"], "text");
+    assert.deepEqual(capturedBody?.["text"], { body: "Here is your payment link: https://rzp.io/i/abc" });
+    assert.equal(capturedAuth, "Bearer access-token-xyz");
+  });
+
+  test("throws MetaApiError (never fabricates a message id) when the response has no messages array", async () => {
+    const fetchImpl = (async () => jsonResponse(200, { messaging_product: "whatsapp" })) as typeof fetch;
+    const client = makeClient(fetchImpl);
+    await assert.rejects(
+      () => client.sendTextMessage("phone-id", "+91123", "hi", "token"),
+      MetaApiError,
+    );
+  });
+});
+
+describe("sendTemplateMessage", () => {
+  test("POSTs a template payload with name/language/body parameters", async () => {
+    let capturedBody: Record<string, unknown> | undefined;
+    const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      capturedBody = JSON.parse(String(init?.body));
+      return jsonResponse(200, { messages: [{ id: "wamid.TEMPLATE1" }] });
+    }) as typeof fetch;
+
+    const client = makeClient(fetchImpl);
+    const result = await client.sendTemplateMessage(
+      "phone-id",
+      "+919876543210",
+      "payment_link_notify",
+      "en_US",
+      ["Priya", "https://rzp.io/i/abc"],
+      "access-token-xyz",
+    );
+
+    assert.equal(result.messageId, "wamid.TEMPLATE1");
+    assert.equal(capturedBody?.["type"], "template");
+    const template = capturedBody?.["template"] as Record<string, unknown>;
+    assert.equal(template["name"], "payment_link_notify");
+    assert.deepEqual(template["language"], { code: "en_US" });
+    const components = template["components"] as { parameters: { text: string }[] }[];
+    assert.equal(components[0]!.parameters[0]!.text, "Priya");
+    assert.equal(components[0]!.parameters[1]!.text, "https://rzp.io/i/abc");
+  });
+
+  test("omits the components array entirely when no body params are given", async () => {
+    let capturedBody: Record<string, unknown> | undefined;
+    const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      capturedBody = JSON.parse(String(init?.body));
+      return jsonResponse(200, { messages: [{ id: "wamid.TEMPLATE2" }] });
+    }) as typeof fetch;
+    const client = makeClient(fetchImpl);
+    await client.sendTemplateMessage("phone-id", "+91123", "generic_notice", "en_US", undefined, "token");
+    const template = capturedBody?.["template"] as Record<string, unknown>;
+    assert.equal("components" in template, false);
+  });
+});

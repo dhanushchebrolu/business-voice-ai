@@ -2846,6 +2846,7 @@ export type Database = {
           agent_config_id: string | null;
           business_id: string;
           calendar_connection_id: string | null;
+          call_id: string | null;
           contact_id: string | null;
           created_at: string;
           customer_email: string | null;
@@ -2853,6 +2854,7 @@ export type Database = {
           customer_phone: string | null;
           end_at: string;
           google_event_id: string | null;
+          hold_expires_at: string | null;
           id: string;
           idempotency_key: string | null;
           metadata: Json;
@@ -2869,6 +2871,7 @@ export type Database = {
           agent_config_id?: string | null;
           business_id: string;
           calendar_connection_id?: string | null;
+          call_id?: string | null;
           contact_id?: string | null;
           created_at?: string;
           customer_email?: string | null;
@@ -2876,6 +2879,7 @@ export type Database = {
           customer_phone?: string | null;
           end_at: string;
           google_event_id?: string | null;
+          hold_expires_at?: string | null;
           id?: string;
           idempotency_key?: string | null;
           metadata?: Json;
@@ -2892,6 +2896,7 @@ export type Database = {
           agent_config_id?: string | null;
           business_id?: string;
           calendar_connection_id?: string | null;
+          call_id?: string | null;
           contact_id?: string | null;
           created_at?: string;
           customer_email?: string | null;
@@ -2899,6 +2904,7 @@ export type Database = {
           customer_phone?: string | null;
           end_at?: string;
           google_event_id?: string | null;
+          hold_expires_at?: string | null;
           id?: string;
           idempotency_key?: string | null;
           metadata?: Json;
@@ -2952,6 +2958,228 @@ export type Database = {
             columns: ["service_id"];
             isOneToOne: false;
             referencedRelation: "services";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      payment_domain_events: {
+        Row: {
+          booking_id: string;
+          business_id: string;
+          calendar_dispatched_at: string | null;
+          calendar_error: string | null;
+          created_at: string;
+          event_type: string;
+          id: string;
+          organization_id: string;
+          payload: Json;
+          payment_request_id: string;
+          voice_dispatched_at: string | null;
+          voice_error: string | null;
+          whatsapp_dispatched_at: string | null;
+          whatsapp_error: string | null;
+        };
+        Insert: {
+          booking_id: string;
+          business_id: string;
+          calendar_dispatched_at?: string | null;
+          calendar_error?: string | null;
+          created_at?: string;
+          event_type: string;
+          id?: string;
+          organization_id: string;
+          payload?: Json;
+          payment_request_id: string;
+          voice_dispatched_at?: string | null;
+          voice_error?: string | null;
+          whatsapp_dispatched_at?: string | null;
+          whatsapp_error?: string | null;
+        };
+        Update: {
+          booking_id?: string;
+          business_id?: string;
+          calendar_dispatched_at?: string | null;
+          calendar_error?: string | null;
+          created_at?: string;
+          event_type?: string;
+          id?: string;
+          organization_id?: string;
+          payload?: Json;
+          payment_request_id?: string;
+          voice_dispatched_at?: string | null;
+          voice_error?: string | null;
+          whatsapp_dispatched_at?: string | null;
+          whatsapp_error?: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "payment_domain_events_booking_id_fkey";
+            columns: ["booking_id"];
+            isOneToOne: false;
+            referencedRelation: "bookings";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "payment_domain_events_business_id_fkey";
+            columns: ["business_id"];
+            isOneToOne: false;
+            referencedRelation: "businesses";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "payment_domain_events_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "payment_domain_events_payment_request_id_fkey";
+            columns: ["payment_request_id"];
+            isOneToOne: false;
+            referencedRelation: "payment_requests";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      payment_requests: {
+        Row: {
+          amount_minor_units: number;
+          booking_id: string;
+          business_id: string;
+          captured_at: string | null;
+          created_at: string;
+          currency: string;
+          expires_at: string | null;
+          id: string;
+          idempotency_key: string;
+          last_error: string | null;
+          metadata: Json;
+          organization_id: string;
+          payment_link_url: string | null;
+          provider: string;
+          provider_order_id: string | null;
+          provider_payment_id: string | null;
+          provider_payment_link_id: string | null;
+          razorpay_connection_id: string;
+          status: string;
+          updated_at: string;
+        };
+        Insert: {
+          amount_minor_units: number;
+          booking_id: string;
+          business_id: string;
+          captured_at?: string | null;
+          created_at?: string;
+          currency?: string;
+          expires_at?: string | null;
+          id?: string;
+          idempotency_key: string;
+          last_error?: string | null;
+          metadata?: Json;
+          organization_id: string;
+          payment_link_url?: string | null;
+          provider?: string;
+          provider_order_id?: string | null;
+          provider_payment_id?: string | null;
+          provider_payment_link_id?: string | null;
+          razorpay_connection_id: string;
+          status?: string;
+          updated_at?: string;
+        };
+        Update: {
+          amount_minor_units?: number;
+          booking_id?: string;
+          business_id?: string;
+          captured_at?: string | null;
+          created_at?: string;
+          currency?: string;
+          expires_at?: string | null;
+          id?: string;
+          idempotency_key?: string;
+          last_error?: string | null;
+          metadata?: Json;
+          organization_id?: string;
+          payment_link_url?: string | null;
+          provider?: string;
+          provider_order_id?: string | null;
+          provider_payment_id?: string | null;
+          provider_payment_link_id?: string | null;
+          razorpay_connection_id?: string;
+          status?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "payment_requests_booking_id_fkey";
+            columns: ["booking_id"];
+            isOneToOne: false;
+            referencedRelation: "bookings";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "payment_requests_business_id_fkey";
+            columns: ["business_id"];
+            isOneToOne: false;
+            referencedRelation: "businesses";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "payment_requests_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "payment_requests_razorpay_connection_id_fkey";
+            columns: ["razorpay_connection_id"];
+            isOneToOne: false;
+            referencedRelation: "razorpay_connections";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      payment_webhook_events: {
+        Row: {
+          created_at: string;
+          error: string | null;
+          event_id: string;
+          event_type: string | null;
+          id: string;
+          payload: Json;
+          payment_request_id: string | null;
+          processed_at: string | null;
+          provider: string;
+        };
+        Insert: {
+          created_at?: string;
+          error?: string | null;
+          event_id: string;
+          event_type?: string | null;
+          id?: string;
+          payload: Json;
+          payment_request_id?: string | null;
+          processed_at?: string | null;
+          provider: string;
+        };
+        Update: {
+          created_at?: string;
+          error?: string | null;
+          event_id?: string;
+          event_type?: string | null;
+          id?: string;
+          payload?: Json;
+          payment_request_id?: string | null;
+          processed_at?: string | null;
+          provider?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "payment_webhook_events_payment_request_id_fkey";
+            columns: ["payment_request_id"];
+            isOneToOne: false;
+            referencedRelation: "payment_requests";
             referencedColumns: ["id"];
           },
         ];
@@ -3051,6 +3279,51 @@ export type Database = {
       bootstrap_first_platform_admin: {
         Args: { p_email: string | null; p_user_id: string };
         Returns: boolean;
+      };
+      create_booking_payment_hold: {
+        Args: {
+          p_agent_config_id: string | null;
+          p_business_id: string;
+          p_calendar_connection_id: string;
+          p_call_id: string | null;
+          p_contact_id: string | null;
+          p_customer_email: string | null;
+          p_customer_name: string | null;
+          p_customer_phone: string | null;
+          p_end_at: string;
+          p_hold_expires_at: string | null;
+          p_idempotency_key: string | null;
+          p_organization_id: string;
+          p_service_id: string | null;
+          p_source: string;
+          p_start_at: string;
+          p_timezone: string;
+        };
+        Returns: {
+          agent_config_id: string | null;
+          business_id: string;
+          calendar_connection_id: string | null;
+          call_id: string | null;
+          contact_id: string | null;
+          created_at: string;
+          customer_email: string | null;
+          customer_name: string | null;
+          customer_phone: string | null;
+          end_at: string;
+          google_event_id: string | null;
+          hold_expires_at: string | null;
+          id: string;
+          idempotency_key: string | null;
+          metadata: Json;
+          notes: string | null;
+          organization_id: string;
+          service_id: string | null;
+          source: string;
+          start_at: string;
+          status: string;
+          timezone: string;
+          updated_at: string;
+        };
       };
       customer_rate: { Args: { _key: string; _org: string }; Returns: number };
       debit_wallet_for_call: {

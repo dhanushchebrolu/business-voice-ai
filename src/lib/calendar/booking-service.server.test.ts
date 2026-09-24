@@ -5,8 +5,10 @@ import {
   rescheduleBooking,
   cancelBooking,
   getBooking,
+  createPaymentRequiredBooking,
   BookingError,
   type CreateBookingInput,
+  type CreatePaymentRequiredBookingInput,
 } from "./booking-service.server.ts";
 import { CalendarProviderError, type CalendarProvider } from "./calendar-provider.ts";
 
@@ -83,6 +85,7 @@ function makeFakeSupabase(script: { result: unknown }[]) {
         },
       };
     },
+    rpc: (fnName: string, args: unknown) => Promise.resolve(consume(fnName, "rpc", args)),
   };
   return { client: client as never, calls };
 }
@@ -582,5 +585,97 @@ describe("getBooking", () => {
     ]);
     const result = await getBooking(client, { organizationId: "org-1", bookingId: "booking-1" });
     assert.equal(result?.id, "booking-1");
+  });
+});
+
+const PAYMENT_HOLD_INPUT: CreatePaymentRequiredBookingInput = {
+  organizationId: "org-1",
+  businessId: "biz-1",
+  calendarConnectionId: "conn-1",
+  customerName: "Priya",
+  customerPhone: "+919876543210",
+  startIso: "2026-09-25T10:30:00.000Z",
+  endIso: "2026-09-25T11:00:00.000Z",
+  timezone: "Asia/Kolkata",
+  source: "voice",
+  idempotencyKey: "hold-key-1",
+};
+
+describe("createPaymentRequiredBooking", () => {
+  test("resolves the contact, then calls the atomic RPC, and returns a PENDING_PAYMENT hold", async () => {
+    const { client, calls } = makeFakeSupabase([
+      { result: { data: { id: "contact-1" }, error: null } }, // contact upsert
+      {
+        result: {
+          data: {
+            id: "booking-1",
+            status: "PENDING_PAYMENT",
+            start_at: PAYMENT_HOLD_INPUT.startIso,
+            end_at: PAYMENT_HOLD_INPUT.endIso,
+            timezone: "Asia/Kolkata",
+            google_event_id: null,
+            contact_id: "contact-1",
+            hold_expires_at: "2026-09-25T10:45:00.000Z",
+            call_id: null,
+          },
+          error: null,
+        },
+      }, // rpc
+    ]);
+
+    const result = await createPaymentRequiredBooking(client, PAYMENT_HOLD_INPUT);
+    assert.equal(result.status, "PENDING_PAYMENT");
+    assert.equal(result.id, "booking-1");
+    assert.equal(result.googleEventId, null, "no calendar event is created at hold time");
+    assert.equal(result.holdExpiresAt, "2026-09-25T10:45:00.000Z");
+
+    const rpcCall = calls.find((c) => c.method === "rpc");
+    assert.ok(rpcCall);
+    assert.equal(rpcCall!.table, "create_booking_payment_hold");
+    const args = rpcCall!.args[0] as Record<string, unknown>;
+    assert.equal(args["p_idempotency_key"], "hold-key-1");
+    assert.equal(args["p_contact_id"], "contact-1");
+    assert.ok(args["p_hold_expires_at"], "a hold expiry must always be set");
+  });
+
+  test("rejects a start/end where end is not after start, without calling the database at all", async () => {
+    const { client, calls } = makeFakeSupabase([]);
+    await assert.rejects(
+      () =>
+        createPaymentRequiredBooking(client, {
+          ...PAYMENT_HOLD_INPUT,
+          startIso: "2026-09-25T11:00:00.000Z",
+          endIso: "2026-09-25T10:30:00.000Z",
+        }),
+      (err: unknown) => {
+        assert.ok(err instanceof BookingError);
+        assert.equal(err.code, "INVALID_INPUT");
+        return true;
+      },
+    );
+    assert.equal(calls.length, 0);
+  });
+
+  test("maps the RPC's SLOT_NO_LONGER_AVAILABLE exception to a BookingError, never a raw Postgres error", async () => {
+    const { client } = makeFakeSupabase([
+      { result: { data: { id: "contact-1" }, error: null } },
+      { result: { data: null, error: { message: "SLOT_NO_LONGER_AVAILABLE" } } },
+    ]);
+    await assert.rejects(
+      () => createPaymentRequiredBooking(client, PAYMENT_HOLD_INPUT),
+      (err: unknown) => {
+        assert.ok(err instanceof BookingError);
+        assert.equal(err.code, "SLOT_NO_LONGER_AVAILABLE");
+        return true;
+      },
+    );
+  });
+
+  test("propagates an unrelated database error as-is (never silently swallowed)", async () => {
+    const { client } = makeFakeSupabase([
+      { result: { data: { id: "contact-1" }, error: null } },
+      { result: { data: null, error: { message: "connection reset" } } },
+    ]);
+    await assert.rejects(() => createPaymentRequiredBooking(client, PAYMENT_HOLD_INPUT));
   });
 });

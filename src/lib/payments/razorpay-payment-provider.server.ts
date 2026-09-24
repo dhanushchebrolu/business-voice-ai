@@ -29,10 +29,19 @@ import {
 import { fetchMerchantDetails, RazorpayOAuthError } from "../razorpay/razorpay-oauth.server.ts";
 import { resolveRazorpayConfig } from "../razorpay/razorpay-config.server.ts";
 import {
+  createPaymentLink,
+  getPaymentLinkStatus,
+  mapProviderPaymentLinkStatus,
+  RazorpayPaymentsApiError,
+} from "../razorpay/razorpay-payments.server.ts";
+import {
   PaymentProviderError,
   type PaymentProvider,
   type PaymentConnectionStatus,
   type MerchantDetails,
+  type CreatePaymentRequestInput,
+  type PaymentRequestResult,
+  type PaymentRequestStatusResult,
 } from "./payment-provider.ts";
 
 type Client = SupabaseClient<Database>;
@@ -214,5 +223,89 @@ export class RazorpayPaymentProvider implements PaymentProvider {
       phone: data.phone ?? undefined,
       status: data.merchant_status ?? undefined,
     };
+  }
+
+  private async getRazorpayAccountId(connectionId: string): Promise<string> {
+    const { data, error } = await this.ctx.supabaseAdmin
+      .from("razorpay_connections")
+      .select("razorpay_account_id")
+      .eq("id", connectionId)
+      .maybeSingle();
+    if (error) throw error;
+    if (!data?.razorpay_account_id) {
+      throw new PaymentProviderError(
+        "MERCHANT_NOT_FOUND",
+        "This connection has no Razorpay account id on record yet.",
+      );
+    }
+    return data.razorpay_account_id;
+  }
+
+  private mapPaymentsApiError(err: unknown, fallbackMessage: string): PaymentProviderError {
+    if (err instanceof RazorpayPaymentsApiError) {
+      if (err.status === 401) this.status = "REAUTH_REQUIRED";
+      return new PaymentProviderError(
+        err.status === 401 ? "AUTH_REQUIRED" : err.retryable ? "PROVIDER_UNAVAILABLE" : "UNKNOWN",
+        err.message,
+      );
+    }
+    return new PaymentProviderError("UNKNOWN", fallbackMessage);
+  }
+
+  /**
+   * Creates a real Razorpay Payment Link against the connected merchant
+   * account. Never returns CAPTURED — see payment-provider.ts's doc
+   * comment on createPaymentRequest for why. Amount must already be
+   * integer minor units; this method does no currency conversion or
+   * rounding of its own.
+   */
+  async createPaymentRequest(input: CreatePaymentRequestInput): Promise<PaymentRequestResult> {
+    const connectionId = this.requireConnectionId();
+    const accessToken = await this.getValidAccessTokenInternal(connectionId);
+    const razorpayAccountId = await this.getRazorpayAccountId(connectionId);
+    try {
+      const result = await createPaymentLink(
+        accessToken,
+        {
+          razorpayAccountId,
+          amountMinorUnits: input.amountMinorUnits,
+          currency: input.currency,
+          description: input.description,
+          customerName: input.customerName,
+          customerPhone: input.customerPhone,
+          customerEmail: input.customerEmail,
+          referenceId: input.idempotencyKey,
+          notes: input.notes,
+        },
+        this.ctx.fetchImpl,
+      );
+      return {
+        providerPaymentLinkId: result.providerPaymentLinkId,
+        paymentLinkUrl: result.paymentLinkUrl,
+        status: mapProviderPaymentLinkStatus(result.rawStatus),
+      };
+    } catch (err) {
+      throw this.mapPaymentsApiError(err, "Failed to create the payment request.");
+    }
+  }
+
+  /** Read-only: reflects Razorpay's own reported status, never this codebase's local guess. */
+  async getPaymentRequestStatus(
+    providerPaymentLinkId: string,
+  ): Promise<PaymentRequestStatusResult> {
+    const connectionId = this.requireConnectionId();
+    const accessToken = await this.getValidAccessTokenInternal(connectionId);
+    const razorpayAccountId = await this.getRazorpayAccountId(connectionId);
+    try {
+      const result = await getPaymentLinkStatus(
+        accessToken,
+        razorpayAccountId,
+        providerPaymentLinkId,
+        this.ctx.fetchImpl,
+      );
+      return { status: result.status, amountPaidMinorUnits: result.amountPaidMinorUnits };
+    } catch (err) {
+      throw this.mapPaymentsApiError(err, "Failed to read the payment request status.");
+    }
   }
 }
