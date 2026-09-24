@@ -145,6 +145,24 @@ describe("sendWhatsAppPaymentMessage — no connection", () => {
   });
 });
 
+describe("sendWhatsAppPaymentMessage — tenant isolation", () => {
+  test("resolves the connection scoped by BOTH organization_id and business_id — never falls back to another business's connected number", async () => {
+    const { client, calls } = makeFakeSupabase([
+      {
+        table: "whatsapp_connections",
+        op: "select.maybeSingle",
+        result: { data: null, error: null },
+      },
+    ]);
+    await sendWhatsAppPaymentMessage(client, BASE_INPUT);
+    const connectionLookup = calls.find((c) => c.table === "whatsapp_connections");
+    assert.ok(connectionLookup);
+    const filters = connectionLookup!.args[0] as Record<string, unknown>;
+    assert.equal(filters["organization_id"], BASE_INPUT.organizationId);
+    assert.equal(filters["business_id"], BASE_INPUT.businessId);
+  });
+});
+
 describe("sendWhatsAppPaymentMessage — duplicate guard", () => {
   test("skips sending a second time for the same purpose + payment_request_id", async () => {
     const { client, calls } = makeFakeSupabase([
