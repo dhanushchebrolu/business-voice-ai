@@ -18,6 +18,8 @@ import {
   Megaphone,
   Contact,
   MessageCircle,
+  CalendarDays,
+  Plug,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Logo, StatusPill } from "./primitives";
@@ -45,6 +47,7 @@ const NAV: {
       { to: "/app/contacts", label: "Contacts", icon: Contact },
       { to: "/app/calls", label: "Calls", icon: PhoneCall },
       { to: "/app/leads", label: "Leads", icon: Users },
+      { to: "/app/bookings", label: "Bookings", icon: CalendarDays },
     ],
   },
   {
@@ -55,6 +58,7 @@ const NAV: {
       { to: "/app/agent", label: "AI Receptionist", icon: Bot },
       { to: "/app/numbers", label: "Phone numbers", icon: Hash },
       { to: "/app/whatsapp", label: "WhatsApp", icon: MessageCircle },
+      { to: "/app/integrations", label: "Integrations", icon: Plug },
     ],
   },
   {

@@ -37,10 +37,12 @@ import { Route as AdminWebsiteAiRouteImport } from './routes/admin.website-ai'
 import { Route as AppIndexRouteImport } from './routes/app.index'
 import { Route as AppAgentRouteImport } from './routes/app.agent'
 import { Route as AppBillingRouteImport } from './routes/app.billing'
+import { Route as AppBookingsRouteImport } from './routes/app.bookings'
 import { Route as AppBusinessRouteImport } from './routes/app.business'
 import { Route as AppCallsRouteImport } from './routes/app.calls'
 import { Route as AppCampaignsRouteImport } from './routes/app.campaigns'
 import { Route as AppContactsRouteImport } from './routes/app.contacts'
+import { Route as AppIntegrationsRouteImport } from './routes/app.integrations'
 import { Route as AppKnowledgeRouteImport } from './routes/app.knowledge'
 import { Route as AppLeadsRouteImport } from './routes/app.leads'
 import { Route as AppNumbersRouteImport } from './routes/app.numbers'
@@ -56,6 +58,7 @@ import { Route as ApiPublicCronDispatchCampaignsRouteImport } from './routes/api
 import { Route as ApiPublicSarvamClientContextRouteImport } from './routes/api/public/sarvam/client-context'
 import { Route as ApiPublicWebhooksRazorpayRouteImport } from './routes/api/public/webhooks/razorpay'
 import { Route as ApiPublicWebhooksTelephonyRouteImport } from './routes/api/public/webhooks/telephony'
+import { Route as ApiPublicIntegrationsGoogleCalendarCallbackRouteImport } from './routes/api/public/integrations/google-calendar/callback'
 import { Route as ApiPublicWebhooksExotelMediaTokenRouteImport } from './routes/api/public/webhooks/exotel.media-token'
 
 const IndexRoute = IndexRouteImport.update({
@@ -198,6 +201,11 @@ const AppBillingRoute = AppBillingRouteImport.update({
   path: '/billing',
   getParentRoute: () => AppRoute,
 } as any)
+const AppBookingsRoute = AppBookingsRouteImport.update({
+  id: '/bookings',
+  path: '/bookings',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppBusinessRoute = AppBusinessRouteImport.update({
   id: '/business',
   path: '/business',
@@ -216,6 +224,11 @@ const AppCampaignsRoute = AppCampaignsRouteImport.update({
 const AppContactsRoute = AppContactsRouteImport.update({
   id: '/contacts',
   path: '/contacts',
+  getParentRoute: () => AppRoute,
+} as any)
+const AppIntegrationsRoute = AppIntegrationsRouteImport.update({
+  id: '/integrations',
+  path: '/integrations',
   getParentRoute: () => AppRoute,
 } as any)
 const AppKnowledgeRoute = AppKnowledgeRouteImport.update({
@@ -297,6 +310,12 @@ const ApiPublicWebhooksTelephonyRoute =
     path: '/api/public/webhooks/telephony',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicIntegrationsGoogleCalendarCallbackRoute =
+  ApiPublicIntegrationsGoogleCalendarCallbackRouteImport.update({
+    id: '/api/public/integrations/google-calendar/callback',
+    path: '/api/public/integrations/google-calendar/callback',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicWebhooksExotelMediaTokenRoute =
   ApiPublicWebhooksExotelMediaTokenRouteImport.update({
     id: '/api/public/webhooks/exotel/media-token',
@@ -330,10 +349,12 @@ export interface FileRoutesByFullPath {
   '/admin/website-ai': typeof AdminWebsiteAiRoute
   '/app/agent': typeof AppAgentRoute
   '/app/billing': typeof AppBillingRoute
+  '/app/bookings': typeof AppBookingsRoute
   '/app/business': typeof AppBusinessRoute
   '/app/calls': typeof AppCallsRoute
   '/app/campaigns': typeof AppCampaignsRouteWithChildren
   '/app/contacts': typeof AppContactsRoute
+  '/app/integrations': typeof AppIntegrationsRoute
   '/app/knowledge': typeof AppKnowledgeRoute
   '/app/leads': typeof AppLeadsRoute
   '/app/numbers': typeof AppNumbersRoute
@@ -352,6 +373,7 @@ export interface FileRoutesByFullPath {
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
+  '/api/public/integrations/google-calendar/callback': typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
   '/api/public/webhooks/exotel/media-token': typeof ApiPublicWebhooksExotelMediaTokenRoute
 }
 export interface FileRoutesByTo {
@@ -376,10 +398,12 @@ export interface FileRoutesByTo {
   '/admin/website-ai': typeof AdminWebsiteAiRoute
   '/app/agent': typeof AppAgentRoute
   '/app/billing': typeof AppBillingRoute
+  '/app/bookings': typeof AppBookingsRoute
   '/app/business': typeof AppBusinessRoute
   '/app/calls': typeof AppCallsRoute
   '/app/campaigns': typeof AppCampaignsRouteWithChildren
   '/app/contacts': typeof AppContactsRoute
+  '/app/integrations': typeof AppIntegrationsRoute
   '/app/knowledge': typeof AppKnowledgeRoute
   '/app/leads': typeof AppLeadsRoute
   '/app/numbers': typeof AppNumbersRoute
@@ -398,6 +422,7 @@ export interface FileRoutesByTo {
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
+  '/api/public/integrations/google-calendar/callback': typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
   '/api/public/webhooks/exotel/media-token': typeof ApiPublicWebhooksExotelMediaTokenRoute
 }
 export interface FileRoutesById {
@@ -427,10 +452,12 @@ export interface FileRoutesById {
   '/admin/website-ai': typeof AdminWebsiteAiRoute
   '/app/agent': typeof AppAgentRoute
   '/app/billing': typeof AppBillingRoute
+  '/app/bookings': typeof AppBookingsRoute
   '/app/business': typeof AppBusinessRoute
   '/app/calls': typeof AppCallsRoute
   '/app/campaigns': typeof AppCampaignsRouteWithChildren
   '/app/contacts': typeof AppContactsRoute
+  '/app/integrations': typeof AppIntegrationsRoute
   '/app/knowledge': typeof AppKnowledgeRoute
   '/app/leads': typeof AppLeadsRoute
   '/app/numbers': typeof AppNumbersRoute
@@ -449,6 +476,7 @@ export interface FileRoutesById {
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
+  '/api/public/integrations/google-calendar/callback': typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
   '/api/public/webhooks/exotel/media-token': typeof ApiPublicWebhooksExotelMediaTokenRoute
 }
 export interface FileRouteTypes {
@@ -479,10 +507,12 @@ export interface FileRouteTypes {
     | '/admin/website-ai'
     | '/app/agent'
     | '/app/billing'
+    | '/app/bookings'
     | '/app/business'
     | '/app/calls'
     | '/app/campaigns'
     | '/app/contacts'
+    | '/app/integrations'
     | '/app/knowledge'
     | '/app/leads'
     | '/app/numbers'
@@ -501,6 +531,7 @@ export interface FileRouteTypes {
     | '/api/public/sarvam/client-context'
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/telephony'
+    | '/api/public/integrations/google-calendar/callback'
     | '/api/public/webhooks/exotel/media-token'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -525,10 +556,12 @@ export interface FileRouteTypes {
     | '/admin/website-ai'
     | '/app/agent'
     | '/app/billing'
+    | '/app/bookings'
     | '/app/business'
     | '/app/calls'
     | '/app/campaigns'
     | '/app/contacts'
+    | '/app/integrations'
     | '/app/knowledge'
     | '/app/leads'
     | '/app/numbers'
@@ -547,6 +580,7 @@ export interface FileRouteTypes {
     | '/api/public/sarvam/client-context'
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/telephony'
+    | '/api/public/integrations/google-calendar/callback'
     | '/api/public/webhooks/exotel/media-token'
   id:
     | '__root__'
@@ -575,10 +609,12 @@ export interface FileRouteTypes {
     | '/admin/website-ai'
     | '/app/agent'
     | '/app/billing'
+    | '/app/bookings'
     | '/app/business'
     | '/app/calls'
     | '/app/campaigns'
     | '/app/contacts'
+    | '/app/integrations'
     | '/app/knowledge'
     | '/app/leads'
     | '/app/numbers'
@@ -597,6 +633,7 @@ export interface FileRouteTypes {
     | '/api/public/sarvam/client-context'
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/telephony'
+    | '/api/public/integrations/google-calendar/callback'
     | '/api/public/webhooks/exotel/media-token'
   fileRoutesById: FileRoutesById
 }
@@ -613,6 +650,7 @@ export interface RootRouteChildren {
   ApiPublicSarvamClientContextRoute: typeof ApiPublicSarvamClientContextRoute
   ApiPublicWebhooksRazorpayRoute: typeof ApiPublicWebhooksRazorpayRoute
   ApiPublicWebhooksTelephonyRoute: typeof ApiPublicWebhooksTelephonyRoute
+  ApiPublicIntegrationsGoogleCalendarCallbackRoute: typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
   ApiPublicWebhooksExotelMediaTokenRoute: typeof ApiPublicWebhooksExotelMediaTokenRoute
 }
 
@@ -814,6 +852,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppBillingRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/bookings': {
+      id: '/app/bookings'
+      path: '/bookings'
+      fullPath: '/app/bookings'
+      preLoaderRoute: typeof AppBookingsRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/business': {
       id: '/app/business'
       path: '/business'
@@ -840,6 +885,13 @@ declare module '@tanstack/react-router' {
       path: '/contacts'
       fullPath: '/app/contacts'
       preLoaderRoute: typeof AppContactsRouteImport
+      parentRoute: typeof AppRoute
+    }
+    '/app/integrations': {
+      id: '/app/integrations'
+      path: '/integrations'
+      fullPath: '/app/integrations'
+      preLoaderRoute: typeof AppIntegrationsRouteImport
       parentRoute: typeof AppRoute
     }
     '/app/knowledge': {
@@ -947,6 +999,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicWebhooksTelephonyRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/integrations/google-calendar/callback': {
+      id: '/api/public/integrations/google-calendar/callback'
+      path: '/api/public/integrations/google-calendar/callback'
+      fullPath: '/api/public/integrations/google-calendar/callback'
+      preLoaderRoute: typeof ApiPublicIntegrationsGoogleCalendarCallbackRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/webhooks/exotel/media-token': {
       id: '/api/public/webhooks/exotel/media-token'
       path: '/api/public/webhooks/exotel/media-token'
@@ -1039,10 +1098,12 @@ const AppCampaignsRouteWithChildren = AppCampaignsRoute._addFileChildren(
 interface AppRouteChildren {
   AppAgentRoute: typeof AppAgentRoute
   AppBillingRoute: typeof AppBillingRoute
+  AppBookingsRoute: typeof AppBookingsRoute
   AppBusinessRoute: typeof AppBusinessRoute
   AppCallsRoute: typeof AppCallsRoute
   AppCampaignsRoute: typeof AppCampaignsRouteWithChildren
   AppContactsRoute: typeof AppContactsRoute
+  AppIntegrationsRoute: typeof AppIntegrationsRoute
   AppKnowledgeRoute: typeof AppKnowledgeRoute
   AppLeadsRoute: typeof AppLeadsRoute
   AppNumbersRoute: typeof AppNumbersRoute
@@ -1055,10 +1116,12 @@ interface AppRouteChildren {
 const AppRouteChildren: AppRouteChildren = {
   AppAgentRoute: AppAgentRoute,
   AppBillingRoute: AppBillingRoute,
+  AppBookingsRoute: AppBookingsRoute,
   AppBusinessRoute: AppBusinessRoute,
   AppCallsRoute: AppCallsRoute,
   AppCampaignsRoute: AppCampaignsRouteWithChildren,
   AppContactsRoute: AppContactsRoute,
+  AppIntegrationsRoute: AppIntegrationsRoute,
   AppKnowledgeRoute: AppKnowledgeRoute,
   AppLeadsRoute: AppLeadsRoute,
   AppNumbersRoute: AppNumbersRoute,
@@ -1093,6 +1156,8 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicSarvamClientContextRoute: ApiPublicSarvamClientContextRoute,
   ApiPublicWebhooksRazorpayRoute: ApiPublicWebhooksRazorpayRoute,
   ApiPublicWebhooksTelephonyRoute: ApiPublicWebhooksTelephonyRoute,
+  ApiPublicIntegrationsGoogleCalendarCallbackRoute:
+    ApiPublicIntegrationsGoogleCalendarCallbackRoute,
   ApiPublicWebhooksExotelMediaTokenRoute:
     ApiPublicWebhooksExotelMediaTokenRoute,
 }

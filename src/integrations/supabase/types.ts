@@ -2709,6 +2709,253 @@ export type Database = {
           },
         ];
       };
+      oauth_states: {
+        Row: {
+          business_id: string | null;
+          consumed_at: string | null;
+          created_at: string;
+          expires_at: string;
+          id: string;
+          organization_id: string;
+          provider: string;
+          redirect_to: string | null;
+          state: string;
+          user_id: string;
+        };
+        Insert: {
+          business_id?: string | null;
+          consumed_at?: string | null;
+          created_at?: string;
+          expires_at: string;
+          id?: string;
+          organization_id: string;
+          provider: string;
+          redirect_to?: string | null;
+          state: string;
+          user_id: string;
+        };
+        Update: {
+          business_id?: string | null;
+          consumed_at?: string | null;
+          created_at?: string;
+          expires_at?: string;
+          id?: string;
+          organization_id?: string;
+          provider?: string;
+          redirect_to?: string | null;
+          state?: string;
+          user_id?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "oauth_states_business_id_fkey";
+            columns: ["business_id"];
+            isOneToOne: false;
+            referencedRelation: "businesses";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "oauth_states_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      google_calendar_connections: {
+        Row: {
+          business_id: string;
+          calendar_id: string | null;
+          calendar_name: string | null;
+          created_at: string;
+          encrypted_credentials: string | null;
+          google_account_id: string | null;
+          google_email: string | null;
+          id: string;
+          last_connected_at: string | null;
+          last_error: string | null;
+          last_sync_at: string | null;
+          metadata: Json;
+          organization_id: string;
+          provider: string;
+          scopes: string[];
+          status: string;
+          token_expires_at: string | null;
+          updated_at: string;
+        };
+        Insert: {
+          business_id: string;
+          calendar_id?: string | null;
+          calendar_name?: string | null;
+          created_at?: string;
+          encrypted_credentials?: string | null;
+          google_account_id?: string | null;
+          google_email?: string | null;
+          id?: string;
+          last_connected_at?: string | null;
+          last_error?: string | null;
+          last_sync_at?: string | null;
+          metadata?: Json;
+          organization_id: string;
+          provider?: string;
+          scopes?: string[];
+          status?: string;
+          token_expires_at?: string | null;
+          updated_at?: string;
+        };
+        Update: {
+          business_id?: string;
+          calendar_id?: string | null;
+          calendar_name?: string | null;
+          created_at?: string;
+          encrypted_credentials?: string | null;
+          google_account_id?: string | null;
+          google_email?: string | null;
+          id?: string;
+          last_connected_at?: string | null;
+          last_error?: string | null;
+          last_sync_at?: string | null;
+          metadata?: Json;
+          organization_id?: string;
+          provider?: string;
+          scopes?: string[];
+          status?: string;
+          token_expires_at?: string | null;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "google_calendar_connections_business_id_fkey";
+            columns: ["business_id"];
+            isOneToOne: false;
+            referencedRelation: "businesses";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "google_calendar_connections_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      bookings: {
+        Row: {
+          agent_config_id: string | null;
+          business_id: string;
+          calendar_connection_id: string | null;
+          contact_id: string | null;
+          created_at: string;
+          customer_email: string | null;
+          customer_name: string | null;
+          customer_phone: string | null;
+          end_at: string;
+          google_event_id: string | null;
+          id: string;
+          idempotency_key: string | null;
+          metadata: Json;
+          notes: string | null;
+          organization_id: string;
+          service_id: string | null;
+          source: string;
+          start_at: string;
+          status: string;
+          timezone: string;
+          updated_at: string;
+        };
+        Insert: {
+          agent_config_id?: string | null;
+          business_id: string;
+          calendar_connection_id?: string | null;
+          contact_id?: string | null;
+          created_at?: string;
+          customer_email?: string | null;
+          customer_name?: string | null;
+          customer_phone?: string | null;
+          end_at: string;
+          google_event_id?: string | null;
+          id?: string;
+          idempotency_key?: string | null;
+          metadata?: Json;
+          notes?: string | null;
+          organization_id: string;
+          service_id?: string | null;
+          source?: string;
+          start_at: string;
+          status?: string;
+          timezone: string;
+          updated_at?: string;
+        };
+        Update: {
+          agent_config_id?: string | null;
+          business_id?: string;
+          calendar_connection_id?: string | null;
+          contact_id?: string | null;
+          created_at?: string;
+          customer_email?: string | null;
+          customer_name?: string | null;
+          customer_phone?: string | null;
+          end_at?: string;
+          google_event_id?: string | null;
+          id?: string;
+          idempotency_key?: string | null;
+          metadata?: Json;
+          notes?: string | null;
+          organization_id?: string;
+          service_id?: string | null;
+          source?: string;
+          start_at?: string;
+          status?: string;
+          timezone?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "bookings_agent_config_id_fkey";
+            columns: ["agent_config_id"];
+            isOneToOne: false;
+            referencedRelation: "agent_configs";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "bookings_business_id_fkey";
+            columns: ["business_id"];
+            isOneToOne: false;
+            referencedRelation: "businesses";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "bookings_calendar_connection_id_fkey";
+            columns: ["calendar_connection_id"];
+            isOneToOne: false;
+            referencedRelation: "google_calendar_connections";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "bookings_contact_id_fkey";
+            columns: ["contact_id"];
+            isOneToOne: false;
+            referencedRelation: "contacts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "bookings_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "bookings_service_id_fkey";
+            columns: ["service_id"];
+            isOneToOne: false;
+            referencedRelation: "services";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
     };
     Views: {
       [_ in never]: never;
