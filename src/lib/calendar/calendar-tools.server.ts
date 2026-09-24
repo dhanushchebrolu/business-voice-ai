@@ -43,16 +43,23 @@ import { CalendarProviderError } from "./calendar-provider.ts";
 type Client = SupabaseClient<Database>;
 
 export type ToolPermission =
-  "calendar_read" | "calendar_book" | "calendar_reschedule" | "calendar_cancel";
+  | "calendar_read"
+  | "calendar_book"
+  | "calendar_reschedule"
+  | "calendar_cancel"
+  // Phase 4 payment tools (payment-tools.server.ts) — read from the same
+  // agent_configs.capabilities column, same default-deny convention.
+  | "booking_payment_required"
+  | "payment_request";
 
 export type ToolResult<T> =
   { success: true; data: T } | { success: false; error: { code: string; message: string } };
 
-function fail<T>(code: string, message: string): ToolResult<T> {
+export function fail<T>(code: string, message: string): ToolResult<T> {
   return { success: false, error: { code, message } };
 }
 
-interface ResolvedContext {
+export interface ResolvedContext {
   connectionId: string;
   calendarId: string;
   timezone: string;
@@ -64,7 +71,7 @@ interface ResolvedContext {
   }[];
 }
 
-async function resolveCalendarContext(
+export async function resolveCalendarContext(
   supabaseAdmin: Client,
   organizationId: string,
   businessId: string,
@@ -116,7 +123,7 @@ async function resolveCalendarContext(
   };
 }
 
-async function assertToolPermission(
+export async function assertToolPermission(
   supabaseAdmin: Client,
   organizationId: string,
   businessId: string,

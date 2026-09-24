@@ -64,13 +64,24 @@ function apiKey(): string {
   return key;
 }
 
+interface AnthropicContentBlock {
+  type: string;
+  text?: string;
+  id?: string;
+  name?: string;
+  input?: Record<string, unknown>;
+  tool_use_id?: string;
+  content?: string;
+  is_error?: boolean;
+}
+
 interface AnthropicMessage {
   role: "user" | "assistant";
-  content: string;
+  content: string | AnthropicContentBlock[];
 }
 
 interface AnthropicResponse {
-  content: { type: string; text?: string }[];
+  content: AnthropicContentBlock[];
   stop_reason: string | null;
   usage?: { input_tokens?: number; output_tokens?: number };
 }
@@ -177,5 +188,115 @@ export const claude = {
         output_tokens: data.usage?.output_tokens ?? 0,
       },
     };
+  },
+
+  /**
+   * Single-tool-call-round conversation turn (Phase 4 AI tool-calling
+   * architecture). Deliberately a SEPARATE function from runConversation
+   * rather than a mode flag on it — runConversation's behavior (including
+   * its documented tool_use-resolves-to-empty-reply case, when called
+   * without an executor) stays byte-for-byte unchanged for every existing
+   * caller, so an agent with no tools/capabilities configured is
+   * completely unaffected by this addition.
+   *
+   * Exactly one round trip for tool execution: if the first call's
+   * stop_reason is "tool_use", every tool_use block in that single
+   * response is executed via `executeTool`, their results are appended as
+   * `tool_result` blocks, and ONE follow-up call is made — with `tools`
+   * omitted, so Claude cannot request a second round no matter what it
+   * decides — to get the final natural-language reply. If the first call
+   * doesn't request a tool at all, this behaves exactly like
+   * runConversation (one call, text reply, empty toolCalls).
+   */
+  async runConversationWithTools(
+    messages: ChatMessage[],
+    tools: ClaudeTool[],
+    executeTool: (
+      name: string,
+      input: Record<string, unknown>,
+    ) => Promise<{ content: string; isError?: boolean }>,
+  ): Promise<{
+    reply: string;
+    toolCalls: { name: string; input: Record<string, unknown>; isError: boolean }[];
+    usage: { input_tokens: number; output_tokens: number };
+  }> {
+    const { system, messages: turns } = toAnthropicRequest(messages);
+    const usage = { input_tokens: 0, output_tokens: 0 };
+
+    const first = await call({
+      model: model(),
+      system,
+      messages: turns,
+      max_tokens: 400,
+      temperature: 0.3,
+      top_p: 0.9,
+      tools,
+    });
+    usage.input_tokens += first.usage?.input_tokens ?? 0;
+    usage.output_tokens += first.usage?.output_tokens ?? 0;
+
+    const toolUseBlocks = first.content.filter(
+      (block): block is AnthropicContentBlock & { id: string; name: string } =>
+        block.type === "tool_use" && typeof block.id === "string" && typeof block.name === "string",
+    );
+
+    if (first.stop_reason !== "tool_use" || toolUseBlocks.length === 0) {
+      const reply = first.content
+        .filter((block) => block.type === "text" && typeof block.text === "string")
+        .map((block) => block.text)
+        .join("")
+        .trim();
+      return { reply, toolCalls: [], usage };
+    }
+
+    const toolCalls: { name: string; input: Record<string, unknown>; isError: boolean }[] = [];
+    const toolResultBlocks: AnthropicContentBlock[] = [];
+    for (const block of toolUseBlocks) {
+      const input = block.input ?? {};
+      let result: { content: string; isError?: boolean };
+      try {
+        result = await executeTool(block.name, input);
+      } catch (err) {
+        result = {
+          content: JSON.stringify({
+            success: false,
+            error: { code: "TOOL_EXECUTION_FAILED", message: (err as Error).message },
+          }),
+          isError: true,
+        };
+      }
+      toolCalls.push({ name: block.name, input, isError: Boolean(result.isError) });
+      toolResultBlocks.push({
+        type: "tool_result",
+        tool_use_id: block.id,
+        content: result.content,
+        ...(result.isError ? { is_error: true } : {}),
+      });
+    }
+
+    const followUp = await call({
+      model: model(),
+      system,
+      messages: [
+        ...turns,
+        { role: "assistant", content: first.content },
+        { role: "user", content: toolResultBlocks },
+      ],
+      max_tokens: 400,
+      temperature: 0.3,
+      top_p: 0.9,
+      // No `tools` here — this is the single round-trip boundary: Claude
+      // cannot request a second tool call because none are offered.
+    });
+    usage.input_tokens += followUp.usage?.input_tokens ?? 0;
+    usage.output_tokens += followUp.usage?.output_tokens ?? 0;
+
+    const reply = followUp.content
+      .filter((block) => block.type === "text" && typeof block.text === "string")
+      .map((block) => block.text)
+      .join("")
+      .trim();
+
+    return { reply, toolCalls, usage };
   },
 };

@@ -19,10 +19,22 @@
  */
 
 import { sarvam, type ChatMessage } from "./sarvam.server.ts";
-import { claude } from "./claude.server.ts";
+import { claude, type ClaudeTool } from "./claude.server.ts";
 import { gemini } from "./gemini.server.ts";
 
 export type GenerateReply = (messages: ChatMessage[]) => Promise<{ reply: string }>;
+
+export type GenerateReplyWithTools = (
+  messages: ChatMessage[],
+  tools: ClaudeTool[],
+  executeTool: (
+    name: string,
+    input: Record<string, unknown>,
+  ) => Promise<{ content: string; isError?: boolean }>,
+) => Promise<{
+  reply: string;
+  toolCalls: { name: string; input: Record<string, unknown>; isError: boolean }[];
+}>;
 
 export type VoiceLlmProvider = "sarvam" | "claude" | "gemini";
 
@@ -39,4 +51,18 @@ export function resolveGenerateReply(): GenerateReply {
   if (provider === "claude") return claude.runConversation;
   if (provider === "gemini") return gemini.runConversation;
   return sarvam.runConversation;
+}
+
+/**
+ * Phase 4 AI tool-calling — only Claude implements the single-tool-call-
+ * round exchange today (runConversationWithTools; see claude.server.ts's
+ * own doc comment for why it's a separate function from runConversation).
+ * Sarvam and Gemini return undefined here, not a shim that ignores tools
+ * silently — voice-runtime.server.ts's defaultRuntimeDeps reads this
+ * return value to decide whether to wire the tool-calling deps in at
+ * all, so an agent running on Sarvam or Gemini never has tools
+ * half-enabled with no way to actually call them.
+ */
+export function resolveGenerateReplyWithTools(): GenerateReplyWithTools | undefined {
+  return resolveVoiceLlmProvider() === "claude" ? claude.runConversationWithTools : undefined;
 }

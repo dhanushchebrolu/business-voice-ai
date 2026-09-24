@@ -362,6 +362,225 @@ describe("claude.runConversation — error handling never leaks the API key", ()
   });
 });
 
+describe("claude.runConversationWithTools — single tool-call round", () => {
+  test("no tool_use requested: behaves like a plain call, empty toolCalls, no follow-up request made", async () => {
+    await withEnv({ ANTHROPIC_API_KEY: "k" }, async () => {
+      let callCount = 0;
+      await withFetch(
+        (async () => {
+          callCount++;
+          return new Response(
+            JSON.stringify({
+              content: [{ type: "text", text: "Hello there" }],
+              stop_reason: "end_turn",
+              usage: { input_tokens: 10, output_tokens: 2 },
+            }),
+            { status: 200 },
+          );
+        }) as typeof fetch,
+        async () => {
+          const executed: string[] = [];
+          const result = await claude.runConversationWithTools(
+            [{ role: "user", content: "hi" }],
+            [{ name: "check_availability", description: "d", input_schema: { type: "object" } }],
+            async (name) => {
+              executed.push(name);
+              return { content: "{}" };
+            },
+          );
+          assert.equal(result.reply, "Hello there");
+          assert.deepEqual(result.toolCalls, []);
+          assert.deepEqual(executed, []);
+          assert.equal(result.usage.input_tokens, 10);
+        },
+      );
+      assert.equal(callCount, 1, "no tool requested means exactly one API call");
+    });
+  });
+
+  test("a tool_use response executes the tool once, then makes exactly one follow-up call with the tool_result appended", async () => {
+    await withEnv({ ANTHROPIC_API_KEY: "k" }, async () => {
+      const requests: { body: Record<string, unknown> }[] = [];
+      await withFetch(
+        (async (_url: string | URL, init?: RequestInit) => {
+          const body = JSON.parse(init!.body as string) as Record<string, unknown>;
+          requests.push({ body });
+          if (requests.length === 1) {
+            return new Response(
+              JSON.stringify({
+                content: [
+                  { type: "text", text: "Let me check." },
+                  {
+                    type: "tool_use",
+                    id: "toolu_1",
+                    name: "check_availability",
+                    input: { date: "2026-10-01" },
+                  },
+                ],
+                stop_reason: "tool_use",
+                usage: { input_tokens: 20, output_tokens: 8 },
+              }),
+              { status: 200 },
+            );
+          }
+          return new Response(
+            JSON.stringify({
+              content: [{ type: "text", text: "You're free at 3pm." }],
+              stop_reason: "end_turn",
+              usage: { input_tokens: 30, output_tokens: 6 },
+            }),
+            { status: 200 },
+          );
+        }) as typeof fetch,
+        async () => {
+          const executed: { name: string; input: Record<string, unknown> }[] = [];
+          const result = await claude.runConversationWithTools(
+            [{ role: "user", content: "Any slots tomorrow?" }],
+            [{ name: "check_availability", description: "d", input_schema: { type: "object" } }],
+            async (name, input) => {
+              executed.push({ name, input });
+              return { content: JSON.stringify({ success: true, data: { slots: ["15:00"] } }) };
+            },
+          );
+          assert.equal(result.reply, "You're free at 3pm.");
+          assert.equal(result.toolCalls.length, 1);
+          assert.equal(result.toolCalls[0]!.name, "check_availability");
+          assert.equal(result.toolCalls[0]!.isError, false);
+          assert.deepEqual(executed, [
+            { name: "check_availability", input: { date: "2026-10-01" } },
+          ]);
+          // Token usage summed across both round trips.
+          assert.equal(result.usage.input_tokens, 50);
+          assert.equal(result.usage.output_tokens, 14);
+        },
+      );
+      assert.equal(
+        requests.length,
+        2,
+        "exactly one tool round: first call + one follow-up, never more",
+      );
+
+      const firstBody = requests[0]!.body as { tools?: unknown };
+      assert.ok(firstBody.tools, "the first call must offer tools");
+
+      const secondBody = requests[1]!.body as {
+        tools?: unknown;
+        messages: { role: string; content: unknown }[];
+      };
+      assert.equal(
+        "tools" in secondBody,
+        false,
+        "the follow-up call must never offer tools again — that is the single-round boundary",
+      );
+      // The follow-up must echo the assistant's own tool_use content back,
+      // then a user turn carrying the matching tool_result.
+      const assistantTurn = secondBody.messages.find((m) => m.role === "assistant");
+      const userToolResultTurn = secondBody.messages[secondBody.messages.length - 1]!;
+      assert.ok(Array.isArray(assistantTurn?.content));
+      assert.ok((assistantTurn!.content as { type: string }[]).some((b) => b.type === "tool_use"));
+      assert.equal(userToolResultTurn.role, "user");
+      assert.ok(Array.isArray(userToolResultTurn.content));
+      const resultBlock = (userToolResultTurn.content as Record<string, unknown>[])[0]!;
+      assert.equal(resultBlock["type"], "tool_result");
+      assert.equal(resultBlock["tool_use_id"], "toolu_1");
+    });
+  });
+
+  test("a tool executor that throws is caught and reported as an error tool_result, never crashes the turn", async () => {
+    await withEnv({ ANTHROPIC_API_KEY: "k" }, async () => {
+      const requests: Record<string, unknown>[] = [];
+      await withFetch(
+        (async (_url: string | URL, init?: RequestInit) => {
+          const body = JSON.parse(init!.body as string) as Record<string, unknown>;
+          requests.push(body);
+          if (requests.length === 1) {
+            return new Response(
+              JSON.stringify({
+                content: [{ type: "tool_use", id: "toolu_9", name: "request_payment", input: {} }],
+                stop_reason: "tool_use",
+              }),
+              { status: 200 },
+            );
+          }
+          return new Response(
+            JSON.stringify({
+              content: [{ type: "text", text: "Something went wrong requesting payment." }],
+              stop_reason: "end_turn",
+            }),
+            { status: 200 },
+          );
+        }) as typeof fetch,
+        async () => {
+          const result = await claude.runConversationWithTools(
+            [{ role: "user", content: "charge me" }],
+            [{ name: "request_payment", description: "d", input_schema: { type: "object" } }],
+            async () => {
+              throw new Error("boom");
+            },
+          );
+          assert.equal(result.reply, "Something went wrong requesting payment.");
+          assert.equal(result.toolCalls.length, 1);
+          assert.equal(result.toolCalls[0]!.isError, true);
+        },
+      );
+      const secondBody = requests[1] as { messages: { role: string; content: unknown }[] };
+      const userTurn = secondBody.messages[secondBody.messages.length - 1]!;
+      const block = (userTurn.content as Record<string, unknown>[])[0]!;
+      assert.equal(block["is_error"], true);
+    });
+  });
+
+  test("multiple tool_use blocks in one response are all executed before the single follow-up call", async () => {
+    await withEnv({ ANTHROPIC_API_KEY: "k" }, async () => {
+      const requests: Record<string, unknown>[] = [];
+      await withFetch(
+        (async (_url: string | URL, init?: RequestInit) => {
+          const body = JSON.parse(init!.body as string) as Record<string, unknown>;
+          requests.push(body);
+          if (requests.length === 1) {
+            return new Response(
+              JSON.stringify({
+                content: [
+                  { type: "tool_use", id: "toolu_a", name: "tool_a", input: {} },
+                  { type: "tool_use", id: "toolu_b", name: "tool_b", input: {} },
+                ],
+                stop_reason: "tool_use",
+              }),
+              { status: 200 },
+            );
+          }
+          return new Response(
+            JSON.stringify({ content: [{ type: "text", text: "done" }], stop_reason: "end_turn" }),
+            { status: 200 },
+          );
+        }) as typeof fetch,
+        async () => {
+          const executed: string[] = [];
+          const result = await claude.runConversationWithTools(
+            [{ role: "user", content: "do both" }],
+            [
+              { name: "tool_a", description: "d", input_schema: { type: "object" } },
+              { name: "tool_b", description: "d", input_schema: { type: "object" } },
+            ],
+            async (name) => {
+              executed.push(name);
+              return { content: "{}" };
+            },
+          );
+          assert.deepEqual(executed, ["tool_a", "tool_b"]);
+          assert.equal(result.toolCalls.length, 2);
+          assert.equal(result.reply, "done");
+        },
+      );
+      assert.equal(
+        requests.length,
+        2,
+        "still exactly one round trip regardless of how many tools were called in it",
+      );
+    });
+  });
+});
+
 describe("claude.server.ts reuses sarvam.server.ts's ProviderError, not a parallel class", () => {
   test("voice-runtime.server.ts's `error instanceof ProviderError` check (speakFallback) works identically regardless of which LLM provider raised the error", async () => {
     const { ProviderError: SarvamProviderError } = await import("./sarvam.server.ts");

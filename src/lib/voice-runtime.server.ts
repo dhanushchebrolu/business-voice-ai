@@ -80,7 +80,9 @@ import {
 } from "./sarvam-realtime.server.ts";
 import { ProviderError, type ChatMessage } from "./sarvam.server.ts";
 import { resolveGenerateReply } from "./llm-provider.server.ts";
+import { resolveGenerateReplyWithTools } from "./llm-provider.server.ts";
 import type { AgentSnapshot } from "./agent-instructions.ts";
+import type { ClaudeTool } from "./claude.server.ts";
 
 /**
  * Explicit runtime states. `created` -> `connecting` -> `greeting` ->
@@ -180,11 +182,45 @@ export interface TranscriptRecord {
  * production wiring, and it is exactly what `startRuntimeSession` uses
  * when no `deps` argument is passed.
  */
+/** Context a tool execution needs, resolved server-side from the session — never from the model's own tool-call input. See ai-tools.server.ts's header comment for why. */
+export interface ToolExecContext {
+  organizationId: string;
+  businessId: string;
+  agentConfigId: string | null;
+  callId: string;
+}
+
 export interface RuntimeDeps {
   connectStt: (opts: ConnectSttOptions) => Promise<SttSession>;
   connectTts: (opts: ConnectTtsOptions) => Promise<TtsSession>;
   generateReply: (messages: ChatMessage[]) => Promise<{ reply: string }>;
   persistTranscript: (record: TranscriptRecord) => Promise<void>;
+  /**
+   * Phase 4 AI tool-calling — all three optional and all-or-nothing by
+   * convention (see getReply below): when present, a turn resolves the
+   * agent's permitted tools and, if any exist, runs the single-tool-
+   * call-round path instead of plain generateReply. Absent (the case for
+   * every non-Claude provider today, and for any test harness that
+   * doesn't opt in), a session behaves exactly as it did before tools
+   * existed — this is what keeps the change backward-compatible.
+   */
+  generateReplyWithTools?: (
+    messages: ChatMessage[],
+    tools: ClaudeTool[],
+    executeTool: (
+      name: string,
+      input: Record<string, unknown>,
+    ) => Promise<{ content: string; isError?: boolean }>,
+  ) => Promise<{
+    reply: string;
+    toolCalls: { name: string; input: Record<string, unknown>; isError: boolean }[];
+  }>;
+  resolveAvailableTools?: (organizationId: string, businessId: string) => Promise<ClaudeTool[]>;
+  executeTool?: (
+    name: string,
+    input: Record<string, unknown>,
+    ctx: ToolExecContext,
+  ) => Promise<{ content: string; isError?: boolean }>;
 }
 
 async function persistTranscriptToCallLogs(record: TranscriptRecord): Promise<void> {
@@ -200,6 +236,38 @@ async function persistTranscriptToCallLogs(record: TranscriptRecord): Promise<vo
     .eq("id", record.callId);
 }
 
+async function resolveAvailableToolsFromDb(
+  organizationId: string,
+  businessId: string,
+): Promise<ClaudeTool[]> {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const { resolveAvailableTools } = await import("./ai-tools.server.ts");
+  return resolveAvailableTools(supabaseAdmin, organizationId, businessId);
+}
+
+async function executeToolViaRegistry(
+  name: string,
+  input: Record<string, unknown>,
+  ctx: ToolExecContext,
+): Promise<{ content: string; isError?: boolean }> {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const { executeAiTool } = await import("./ai-tools.server.ts");
+  return executeAiTool(
+    supabaseAdmin,
+    {
+      organizationId: ctx.organizationId,
+      businessId: ctx.businessId,
+      agentConfigId: ctx.agentConfigId,
+      callId: ctx.callId,
+      source: "voice",
+    },
+    name,
+    input,
+  );
+}
+
+const generateReplyWithTools = resolveGenerateReplyWithTools();
+
 export const defaultRuntimeDeps: RuntimeDeps = {
   connectStt: connectSarvamStt,
   connectTts: connectSarvamTts,
@@ -209,6 +277,18 @@ export const defaultRuntimeDeps: RuntimeDeps = {
   // text-in/text-out reasoning step changes.
   generateReply: resolveGenerateReply(),
   persistTranscript: persistTranscriptToCallLogs,
+  // Tool-calling deps are all-or-nothing (see getReply): populated only
+  // when the selected provider actually implements it (Claude today).
+  // generateReplyWithTools is undefined for Sarvam/Gemini, which
+  // correctly disables the whole tool-calling path for them rather than
+  // half-wiring it.
+  ...(generateReplyWithTools
+    ? {
+        generateReplyWithTools,
+        resolveAvailableTools: resolveAvailableToolsFromDb,
+        executeTool: executeToolViaRegistry,
+      }
+    : {}),
 };
 
 interface Session {
@@ -422,6 +502,41 @@ async function speak(
   }
 }
 
+/**
+ * Resolves one turn's reply — plain generateReply, or the single-tool-
+ * call-round path when the runtime's deps support it AND the agent has
+ * at least one permitted tool. An agent with tool-calling deps wired but
+ * zero permitted tools (the common case: no capabilities granted) still
+ * takes the exact same plain-generateReply path as before tools existed.
+ */
+async function getReply(session: Session, messages: ChatMessage[]): Promise<{ reply: string }> {
+  const { generateReplyWithTools, resolveAvailableTools, executeTool } = session.deps;
+  if (generateReplyWithTools && resolveAvailableTools && executeTool) {
+    const tools = await resolveAvailableTools(
+      session.input.organizationId,
+      session.input.businessId,
+    );
+    if (tools.length > 0) {
+      const toolCtx: ToolExecContext = {
+        organizationId: session.input.organizationId,
+        businessId: session.input.businessId,
+        agentConfigId: session.input.agentConfigId,
+        callId: session.input.callId,
+      };
+      const result = await generateReplyWithTools(messages, tools, (name, input) =>
+        executeTool(name, input, toolCtx),
+      );
+      if (result.toolCalls.length) {
+        log("tool_calls_executed", session, {
+          tools: result.toolCalls.map((t) => ({ name: t.name, is_error: t.isError })),
+        });
+      }
+      return { reply: result.reply };
+    }
+  }
+  return session.deps.generateReply(messages);
+}
+
 async function handleUserUtterance(session: Session, text: string) {
   session.turns.push({ role: "user", text, at: new Date().toISOString() });
   setState(session, "thinking");
@@ -434,7 +549,7 @@ async function handleUserUtterance(session: Session, text: string) {
   ];
 
   try {
-    const { reply } = await session.deps.generateReply(messages);
+    const { reply } = await getReply(session, messages);
     log("llm_completed", session, { latency_ms: Date.now() - requestStarted });
 
     // Soft cancellation: if the caller interrupted (or spoke again) while
