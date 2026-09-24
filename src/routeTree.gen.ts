@@ -47,6 +47,7 @@ import { Route as AppKnowledgeRouteImport } from './routes/app.knowledge'
 import { Route as AppLeadsRouteImport } from './routes/app.leads'
 import { Route as AppNumbersRouteImport } from './routes/app.numbers'
 import { Route as AppOnboardingRouteImport } from './routes/app.onboarding'
+import { Route as AppPaymentsRouteImport } from './routes/app.payments'
 import { Route as AppSettingsRouteImport } from './routes/app.settings'
 import { Route as AppWhatsappRouteImport } from './routes/app.whatsapp'
 import { Route as AuthCallbackRouteImport } from './routes/auth.callback'
@@ -255,6 +256,11 @@ const AppOnboardingRoute = AppOnboardingRouteImport.update({
   path: '/onboarding',
   getParentRoute: () => AppRoute,
 } as any)
+const AppPaymentsRoute = AppPaymentsRouteImport.update({
+  id: '/payments',
+  path: '/payments',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppSettingsRoute = AppSettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
@@ -387,6 +393,7 @@ export interface FileRoutesByFullPath {
   '/app/leads': typeof AppLeadsRoute
   '/app/numbers': typeof AppNumbersRoute
   '/app/onboarding': typeof AppOnboardingRoute
+  '/app/payments': typeof AppPaymentsRoute
   '/app/settings': typeof AppSettingsRoute
   '/app/whatsapp': typeof AppWhatsappRoute
   '/auth/callback': typeof AuthCallbackRoute
@@ -440,6 +447,7 @@ export interface FileRoutesByTo {
   '/app/leads': typeof AppLeadsRoute
   '/app/numbers': typeof AppNumbersRoute
   '/app/onboarding': typeof AppOnboardingRoute
+  '/app/payments': typeof AppPaymentsRoute
   '/app/settings': typeof AppSettingsRoute
   '/app/whatsapp': typeof AppWhatsappRoute
   '/auth/callback': typeof AuthCallbackRoute
@@ -498,6 +506,7 @@ export interface FileRoutesById {
   '/app/leads': typeof AppLeadsRoute
   '/app/numbers': typeof AppNumbersRoute
   '/app/onboarding': typeof AppOnboardingRoute
+  '/app/payments': typeof AppPaymentsRoute
   '/app/settings': typeof AppSettingsRoute
   '/app/whatsapp': typeof AppWhatsappRoute
   '/auth/callback': typeof AuthCallbackRoute
@@ -557,6 +566,7 @@ export interface FileRouteTypes {
     | '/app/leads'
     | '/app/numbers'
     | '/app/onboarding'
+    | '/app/payments'
     | '/app/settings'
     | '/app/whatsapp'
     | '/auth/callback'
@@ -610,6 +620,7 @@ export interface FileRouteTypes {
     | '/app/leads'
     | '/app/numbers'
     | '/app/onboarding'
+    | '/app/payments'
     | '/app/settings'
     | '/app/whatsapp'
     | '/auth/callback'
@@ -667,6 +678,7 @@ export interface FileRouteTypes {
     | '/app/leads'
     | '/app/numbers'
     | '/app/onboarding'
+    | '/app/payments'
     | '/app/settings'
     | '/app/whatsapp'
     | '/auth/callback'
@@ -978,6 +990,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppOnboardingRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/payments': {
+      id: '/app/payments'
+      path: '/payments'
+      fullPath: '/app/payments'
+      preLoaderRoute: typeof AppPaymentsRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/settings': {
       id: '/app/settings'
       path: '/settings'
@@ -1192,6 +1211,7 @@ interface AppRouteChildren {
   AppLeadsRoute: typeof AppLeadsRoute
   AppNumbersRoute: typeof AppNumbersRoute
   AppOnboardingRoute: typeof AppOnboardingRoute
+  AppPaymentsRoute: typeof AppPaymentsRoute
   AppSettingsRoute: typeof AppSettingsRoute
   AppWhatsappRoute: typeof AppWhatsappRoute
   AppIndexRoute: typeof AppIndexRoute
@@ -1210,6 +1230,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppLeadsRoute: AppLeadsRoute,
   AppNumbersRoute: AppNumbersRoute,
   AppOnboardingRoute: AppOnboardingRoute,
+  AppPaymentsRoute: AppPaymentsRoute,
   AppSettingsRoute: AppSettingsRoute,
   AppWhatsappRoute: AppWhatsappRoute,
   AppIndexRoute: AppIndexRoute,

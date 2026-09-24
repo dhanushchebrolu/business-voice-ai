@@ -20,6 +20,7 @@ import {
   MessageCircle,
   CalendarDays,
   Plug,
+  Receipt,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Logo, StatusPill } from "./primitives";
@@ -48,6 +49,7 @@ const NAV: {
       { to: "/app/calls", label: "Calls", icon: PhoneCall },
       { to: "/app/leads", label: "Leads", icon: Users },
       { to: "/app/bookings", label: "Bookings", icon: CalendarDays },
+      { to: "/app/payments", label: "Payments", icon: Receipt },
     ],
   },
   {
