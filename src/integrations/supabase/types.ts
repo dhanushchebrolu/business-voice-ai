@@ -2956,6 +2956,93 @@ export type Database = {
           },
         ];
       };
+      razorpay_connections: {
+        Row: {
+          business_id: string;
+          business_name: string | null;
+          connected_at: string | null;
+          connection_status: string;
+          created_at: string;
+          disconnected_at: string | null;
+          display_name: string | null;
+          email: string | null;
+          encrypted_credentials: string | null;
+          id: string;
+          last_error: string | null;
+          last_verified_at: string | null;
+          merchant_status: string | null;
+          metadata: Json;
+          organization_id: string;
+          phone: string | null;
+          provider: string;
+          razorpay_account_id: string | null;
+          scopes: string[];
+          token_expires_at: string | null;
+          updated_at: string;
+        };
+        Insert: {
+          business_id: string;
+          business_name?: string | null;
+          connected_at?: string | null;
+          connection_status?: string;
+          created_at?: string;
+          disconnected_at?: string | null;
+          display_name?: string | null;
+          email?: string | null;
+          encrypted_credentials?: string | null;
+          id?: string;
+          last_error?: string | null;
+          last_verified_at?: string | null;
+          merchant_status?: string | null;
+          metadata?: Json;
+          organization_id: string;
+          phone?: string | null;
+          provider?: string;
+          razorpay_account_id?: string | null;
+          scopes?: string[];
+          token_expires_at?: string | null;
+          updated_at?: string;
+        };
+        Update: {
+          business_id?: string;
+          business_name?: string | null;
+          connected_at?: string | null;
+          connection_status?: string;
+          created_at?: string;
+          disconnected_at?: string | null;
+          display_name?: string | null;
+          email?: string | null;
+          encrypted_credentials?: string | null;
+          id?: string;
+          last_error?: string | null;
+          last_verified_at?: string | null;
+          merchant_status?: string | null;
+          metadata?: Json;
+          organization_id?: string;
+          phone?: string | null;
+          provider?: string;
+          razorpay_account_id?: string | null;
+          scopes?: string[];
+          token_expires_at?: string | null;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "razorpay_connections_business_id_fkey";
+            columns: ["business_id"];
+            isOneToOne: false;
+            referencedRelation: "businesses";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "razorpay_connections_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
     };
     Views: {
       [_ in never]: never;

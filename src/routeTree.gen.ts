@@ -59,6 +59,7 @@ import { Route as ApiPublicSarvamClientContextRouteImport } from './routes/api/p
 import { Route as ApiPublicWebhooksRazorpayRouteImport } from './routes/api/public/webhooks/razorpay'
 import { Route as ApiPublicWebhooksTelephonyRouteImport } from './routes/api/public/webhooks/telephony'
 import { Route as ApiPublicIntegrationsGoogleCalendarCallbackRouteImport } from './routes/api/public/integrations/google-calendar/callback'
+import { Route as ApiPublicIntegrationsRazorpayCallbackRouteImport } from './routes/api/public/integrations/razorpay/callback'
 import { Route as ApiPublicWebhooksExotelMediaTokenRouteImport } from './routes/api/public/webhooks/exotel.media-token'
 
 const IndexRoute = IndexRouteImport.update({
@@ -316,6 +317,12 @@ const ApiPublicIntegrationsGoogleCalendarCallbackRoute =
     path: '/api/public/integrations/google-calendar/callback',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicIntegrationsRazorpayCallbackRoute =
+  ApiPublicIntegrationsRazorpayCallbackRouteImport.update({
+    id: '/api/public/integrations/razorpay/callback',
+    path: '/api/public/integrations/razorpay/callback',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicWebhooksExotelMediaTokenRoute =
   ApiPublicWebhooksExotelMediaTokenRouteImport.update({
     id: '/api/public/webhooks/exotel/media-token',
@@ -374,6 +381,7 @@ export interface FileRoutesByFullPath {
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
   '/api/public/integrations/google-calendar/callback': typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
+  '/api/public/integrations/razorpay/callback': typeof ApiPublicIntegrationsRazorpayCallbackRoute
   '/api/public/webhooks/exotel/media-token': typeof ApiPublicWebhooksExotelMediaTokenRoute
 }
 export interface FileRoutesByTo {
@@ -423,6 +431,7 @@ export interface FileRoutesByTo {
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
   '/api/public/integrations/google-calendar/callback': typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
+  '/api/public/integrations/razorpay/callback': typeof ApiPublicIntegrationsRazorpayCallbackRoute
   '/api/public/webhooks/exotel/media-token': typeof ApiPublicWebhooksExotelMediaTokenRoute
 }
 export interface FileRoutesById {
@@ -477,6 +486,7 @@ export interface FileRoutesById {
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
   '/api/public/integrations/google-calendar/callback': typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
+  '/api/public/integrations/razorpay/callback': typeof ApiPublicIntegrationsRazorpayCallbackRoute
   '/api/public/webhooks/exotel/media-token': typeof ApiPublicWebhooksExotelMediaTokenRoute
 }
 export interface FileRouteTypes {
@@ -532,6 +542,7 @@ export interface FileRouteTypes {
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/telephony'
     | '/api/public/integrations/google-calendar/callback'
+    | '/api/public/integrations/razorpay/callback'
     | '/api/public/webhooks/exotel/media-token'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -581,6 +592,7 @@ export interface FileRouteTypes {
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/telephony'
     | '/api/public/integrations/google-calendar/callback'
+    | '/api/public/integrations/razorpay/callback'
     | '/api/public/webhooks/exotel/media-token'
   id:
     | '__root__'
@@ -634,6 +646,7 @@ export interface FileRouteTypes {
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/telephony'
     | '/api/public/integrations/google-calendar/callback'
+    | '/api/public/integrations/razorpay/callback'
     | '/api/public/webhooks/exotel/media-token'
   fileRoutesById: FileRoutesById
 }
@@ -651,6 +664,7 @@ export interface RootRouteChildren {
   ApiPublicWebhooksRazorpayRoute: typeof ApiPublicWebhooksRazorpayRoute
   ApiPublicWebhooksTelephonyRoute: typeof ApiPublicWebhooksTelephonyRoute
   ApiPublicIntegrationsGoogleCalendarCallbackRoute: typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
+  ApiPublicIntegrationsRazorpayCallbackRoute: typeof ApiPublicIntegrationsRazorpayCallbackRoute
   ApiPublicWebhooksExotelMediaTokenRoute: typeof ApiPublicWebhooksExotelMediaTokenRoute
 }
 
@@ -1006,6 +1020,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicIntegrationsGoogleCalendarCallbackRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/integrations/razorpay/callback': {
+      id: '/api/public/integrations/razorpay/callback'
+      path: '/api/public/integrations/razorpay/callback'
+      fullPath: '/api/public/integrations/razorpay/callback'
+      preLoaderRoute: typeof ApiPublicIntegrationsRazorpayCallbackRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/webhooks/exotel/media-token': {
       id: '/api/public/webhooks/exotel/media-token'
       path: '/api/public/webhooks/exotel/media-token'
@@ -1158,6 +1179,8 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicWebhooksTelephonyRoute: ApiPublicWebhooksTelephonyRoute,
   ApiPublicIntegrationsGoogleCalendarCallbackRoute:
     ApiPublicIntegrationsGoogleCalendarCallbackRoute,
+  ApiPublicIntegrationsRazorpayCallbackRoute:
+    ApiPublicIntegrationsRazorpayCallbackRoute,
   ApiPublicWebhooksExotelMediaTokenRoute:
     ApiPublicWebhooksExotelMediaTokenRoute,
 }
