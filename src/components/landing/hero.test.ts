@@ -5,23 +5,24 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 /**
- * Functionality coverage for the hero: both CTAs must be real routes, not
- * placeholder handlers, and the decorative product-UI mockup (silhouette +
- * floating cards) must be marked non-interactive so it never masquerades
- * as a clickable control.
+ * Functionality coverage for the hero: both CTAs must be real (a genuine
+ * signup route, and a genuine smooth-scroll to a section that exists on
+ * the page), not placeholder handlers, and the decorative product-UI
+ * mockup (silhouette + floating cards) must be marked non-interactive so
+ * it never masquerades as a clickable control.
  */
 
 const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "hero.tsx"), "utf8");
 
 describe("Hero has two real, working CTAs", () => {
-  test("Book a Demo links to the real contact route", () => {
-    assert.match(src, /to="\/contact"/);
-    assert.match(src, /Book a Demo/);
+  test("Get Started with ClickAI links to the real signup route", () => {
+    assert.match(src, /to="\/auth" search=\{\{ mode: "signup" \}\}/);
+    assert.match(src, /Get Started with ClickAI/);
   });
 
-  test('Try Now links to the real signup route (not a href="#" placeholder)', () => {
-    assert.match(src, /to="\/auth" search=\{\{ mode: "signup" \}\}/);
-    assert.match(src, /Try Now/);
+  test('Explore AI Employees scrolls to the real products section (not a href="#" placeholder)', () => {
+    assert.match(src, /scrollToSection\("value-propositions"\)/);
+    assert.match(src, /Explore AI Employees/);
     assert.doesNotMatch(src, /href="#"/);
   });
 

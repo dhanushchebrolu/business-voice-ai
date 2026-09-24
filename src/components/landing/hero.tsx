@@ -2,6 +2,10 @@ import { Link } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import { ParticleWave } from "./particle-wave";
 
+function scrollToSection(id: string) {
+  document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
 /**
  * Matches the reference's hero composition: a dark headline block that
  * dissolves into white through the dotted wave, then a white illustration
@@ -28,34 +32,34 @@ export function Hero() {
         </div>
 
         <div className="relative mx-auto max-w-3xl px-5 pb-16 pt-10 text-center sm:px-8 sm:pb-24 sm:pt-16">
-          <h1 className="font-serif text-[10vw] leading-[1.08] tracking-tight text-white sm:text-5xl lg:text-6xl">
-            Create reliable AI agents
-            <br />
-            for everyday business
+          <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-white/50">
+            AI-Powered Business Solutions
+          </p>
+          <h1 className="mx-auto mt-4 font-serif text-[10vw] leading-[1.08] tracking-tight text-white sm:text-5xl lg:text-6xl">
+            Automate. Engage. Grow.
           </h1>
           <p className="mx-auto mt-5 max-w-md text-sm leading-relaxed text-white/55 sm:text-base">
-            ClickAI turns every voice and WhatsApp conversation into a reliable, on-brand agent
-            interaction.
+            AI employees that answer customers, capture leads, book appointments, process orders,
+            collect payments and provide 24/7 support.
           </p>
 
           <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
-            <Link to="/contact">
+            <Link to="/auth" search={{ mode: "signup" }}>
               <Button
                 size="lg"
                 className="rounded-full bg-white px-6 text-[#0a0a0d] hover:bg-white/90"
               >
-                Book a Demo
+                Get Started with ClickAI
               </Button>
             </Link>
-            <Link to="/auth" search={{ mode: "signup" }}>
-              <Button
-                size="lg"
-                variant="outline"
-                className="rounded-full border-white/25 bg-transparent px-6 text-white hover:bg-white/10"
-              >
-                Try Now
-              </Button>
-            </Link>
+            <Button
+              size="lg"
+              variant="outline"
+              onClick={() => scrollToSection("value-propositions")}
+              className="rounded-full border-white/25 bg-transparent px-6 text-white hover:bg-white/10"
+            >
+              Explore AI Employees
+            </Button>
           </div>
         </div>
       </section>

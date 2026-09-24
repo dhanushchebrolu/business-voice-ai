@@ -9,6 +9,56 @@ const CATEGORIES = [
   "AI Models",
 ];
 
+/**
+ * Marketplace status is deliberately honest per integration, not a blanket
+ * "Connect" label for everything: only what's actually wired up today (the
+ * existing WhatsApp Business embedded-signup flow, and voice telephony via
+ * the provider-agnostic runtime) is marked connectable. Everything else on
+ * ClickAI's integration roadmap is labeled "Coming soon" rather than
+ * presented as live.
+ */
+const GROUPS: { heading: string; items: { name: string; status: "connect" | "soon" }[] }[] = [
+  {
+    heading: "Communication",
+    items: [
+      { name: "WhatsApp", status: "connect" },
+      { name: "Voice", status: "connect" },
+      { name: "Website Chat", status: "connect" },
+      { name: "Instagram", status: "soon" },
+      { name: "SMS", status: "soon" },
+      { name: "Email", status: "soon" },
+    ],
+  },
+  {
+    heading: "Google",
+    items: [
+      { name: "Google Calendar", status: "soon" },
+      { name: "Google Business Profile", status: "soon" },
+      { name: "Gmail", status: "soon" },
+    ],
+  },
+  {
+    heading: "Payments",
+    items: [{ name: "Razorpay", status: "soon" }],
+  },
+  {
+    heading: "CRM",
+    items: [
+      { name: "HubSpot", status: "soon" },
+      { name: "Zoho CRM", status: "soon" },
+      { name: "Salesforce", status: "soon" },
+      { name: "Pipedrive", status: "soon" },
+    ],
+  },
+  {
+    heading: "E-commerce",
+    items: [
+      { name: "Shopify", status: "soon" },
+      { name: "WooCommerce", status: "soon" },
+    ],
+  },
+];
+
 export function IntegrationsSection() {
   return (
     <section id="integrations" className="border-t border-[#14141a]/10 bg-[#f6f3ee] py-24 sm:py-32">
@@ -19,13 +69,10 @@ export function IntegrationsSection() {
               Integrations
             </p>
             <h2 className="mt-4 font-serif text-4xl leading-[1.08] text-[#14141a] sm:text-5xl">
-              All your tools.
-              <br />
-              One seamless workflow.
+              Connect the tools your business already uses.
             </h2>
             <p className="mt-6 max-w-sm text-sm leading-relaxed text-[#14141a]/55 sm:text-base">
-              Connect ClickAI to the tools your team already runs on, and automate the handoff
-              between every conversation and the systems behind it.
+              No API keys to manage — connect an account and your AI employee starts using it.
             </p>
           </div>
 
@@ -48,12 +95,40 @@ export function IntegrationsSection() {
             <div className="absolute -right-2 bottom-[-28px] w-52 rounded-2xl border border-[#14141a]/10 bg-white p-3.5 shadow-[0_24px_48px_-20px_rgba(20,20,26,0.25)] sm:-right-6 sm:bottom-[-32px] sm:w-60">
               <p className="text-xs font-semibold text-[#14141a]">Connected</p>
               <ul className="mt-2 space-y-1.5 text-[11px] text-[#14141a]/60">
-                <li>WhatsApp Business API</li>
-                <li>Exotel telephony</li>
-                <li>Google Calendar</li>
+                <li>WhatsApp Business</li>
+                <li>Voice telephony</li>
               </ul>
             </div>
           </div>
+        </div>
+
+        <div className="mt-24 grid gap-10 sm:grid-cols-2 lg:grid-cols-3">
+          {GROUPS.map((group) => (
+            <div key={group.heading}>
+              <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-[#14141a]/40">
+                {group.heading}
+              </p>
+              <ul className="mt-4 space-y-2.5">
+                {group.items.map((item) => (
+                  <li
+                    key={item.name}
+                    className="flex items-center justify-between rounded-xl border border-[#14141a]/10 bg-white px-4 py-2.5"
+                  >
+                    <span className="text-sm text-[#14141a]/80">{item.name}</span>
+                    {item.status === "connect" ? (
+                      <span className="rounded-full bg-[#14141a] px-2.5 py-1 text-[10px] font-medium text-white">
+                        Connect
+                      </span>
+                    ) : (
+                      <span className="rounded-full border border-[#14141a]/15 px-2.5 py-1 text-[10px] font-medium text-[#14141a]/40">
+                        Coming soon
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
         </div>
       </div>
     </section>
