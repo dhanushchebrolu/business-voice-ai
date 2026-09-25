@@ -6,19 +6,19 @@
  * three color-blocked stat cards, each one true of the platform itself.
  */
 const CAPABILITIES = [
-  { top: "24/7", bottom: "AI availability, every channel", tone: "bg-[#3f5a78]" },
-  { top: "Multi-channel", bottom: "Voice and WhatsApp, one agent", tone: "bg-[#4a6b52]" },
-  { top: "White-label", bottom: "Built for agencies and partners", tone: "bg-[#5c4f66]" },
+  { top: "24/7", bottom: "AI availability, every channel", tone: "bg-blue-600" },
+  { top: "Multi-channel", bottom: "Voice and WhatsApp, one agent", tone: "bg-blue-700" },
+  { top: "White-label", bottom: "Built for agencies and partners", tone: "bg-slate-900" },
 ];
 
 export function MetricsSection() {
   return (
-    <section className="border-t border-white/10 bg-[#0a0a0d] py-24 sm:py-32">
+    <section className="border-t border-slate-200 bg-white py-24 sm:py-32">
       <div className="mx-auto max-w-[1200px] px-5 sm:px-8">
-        <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-white/45">
+        <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-blue-600">
           ClickAI capabilities
         </p>
-        <h2 className="mt-4 max-w-xl font-serif text-4xl leading-[1.1] text-white sm:text-5xl">
+        <h2 className="mt-4 max-w-xl font-serif text-4xl leading-[1.1] text-slate-900 sm:text-5xl">
           Built to earn trust in every conversation.
         </h2>
 

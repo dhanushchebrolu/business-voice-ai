@@ -42,19 +42,19 @@ function scrollToSection(id: string) {
 
 export function LandingFooter() {
   return (
-    <footer className="border-t border-white/10 bg-[#0a0a0d] py-16">
+    <footer className="border-t border-slate-200 bg-white py-16">
       <div className="mx-auto max-w-[1200px] px-5 sm:px-8">
-        <div className="grid gap-10 border-b border-white/10 pb-12 sm:grid-cols-2">
+        <div className="grid gap-10 border-b border-slate-200 pb-12 sm:grid-cols-2">
           <div>
-            <span className="text-[15px] font-semibold tracking-tight text-white">ClickAI</span>
-            <p className="mt-3 max-w-xs text-sm leading-relaxed text-white/45">
+            <span className="text-[15px] font-semibold tracking-tight text-slate-900">ClickAI</span>
+            <p className="mt-3 max-w-xs text-sm leading-relaxed text-slate-500">
               White-label AI voice, WhatsApp and automation for businesses.
             </p>
           </div>
           <div className="flex items-start sm:justify-end">
             <Link
               to="/contact"
-              className="rounded-full border border-white/20 px-5 py-2.5 text-sm font-medium text-white hover:bg-white/10"
+              className="rounded-full border border-blue-200 bg-blue-50 px-5 py-2.5 text-sm font-medium text-blue-700 hover:bg-blue-100"
             >
               Get in touch
             </Link>
@@ -64,14 +64,14 @@ export function LandingFooter() {
         <div className="grid gap-10 pt-12 sm:grid-cols-4">
           {COLUMNS.map((col) => (
             <div key={col.heading}>
-              <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-white/40">
+              <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-slate-400">
                 {col.heading}
               </p>
               <ul className="mt-4 space-y-2.5">
                 {col.links.map((link) =>
                   link.to ? (
                     <li key={link.label}>
-                      <Link to={link.to} className="text-sm text-white/65 hover:text-white">
+                      <Link to={link.to} className="text-sm text-slate-500 hover:text-blue-600">
                         {link.label}
                       </Link>
                     </li>
@@ -80,7 +80,7 @@ export function LandingFooter() {
                       <button
                         type="button"
                         onClick={() => scrollToSection(link.targetId!)}
-                        className="text-sm text-white/65 hover:text-white"
+                        className="text-sm text-slate-500 hover:text-blue-600"
                       >
                         {link.label}
                       </button>
@@ -92,7 +92,7 @@ export function LandingFooter() {
           ))}
         </div>
 
-        <div className="mt-14 flex flex-col gap-2 border-t border-white/10 pt-6 text-xs text-white/35 sm:flex-row sm:items-center sm:justify-between">
+        <div className="mt-14 flex flex-col gap-2 border-t border-slate-200 pt-6 text-xs text-slate-400 sm:flex-row sm:items-center sm:justify-between">
           <p>ClickAI © {new Date().getFullYear()}</p>
           <p>clickai.in</p>
         </div>

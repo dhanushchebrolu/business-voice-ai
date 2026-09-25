@@ -83,9 +83,9 @@ function CardIcon({ variant }: { variant: "burst" | "diamond" | "hex" | "ring" }
               y1="32"
               x2={x2}
               y2={y2}
-              stroke="#c98fb0"
+              stroke="#2563eb"
               strokeWidth="1.3"
-              opacity="0.85"
+              opacity="0.7"
             />
           );
         })}
@@ -102,7 +102,7 @@ function CardIcon({ variant }: { variant: "burst" | "diamond" | "hex" | "ring" }
           height="32"
           transform="rotate(45 32 32)"
           fill="none"
-          stroke="#7fa3d1"
+          stroke="#2563eb"
           strokeWidth="1.3"
         />
         <rect
@@ -112,7 +112,7 @@ function CardIcon({ variant }: { variant: "burst" | "diamond" | "hex" | "ring" }
           height="16"
           transform="rotate(45 32 32)"
           fill="none"
-          stroke="#7fa3d1"
+          stroke="#2563eb"
           strokeWidth="1.3"
           opacity="0.6"
         />
@@ -125,17 +125,17 @@ function CardIcon({ variant }: { variant: "burst" | "diamond" | "hex" | "ring" }
         <polygon
           points="32,10 50,21 50,43 32,54 14,43 14,21"
           fill="none"
-          stroke="#7fbf9f"
+          stroke="#2563eb"
           strokeWidth="1.3"
         />
-        <rect x="24" y="24" width="16" height="16" fill="none" stroke="#7fbf9f" strokeWidth="1.3" />
+        <rect x="24" y="24" width="16" height="16" fill="none" stroke="#2563eb" strokeWidth="1.3" />
       </svg>
     );
   }
   return (
     <svg viewBox="0 0 64 64" className="size-10" aria-hidden="true">
-      <circle cx="32" cy="32" r="22" fill="none" stroke="#d1a86b" strokeWidth="1.3" />
-      <circle cx="32" cy="32" r="12" fill="none" stroke="#d1a86b" strokeWidth="1.3" opacity="0.6" />
+      <circle cx="32" cy="32" r="22" fill="none" stroke="#2563eb" strokeWidth="1.3" />
+      <circle cx="32" cy="32" r="12" fill="none" stroke="#2563eb" strokeWidth="1.3" opacity="0.6" />
     </svg>
   );
 }
@@ -146,20 +146,17 @@ function scrollToSection(id: string) {
 
 export function ValuePropositions() {
   return (
-    <section
-      id="value-propositions"
-      className="border-t border-white/10 bg-[#0a0a0d] py-24 sm:py-32"
-    >
+    <section id="value-propositions" className="border-t border-slate-200 bg-white py-24 sm:py-32">
       <div className="mx-auto max-w-[1200px] px-5 sm:px-8">
         <div className="flex flex-col gap-8 sm:flex-row sm:items-end sm:justify-between">
           <div className="max-w-xl">
-            <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-white/45">
+            <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-blue-600">
               AI employees
             </p>
-            <h2 className="mt-4 font-serif text-4xl leading-[1.1] text-white sm:text-5xl">
+            <h2 className="mt-4 font-serif text-4xl leading-[1.1] text-slate-900 sm:text-5xl">
               Four AI employees. One shared brain.
             </h2>
-            <p className="mt-4 text-sm leading-relaxed text-white/50 sm:text-base">
+            <p className="mt-4 text-sm leading-relaxed text-slate-500 sm:text-base">
               Every ClickAI agent runs on the same core — business knowledge, tools and channels —
               configured for the role your business needs.
             </p>
@@ -167,14 +164,14 @@ export function ValuePropositions() {
               <button
                 type="button"
                 onClick={() => scrollToSection("feature-showcase")}
-                className="text-sm text-white/70 underline decoration-white/20 underline-offset-4 hover:text-white"
+                className="text-sm text-slate-600 underline decoration-slate-300 underline-offset-4 hover:text-blue-600"
               >
                 How it Works?
               </button>
               <button
                 type="button"
                 onClick={() => scrollToSection("voice-demo")}
-                className="rounded-full bg-white px-5 py-2 text-sm font-medium text-[#0a0a0d] hover:bg-white/90"
+                className="rounded-full bg-blue-600 px-5 py-2 text-sm font-medium text-white hover:bg-blue-700"
               >
                 Watch Demo
               </button>
@@ -187,18 +184,20 @@ export function ValuePropositions() {
             <div
               key={product.name}
               id={product.id}
-              className="flex scroll-mt-24 flex-col rounded-2xl border border-white/10 bg-white/[0.03] p-7"
+              className="flex scroll-mt-24 flex-col rounded-2xl border border-slate-200 bg-white p-7 shadow-sm"
             >
-              <CardIcon variant={product.icon} />
-              <h3 className="mt-6 text-xl font-semibold tracking-tight text-white">
+              <span className="grid size-14 place-items-center rounded-2xl bg-blue-50">
+                <CardIcon variant={product.icon} />
+              </span>
+              <h3 className="mt-6 text-xl font-semibold tracking-tight text-slate-900">
                 {product.name}
               </h3>
-              <p className="mt-1 text-sm text-white/60">{product.tagline}</p>
+              <p className="mt-1 text-sm text-slate-500">{product.tagline}</p>
 
-              <ul className="mt-5 space-y-2 text-sm leading-relaxed text-white/50">
+              <ul className="mt-5 space-y-2 text-sm leading-relaxed text-slate-500">
                 {product.capabilities.map((c) => (
                   <li key={c} className="flex gap-2">
-                    <span className="text-white/25" aria-hidden="true">
+                    <span className="text-blue-400" aria-hidden="true">
                       —
                     </span>
                     {c}
@@ -210,16 +209,19 @@ export function ValuePropositions() {
                 {product.channels.map((ch) => (
                   <span
                     key={ch}
-                    className="rounded-full border border-white/10 px-2.5 py-1 text-[11px] text-white/55"
+                    className="rounded-full border border-blue-100 bg-blue-50 px-2.5 py-1 text-[11px] text-blue-700"
                   >
                     {ch}
                   </span>
                 ))}
               </div>
 
-              <p className="mt-4 text-xs text-white/35">Popular for: {product.industries}</p>
+              <p className="mt-4 text-xs text-slate-400">Popular for: {product.industries}</p>
 
-              <Link to="/contact" className="mt-6 text-sm font-medium text-white hover:underline">
+              <Link
+                to="/contact"
+                className="mt-6 text-sm font-medium text-blue-600 hover:underline"
+              >
                 Talk to us about {product.name} →
               </Link>
             </div>

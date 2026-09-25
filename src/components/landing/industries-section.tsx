@@ -10,22 +10,25 @@ import { BUSINESS_TYPES } from "@/lib/business-types";
  */
 export function IndustriesSection() {
   return (
-    <section id="industries" className="border-t border-[#14141a]/10 bg-[#f6f3ee] py-24 sm:py-32">
+    <section id="industries" className="border-t border-slate-200 bg-white py-24 sm:py-32">
       <div className="mx-auto max-w-[1200px] px-5 sm:px-8">
-        <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-[#14141a]/40">
+        <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-blue-600">
           Industries
         </p>
-        <h2 className="mt-4 max-w-xl font-serif text-4xl leading-[1.08] text-[#14141a] sm:text-5xl">
+        <h2 className="mt-4 max-w-xl font-serif text-4xl leading-[1.08] text-slate-900 sm:text-5xl">
           AI built for your business.
         </h2>
 
         <div className="mt-14 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {BUSINESS_TYPES.filter((t) => t.id !== "other").map((industry) => (
-            <div key={industry.id} className="rounded-2xl border border-[#14141a]/10 bg-white p-6">
-              <h3 className="text-base font-semibold tracking-tight text-[#14141a]">
+            <div
+              key={industry.id}
+              className="rounded-2xl border border-slate-200 bg-blue-50/30 p-6 transition-colors hover:border-blue-200 hover:bg-blue-50"
+            >
+              <h3 className="text-base font-semibold tracking-tight text-slate-900">
                 {industry.label}
               </h3>
-              <p className="mt-2 text-sm leading-relaxed text-[#14141a]/55">{industry.blurb}</p>
+              <p className="mt-2 text-sm leading-relaxed text-slate-500">{industry.blurb}</p>
             </div>
           ))}
         </div>

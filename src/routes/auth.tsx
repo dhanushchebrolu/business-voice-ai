@@ -176,7 +176,7 @@ function AuthPage() {
   }
 
   return (
-    <div className="grid min-h-screen lg:grid-cols-[1fr_1.1fr]">
+    <div className="theme-light grid min-h-screen bg-background lg:grid-cols-[1fr_1.1fr]">
       <div className="relative hidden flex-col justify-between border-r border-border bg-surface/40 p-10 lg:flex">
         <div className="grid-noise pointer-events-none absolute inset-0 opacity-50" aria-hidden />
         <Link to="/" className="relative">

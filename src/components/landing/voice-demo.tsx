@@ -207,7 +207,7 @@ export function VoiceDemo() {
               type="button"
               onClick={handlePlayPause}
               aria-label={isPlaying ? "Pause demo" : "Play demo"}
-              className="grid size-9 shrink-0 place-items-center rounded-full bg-[#14141a] text-white transition-transform hover:scale-105"
+              className="grid size-9 shrink-0 place-items-center rounded-full bg-blue-600 text-white transition-transform hover:scale-105"
             >
               {isPlaying ? <Pause className="size-3.5" /> : <Play className="ml-0.5 size-3.5" />}
             </button>
@@ -235,7 +235,7 @@ export function VoiceDemo() {
                 return (
                   <span
                     key={i}
-                    className={`w-full rounded-full transition-colors ${played ? "bg-[#14141a]" : "bg-[#14141a]/15"}`}
+                    className={`w-full rounded-full transition-colors ${played ? "bg-blue-600" : "bg-blue-600/15"}`}
                     style={{ height: `${Math.max(10, level * 100)}%` }}
                   />
                 );

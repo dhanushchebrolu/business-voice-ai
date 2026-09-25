@@ -7,9 +7,15 @@ export const Route = createFileRoute("/pricing")({
   head: () => ({
     meta: [
       { title: "Pricing — Vaani AI receptionist" },
-      { name: "description", content: "Simple monthly plans for AI phone receptionists, with usage-based call minutes." },
+      {
+        name: "description",
+        content: "Simple monthly plans for AI phone receptionists, with usage-based call minutes.",
+      },
       { property: "og:title", content: "Pricing — Vaani AI receptionist" },
-      { property: "og:description", content: "Starter, Professional and Business plans with included call minutes." },
+      {
+        property: "og:description",
+        content: "Starter, Professional and Business plans with included call minutes.",
+      },
     ],
   }),
   component: Pricing,
@@ -21,7 +27,13 @@ export const PLANS = [
     name: "Starter",
     price: 2999,
     blurb: "A single location getting its first AI receptionist.",
-    features: ["1 business profile", "1 phone number", "500 call minutes / month", "Calls, transcripts & leads", "Email support"],
+    features: [
+      "1 business profile",
+      "1 phone number",
+      "500 call minutes / month",
+      "Calls, transcripts & leads",
+      "Email support",
+    ],
   },
   {
     id: "professional",
@@ -56,13 +68,16 @@ export const PLANS = [
 
 function Pricing() {
   return (
-    <div className="min-h-screen bg-background">
+    <div className="theme-light min-h-screen bg-background">
       <header className="border-b border-border">
         <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-5">
           <Link to="/">
             <Logo />
           </Link>
-          <Link to="/" className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
+          <Link
+            to="/"
+            className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+          >
             <ArrowLeft className="size-3.5" /> Home
           </Link>
         </div>
@@ -70,10 +85,12 @@ function Pricing() {
 
       <main className="mx-auto max-w-6xl px-5 py-16">
         <StatusPill tone="accent">Plans</StatusPill>
-        <h1 className="mt-5 text-3xl font-semibold tracking-tight sm:text-4xl">Pay for a receptionist, not a platform</h1>
+        <h1 className="mt-5 text-3xl font-semibold tracking-tight sm:text-4xl">
+          Pay for a receptionist, not a platform
+        </h1>
         <p className="mt-3 max-w-xl text-sm text-muted-foreground">
-          A one-time setup fee activates your workspace. Call minutes beyond your plan are billed from your wallet at your
-          workspace rate.
+          A one-time setup fee activates your workspace. Call minutes beyond your plan are billed
+          from your wallet at your workspace rate.
         </p>
 
         <div className="mt-10 grid gap-5 lg:grid-cols-3">
@@ -117,8 +134,9 @@ function Pricing() {
         </div>
 
         <p className="mt-10 rounded-lg border border-border bg-surface/50 p-4 text-xs text-muted-foreground">
-          Payments are processed securely by our payment provider. Your dashboard unlocks after the setup payment is confirmed, and the billing screen will
-          show a clear “payment provider not connected” state until Razorpay is configured.
+          Payments are processed securely by our payment provider. Your dashboard unlocks after the
+          setup payment is confirmed, and the billing screen will show a clear “payment provider not
+          connected” state until Razorpay is configured.
         </p>
       </main>
     </div>

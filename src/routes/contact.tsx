@@ -63,7 +63,7 @@ function Contact() {
   }
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="theme-light min-h-screen bg-background">
       <header className="sticky top-0 z-30 border-b border-border bg-background/85 backdrop-blur">
         <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-5">
           <Link to="/">

@@ -69,7 +69,7 @@ function ResetPassword() {
 
   if (loading) {
     return (
-      <div className="flex min-h-screen items-center justify-center gap-2 text-sm text-muted-foreground">
+      <div className="theme-light flex min-h-screen items-center justify-center gap-2 bg-background text-sm text-muted-foreground">
         <Loader2 className="size-4 animate-spin" /> Loading…
       </div>
     );
@@ -77,7 +77,7 @@ function ResetPassword() {
 
   if (linkInvalid) {
     return (
-      <div className="flex min-h-screen flex-col items-center justify-center px-4 text-center">
+      <div className="theme-light flex min-h-screen flex-col items-center justify-center bg-background px-4 text-center">
         <Logo className="mb-6" />
         <h1 className="text-lg font-semibold tracking-tight">
           This reset link is invalid or has expired
@@ -93,7 +93,7 @@ function ResetPassword() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center px-5">
+    <div className="theme-light flex min-h-screen items-center justify-center bg-background px-5">
       <div className="w-full max-w-sm">
         <Link to="/">
           <Logo />

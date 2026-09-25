@@ -2,10 +2,13 @@ import { MessageCircle, Instagram, Phone, CreditCard, CalendarDays, Globe } from
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 
 /**
- * The hero's hub-and-spoke graphic — a ClickAI-branded center node with the
- * channels/integrations ClickAI actually connects today radiating around
- * it. Original artwork (SVG connector lines + CSS hexagon chips), not a
- * copy of any reference image's assets.
+ * The hero's hub-and-spoke graphic — a ClickAI-branded center "coin" with
+ * the channels/integrations ClickAI actually connects today radiating
+ * around it on a tilted isometric-style grid floor. Original artwork
+ * (CSS-faked isometric floor + hexagon chips + SVG glow lines), not a copy
+ * of any reference image's assets — the depth illusion is built from a
+ * genuinely rotated (rotateX) floor plane plus layered box-shadows for
+ * node/coin thickness, not a traced 3D render.
  *
  * Every node listed here is a real, live ClickAI capability, not an
  * aspirational one — WhatsApp, Instagram and Razorpay are the three the
@@ -21,59 +24,15 @@ interface HubNode {
   label: string;
   Icon: typeof MessageCircle;
   angleDeg: number;
-  colorClass: string;
-  glowClass: string;
 }
 
 const NODES: HubNode[] = [
-  {
-    id: "voice",
-    label: "Voice Calls",
-    Icon: Phone,
-    angleDeg: -90,
-    colorClass: "text-sky-300",
-    glowClass: "bg-sky-400/20",
-  },
-  {
-    id: "whatsapp",
-    label: "WhatsApp",
-    Icon: MessageCircle,
-    angleDeg: -30,
-    colorClass: "text-emerald-300",
-    glowClass: "bg-emerald-400/20",
-  },
-  {
-    id: "razorpay",
-    label: "Razorpay",
-    Icon: CreditCard,
-    angleDeg: 30,
-    colorClass: "text-indigo-300",
-    glowClass: "bg-indigo-400/20",
-  },
-  {
-    id: "instagram",
-    label: "Instagram",
-    Icon: Instagram,
-    angleDeg: 90,
-    colorClass: "text-pink-300",
-    glowClass: "bg-pink-400/20",
-  },
-  {
-    id: "calendar",
-    label: "Google Calendar",
-    Icon: CalendarDays,
-    angleDeg: 150,
-    colorClass: "text-amber-300",
-    glowClass: "bg-amber-400/20",
-  },
-  {
-    id: "chat",
-    label: "Website Chat",
-    Icon: Globe,
-    angleDeg: 210,
-    colorClass: "text-teal-300",
-    glowClass: "bg-teal-400/20",
-  },
+  { id: "voice", label: "Voice Calls", Icon: Phone, angleDeg: -90 },
+  { id: "whatsapp", label: "WhatsApp", Icon: MessageCircle, angleDeg: -30 },
+  { id: "razorpay", label: "Razorpay", Icon: CreditCard, angleDeg: 30 },
+  { id: "instagram", label: "Instagram", Icon: Instagram, angleDeg: 90 },
+  { id: "calendar", label: "Google Calendar", Icon: CalendarDays, angleDeg: 150 },
+  { id: "chat", label: "Website Chat", Icon: Globe, angleDeg: 210 },
 ];
 
 const RADIUS_PCT = 38;
@@ -88,26 +47,51 @@ export function HubGraphic() {
   const reducedMotion = usePrefersReducedMotion();
 
   return (
-    <div className="relative mx-auto aspect-square w-full max-w-[440px]" aria-hidden="true">
+    <div className="relative mx-auto aspect-square w-full max-w-[480px]" aria-hidden="true">
+      {/* Tilted grid floor — the isometric-depth illusion, a genuinely
+          rotated plane (not a flat background image) sitting behind
+          everything else. */}
+      <div
+        className="absolute inset-0 overflow-hidden rounded-[32px]"
+        style={{ perspective: "700px" }}
+      >
+        <div
+          className="absolute inset-[-20%]"
+          style={{
+            transform: "rotateX(58deg)",
+            transformOrigin: "center",
+            backgroundImage:
+              "linear-gradient(to right, rgba(37,99,235,0.10) 1px, transparent 1px), linear-gradient(to bottom, rgba(37,99,235,0.10) 1px, transparent 1px)",
+            backgroundSize: "36px 36px",
+            maskImage: "radial-gradient(circle at center, black 45%, transparent 75%)",
+            WebkitMaskImage: "radial-gradient(circle at center, black 45%, transparent 75%)",
+          }}
+        />
+      </div>
+
       <svg viewBox="0 0 100 100" className="absolute inset-0 h-full w-full" fill="none">
         <defs>
-          <radialGradient id="hub-line-fade" cx="50%" cy="50%" r="60%">
-            <stop offset="0%" stopColor="white" stopOpacity="0.35" />
-            <stop offset="100%" stopColor="white" stopOpacity="0.05" />
-          </radialGradient>
+          <linearGradient id="hub-line-glow" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stopColor="#60a5fa" stopOpacity="0.9" />
+            <stop offset="100%" stopColor="#2563eb" stopOpacity="0.35" />
+          </linearGradient>
         </defs>
         {NODES.map((node) => {
           const { x, y } = nodePosition(node.angleDeg);
-          const midX = 50 + (x - 50) * 0.5 + (y - 50) * 0.12;
-          const midY = 50 + (y - 50) * 0.5 - (x - 50) * 0.12;
+          const midX = 50 + (x - 50) * 0.5 + (y - 50) * 0.14;
+          const midY = 50 + (y - 50) * 0.5 - (x - 50) * 0.14;
+          const d = `M 50 50 Q ${midX} ${midY} ${x} ${y}`;
           return (
-            <path
-              key={node.id}
-              d={`M 50 50 Q ${midX} ${midY} ${x} ${y}`}
-              stroke="url(#hub-line-fade)"
-              strokeWidth="0.6"
-              strokeLinecap="round"
-            />
+            <g key={node.id}>
+              <path
+                d={d}
+                stroke="#93c5fd"
+                strokeOpacity="0.35"
+                strokeWidth="2.2"
+                strokeLinecap="round"
+              />
+              <path d={d} stroke="url(#hub-line-glow)" strokeWidth="0.55" strokeLinecap="round" />
+            </g>
           );
         })}
       </svg>
@@ -121,21 +105,29 @@ export function HubGraphic() {
             style={{ left: `${x}%`, top: `${y}%` }}
           >
             <div
-              className={`relative flex size-16 items-center justify-center border border-white/15 bg-[#111114]/90 shadow-[0_12px_30px_-12px_rgba(0,0,0,0.6)] sm:size-20 ${
-                reducedMotion ? "" : "animate-hub-float"
-              }`}
-              style={{
-                clipPath: HEX_CLIP,
-                animationDelay: reducedMotion ? undefined : `${i * 0.45}s`,
-              }}
+              className={reducedMotion ? "" : "animate-hub-float"}
+              style={{ animationDelay: reducedMotion ? undefined : `${i * 0.45}s` }}
             >
-              <span
-                className={`pointer-events-none absolute inset-0 rounded-full blur-lg ${node.glowClass}`}
+              {/* Offset dark layer behind gives the chip a beveled/
+                  extruded thickness, matching the reference's raised
+                  hex tiles. */}
+              <div
+                className="absolute inset-0 translate-y-[5px] bg-blue-950/10"
+                style={{ clipPath: HEX_CLIP }}
                 aria-hidden="true"
               />
-              <node.Icon className={`relative size-6 sm:size-7 ${node.colorClass}`} />
+              <div
+                className="relative flex size-16 items-center justify-center border border-blue-200 bg-white shadow-[0_16px_28px_-14px_rgba(37,99,235,0.45)] sm:size-[72px]"
+                style={{ clipPath: HEX_CLIP }}
+              >
+                <span
+                  className="pointer-events-none absolute inset-0 rounded-full bg-blue-400/15 blur-lg"
+                  aria-hidden="true"
+                />
+                <node.Icon className="relative size-6 text-blue-600 sm:size-7" />
+              </div>
             </div>
-            <p className="mt-1.5 text-center text-[10px] font-medium text-white/45 sm:text-[11px]">
+            <p className="mt-2 text-center text-[10px] font-medium text-slate-500 sm:text-[11px]">
               {node.label}
             </p>
           </div>
@@ -144,18 +136,23 @@ export function HubGraphic() {
 
       <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
         <span
-          className={`pointer-events-none absolute inset-0 -m-4 rounded-full bg-white/10 blur-2xl ${
+          className={`pointer-events-none absolute inset-0 -m-6 rounded-full bg-blue-400/25 blur-2xl ${
             reducedMotion ? "" : "animate-hub-pulse"
           }`}
           aria-hidden="true"
         />
-        <div className="relative grid size-28 place-items-center rounded-full border border-white/20 bg-[#0a0a0d] shadow-[0_0_60px_-8px_rgba(255,255,255,0.25)] sm:size-32">
-          <span className="grid size-9 place-items-center rounded-full border border-white/25 text-sm font-semibold text-white sm:size-10">
-            C
-          </span>
-          <span className="mt-1.5 text-[11px] font-semibold tracking-tight text-white sm:text-xs">
-            ClickAI
-          </span>
+        {/* Coin thickness: a darker blue ellipse offset below the main
+            face, simulating the reference's ridged-edge center disc. */}
+        <div className="absolute left-1/2 top-[10px] h-[76px] w-[168px] -translate-x-1/2 rounded-full bg-blue-700 sm:h-[88px] sm:w-[192px]" />
+        <div className="relative grid h-[76px] w-[168px] place-items-center rounded-full border-2 border-blue-300 bg-gradient-to-b from-white to-blue-50 shadow-[0_0_50px_-6px_rgba(37,99,235,0.5)] sm:h-[88px] sm:w-[192px]">
+          <div className="flex flex-col items-center">
+            <span className="grid size-8 place-items-center rounded-full bg-blue-600 text-xs font-semibold text-white sm:size-9">
+              C
+            </span>
+            <span className="mt-1 text-[11px] font-semibold tracking-tight text-slate-900 sm:text-xs">
+              ClickAI
+            </span>
+          </div>
         </div>
       </div>
     </div>

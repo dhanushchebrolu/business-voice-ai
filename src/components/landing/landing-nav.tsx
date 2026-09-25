@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { BUSINESS_TYPES } from "@/lib/business-types";
 
 /**
- * Dark landing-page navigation: logo left, Products / Pricing /
+ * White + blue landing-page navigation: logo left, Products / Pricing /
  * Integrations / Industries centered (Products/Integrations/Industries
  * open a real dropdown; Pricing is a direct link to the real /pricing
  * route), a persistent Contact button, and a single menu control that
@@ -105,7 +105,7 @@ function NavDropdown({
         aria-haspopup="true"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
-        className="inline-flex items-center gap-1 text-sm text-white/70 transition-colors hover:text-white"
+        className="inline-flex items-center gap-1 text-sm text-slate-600 transition-colors hover:text-blue-600"
       >
         {label}
         <ChevronDown className={`size-3.5 transition-transform ${open ? "rotate-180" : ""}`} />
@@ -114,7 +114,7 @@ function NavDropdown({
         <div
           role="menu"
           aria-label={label}
-          className={`absolute left-1/2 top-full z-50 mt-3 -translate-x-1/2 rounded-2xl border border-white/10 bg-[#0d0d10] p-4 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.75)] ${panelClassName ?? "w-72"}`}
+          className={`absolute left-1/2 top-full z-50 mt-3 -translate-x-1/2 rounded-2xl border border-slate-200 bg-white p-4 shadow-[0_24px_60px_-20px_rgba(15,23,42,0.25)] ${panelClassName ?? "w-72"}`}
         >
           {renderPanel(close)}
         </div>
@@ -144,16 +144,16 @@ export function LandingNav() {
   }, [menuOpen]);
 
   return (
-    <header className="relative z-40">
+    <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/85 backdrop-blur">
       <div className="mx-auto flex h-20 max-w-[1400px] items-center justify-between px-5 sm:px-8">
         <Link to="/" className="flex items-center gap-2">
           <span
-            className="grid size-7 place-items-center rounded-full border border-white/20 text-[11px] font-semibold text-white"
+            className="grid size-7 place-items-center rounded-full bg-blue-600 text-[11px] font-semibold text-white"
             aria-hidden="true"
           >
             C
           </span>
-          <span className="text-[15px] font-semibold tracking-tight text-white">ClickAI</span>
+          <span className="text-[15px] font-semibold tracking-tight text-slate-900">ClickAI</span>
         </Link>
 
         <nav className="hidden items-center gap-8 md:flex" aria-label="Primary">
@@ -171,17 +171,20 @@ export function LandingNav() {
                       close();
                       scrollToSection(item.targetId);
                     }}
-                    className="block w-full rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-white/5"
+                    className="block w-full rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-blue-50"
                   >
-                    <span className="block text-sm font-medium text-white">{item.label}</span>
-                    <span className="mt-0.5 block text-xs text-white/45">{item.blurb}</span>
+                    <span className="block text-sm font-medium text-slate-900">{item.label}</span>
+                    <span className="mt-0.5 block text-xs text-slate-500">{item.blurb}</span>
                   </button>
                 ))}
               </div>
             )}
           />
 
-          <Link to="/pricing" className="text-sm text-white/70 transition-colors hover:text-white">
+          <Link
+            to="/pricing"
+            className="text-sm text-slate-600 transition-colors hover:text-blue-600"
+          >
             Pricing
           </Link>
 
@@ -199,7 +202,7 @@ export function LandingNav() {
                       close();
                       scrollToSection(item.targetId);
                     }}
-                    className="rounded-lg px-3 py-2 text-left text-sm text-white/80 transition-colors hover:bg-white/5 hover:text-white"
+                    className="rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-blue-50 hover:text-blue-700"
                   >
                     {item.label}
                   </button>
@@ -222,7 +225,7 @@ export function LandingNav() {
                       close();
                       scrollToSection(item.targetId);
                     }}
-                    className="rounded-lg px-3 py-2 text-left text-sm text-white/80 transition-colors hover:bg-white/5 hover:text-white"
+                    className="rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-blue-50 hover:text-blue-700"
                   >
                     {item.label}
                   </button>
@@ -236,7 +239,7 @@ export function LandingNav() {
           <Link to="/contact" className="hidden sm:block">
             <Button
               size="sm"
-              className="rounded-full bg-white px-5 text-[#0a0a0d] hover:bg-white/90"
+              className="rounded-full bg-blue-600 px-5 text-white hover:bg-blue-700"
             >
               Contact
             </Button>
@@ -244,7 +247,7 @@ export function LandingNav() {
 
           <button
             type="button"
-            className="grid size-10 place-items-center rounded-full border border-white/15 text-white"
+            className="grid size-10 place-items-center rounded-full border border-slate-200 text-slate-700 hover:bg-slate-50"
             aria-expanded={menuOpen}
             aria-controls="landing-menu"
             aria-label={menuOpen ? "Close menu" : "Open menu"}
@@ -261,13 +264,13 @@ export function LandingNav() {
           role="dialog"
           aria-modal="true"
           aria-label="Navigation menu"
-          className="fixed inset-0 z-50 flex flex-col overflow-y-auto bg-[#0a0a0d] px-6 py-6"
+          className="fixed inset-0 z-50 flex flex-col overflow-y-auto bg-white px-6 py-6"
         >
           <div className="mx-auto flex w-full max-w-[1400px] items-center justify-between">
-            <span className="text-[15px] font-semibold tracking-tight text-white">ClickAI</span>
+            <span className="text-[15px] font-semibold tracking-tight text-slate-900">ClickAI</span>
             <button
               type="button"
-              className="grid size-9 place-items-center rounded-full border border-white/15 text-white"
+              className="grid size-9 place-items-center rounded-full border border-slate-200 text-slate-700"
               aria-label="Close menu"
               onClick={() => setMenuOpen(false)}
             >
@@ -285,7 +288,7 @@ export function LandingNav() {
                     setMenuOpen(false);
                     scrollToSection(item.targetId);
                   }}
-                  className="rounded-lg px-2 py-3 text-left font-serif text-3xl text-white/85 hover:text-white sm:text-4xl"
+                  className="rounded-lg px-2 py-3 text-left font-serif text-3xl text-slate-800 hover:text-blue-600 sm:text-4xl"
                 >
                   {item.label}
                 </button>
@@ -293,7 +296,7 @@ export function LandingNav() {
               <Link
                 to="/pricing"
                 onClick={() => setMenuOpen(false)}
-                className="rounded-lg px-2 py-3 font-serif text-3xl text-white/85 hover:text-white sm:text-4xl"
+                className="rounded-lg px-2 py-3 font-serif text-3xl text-slate-800 hover:text-blue-600 sm:text-4xl"
               >
                 Pricing
               </Link>
@@ -303,7 +306,7 @@ export function LandingNav() {
                   setMenuOpen(false);
                   scrollToSection("integrations");
                 }}
-                className="rounded-lg px-2 py-3 text-left font-serif text-3xl text-white/85 hover:text-white sm:text-4xl"
+                className="rounded-lg px-2 py-3 text-left font-serif text-3xl text-slate-800 hover:text-blue-600 sm:text-4xl"
               >
                 Integrations
               </button>
@@ -313,14 +316,14 @@ export function LandingNav() {
                   setMenuOpen(false);
                   scrollToSection("industries");
                 }}
-                className="rounded-lg px-2 py-3 text-left font-serif text-3xl text-white/85 hover:text-white sm:text-4xl"
+                className="rounded-lg px-2 py-3 text-left font-serif text-3xl text-slate-800 hover:text-blue-600 sm:text-4xl"
               >
                 Industries
               </button>
               <Link
                 to="/contact"
                 onClick={() => setMenuOpen(false)}
-                className="rounded-lg px-2 py-3 font-serif text-3xl text-white/85 hover:text-white sm:text-4xl"
+                className="rounded-lg px-2 py-3 font-serif text-3xl text-slate-800 hover:text-blue-600 sm:text-4xl"
               >
                 Contact
               </Link>
@@ -331,12 +334,15 @@ export function LandingNav() {
                 <>
                   {hasDashboard ? (
                     <Link to="/app" onClick={() => setMenuOpen(false)}>
-                      <Button className="w-full rounded-full" size="lg">
+                      <Button
+                        className="w-full rounded-full bg-blue-600 text-white hover:bg-blue-700"
+                        size="lg"
+                      >
                         Dashboard
                       </Button>
                     </Link>
                   ) : (
-                    <span className="text-sm text-white/60">{user?.email}</span>
+                    <span className="text-sm text-slate-500">{user?.email}</span>
                   )}
                   <button
                     type="button"
@@ -345,7 +351,7 @@ export function LandingNav() {
                       await signOut();
                       navigate({ to: "/" });
                     }}
-                    className="rounded-full border border-white/15 px-4 py-3 text-center text-white/80"
+                    className="rounded-full border border-slate-200 px-4 py-3 text-center text-slate-700 hover:bg-slate-50"
                   >
                     Sign out
                   </button>
@@ -353,12 +359,19 @@ export function LandingNav() {
               ) : (
                 <>
                   <Link to="/auth" onClick={() => setMenuOpen(false)}>
-                    <Button variant="outline" className="w-full rounded-full" size="lg">
+                    <Button
+                      variant="outline"
+                      className="w-full rounded-full border-slate-300 text-slate-900 hover:bg-slate-50"
+                      size="lg"
+                    >
                       Login
                     </Button>
                   </Link>
                   <Link to="/auth" search={{ mode: "signup" }} onClick={() => setMenuOpen(false)}>
-                    <Button className="w-full rounded-full" size="lg">
+                    <Button
+                      className="w-full rounded-full bg-blue-600 text-white hover:bg-blue-700"
+                      size="lg"
+                    >
                       Get Started
                     </Button>
                   </Link>
