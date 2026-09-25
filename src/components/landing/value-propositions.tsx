@@ -11,6 +11,7 @@ import { Link } from "@tanstack/react-router";
  */
 const PRODUCTS = [
   {
+    id: "ai-sales-executive",
     name: "AI Sales Executive",
     tagline: "Turn enquiries into customers.",
     capabilities: [
@@ -24,6 +25,7 @@ const PRODUCTS = [
     icon: "burst" as const,
   },
   {
+    id: "ai-receptionist",
     name: "AI Receptionist",
     tagline: "Your 24/7 front desk.",
     capabilities: [
@@ -37,6 +39,7 @@ const PRODUCTS = [
     icon: "diamond" as const,
   },
   {
+    id: "ai-order-booking",
     name: "AI Booking & Order Agent",
     tagline: "Take bookings. Process orders. Keep customers updated.",
     capabilities: [
@@ -50,6 +53,7 @@ const PRODUCTS = [
     icon: "hex" as const,
   },
   {
+    id: "ai-customer-care",
     name: "AI Customer Care",
     tagline: "Delight your customers, every time.",
     capabilities: [
@@ -182,7 +186,8 @@ export function ValuePropositions() {
           {PRODUCTS.map((product) => (
             <div
               key={product.name}
-              className="flex flex-col rounded-2xl border border-white/10 bg-white/[0.03] p-7"
+              id={product.id}
+              className="flex scroll-mt-24 flex-col rounded-2xl border border-white/10 bg-white/[0.03] p-7"
             >
               <CardIcon variant={product.icon} />
               <h3 className="mt-6 text-xl font-semibold tracking-tight text-white">

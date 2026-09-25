@@ -11,9 +11,10 @@ const CATEGORIES = [
 
 /**
  * Marketplace status is deliberately honest per integration, not a blanket
- * "Connect" label for everything: only what's actually wired up today (the
- * existing WhatsApp Business embedded-signup flow, and voice telephony via
- * the provider-agnostic runtime) is marked connectable. Everything else on
+ * "Connect" label for everything: only what's actually wired up today
+ * (WhatsApp Business embedded signup, voice telephony via the provider-
+ * agnostic runtime, website chat, Instagram, Google Calendar OAuth, and
+ * Razorpay merchant OAuth) is marked connectable. Everything else on
  * ClickAI's integration roadmap is labeled "Coming soon" rather than
  * presented as live.
  */
@@ -24,7 +25,7 @@ const GROUPS: { heading: string; items: { name: string; status: "connect" | "soo
       { name: "WhatsApp", status: "connect" },
       { name: "Voice", status: "connect" },
       { name: "Website Chat", status: "connect" },
-      { name: "Instagram", status: "soon" },
+      { name: "Instagram", status: "connect" },
       { name: "SMS", status: "soon" },
       { name: "Email", status: "soon" },
     ],
@@ -32,14 +33,14 @@ const GROUPS: { heading: string; items: { name: string; status: "connect" | "soo
   {
     heading: "Google",
     items: [
-      { name: "Google Calendar", status: "soon" },
+      { name: "Google Calendar", status: "connect" },
       { name: "Google Business Profile", status: "soon" },
       { name: "Gmail", status: "soon" },
     ],
   },
   {
     heading: "Payments",
-    items: [{ name: "Razorpay", status: "soon" }],
+    items: [{ name: "Razorpay", status: "connect" }],
   },
   {
     heading: "CRM",
@@ -96,7 +97,8 @@ export function IntegrationsSection() {
               <p className="text-xs font-semibold text-[#14141a]">Connected</p>
               <ul className="mt-2 space-y-1.5 text-[11px] text-[#14141a]/60">
                 <li>WhatsApp Business</li>
-                <li>Voice telephony</li>
+                <li>Instagram</li>
+                <li>Razorpay</li>
               </ul>
             </div>
           </div>

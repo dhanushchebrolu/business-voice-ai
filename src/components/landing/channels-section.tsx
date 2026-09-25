@@ -2,7 +2,7 @@ const CHANNELS = [
   { name: "WhatsApp", status: "live" as const },
   { name: "Voice", status: "live" as const },
   { name: "Website Chat", status: "live" as const },
-  { name: "Instagram", status: "building" as const },
+  { name: "Instagram", status: "live" as const },
   { name: "SMS", status: "building" as const },
   { name: "Email", status: "building" as const },
 ];

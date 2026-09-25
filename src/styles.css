@@ -178,3 +178,34 @@
     linear-gradient(to bottom, color-mix(in oklab, var(--foreground) 4%, transparent) 1px, transparent 1px);
   background-size: 48px 48px;
 }
+
+/* Landing-page hero hub graphic only (hub-graphic.tsx) — gentle idle
+   motion for the integration nodes and their center-glow pulse. Callers
+   gate these behind usePrefersReducedMotion, same as particle-wave.tsx's
+   own reduced-motion handling. */
+@keyframes hub-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
+}
+@keyframes hub-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.12);
+  }
+}
+@utility animate-hub-float {
+  animation: hub-float 5s ease-in-out infinite;
+}
+@utility animate-hub-pulse {
+  animation: hub-pulse 3.2s ease-in-out infinite;
+}

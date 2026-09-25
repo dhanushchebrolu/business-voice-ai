@@ -6,10 +6,11 @@ import { dirname, join } from "node:path";
 
 /**
  * Only the integrations this codebase actually has wired up (WhatsApp,
- * voice telephony, website chat) may be marked "Connect" — everything else
- * on the roadmap (Google Calendar, Razorpay, Instagram, CRMs, e-commerce)
- * must be marked "Coming soon" rather than presented as connectable when
- * no OAuth flow or credential storage exists for it yet.
+ * voice telephony, website chat, Instagram, Google Calendar, Razorpay) may
+ * be marked "Connect" — everything else on the roadmap (Google Business
+ * Profile, Gmail, SMS, Email, CRMs, e-commerce) must be marked "Coming
+ * soon" rather than presented as connectable when no OAuth flow or
+ * credential storage exists for it yet.
  */
 const src = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "integrations-section.tsx"),
@@ -39,7 +40,10 @@ describe("IntegrationsSection is honest about which integrations can actually be
     const connectNames = [...block.matchAll(/name: "([^"]+)", status: "connect"/g)].map(
       (m) => m[1],
     );
-    assert.deepEqual(new Set(connectNames), new Set(["WhatsApp", "Voice", "Website Chat"]));
+    assert.deepEqual(
+      new Set(connectNames),
+      new Set(["WhatsApp", "Voice", "Website Chat", "Instagram", "Google Calendar", "Razorpay"]),
+    );
   });
 
   test("uses connect-style language, not raw API-key setup language", () => {

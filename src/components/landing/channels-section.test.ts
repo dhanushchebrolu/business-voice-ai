@@ -6,8 +6,8 @@ import { dirname, join } from "node:path";
 
 /**
  * The channel list must honestly distinguish what's actually built
- * (WhatsApp, voice, website chat — all wired up in this codebase) from
- * what's still on the roadmap (Instagram, SMS, email) rather than
+ * (WhatsApp, voice, website chat, Instagram — all wired up in this
+ * codebase) from what's still on the roadmap (SMS, email) rather than
  * presenting all six as equally live.
  */
 const src = readFileSync(
@@ -27,6 +27,9 @@ describe("ChannelsSection is honest about which channels are actually live", () 
     assert.ok(liveMatch, "expected a CHANNELS array");
     const block = liveMatch![1]!;
     const liveNames = [...block.matchAll(/name: "([^"]+)", status: "live"/g)].map((m) => m[1]);
-    assert.deepEqual(new Set(liveNames), new Set(["WhatsApp", "Voice", "Website Chat"]));
+    assert.deepEqual(
+      new Set(liveNames),
+      new Set(["WhatsApp", "Voice", "Website Chat", "Instagram"]),
+    );
   });
 });

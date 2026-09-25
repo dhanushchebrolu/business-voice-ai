@@ -1,17 +1,13 @@
-const INDUSTRIES = [
-  {
-    name: "Restaurants & Cafés",
-    capabilities: "Food ordering, table reservations, delivery support",
-  },
-  { name: "Hotels & Resorts", capabilities: "Room booking, availability, check-in information" },
-  { name: "Hospitals & Clinics", capabilities: "Doctor appointments, token management, reminders" },
-  { name: "Salons & Spas", capabilities: "Service booking, stylist selection, reminders" },
-  { name: "Retail Stores", capabilities: "Product enquiries, order placement, delivery tracking" },
-  { name: "Diagnostic Centers", capabilities: "Test booking, home sample collection, reports" },
-  { name: "Service Businesses", capabilities: "Bookings, site visits, quotations, follow-ups" },
-  { name: "E-commerce / D2C", capabilities: "Order placement, payment support, returns" },
-];
+import { BUSINESS_TYPES } from "@/lib/business-types";
 
+/**
+ * Shows every business type the dashboard's own onboarding flow supports
+ * (BUSINESS_TYPES, src/lib/business-types.ts) — the same list the nav
+ * bar's Industries dropdown links here, so a visitor who picks an industry
+ * from the nav lands on a section that genuinely covers it, not a
+ * shorter, separately-maintained marketing list that could drift out of
+ * sync with what the product actually configures.
+ */
 export function IndustriesSection() {
   return (
     <section id="industries" className="border-t border-[#14141a]/10 bg-[#f6f3ee] py-24 sm:py-32">
@@ -24,17 +20,12 @@ export function IndustriesSection() {
         </h2>
 
         <div className="mt-14 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {INDUSTRIES.map((industry) => (
-            <div
-              key={industry.name}
-              className="rounded-2xl border border-[#14141a]/10 bg-white p-6"
-            >
+          {BUSINESS_TYPES.filter((t) => t.id !== "other").map((industry) => (
+            <div key={industry.id} className="rounded-2xl border border-[#14141a]/10 bg-white p-6">
               <h3 className="text-base font-semibold tracking-tight text-[#14141a]">
-                {industry.name}
+                {industry.label}
               </h3>
-              <p className="mt-2 text-sm leading-relaxed text-[#14141a]/55">
-                {industry.capabilities}
-              </p>
+              <p className="mt-2 text-sm leading-relaxed text-[#14141a]/55">{industry.blurb}</p>
             </div>
           ))}
         </div>

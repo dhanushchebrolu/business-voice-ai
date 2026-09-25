@@ -7,10 +7,11 @@ import { dirname, join } from "node:path";
 /**
  * Functionality-requirements coverage for the landing-page nav: dashboard
  * access must be delegated to the existing backend-authoritative hook (not
- * re-derived), every nav item must resolve to a real destination, and the
- * single menu overlay (used by both mobile and desktop, matching the
- * reference's hamburger-only nav bar) must be a genuine open/close dialog
- * with Escape handling and a body-scroll lock — not a decorative overlay.
+ * re-derived), every nav item must resolve to a real destination, the
+ * three dropdowns (Products/Integrations/Industries) must be genuine
+ * open/close menus (not decorative), and the single menu overlay (mobile
+ * nav + auth-aware CTAs) must remain a real open/close dialog with Escape
+ * handling and a body-scroll lock.
  */
 
 const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "landing-nav.tsx"), "utf8");
@@ -22,13 +23,42 @@ describe("LandingNav reuses the existing dashboard-access hook and has only real
     assert.match(src, /useDashboardAccess\(\)/);
   });
 
-  test("nav items scroll to real in-page sections; Resources/Login/Get Started/Dashboard use real routes", () => {
-    assert.match(src, /targetId: "value-propositions"/);
-    assert.match(src, /targetId: "feature-showcase"/);
-    assert.match(src, /targetId: "integrations"/);
+  test("top-level bar is Products / Pricing / Integrations / Industries, plus a persistent Contact CTA", () => {
+    assert.match(src, /label="Products"/);
+    assert.match(src, /to="\/pricing"/);
+    assert.match(src, /label="Integrations"/);
+    assert.match(src, /label="Industries"/);
     assert.match(src, /to="\/contact"/);
-    assert.match(src, /to="\/auth"/);
-    assert.match(src, /to="\/app"/);
+  });
+
+  test("Products dropdown lists all four AI employee products, each targeting a real product-card id", () => {
+    for (const [label, targetId] of [
+      ["AI Sales Executive", "ai-sales-executive"],
+      ["AI Receptionist", "ai-receptionist"],
+      ["AI Order Booking", "ai-order-booking"],
+      ["AI Customer Care", "ai-customer-care"],
+    ]) {
+      assert.match(src, new RegExp(`label: "${label}",\\s*targetId: "${targetId}"`));
+    }
+  });
+
+  test("Integrations dropdown lists WhatsApp, Instagram, Razorpay, Google Calendar, Shopify, WooCommerce, all targeting the real #integrations section", () => {
+    for (const label of [
+      "WhatsApp",
+      "Instagram",
+      "Razorpay",
+      "Google Calendar",
+      "Shopify",
+      "WooCommerce",
+    ]) {
+      assert.match(src, new RegExp(`label: "${label}",\\s*targetId: "integrations"`));
+    }
+  });
+
+  test("Industries dropdown is built from the shared BUSINESS_TYPES source of truth, not a separately-maintained list", () => {
+    assert.match(src, /from "@\/lib\/business-types"/);
+    assert.match(src, /BUSINESS_TYPES\.map/);
+    assert.match(src, /targetId: "industries"/);
   });
 
   test("no invented /product, /solutions, /developers, or /resources routes", () => {
@@ -40,6 +70,15 @@ describe("LandingNav reuses the existing dashboard-access hook and has only real
     ]) {
       assert.equal(src.includes(invented), false, `must not link to invented route ${invented}`);
     }
+  });
+
+  test("dropdowns are real open/close menus: click-toggle, outside-click close, Escape close, correct ARIA", () => {
+    assert.match(src, /aria-haspopup="true"/);
+    assert.match(src, /aria-expanded=\{open\}/);
+    assert.match(src, /setOpen\(\(v\) => !v\)/);
+    assert.match(src, /mousedown/);
+    assert.match(src, /e\.key === "Escape"/);
+    assert.match(src, /role="menu"/);
   });
 
   test("the single menu overlay is a real dialog with body-scroll lock and Escape-to-close, and closes on every link/button", () => {
