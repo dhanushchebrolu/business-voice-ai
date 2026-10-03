@@ -1,9 +1,11 @@
 /**
  * Adapted from VoiceOrbs' Particles Orb (MIT) — see ./LICENSE-voiceorbs.md.
  * Particle formation, state machine, and canvas rendering are unmodified
- * from source; only the default `colorFrom`/`colorTo` are recolored from
+ * from source; the default `colorFrom`/`colorTo` are recolored from
  * VoiceOrbs' pink/purple to ClickAI's sky/violet palette (matching the
- * existing hero card's own glow accents and CTA/mic-icon violet).
+ * existing hero card's own glow accents and CTA/mic-icon violet), and the
+ * idle-state alpha is raised so the orb reads bright against the white
+ * hero background at rest, not just while speaking.
  */
 "use client";
 
@@ -66,7 +68,7 @@ const STATES: Record<OrbState, StateParams> = {
     ring: 0,
     jitter: 0,
     shake: 0,
-    alpha: 0.72,
+    alpha: 1,
     rest: 0,
   },
   connecting: {
@@ -215,7 +217,7 @@ export const ParticlesOrb = ({
   state = "idle",
   size = 168,
   speed = 1,
-  colorFrom = "#7dd3fc",
+  colorFrom = "#06b6d4",
   colorTo = "#7c3aed",
   levelRef,
   label = "Assistant orb",

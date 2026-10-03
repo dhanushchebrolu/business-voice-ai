@@ -128,7 +128,7 @@ describe("cleanup: animation frame and listeners are torn down on unmount", () =
 
 describe("ClickAI branding: recolored from VoiceOrbs' pink/purple default to the sky/violet palette", () => {
   test("default colorFrom/colorTo are ClickAI's sky-to-violet, not VoiceOrbs' pink-to-purple", () => {
-    assert.match(src, /colorFrom = "#7dd3fc"/);
+    assert.match(src, /colorFrom = "#06b6d4"/);
     assert.match(src, /colorTo = "#7c3aed"/);
     assert.doesNotMatch(src, /#f0abfc/);
     assert.doesNotMatch(src, /#818cf8/);

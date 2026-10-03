@@ -13,7 +13,7 @@ export function ParticlesOrbFallback({ className }: { className?: string | undef
       aria-hidden="true"
       style={{
         borderRadius: "9999px",
-        background: "radial-gradient(circle at 35% 30%, #7dd3fc, #7c3aed 65%, #4c1d95 100%)",
+        background: "radial-gradient(circle at 35% 30%, #06b6d4, #7c3aed 65%, #4c1d95 100%)",
       }}
     />
   );

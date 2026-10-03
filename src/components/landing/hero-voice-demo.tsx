@@ -52,7 +52,7 @@ export function HeroVoiceDemo() {
   const [duration, setDuration] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [orbNearViewport, setOrbNearViewport] = useState(false);
-  const [orbSize, setOrbSize] = useState(208);
+  const [orbSize, setOrbSize] = useState(240);
 
   useEffect(() => {
     return () => {
@@ -232,8 +232,12 @@ export function HeroVoiceDemo() {
             type="button"
             onClick={handlePlayPause}
             aria-label={isPlaying ? "Pause the demo call" : "Play the demo call"}
-            className="group relative grid size-52 shrink-0 place-items-center rounded-full transition-transform hover:scale-105 sm:size-60"
+            className="group relative grid size-60 shrink-0 place-items-center rounded-full transition-transform hover:scale-105 sm:size-80"
           >
+            <span
+              aria-hidden="true"
+              className="absolute -inset-6 rounded-full bg-[radial-gradient(circle,rgba(6,182,212,0.6),rgba(124,58,237,0.5)_55%,transparent_75%)] blur-2xl sm:-inset-10 sm:blur-3xl"
+            />
             {orbNearViewport ? (
               <Suspense
                 fallback={
