@@ -15,15 +15,15 @@ import { dirname, join } from "node:path";
 const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "hero.tsx"), "utf8");
 
 describe("Hero has two real, working CTAs and a real audio player", () => {
-  test('"Explore Integrations" scrolls to the real integrations section (not a href="#" placeholder)', () => {
-    assert.match(src, /scrollToSection\("integrations"\)/);
-    assert.match(src, /Explore Integrations/);
-    assert.doesNotMatch(src, /href="#"/);
+  test('"Book a Demo" links to the real /contact route', () => {
+    assert.match(src, /to="\/contact"/);
+    assert.match(src, />\s*Book a Demo\s*</);
   });
 
-  test('"Contact" links to the real /contact route', () => {
-    assert.match(src, /to="\/contact"/);
-    assert.match(src, />\s*Contact\s*</);
+  test('"Test Agent" scrolls to the real #voice-demo section (not a href="#" placeholder)', () => {
+    assert.match(src, /scrollToSection\("voice-demo"\)/);
+    assert.match(src, />\s*Test Agent\s*</);
+    assert.doesNotMatch(src, /href="#"/);
   });
 
   test("the real audio player is imported and rendered, not a decorative placeholder", () => {

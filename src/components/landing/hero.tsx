@@ -17,6 +17,12 @@ const FEATURES = [
  * White + violet hero: left-aligned headline/copy/two CTAs/feature strip,
  * right-aligned real audio player (hero-voice-demo.tsx) a visitor can
  * actually press play on — built as original ClickAI artwork and copy.
+ *
+ * "Book a Demo" links to the real /contact route (same CTA final-cta.tsx
+ * uses); "Test Agent" scrolls to the real #voice-demo section further down
+ * the page (feature-showcase.tsx) rather than linking to the authenticated,
+ * per-business testAgentText dashboard feature, which requires a signed-in
+ * account and an existing agent config neither of which a visitor has yet.
  */
 export function Hero() {
   return (
@@ -50,22 +56,22 @@ export function Hero() {
           </p>
 
           <div className="mt-9 flex flex-wrap items-center gap-3">
-            <Button
-              size="lg"
-              onClick={() => scrollToSection("integrations")}
-              className="rounded-full bg-violet-600 px-6 text-white hover:bg-violet-700"
-            >
-              Explore Integrations
-            </Button>
             <Link to="/contact">
               <Button
                 size="lg"
-                variant="outline"
-                className="rounded-full border-slate-300 bg-transparent px-6 text-slate-900 hover:bg-slate-50"
+                className="rounded-full bg-violet-600 px-6 text-white hover:bg-violet-700"
               >
-                Contact
+                Book a Demo
               </Button>
             </Link>
+            <Button
+              size="lg"
+              variant="outline"
+              onClick={() => scrollToSection("voice-demo")}
+              className="rounded-full border-slate-300 bg-transparent px-6 text-slate-900 hover:bg-slate-50"
+            >
+              Test Agent
+            </Button>
           </div>
 
           <div className="mt-10 flex flex-wrap items-center gap-x-6 gap-y-2">
