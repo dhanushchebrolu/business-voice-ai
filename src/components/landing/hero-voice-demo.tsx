@@ -1,6 +1,15 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Mic, Pause, RotateCcw } from "lucide-react";
-import { OrganicOrb } from "./organic-orb";
+import { OrganicOrbFallback } from "./organic-orb-fallback";
+
+// Three.js + @react-three/fiber are a multi-hundred-KB dependency the rest
+// of the homepage never needs, so OrganicOrb is loaded as its own chunk —
+// never statically imported here or anywhere reachable from the initial
+// route bundle — and only once its section is about to be visible (see the
+// IntersectionObserver below), not unconditionally on every page load.
+const LazyOrganicOrb = lazy(() =>
+  import("./organic-orb").then((module) => ({ default: module.OrganicOrb })),
+);
 
 /**
  * The hero's right-side audio player — the one place on the homepage a
@@ -28,18 +37,45 @@ export function HeroVoiceDemo() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const rafRef = useRef(0);
+  const orbContainerRef = useRef<HTMLButtonElement>(null);
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [amplitude, setAmplitude] = useState(0);
+  const [orbNearViewport, setOrbNearViewport] = useState(false);
 
   useEffect(() => {
     return () => {
       cancelAnimationFrame(rafRef.current);
       audioContextRef.current?.close().catch(() => {});
     };
+  }, []);
+
+  // Start downloading the orb's chunk a little before it's actually on
+  // screen — not on initial page load (it may be below the fold, e.g. on
+  // mobile) and not only once it's already visible (that would show the
+  // flat fallback circle for a beat while the chunk fetches). "400px" of
+  // margin gives it a head start on a normal scroll speed.
+  useEffect(() => {
+    const node = orbContainerRef.current;
+    if (!node) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setOrbNearViewport(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry?.isIntersecting) {
+          setOrbNearViewport(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: "400px 0px" },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
   }, []);
 
   function ensureAnalyser() {
@@ -167,16 +203,27 @@ export function HeroVoiceDemo() {
 
         <div className="relative flex flex-col items-center px-8 py-16 sm:py-20">
           <button
+            ref={orbContainerRef}
             type="button"
             onClick={handlePlayPause}
             aria-label={isPlaying ? "Pause the demo call" : "Play the demo call"}
             className="group relative grid size-52 shrink-0 place-items-center rounded-full transition-transform hover:scale-105 sm:size-60"
           >
-            <OrganicOrb
-              amplitude={amplitude}
-              speaking={isPlaying}
-              className="absolute inset-0 h-full w-full overflow-hidden rounded-full"
-            />
+            {orbNearViewport ? (
+              <Suspense
+                fallback={
+                  <OrganicOrbFallback className="absolute inset-0 h-full w-full overflow-hidden rounded-full" />
+                }
+              >
+                <LazyOrganicOrb
+                  amplitude={amplitude}
+                  speaking={isPlaying}
+                  className="absolute inset-0 h-full w-full overflow-hidden rounded-full"
+                />
+              </Suspense>
+            ) : (
+              <OrganicOrbFallback className="absolute inset-0 h-full w-full overflow-hidden rounded-full" />
+            )}
             <span
               className="absolute bottom-1 right-1 grid size-11 place-items-center rounded-full bg-white shadow-[0_8px_20px_-6px_rgba(124,58,237,0.6)] sm:size-12"
               aria-hidden="true"

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import * as THREE from "three";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
+import { OrganicOrbFallback } from "./organic-orb-fallback";
 
 /**
  * Continuously-deforming 3D blob — the hero's "this AI agent is alive"
@@ -125,7 +126,7 @@ const VERTEX_SHADER = `
     // silhouette; fine adds organic surface-level ripple on top. Both are
     // always active -- uEnergy only scales their amplitude, it never
     // zeroes them out, so the blob is never still.
-    float displacement = (coarse * 1.3 + fine * 0.5) * (0.55 + uEnergy);
+    float displacement = (coarse * 2.3 + fine * 0.8) * (0.55 + uEnergy);
     vDisplacement = displacement;
 
     vec3 newPosition = position + normal * displacement;
@@ -232,17 +233,7 @@ export function OrganicOrb({ amplitude = 0, speaking = false, className }: Organ
   }, []);
 
   if (!mounted) {
-    return (
-      <div
-        className={className}
-        aria-hidden="true"
-        style={{
-          borderRadius: "9999px",
-          background:
-            "radial-gradient(circle at 35% 30%, #93c5fd, #7c3aed 55%, #312e81 100%)",
-        }}
-      />
-    );
+    return <OrganicOrbFallback className={className} />;
   }
 
   return (

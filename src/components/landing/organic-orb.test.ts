@@ -68,6 +68,8 @@ describe("OrganicOrb is a continuously-deforming 3D mesh, never a static sphere,
     assert.match(src, /const \[mounted, setMounted\] = useState\(false\)/);
     assert.match(src, /useEffect\(\(\) => \{\s*setMounted\(true\);/);
     assert.match(src, /if \(!mounted\) \{/);
+    assert.match(src, /import \{ OrganicOrbFallback \} from "\.\/organic-orb-fallback"/);
+    assert.match(src, /return <OrganicOrbFallback className=\{className\} \/>;/);
   });
 
   test("respects prefers-reduced-motion by dampening speed/energy, not by going fully static", () => {

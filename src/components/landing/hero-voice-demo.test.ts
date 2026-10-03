@@ -53,9 +53,25 @@ describe("HeroVoiceDemo is a real, working audio player, not a decorative fake",
   });
 
   test("the continuously-animating orb is wired to the real amplitude/speaking signals, not a decorative import", () => {
-    assert.match(src, /import \{ OrganicOrb \} from "\.\/organic-orb"/);
-    assert.match(src, /<OrganicOrb\b/);
+    assert.match(src, /<LazyOrganicOrb\b/);
     assert.match(src, /amplitude=\{amplitude\}/);
     assert.match(src, /speaking=\{isPlaying\}/);
+  });
+
+  test("Three.js/@react-three/fiber are never statically imported — OrganicOrb is only reachable via a dynamic import()", () => {
+    assert.doesNotMatch(src, /^import .*"\.\/organic-orb"/m);
+    assert.match(src, /lazy\(\(\) =>\s*\n?\s*import\("\.\/organic-orb"\)/);
+  });
+
+  test("the orb chunk loads near-viewport, not unconditionally on mount — uses a real IntersectionObserver, not an eager flag", () => {
+    assert.match(src, /new IntersectionObserver/);
+    assert.match(src, /rootMargin/);
+    assert.doesNotMatch(src, /useState\(true\)/);
+  });
+
+  test("a non-Three fallback (no layout shift) renders before the lazy chunk resolves, both as the pre-trigger placeholder and the Suspense fallback", () => {
+    assert.match(src, /import \{ OrganicOrbFallback \} from "\.\/organic-orb-fallback"/);
+    assert.match(src, /<Suspense\s+fallback=\{/);
+    assert.match(src, /<OrganicOrbFallback\b/);
   });
 });
