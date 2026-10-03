@@ -9,9 +9,11 @@ const CHANNELS = [
 
 export function ChannelsSection() {
   return (
-    <section className="border-t border-slate-200 bg-blue-50/40 py-24 sm:py-32">
+    <section className="border-t border-slate-200 bg-violet-50/40 py-24 sm:py-32">
       <div className="mx-auto max-w-[1200px] px-5 sm:px-8">
-        <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-blue-600">Channels</p>
+        <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-violet-600">
+          Channels
+        </p>
         <h2 className="mt-4 max-w-xl font-serif text-4xl leading-[1.08] text-slate-900 sm:text-5xl">
           Meet your customers everywhere.
         </h2>
@@ -29,7 +31,7 @@ export function ChannelsSection() {
               <span
                 className={`rounded-full px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.08em] ${
                   channel.status === "live"
-                    ? "bg-blue-100 text-blue-700"
+                    ? "bg-violet-100 text-violet-700"
                     : "border border-slate-200 text-slate-400"
                 }`}
               >

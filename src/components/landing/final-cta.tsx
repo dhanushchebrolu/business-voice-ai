@@ -4,7 +4,7 @@ import { ParticleWave } from "./particle-wave";
 
 export function FinalCta() {
   return (
-    <section className="relative overflow-hidden border-t border-blue-500 bg-blue-600 py-28 sm:py-36">
+    <section className="relative overflow-hidden border-t border-violet-500 bg-violet-600 py-28 sm:py-36">
       <div className="pointer-events-none absolute inset-0 opacity-25">
         <ParticleWave tone="on-dark" variant="subtle" className="h-full w-full" />
       </div>
@@ -15,13 +15,16 @@ export function FinalCta() {
           <br />
           start talking.
         </h2>
-        <p className="mx-auto mt-6 max-w-xl text-sm leading-relaxed text-blue-50 sm:text-base">
+        <p className="mx-auto mt-6 max-w-xl text-sm leading-relaxed text-violet-50 sm:text-base">
           Deploy AI agents that talk to customers, qualify leads, book appointments and automate
           everyday work.
         </p>
         <div className="mt-9 flex flex-wrap items-center justify-center gap-3">
           <Link to="/auth" search={{ mode: "signup" }}>
-            <Button size="lg" className="rounded-full bg-white px-6 text-blue-700 hover:bg-blue-50">
+            <Button
+              size="lg"
+              className="rounded-full bg-white px-6 text-violet-700 hover:bg-violet-50"
+            >
               Get Started with ClickAI
             </Button>
           </Link>

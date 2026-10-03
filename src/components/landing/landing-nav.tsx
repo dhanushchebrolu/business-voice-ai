@@ -105,7 +105,7 @@ function NavDropdown({
         aria-haspopup="true"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
-        className="inline-flex items-center gap-1 text-sm text-slate-600 transition-colors hover:text-blue-600"
+        className="inline-flex items-center gap-1 text-sm text-slate-600 transition-colors hover:text-violet-600"
       >
         {label}
         <ChevronDown className={`size-3.5 transition-transform ${open ? "rotate-180" : ""}`} />
@@ -148,7 +148,7 @@ export function LandingNav() {
       <div className="mx-auto flex h-20 max-w-[1400px] items-center justify-between px-5 sm:px-8">
         <Link to="/" className="flex items-center gap-2">
           <span
-            className="grid size-7 place-items-center rounded-full bg-blue-600 text-[11px] font-semibold text-white"
+            className="grid size-7 place-items-center rounded-full bg-violet-600 text-[11px] font-semibold text-white"
             aria-hidden="true"
           >
             C
@@ -171,7 +171,7 @@ export function LandingNav() {
                       close();
                       scrollToSection(item.targetId);
                     }}
-                    className="block w-full rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-blue-50"
+                    className="block w-full rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-violet-50"
                   >
                     <span className="block text-sm font-medium text-slate-900">{item.label}</span>
                     <span className="mt-0.5 block text-xs text-slate-500">{item.blurb}</span>
@@ -183,7 +183,7 @@ export function LandingNav() {
 
           <Link
             to="/pricing"
-            className="text-sm text-slate-600 transition-colors hover:text-blue-600"
+            className="text-sm text-slate-600 transition-colors hover:text-violet-600"
           >
             Pricing
           </Link>
@@ -202,7 +202,7 @@ export function LandingNav() {
                       close();
                       scrollToSection(item.targetId);
                     }}
-                    className="rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-blue-50 hover:text-blue-700"
+                    className="rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-violet-50 hover:text-violet-700"
                   >
                     {item.label}
                   </button>
@@ -225,7 +225,7 @@ export function LandingNav() {
                       close();
                       scrollToSection(item.targetId);
                     }}
-                    className="rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-blue-50 hover:text-blue-700"
+                    className="rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-violet-50 hover:text-violet-700"
                   >
                     {item.label}
                   </button>
@@ -239,7 +239,7 @@ export function LandingNav() {
           <Link to="/contact" className="hidden sm:block">
             <Button
               size="sm"
-              className="rounded-full bg-blue-600 px-5 text-white hover:bg-blue-700"
+              className="rounded-full bg-violet-600 px-5 text-white hover:bg-violet-700"
             >
               Contact
             </Button>
@@ -288,7 +288,7 @@ export function LandingNav() {
                     setMenuOpen(false);
                     scrollToSection(item.targetId);
                   }}
-                  className="rounded-lg px-2 py-3 text-left font-serif text-3xl text-slate-800 hover:text-blue-600 sm:text-4xl"
+                  className="rounded-lg px-2 py-3 text-left font-serif text-3xl text-slate-800 hover:text-violet-600 sm:text-4xl"
                 >
                   {item.label}
                 </button>
@@ -296,7 +296,7 @@ export function LandingNav() {
               <Link
                 to="/pricing"
                 onClick={() => setMenuOpen(false)}
-                className="rounded-lg px-2 py-3 font-serif text-3xl text-slate-800 hover:text-blue-600 sm:text-4xl"
+                className="rounded-lg px-2 py-3 font-serif text-3xl text-slate-800 hover:text-violet-600 sm:text-4xl"
               >
                 Pricing
               </Link>
@@ -306,7 +306,7 @@ export function LandingNav() {
                   setMenuOpen(false);
                   scrollToSection("integrations");
                 }}
-                className="rounded-lg px-2 py-3 text-left font-serif text-3xl text-slate-800 hover:text-blue-600 sm:text-4xl"
+                className="rounded-lg px-2 py-3 text-left font-serif text-3xl text-slate-800 hover:text-violet-600 sm:text-4xl"
               >
                 Integrations
               </button>
@@ -316,14 +316,14 @@ export function LandingNav() {
                   setMenuOpen(false);
                   scrollToSection("industries");
                 }}
-                className="rounded-lg px-2 py-3 text-left font-serif text-3xl text-slate-800 hover:text-blue-600 sm:text-4xl"
+                className="rounded-lg px-2 py-3 text-left font-serif text-3xl text-slate-800 hover:text-violet-600 sm:text-4xl"
               >
                 Industries
               </button>
               <Link
                 to="/contact"
                 onClick={() => setMenuOpen(false)}
-                className="rounded-lg px-2 py-3 font-serif text-3xl text-slate-800 hover:text-blue-600 sm:text-4xl"
+                className="rounded-lg px-2 py-3 font-serif text-3xl text-slate-800 hover:text-violet-600 sm:text-4xl"
               >
                 Contact
               </Link>
@@ -335,7 +335,7 @@ export function LandingNav() {
                   {hasDashboard ? (
                     <Link to="/app" onClick={() => setMenuOpen(false)}>
                       <Button
-                        className="w-full rounded-full bg-blue-600 text-white hover:bg-blue-700"
+                        className="w-full rounded-full bg-violet-600 text-white hover:bg-violet-700"
                         size="lg"
                       >
                         Dashboard
@@ -369,7 +369,7 @@ export function LandingNav() {
                   </Link>
                   <Link to="/auth" search={{ mode: "signup" }} onClick={() => setMenuOpen(false)}>
                     <Button
-                      className="w-full rounded-full bg-blue-600 text-white hover:bg-blue-700"
+                      className="w-full rounded-full bg-violet-600 text-white hover:bg-violet-700"
                       size="lg"
                     >
                       Get Started

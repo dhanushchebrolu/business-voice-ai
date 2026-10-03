@@ -22,12 +22,12 @@ export function FeatureShowcase() {
         </div>
 
         <div className="mt-14 grid gap-6 lg:grid-cols-2">
-          <div className="relative overflow-hidden rounded-2xl bg-blue-50 p-6">
+          <div className="relative overflow-hidden rounded-2xl bg-violet-50 p-6">
             <div className="pointer-events-none absolute inset-0 opacity-70">
               <ParticleWave tone="on-light" variant="subtle" className="h-full w-full" />
             </div>
             <div className="relative">
-              <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-blue-600">
+              <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-violet-600">
                 [1/2]
               </p>
               <h3 className="mt-3 text-xl font-semibold tracking-tight text-slate-900">

@@ -143,13 +143,13 @@
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.21 0.04 265.75);
 
-  --primary: oklch(0.546 0.215 262.88);
+  --primary: oklch(0.541 0.249 293.01);
   --primary-foreground: oklch(0.99 0 0);
   --secondary: oklch(0.97 0.014 254.6);
   --secondary-foreground: oklch(0.21 0.04 265.75);
   --muted: oklch(0.968 0.007 255);
   --muted-foreground: oklch(0.554 0.046 257.4);
-  --accent: oklch(0.932 0.032 255.6);
+  --accent: oklch(0.894 0.057 293.28);
   --accent-foreground: oklch(0.21 0.04 265.75);
 
   --destructive: oklch(0.577 0.245 27.33);
@@ -158,21 +158,21 @@
   --success-foreground: oklch(0.98 0.02 158);
   --warning: oklch(0.7 0.16 60);
   --warning-foreground: oklch(0.99 0.02 85);
-  --info: oklch(0.546 0.215 262.88);
+  --info: oklch(0.541 0.249 293.01);
 
   --border: oklch(0.928 0.006 264.5);
   --border-strong: oklch(0.85 0.01 264.5);
   --input: oklch(0.9 0.008 264.5);
-  --ring: oklch(0.546 0.215 262.88 / 45%);
+  --ring: oklch(0.541 0.249 293.01 / 45%);
 
   --sidebar: oklch(0.98 0.006 255);
   --sidebar-foreground: oklch(0.21 0.04 265.75);
-  --sidebar-primary: oklch(0.546 0.215 262.88);
+  --sidebar-primary: oklch(0.541 0.249 293.01);
   --sidebar-primary-foreground: oklch(0.99 0 0);
-  --sidebar-accent: oklch(0.94 0.02 255);
+  --sidebar-accent: oklch(0.894 0.057 293.28);
   --sidebar-accent-foreground: oklch(0.21 0.04 265.75);
   --sidebar-border: oklch(0.9 0.008 264.5);
-  --sidebar-ring: oklch(0.546 0.215 262.88 / 40%);
+  --sidebar-ring: oklch(0.541 0.249 293.01 / 40%);
 
   color-scheme: light;
 }
@@ -234,33 +234,3 @@
   background-size: 48px 48px;
 }
 
-/* Landing-page hero hub graphic only (hub-graphic.tsx) — gentle idle
-   motion for the integration nodes and their center-glow pulse. Callers
-   gate these behind usePrefersReducedMotion, same as particle-wave.tsx's
-   own reduced-motion handling. */
-@keyframes hub-float {
-  0%,
-  100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-8px);
-  }
-}
-@keyframes hub-pulse {
-  0%,
-  100% {
-    opacity: 0.55;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 1;
-    transform: scale(1.12);
-  }
-}
-@utility animate-hub-float {
-  animation: hub-float 5s ease-in-out infinite;
-}
-@utility animate-hub-pulse {
-  animation: hub-pulse 3.2s ease-in-out infinite;
-}

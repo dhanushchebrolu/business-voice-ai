@@ -7,14 +7,14 @@ import { dirname, join } from "node:path";
 /**
  * Functionality coverage for the hero: both CTAs must be real (a genuine
  * smooth-scroll to a section that exists on the page, and a genuine
- * contact route), not placeholder handlers, and the decorative hub graphic
- * must be marked non-interactive so it never masquerades as a clickable
- * control.
+ * contact route), not placeholder handlers, and the real audio player
+ * (hero-voice-demo.tsx) must actually be rendered — this is the one place
+ * on the homepage a visitor can press play and hear a sample call.
  */
 
 const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "hero.tsx"), "utf8");
 
-describe("Hero has two real, working CTAs", () => {
+describe("Hero has two real, working CTAs and a real audio player", () => {
   test('"Explore Integrations" scrolls to the real integrations section (not a href="#" placeholder)', () => {
     assert.match(src, /scrollToSection\("integrations"\)/);
     assert.match(src, /Explore Integrations/);
@@ -26,8 +26,13 @@ describe("Hero has two real, working CTAs", () => {
     assert.match(src, />\s*Contact\s*</);
   });
 
-  test("the decorative hub graphic is imported and rendered", () => {
-    assert.match(src, /import \{ HubGraphic \} from "\.\/hub-graphic"/);
-    assert.match(src, /<HubGraphic \/>/);
+  test("the real audio player is imported and rendered, not a decorative placeholder", () => {
+    assert.match(src, /import \{ HeroVoiceDemo \} from "\.\/hero-voice-demo"/);
+    assert.match(src, /<HeroVoiceDemo \/>/);
+  });
+
+  test("no fabricated customer/rating/stat claims in the headline or copy", () => {
+    assert.doesNotMatch(src, /\d[\d,]*\+?\s*(businesses|customers|calls)/i);
+    assert.doesNotMatch(src, /\d(\.\d)?\s*\/\s*5/);
   });
 });

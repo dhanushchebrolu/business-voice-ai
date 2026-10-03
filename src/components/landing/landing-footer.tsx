@@ -73,14 +73,14 @@ function SectionLink({ label, targetId }: { label: string; targetId: string }) {
       <button
         type="button"
         onClick={() => scrollToSection(targetId)}
-        className="text-sm text-slate-500 hover:text-blue-600"
+        className="text-sm text-slate-500 hover:text-violet-600"
       >
         {label}
       </button>
     );
   }
   return (
-    <Link to="/" hash={targetId} className="text-sm text-slate-500 hover:text-blue-600">
+    <Link to="/" hash={targetId} className="text-sm text-slate-500 hover:text-violet-600">
       {label}
     </Link>
   );
@@ -107,7 +107,7 @@ export function LandingFooter() {
           <div className="flex items-start sm:justify-end">
             <Link
               to="/contact"
-              className="rounded-full border border-blue-200 bg-blue-50 px-5 py-2.5 text-sm font-medium text-blue-700 hover:bg-blue-100"
+              className="rounded-full border border-violet-200 bg-violet-50 px-5 py-2.5 text-sm font-medium text-violet-700 hover:bg-violet-100"
             >
               Get in touch
             </Link>
@@ -126,7 +126,7 @@ export function LandingFooter() {
                 </li>
               ))}
               <li>
-                <Link to="/pricing" className="text-sm text-slate-500 hover:text-blue-600">
+                <Link to="/pricing" className="text-sm text-slate-500 hover:text-violet-600">
                   Pricing
                 </Link>
               </li>
@@ -153,7 +153,7 @@ export function LandingFooter() {
             <ul className="mt-4 space-y-2.5">
               {COMPANY_LINKS.map((link) => (
                 <li key={link.label}>
-                  <Link to={link.to} className="text-sm text-slate-500 hover:text-blue-600">
+                  <Link to={link.to} className="text-sm text-slate-500 hover:text-violet-600">
                     {link.label}
                   </Link>
                 </li>
@@ -169,7 +169,7 @@ export function LandingFooter() {
               {RESOURCES_LINKS.map((link) =>
                 link.to ? (
                   <li key={link.label}>
-                    <Link to={link.to} className="text-sm text-slate-500 hover:text-blue-600">
+                    <Link to={link.to} className="text-sm text-slate-500 hover:text-violet-600">
                       {link.label}
                     </Link>
                   </li>
@@ -189,7 +189,7 @@ export function LandingFooter() {
             <ul className="mt-4 space-y-2.5">
               {LEGAL_LINKS.map((link) => (
                 <li key={link.label}>
-                  <Link to={link.to} className="text-sm text-slate-500 hover:text-blue-600">
+                  <Link to={link.to} className="text-sm text-slate-500 hover:text-violet-600">
                     {link.label}
                   </Link>
                 </li>
@@ -212,11 +212,11 @@ export function LandingFooter() {
             <p key={line}>{line}</p>
           ))}
           <p className="mt-1">
-            <a href="mailto:hello@clickai.in" className="hover:text-blue-600">
+            <a href="mailto:hello@clickai.in" className="hover:text-violet-600">
               hello@clickai.in
             </a>
             {" · "}
-            <a href="tel:+917660001231" className="hover:text-blue-600">
+            <a href="tel:+917660001231" className="hover:text-violet-600">
               +91 76600 01231
             </a>
           </p>

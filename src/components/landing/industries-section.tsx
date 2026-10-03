@@ -12,7 +12,7 @@ export function IndustriesSection() {
   return (
     <section id="industries" className="border-t border-slate-200 bg-white py-24 sm:py-32">
       <div className="mx-auto max-w-[1200px] px-5 sm:px-8">
-        <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-blue-600">
+        <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-violet-600">
           Industries
         </p>
         <h2 className="mt-4 max-w-xl font-serif text-4xl leading-[1.08] text-slate-900 sm:text-5xl">
@@ -23,7 +23,7 @@ export function IndustriesSection() {
           {BUSINESS_TYPES.filter((t) => t.id !== "other").map((industry) => (
             <div
               key={industry.id}
-              className="rounded-2xl border border-slate-200 bg-blue-50/30 p-6 transition-colors hover:border-blue-200 hover:bg-blue-50"
+              className="rounded-2xl border border-slate-200 bg-violet-50/30 p-6 transition-colors hover:border-violet-200 hover:bg-violet-50"
             >
               <h3 className="text-base font-semibold tracking-tight text-slate-900">
                 {industry.label}
