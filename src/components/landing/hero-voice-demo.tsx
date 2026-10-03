@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Mic, Pause, RotateCcw } from "lucide-react";
-import { ParticleWave } from "./particle-wave";
+import { OrganicOrb } from "./organic-orb";
 
 /**
  * The hero's right-side audio player — the one place on the homepage a
@@ -8,9 +8,10 @@ import { ParticleWave } from "./particle-wave";
  * exactly as requested. Reuses the same real Web Audio API engine as
  * voice-demo.tsx (genuine play/pause/seek against a real <audio> element,
  * a real AnalyserNode driving the live waveform — never a fake/animated-
- * only "player"), restyled as the hero's centerpiece: a large circular
- * control over a full-bleed ParticleWave backdrop instead of a compact
- * card with inline bars.
+ * only "player"), restyled as the hero's centerpiece: a continuously
+ * morphing 3D blob (organic-orb.tsx) that visually says "this AI agent is
+ * alive" — never idle/static — with real playback amplitude layering
+ * extra energy on top of its own always-on base motion while speaking.
  *
  * AUDIO SOURCE: plays /audio/ai-receptionist-demo.mp3 — replace that file
  * with a real recorded call and this player picks it up with no code
@@ -143,15 +144,6 @@ export function HeroVoiceDemo() {
       </p>
 
       <div className="relative overflow-hidden rounded-[32px] border border-slate-200 bg-white shadow-[0_30px_60px_-25px_rgba(124,58,237,0.35)]">
-        <div className="pointer-events-none absolute inset-0 opacity-80">
-          <ParticleWave
-            tone="on-light"
-            variant="hero"
-            amplitude={amplitude}
-            className="h-full w-full"
-          />
-        </div>
-
         <audio
           ref={audioRef}
           src="/audio/ai-receptionist-demo.mp3"
@@ -178,24 +170,23 @@ export function HeroVoiceDemo() {
             type="button"
             onClick={handlePlayPause}
             aria-label={isPlaying ? "Pause the demo call" : "Play the demo call"}
-            className="group relative grid size-28 shrink-0 place-items-center rounded-full bg-white shadow-[0_18px_40px_-12px_rgba(124,58,237,0.55)] transition-transform hover:scale-105 sm:size-32"
+            className="group relative grid size-52 shrink-0 place-items-center rounded-full transition-transform hover:scale-105 sm:size-60"
           >
-            <span
-              className="absolute inset-0 rounded-full bg-[conic-gradient(from_180deg,theme(colors.violet.400),theme(colors.sky.300),theme(colors.fuchsia.300),theme(colors.violet.400))] opacity-90"
-              aria-hidden="true"
+            <OrganicOrb
+              amplitude={amplitude}
+              speaking={isPlaying}
+              className="absolute inset-0 h-full w-full overflow-hidden rounded-full"
             />
             <span
-              className="absolute inset-[5px] rounded-full bg-white"
+              className="absolute bottom-1 right-1 grid size-11 place-items-center rounded-full bg-white shadow-[0_8px_20px_-6px_rgba(124,58,237,0.6)] sm:size-12"
               aria-hidden="true"
-              style={{
-                transform: isPlaying ? `scale(${1 - Math.min(amplitude, 1) * 0.08})` : undefined,
-              }}
-            />
-            {isPlaying ? (
-              <Pause className="relative size-9 fill-violet-600 text-violet-600" />
-            ) : (
-              <Mic className="relative size-9 text-violet-600" />
-            )}
+            >
+              {isPlaying ? (
+                <Pause className="size-5 fill-violet-600 text-violet-600" />
+              ) : (
+                <Mic className="size-5 text-violet-600" />
+              )}
+            </span>
           </button>
 
           <div className="mt-8 w-full max-w-[260px]">

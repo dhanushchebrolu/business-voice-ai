@@ -51,4 +51,11 @@ describe("HeroVoiceDemo is a real, working audio player, not a decorative fake",
     assert.doesNotMatch(src, /href="#"/);
     assert.doesNotMatch(src, /onClick=\{\(\) => \{\}\}/);
   });
+
+  test("the continuously-animating orb is wired to the real amplitude/speaking signals, not a decorative import", () => {
+    assert.match(src, /import \{ OrganicOrb \} from "\.\/organic-orb"/);
+    assert.match(src, /<OrganicOrb\b/);
+    assert.match(src, /amplitude=\{amplitude\}/);
+    assert.match(src, /speaking=\{isPlaying\}/);
+  });
 });
