@@ -234,3 +234,67 @@
   background-size: 48px 48px;
 }
 
+/*
+ * Hero flow diagram (hero-flow/) — the animated AI-employee workflow that
+ * replaced the particle orb. Pure CSS/SVG, no canvas/WebGL: a dashed stroke
+ * overlay animates its offset for a "flowing light" look along each wire,
+ * node glows breathe, and floating message bubbles fade in/out. All three
+ * respect prefers-reduced-motion directly (no JS gating needed for these),
+ * independent of the SVG `<animateMotion>` particles, which React only
+ * mounts when `usePrefersReducedMotion()` is false.
+ */
+@keyframes hero-flow-dash {
+  to {
+    stroke-dashoffset: -400;
+  }
+}
+
+@keyframes hero-flow-breathe {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.96);
+  }
+  50% {
+    opacity: 0.6;
+    transform: scale(1.04);
+  }
+}
+
+@keyframes hero-flow-bubble {
+  0%,
+  100% {
+    opacity: 0;
+    transform: translateY(6px) scale(0.96);
+  }
+  12%,
+  38% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.96);
+  }
+}
+
+@utility hero-flow-dash {
+  animation: hero-flow-dash linear infinite;
+}
+
+@utility hero-flow-breathe {
+  animation: hero-flow-breathe 4.5s ease-in-out infinite;
+}
+
+@utility hero-flow-bubble {
+  animation: hero-flow-bubble linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-flow-dash,
+  .hero-flow-breathe,
+  .hero-flow-bubble {
+    animation: none !important;
+  }
+}
+
