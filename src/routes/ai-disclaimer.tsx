@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { LegalLayout, LegalSection } from "@/components/legal/LegalLayout";
 import { LEGAL_LAST_UPDATED } from "@/lib/legal-dates";
+import { CLICKAI_LEGAL_NAME } from "@/lib/company-info";
 
 export const Route = createFileRoute("/ai-disclaimer")({
   head: () => ({
@@ -72,6 +73,10 @@ function AiDisclaimer() {
           human when a situation requires human judgment, and to review AI conversation transcripts
           periodically.
         </p>
+      </LegalSection>
+
+      <LegalSection id="company" title="About ClickAI">
+        <p>ClickAI is the brand operated by {CLICKAI_LEGAL_NAME}.</p>
       </LegalSection>
     </LegalLayout>
   );

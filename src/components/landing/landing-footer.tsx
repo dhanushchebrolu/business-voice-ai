@@ -1,5 +1,6 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import { ShieldCheck, Lock, Headset } from "lucide-react";
+import { CLICKAI_LEGAL_NAME, CLICKAI_ADDRESS_LINES } from "@/lib/company-info";
 
 /**
  * No social links and no email-subscribe form are rendered here — this app
@@ -205,15 +206,11 @@ export function LandingFooter() {
           ))}
         </div>
 
-        {/*
-          No verified registered business address exists anywhere in this
-          repository — nothing to source one from, so none is shown here
-          rather than inventing one. If ClickAI Private Limited's registered
-          address should appear in this footer, add it here as plain text
-          (business owner action — see the session's final report).
-        */}
         <div className="mt-8 border-t border-slate-200 pt-6 text-xs text-slate-400">
-          <p className="font-medium text-slate-500">ClickAI Private Limited</p>
+          <p className="font-medium text-slate-500">{CLICKAI_LEGAL_NAME}</p>
+          {CLICKAI_ADDRESS_LINES.map((line) => (
+            <p key={line}>{line}</p>
+          ))}
           <p className="mt-1">
             <a href="mailto:hello@clickai.in" className="hover:text-blue-600">
               hello@clickai.in
@@ -226,7 +223,9 @@ export function LandingFooter() {
         </div>
 
         <div className="mt-4 flex flex-col gap-2 text-xs text-slate-400 sm:flex-row sm:items-center sm:justify-between">
-          <p>© {new Date().getFullYear()} ClickAI Private Limited. All rights reserved.</p>
+          <p>
+            © {new Date().getFullYear()} {CLICKAI_LEGAL_NAME}. All rights reserved.
+          </p>
           <p>clickai.in</p>
         </div>
       </div>

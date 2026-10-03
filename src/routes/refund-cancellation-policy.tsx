@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { LegalLayout, LegalSection } from "@/components/legal/LegalLayout";
 import { LEGAL_LAST_UPDATED } from "@/lib/legal-dates";
+import { CLICKAI_LEGAL_NAME, CLICKAI_ADDRESS_INLINE } from "@/lib/company-info";
 
 export const Route = createFileRoute("/refund-cancellation-policy")({
   head: () => ({
@@ -80,6 +81,11 @@ function RefundCancellation() {
           For any billing, cancellation, or refund question, contact us at{" "}
           <a href="mailto:hello@clickai.in">hello@clickai.in</a> or{" "}
           <a href="tel:+917660001231">+91 76600 01231</a>.
+        </p>
+        <p>
+          {CLICKAI_LEGAL_NAME}
+          <br />
+          {CLICKAI_ADDRESS_INLINE}
         </p>
       </LegalSection>
     </LegalLayout>

@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { LegalLayout, LegalSection } from "@/components/legal/LegalLayout";
 import { LEGAL_LAST_UPDATED } from "@/lib/legal-dates";
+import { CLICKAI_LEGAL_NAME } from "@/lib/company-info";
 
 export const Route = createFileRoute("/cookie-policy")({
   head: () => ({
@@ -26,7 +27,8 @@ function CookiePolicy() {
     >
       <p className="text-muted-foreground">
         This page lists the cookies ClickAI actually uses. We keep this list accurate to what the
-        platform sets, not a generic template.
+        platform sets, not a generic template. ClickAI is the brand operated by {CLICKAI_LEGAL_NAME}
+        .
       </p>
 
       <LegalSection id="essential" title="Essential cookies">

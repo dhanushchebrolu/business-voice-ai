@@ -3,6 +3,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { Loader2, CheckCircle2, Mail, Phone } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
+import { CLICKAI_LEGAL_NAME, CLICKAI_ADDRESS_LINES } from "@/lib/company-info";
 import { Logo } from "@/components/app/primitives";
 import { PublicNav } from "@/components/app/PublicNav";
 import { LandingFooter } from "@/components/landing/landing-footer";
@@ -120,7 +121,14 @@ function Contact() {
               <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
                 Business
               </p>
-              <p className="mt-1.5 text-sm font-medium text-foreground">ClickAI Private Limited</p>
+              <p className="mt-1.5 text-sm font-medium text-foreground">{CLICKAI_LEGAL_NAME}</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {CLICKAI_ADDRESS_LINES.map((line) => (
+                  <span key={line} className="block">
+                    {line}
+                  </span>
+                ))}
+              </p>
             </div>
           </div>
 

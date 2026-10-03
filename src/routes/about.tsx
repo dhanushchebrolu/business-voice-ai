@@ -1,4 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { CLICKAI_LEGAL_NAME, CLICKAI_ADDRESS_LINES } from "@/lib/company-info";
 import { Logo } from "@/components/app/primitives";
 import { PublicNav } from "@/components/app/PublicNav";
 import { LandingFooter } from "@/components/landing/landing-footer";
@@ -77,8 +78,17 @@ function About() {
 
         <div className="mt-12 rounded-xl border border-border bg-card p-6">
           <h2 className="text-sm font-semibold">Get in touch</h2>
-          <p className="mt-2 text-sm text-muted-foreground">ClickAI Private Limited</p>
-          <p className="mt-1 text-sm text-muted-foreground">
+          <p className="mt-2 text-sm text-muted-foreground">
+            ClickAI is the brand operated by {CLICKAI_LEGAL_NAME}.
+          </p>
+          <p className="mt-2 text-sm text-muted-foreground">
+            {CLICKAI_ADDRESS_LINES.map((line) => (
+              <span key={line} className="block">
+                {line}
+              </span>
+            ))}
+          </p>
+          <p className="mt-2 text-sm text-muted-foreground">
             Email:{" "}
             <a href="mailto:hello@clickai.in" className="text-primary underline underline-offset-2">
               hello@clickai.in

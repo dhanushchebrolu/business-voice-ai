@@ -92,8 +92,13 @@ describe("LandingFooter has no invented social/company links, no fake form, real
     }
   });
 
-  test("shows the real, verified ClickAI company identity and contact details", () => {
-    assert.match(code, /ClickAI Private Limited/);
+  test("shows the correct legal entity from the Certificate of Incorporation, not the earlier incorrect name", () => {
+    assert.match(code, /CLICKAI_LEGAL_NAME/);
+    assert.doesNotMatch(src, /ClickAI Private Limited/);
+    assert.doesNotMatch(src, /Click AI Private Limited/i);
+  });
+
+  test("shows the confirmed contact details", () => {
     assert.match(code, /mailto:hello@clickai\.in/);
     assert.match(code, /tel:\+917660001231/);
     assert.match(code, /\+91 76600 01231/);
@@ -103,8 +108,9 @@ describe("LandingFooter has no invented social/company links, no fake form, real
     assert.match(code, /new Date\(\)\.getFullYear\(\)/);
   });
 
-  test("does not fabricate a registered business address", () => {
-    assert.doesNotMatch(code, /\d{3}\s*(Street|St\.|Road|Rd\.|Avenue|Ave\.)/i);
+  test("shows the confirmed registered address, not an invented or old one", () => {
+    assert.match(code, /CLICKAI_ADDRESS_LINES/);
+    assert.doesNotMatch(src, /rajahmundry/i);
   });
 
   test("the trust row names no fake certifications (SOC 2, ISO 27001, GDPR certified, etc.)", () => {

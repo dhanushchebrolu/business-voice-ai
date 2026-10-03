@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect } from "react";
+import { CLICKAI_BRAND, CLICKAI_LEGAL_NAME, CLICKAI_ADDRESS_JSON_LD } from "@/lib/company-info";
 import { LandingNav } from "@/components/landing/landing-nav";
 import { Hero } from "@/components/landing/hero";
 import { ValuePropositions } from "@/components/landing/value-propositions";
@@ -54,12 +55,13 @@ export const Route = createFileRoute("/")({
 const ORGANIZATION_JSON_LD = {
   "@context": "https://schema.org",
   "@type": "Organization",
-  name: "ClickAI",
-  legalName: "ClickAI Private Limited",
+  name: CLICKAI_BRAND,
+  legalName: CLICKAI_LEGAL_NAME,
   url: "https://clickai.in",
   logo: "https://clickai.in/favicon.ico",
   email: "hello@clickai.in",
   telephone: "+91-76600-01231",
+  address: CLICKAI_ADDRESS_JSON_LD,
   contactPoint: [
     {
       "@type": "ContactPoint",

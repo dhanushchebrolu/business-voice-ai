@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { LegalLayout, LegalSection } from "@/components/legal/LegalLayout";
 import { LEGAL_LAST_UPDATED } from "@/lib/legal-dates";
+import { CLICKAI_LEGAL_NAME, CLICKAI_ADDRESS_INLINE } from "@/lib/company-info";
 
 export const Route = createFileRoute("/privacy-policy")({
   head: () => ({
@@ -8,8 +9,7 @@ export const Route = createFileRoute("/privacy-policy")({
       { title: "ClickAI Privacy Policy | ClickAI" },
       {
         name: "description",
-        content:
-          "How ClickAI Private Limited collects, uses, stores and protects information for its AI business automation platform.",
+        content: `How ${CLICKAI_LEGAL_NAME} collects, uses, stores and protects information for its AI business automation platform.`,
       },
       { property: "og:title", content: "ClickAI Privacy Policy" },
     ],
@@ -45,7 +45,7 @@ function PrivacyPolicy() {
       ]}
     >
       <p className="text-muted-foreground">
-        This Privacy Policy explains how ClickAI Private Limited ("ClickAI", "we", "us") collects,
+        This Privacy Policy explains how {CLICKAI_LEGAL_NAME} ("ClickAI", "we", "us") collects,
         uses, stores and protects information when you visit clickai.in, use our platform, or
         interact with a business that uses ClickAI's AI agents on their behalf.
       </p>
@@ -207,7 +207,9 @@ function PrivacyPolicy() {
 
       <LegalSection id="contact" title="10. Contact us">
         <p>
-          ClickAI Private Limited
+          {CLICKAI_LEGAL_NAME}
+          <br />
+          {CLICKAI_ADDRESS_INLINE}
           <br />
           Email: <a href="mailto:hello@clickai.in">hello@clickai.in</a>
           <br />

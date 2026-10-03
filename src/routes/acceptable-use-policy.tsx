@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { LegalLayout, LegalSection } from "@/components/legal/LegalLayout";
 import { LEGAL_LAST_UPDATED } from "@/lib/legal-dates";
+import { CLICKAI_LEGAL_NAME, CLICKAI_ADDRESS_INLINE } from "@/lib/company-info";
 
 export const Route = createFileRoute("/acceptable-use-policy")({
   head: () => ({
@@ -69,6 +70,9 @@ function AcceptableUse() {
         <p>
           If you believe ClickAI, or a business using ClickAI, has violated this policy, contact us
           at <a href="mailto:hello@clickai.in">hello@clickai.in</a>.
+        </p>
+        <p>
+          ClickAI is the brand operated by {CLICKAI_LEGAL_NAME}, {CLICKAI_ADDRESS_INLINE}.
         </p>
       </LegalSection>
     </LegalLayout>

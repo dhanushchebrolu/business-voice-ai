@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { LegalLayout, LegalSection } from "@/components/legal/LegalLayout";
 import { LEGAL_LAST_UPDATED } from "@/lib/legal-dates";
+import { CLICKAI_LEGAL_NAME, CLICKAI_ADDRESS_INLINE } from "@/lib/company-info";
 
 export const Route = createFileRoute("/terms")({
   head: () => ({
@@ -55,8 +56,8 @@ function Terms() {
       ]}
     >
       <p className="text-muted-foreground">
-        These Terms & Conditions ("Terms") govern your access to and use of the services provided by
-        ClickAI Private Limited ("ClickAI", "we", "us"), including the clickai.in website and the
+        These Terms & Conditions ("Terms") govern your access to and use of the services provided by{" "}
+        {CLICKAI_LEGAL_NAME} ("ClickAI", "we", "us"), including the clickai.in website and the
         ClickAI platform. By creating an account or using ClickAI, you agree to these Terms.
       </p>
 
@@ -226,7 +227,7 @@ function Terms() {
 
       <LegalSection id="governing-law" title="20. Governing law">
         <p>
-          These Terms are governed by the laws applicable to ClickAI Private Limited's place of
+          These Terms are governed by the laws applicable to {CLICKAI_LEGAL_NAME}'s place of
           incorporation, without regard to conflict-of-law principles, except where applicable law
           requires otherwise.
         </p>
@@ -241,7 +242,9 @@ function Terms() {
 
       <LegalSection id="contact" title="22. Contact information">
         <p>
-          ClickAI Private Limited
+          {CLICKAI_LEGAL_NAME}
+          <br />
+          {CLICKAI_ADDRESS_INLINE}
           <br />
           Email: <a href="mailto:hello@clickai.in">hello@clickai.in</a>
           <br />
