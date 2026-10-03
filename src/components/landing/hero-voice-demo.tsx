@@ -1,14 +1,15 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Mic, Pause, RotateCcw } from "lucide-react";
-import { OrganicOrbFallback } from "./organic-orb-fallback";
+import { ParticlesOrbFallback } from "./particles-orb/particles-orb-fallback";
 
-// Three.js + @react-three/fiber are a multi-hundred-KB dependency the rest
-// of the homepage never needs, so OrganicOrb is loaded as its own chunk —
-// never statically imported here or anywhere reachable from the initial
-// route bundle — and only once its section is about to be visible (see the
-// IntersectionObserver below), not unconditionally on every page load.
-const LazyOrganicOrb = lazy(() =>
-  import("./organic-orb").then((module) => ({ default: module.OrganicOrb })),
+// Loaded as its own chunk — never statically imported here or anywhere
+// reachable from the initial route bundle — and only once its section is
+// about to be visible (see the IntersectionObserver below), not
+// unconditionally on every page load. The orb itself is plain Canvas2D
+// (no three.js/WebGL dependency), so this is now defensive bundle hygiene
+// rather than deferring a genuinely heavy chunk.
+const LazyParticlesOrb = lazy(() =>
+  import("./particles-orb/particles-orb").then((module) => ({ default: module.ParticlesOrb })),
 );
 
 /**
@@ -18,9 +19,10 @@ const LazyOrganicOrb = lazy(() =>
  * voice-demo.tsx (genuine play/pause/seek against a real <audio> element,
  * a real AnalyserNode driving the live waveform — never a fake/animated-
  * only "player"), restyled as the hero's centerpiece: a continuously
- * morphing 3D blob (organic-orb.tsx) that visually says "this AI agent is
- * alive" — never idle/static — with real playback amplitude layering
- * extra energy on top of its own always-on base motion while speaking.
+ * animating particle orb (particles-orb/) that visually says "this AI
+ * agent is alive" — never idle/static, continuous rotation/breathing even
+ * with zero audio — with real playback amplitude driving extra energy
+ * while speaking.
  *
  * AUDIO SOURCE: plays /audio/ai-receptionist-demo.mp3 — replace that file
  * with a real recorded call and this player picks it up with no code
@@ -38,13 +40,19 @@ export function HeroVoiceDemo() {
   const analyserRef = useRef<AnalyserNode | null>(null);
   const rafRef = useRef(0);
   const orbContainerRef = useRef<HTMLButtonElement>(null);
+  // ParticlesOrb reads this imperatively every animation frame (no React
+  // re-render per audio tick) — a real AnalyserNode-derived level (0..1)
+  // while playing, or -1 to tell it "no live level, use your own idle/
+  // speaking procedural energy" (its documented fallback contract) while
+  // paused, matching the real AnalyserNode, never a fabricated value.
+  const orbLevelRef = useRef(-1);
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const [amplitude, setAmplitude] = useState(0);
   const [orbNearViewport, setOrbNearViewport] = useState(false);
+  const [orbSize, setOrbSize] = useState(208);
 
   useEffect(() => {
     return () => {
@@ -74,6 +82,22 @@ export function HeroVoiceDemo() {
       },
       { rootMargin: "400px 0px" },
     );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
+  // ParticlesOrb's canvas backing size is a literal pixel number (not a
+  // CSS-stretched element), so it has to be told the button's real
+  // rendered size to stay responsive across breakpoints/resizes rather
+  // than being fixed at one size and blurrily stretched or oversized.
+  useEffect(() => {
+    const node = orbContainerRef.current;
+    if (!node) return;
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(([entry]) => {
+      const width = entry?.contentRect.width;
+      if (width) setOrbSize(Math.round(width));
+    });
     observer.observe(node);
     return () => observer.disconnect();
   }, []);
@@ -108,7 +132,7 @@ export function HeroVoiceDemo() {
       const data = new Uint8Array(analyser.frequencyBinCount);
       analyser.getByteFrequencyData(data);
       const avg = data.reduce((sum, v) => sum + v, 0) / data.length / 255;
-      setAmplitude(avg);
+      orbLevelRef.current = avg;
     }
     setCurrentTime(audio.currentTime);
     rafRef.current = requestAnimationFrame(tick);
@@ -192,11 +216,12 @@ export function HeroVoiceDemo() {
           onPause={() => {
             setIsPlaying(false);
             cancelAnimationFrame(rafRef.current);
+            orbLevelRef.current = -1;
           }}
           onEnded={() => {
             setIsPlaying(false);
             cancelAnimationFrame(rafRef.current);
-            setAmplitude(0);
+            orbLevelRef.current = -1;
           }}
           onError={() => setError("This demo audio couldn't be loaded.")}
         />
@@ -212,17 +237,19 @@ export function HeroVoiceDemo() {
             {orbNearViewport ? (
               <Suspense
                 fallback={
-                  <OrganicOrbFallback className="absolute inset-0 h-full w-full overflow-hidden rounded-full" />
+                  <ParticlesOrbFallback className="absolute inset-0 h-full w-full overflow-hidden rounded-full" />
                 }
               >
-                <LazyOrganicOrb
-                  amplitude={amplitude}
-                  speaking={isPlaying}
+                <LazyParticlesOrb
+                  state={isPlaying ? "speaking" : "idle"}
+                  levelRef={orbLevelRef}
+                  size={orbSize}
+                  label=""
                   className="absolute inset-0 h-full w-full overflow-hidden rounded-full"
                 />
               </Suspense>
             ) : (
-              <OrganicOrbFallback className="absolute inset-0 h-full w-full overflow-hidden rounded-full" />
+              <ParticlesOrbFallback className="absolute inset-0 h-full w-full overflow-hidden rounded-full" />
             )}
             <span
               className="absolute bottom-1 right-1 grid size-11 place-items-center rounded-full bg-white shadow-[0_8px_20px_-6px_rgba(124,58,237,0.6)] sm:size-12"

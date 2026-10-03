@@ -52,15 +52,21 @@ describe("HeroVoiceDemo is a real, working audio player, not a decorative fake",
     assert.doesNotMatch(src, /onClick=\{\(\) => \{\}\}/);
   });
 
-  test("the continuously-animating orb is wired to the real amplitude/speaking signals, not a decorative import", () => {
-    assert.match(src, /<LazyOrganicOrb\b/);
-    assert.match(src, /amplitude=\{amplitude\}/);
-    assert.match(src, /speaking=\{isPlaying\}/);
+  test("the particle orb is wired to the real playback state and a live levelRef, not a decorative import", () => {
+    assert.match(src, /<LazyParticlesOrb\b/);
+    assert.match(src, /state=\{isPlaying \? "speaking" : "idle"\}/);
+    assert.match(src, /levelRef=\{orbLevelRef\}/);
   });
 
-  test("Three.js/@react-three/fiber are never statically imported — OrganicOrb is only reachable via a dynamic import()", () => {
-    assert.doesNotMatch(src, /^import .*"\.\/organic-orb"/m);
-    assert.match(src, /lazy\(\(\) =>\s*\n?\s*import\("\.\/organic-orb"\)/);
+  test('the real AnalyserNode amplitude drives the orb\'s levelRef every tick, and resets to -1 (its documented "fall back to procedural animation" value) on pause/end — never a fabricated constant', () => {
+    assert.match(src, /orbLevelRef\.current = avg;/);
+    assert.match(src, /onPause=\{\(\) => \{[\s\S]{0,120}orbLevelRef\.current = -1;/);
+    assert.match(src, /onEnded=\{\(\) => \{[\s\S]{0,120}orbLevelRef\.current = -1;/);
+  });
+
+  test("ParticlesOrb is never statically imported — it's only reachable via a dynamic import()", () => {
+    assert.doesNotMatch(src, /^import .*"\.\/particles-orb\/particles-orb"/m);
+    assert.match(src, /lazy\(\(\) =>\s*\n?\s*import\("\.\/particles-orb\/particles-orb"\)/);
   });
 
   test("the orb chunk loads near-viewport, not unconditionally on mount — uses a real IntersectionObserver, not an eager flag", () => {
@@ -69,9 +75,17 @@ describe("HeroVoiceDemo is a real, working audio player, not a decorative fake",
     assert.doesNotMatch(src, /useState\(true\)/);
   });
 
-  test("a non-Three fallback (no layout shift) renders before the lazy chunk resolves, both as the pre-trigger placeholder and the Suspense fallback", () => {
-    assert.match(src, /import \{ OrganicOrbFallback \} from "\.\/organic-orb-fallback"/);
+  test("a fallback (no layout shift) renders before the lazy chunk resolves, both as the pre-trigger placeholder and the Suspense fallback", () => {
+    assert.match(
+      src,
+      /import \{ ParticlesOrbFallback \} from "\.\/particles-orb\/particles-orb-fallback"/,
+    );
     assert.match(src, /<Suspense\s+fallback=\{/);
-    assert.match(src, /<OrganicOrbFallback\b/);
+    assert.match(src, /<ParticlesOrbFallback\b/);
+  });
+
+  test("the orb's canvas size tracks the button's real rendered size via ResizeObserver, so it's genuinely responsive rather than fixed/stretched", () => {
+    assert.match(src, /new ResizeObserver/);
+    assert.match(src, /size=\{orbSize\}/);
   });
 });
