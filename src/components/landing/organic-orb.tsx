@@ -7,9 +7,14 @@ import { OrganicOrbFallback } from "./organic-orb-fallback";
 /**
  * Continuously-deforming 3D blob — the hero's "this AI agent is alive"
  * visual. Never idle/static: the geometry's vertices are displaced every
- * frame by layered 3D simplex noise (fbm) evaluated at a monotonically
- * increasing time uniform, inside the vertex shader, so the silhouette is
- * always stretching/compressing/changing shape even with zero audio input.
+ * frame inside the vertex shader by a dominant twisted-ribbon swirl motif
+ * (two sine bands wrapping the Y axis at irrational-ratio time speeds)
+ * layered over secondary 3D simplex noise (fbm), all evaluated at a
+ * monotonically increasing time uniform, so the silhouette is always
+ * stretching/compressing/rippling even with zero audio input. The
+ * fragment shader shades it like matte clay -- a fixed key light plus a
+ * displacement-driven ambient-occlusion proxy, not a glowing rim light --
+ * with a soft edge fade instead of a hard geometric silhouette.
  * `amplitude`/`speaking` (both real signals from the caller's actual
  * AnalyserNode — see hero-voice-demo.tsx) layer extra energy ON TOP of
  * that base motion; they never replace or gate it.
@@ -110,44 +115,105 @@ const VERTEX_SHADER = `
     return value;
   }
 
-  void main() {
-    vNormal = normalize(normalMatrix * normal);
-
-    // Two independent, irrational-ratio time drifts (0.0007*t vs 0.00053*t
-    // scaled differently per axis below) so the combined pattern never
-    // repeats on a period short enough to read as a loop.
-    vec3 flowA = position * 1.1 + vec3(uTime * 0.17, uTime * 0.13, uTime * 0.11);
-    vec3 flowB = position * 0.45 + vec3(-uTime * 0.06, uTime * 0.08, -uTime * 0.05);
-
+  // Two independent, irrational-ratio time drifts (0.17/0.13/0.11 vs
+  // 0.06/0.08/0.05) so the fbm contribution never repeats on a period
+  // short enough to read as a loop. Dominant ribbed motif: parallel bands
+  // running across the sphere, like twisted clay, built as plane waves
+  // (sin of a dot product with a fixed, normalized direction) rather than
+  // a position-dependent rotation -- a rotation-based twist amplifies its
+  // own gradient near the equator (points far from the rotation axis
+  // sweep through a much longer arc per unit of angle change), which
+  // produced steep local folds even when the final displacement was
+  // clamped. A plane wave's gradient is the same fixed, small value
+  // everywhere by construction, so it can never locally crease regardless
+  // of mesh resolution. Two bands at different fixed directions and
+  // irrational-ratio time speeds (0.37 vs 0.24) combine into a
+  // non-obviously-repeating ripple; the mesh's own independent rotation
+  // (see useFrame below) makes the bands' apparent on-screen orientation
+  // slowly turn over time. Hard-clamped (not just tuned low) so no
+  // combination of swirl/noise phases, nor the "speaking" energy spike,
+  // can ever push a vertex far enough inward to pass near the opposite
+  // side of a 1.3-radius sphere -- which would read as a self-intersecting
+  // "bite" taken out of the blob.
+  float computeDisplacement(vec3 pos, float t, float energyAmt) {
+    vec3 flowA = pos * 1.1 + vec3(t * 0.17, t * 0.13, t * 0.11);
+    vec3 flowB = pos * 0.45 + vec3(-t * 0.06, t * 0.08, -t * 0.05);
     float fine = fbm(flowA);
     float coarse = fbm(flowB);
 
-    // coarse drives slow, large-scale stretch/compress of the whole
-    // silhouette; fine adds organic surface-level ripple on top. Both are
-    // always active -- uEnergy only scales their amplitude, it never
-    // zeroes them out, so the blob is never still.
-    float displacement = (coarse * 2.3 + fine * 0.8) * (0.55 + uEnergy);
+    vec3 bandDirA = normalize(vec3(0.6, 1.0, 0.3));
+    vec3 bandDirB = normalize(vec3(-0.4, 0.7, 0.9));
+    float swirlA = sin(dot(pos, bandDirA) * 2.6 + t * 0.37);
+    float swirlB = sin(dot(pos, bandDirB) * 1.9 - t * 0.24);
+    float swirl = swirlA * 0.6 + swirlB * 0.4;
+
+    return clamp((swirl * 1.4 + coarse * 0.55 + fine * 0.2) * (0.55 + energyAmt), -0.85, 0.85);
+  }
+
+  void main() {
+    float displacement = computeDisplacement(position, uTime, uEnergy);
     vDisplacement = displacement;
 
     vec3 newPosition = position + normal * displacement;
+
+    // Three.js never recomputes normals for vertex-shader displacement, so
+    // lighting would otherwise use the original smooth-sphere normal
+    // against a now-bumpy surface -- which reads as sharp, wrong creases
+    // at the ribbing instead of smooth rounded bumps. Recover the true
+    // surface normal by sampling two nearby points along the local tangent
+    // plane and taking the cross product of the resulting displaced edges.
+    vec3 tangent = normalize(cross(normal, abs(normal.y) < 0.99 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+    vec3 bitangent = cross(normal, tangent);
+    float eps = 0.02;
+    vec3 posU = position + tangent * eps;
+    vec3 posV = position + bitangent * eps;
+    vec3 newPosU = posU + normal * computeDisplacement(posU, uTime, uEnergy);
+    vec3 newPosV = posV + normal * computeDisplacement(posV, uTime, uEnergy);
+    vec3 displacedNormal = normalize(cross(newPosU - newPosition, newPosV - newPosition));
+    if (dot(displacedNormal, normal) < 0.0) displacedNormal = -displacedNormal;
+
+    vNormal = normalize(normalMatrix * displacedNormal);
     gl_Position = projectionMatrix * modelViewMatrix * vec4(newPosition, 1.0);
   }
 `;
 
 const FRAGMENT_SHADER = `
-  uniform vec3 uColorDeep;
-  uniform vec3 uColorMid;
-  uniform vec3 uColorHigh;
+  uniform vec3 uColorShadow;
+  uniform vec3 uColorBase;
+  uniform vec3 uColorHighlight;
   uniform float uEnergy;
   varying vec3 vNormal;
   varying float vDisplacement;
 
   void main() {
-    float fresnel = pow(1.0 - abs(vNormal.z), 2.2);
-    float t = clamp(vDisplacement * 1.4 + 0.5, 0.0, 1.0);
-    vec3 base = mix(uColorDeep, uColorMid, t);
-    vec3 color = mix(base, uColorHigh, fresnel * (0.55 + uEnergy * 0.5));
-    gl_FragColor = vec4(color, 1.0);
+    vec3 n = normalize(vNormal);
+
+    // A fixed key light in view space (not purely angle-of-view/fresnel
+    // driven) so the lit side stays believably top-left regardless of the
+    // mesh's own rotation -- a soft matte-clay look rather than a glowing
+    // rim-lit sphere.
+    vec3 lightDir = normalize(vec3(-0.5, 0.8, 0.6));
+    float lambert = dot(n, lightDir) * 0.5 + 0.5;
+
+    // The ridges/valleys from the vertex displacement double as a cheap
+    // ambient-occlusion proxy: valleys read darker, peaks catch more light.
+    float ao = clamp(vDisplacement * 0.5 + 0.5, 0.0, 1.0);
+    float shade = clamp(lambert * 0.7 + ao * 0.3, 0.0, 1.0);
+
+    vec3 color = mix(uColorShadow, uColorBase, smoothstep(0.15, 0.6, shade));
+    color = mix(color, uColorHighlight, smoothstep(0.68, 1.0, shade));
+
+    // A faint rim accent, not a bright glow -- most of the shape-reading
+    // comes from the lambert/AO gradient above.
+    float rim = pow(1.0 - abs(n.z), 3.0);
+    color = mix(color, uColorHighlight, rim * 0.1);
+
+    // Soft edge fade toward transparent at grazing angles -- the hazy,
+    // soft-focus silhouette instead of a hard geometric edge.
+    float edgeFresnel = pow(1.0 - abs(n.z), 5.0);
+    float alpha = 1.0 - edgeFresnel * 0.35;
+
+    gl_FragColor = vec4(color, alpha);
   }
 `;
 
@@ -166,9 +232,9 @@ function BlobMesh({ amplitude, speaking, reducedMotion }: BlobMeshProps) {
     () => ({
       uTime: { value: 0 },
       uEnergy: { value: 0 },
-      uColorDeep: { value: new THREE.Color("#312e81") },
-      uColorMid: { value: new THREE.Color("#7c3aed") },
-      uColorHigh: { value: new THREE.Color("#93c5fd") },
+      uColorShadow: { value: new THREE.Color("#1a2a73") },
+      uColorBase: { value: new THREE.Color("#2f4fe0") },
+      uColorHighlight: { value: new THREE.Color("#8fa6f5") },
     }),
     [],
   );
@@ -206,6 +272,7 @@ function BlobMesh({ amplitude, speaking, reducedMotion }: BlobMeshProps) {
         vertexShader={VERTEX_SHADER}
         fragmentShader={FRAGMENT_SHADER}
         uniforms={uniforms}
+        transparent
       />
     </mesh>
   );
