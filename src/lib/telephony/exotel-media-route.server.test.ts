@@ -5,7 +5,7 @@ import { handleExotelMediaUpgrade } from "./exotel-media-route.server.ts";
 import type { ExotelSocketLike } from "./exotel-media-bridge.server.ts";
 
 test("returns null (pass-through to the normal app router) for any non-media-stream path", async () => {
-  const req = new Request("https://vaani.app/api/public/webhooks/telephony?provider=exotel", {
+  const req = new Request("https://clickai.test/api/public/webhooks/telephony?provider=exotel", {
     headers: { upgrade: "websocket" },
   });
   const res = await handleExotelMediaUpgrade(req);
@@ -13,7 +13,7 @@ test("returns null (pass-through to the normal app router) for any non-media-str
 });
 
 test("rejects a non-upgrade request to the media-stream path", async () => {
-  const req = new Request("https://vaani.app/api/public/media-stream/exotel");
+  const req = new Request("https://clickai.test/api/public/media-stream/exotel");
   const res = await handleExotelMediaUpgrade(req);
   assert.ok(res);
   assert.equal(res!.status, 400);
@@ -21,7 +21,7 @@ test("rejects a non-upgrade request to the media-stream path", async () => {
 
 test("fails closed (501, not a crash) when the Cloudflare WebSocketPair global is unavailable — the real state of this Node test environment, not a mock", async () => {
   assert.equal(typeof (globalThis as Record<string, unknown>)["WebSocketPair"], "undefined");
-  const req = new Request("https://vaani.app/api/public/media-stream/exotel", {
+  const req = new Request("https://clickai.test/api/public/media-stream/exotel", {
     headers: { upgrade: "websocket" },
   });
   const res = await handleExotelMediaUpgrade(req);
@@ -82,7 +82,7 @@ test("BUGFIX regression: a 'media' frame arriving in the same tick as 'start' do
     // already ran before that point, so the fake socket is still usable.
     await assert.rejects(() =>
       handleExotelMediaUpgrade(
-        new Request("https://vaani.app/api/public/media-stream/exotel", {
+        new Request("https://clickai.test/api/public/media-stream/exotel", {
           headers: { upgrade: "websocket" },
         }),
       ),
@@ -115,7 +115,7 @@ test("TASK 7 (reject invalid provider/call identifiers): a 'start' event with no
   try {
     await assert.rejects(() =>
       handleExotelMediaUpgrade(
-        new Request("https://vaani.app/api/public/media-stream/exotel", {
+        new Request("https://clickai.test/api/public/media-stream/exotel", {
           headers: { upgrade: "websocket" },
         }),
       ),

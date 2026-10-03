@@ -13,7 +13,7 @@ const config = {
 test("verifyWebhookSignature: correct verify_token query param passes", () => {
   const adapter = new ExotelTelephonyAdapter(config);
   const url = new URL(
-    "https://vaani.app/api/public/webhooks/telephony?provider=exotel&verify_token=correct-verify-token",
+    "https://clickai.test/api/public/webhooks/telephony?provider=exotel&verify_token=correct-verify-token",
   );
   assert.equal(adapter.verifyWebhookSignature("", {}, url), true);
 });
@@ -21,14 +21,14 @@ test("verifyWebhookSignature: correct verify_token query param passes", () => {
 test("verifyWebhookSignature: wrong verify_token fails", () => {
   const adapter = new ExotelTelephonyAdapter(config);
   const url = new URL(
-    "https://vaani.app/api/public/webhooks/telephony?provider=exotel&verify_token=wrong",
+    "https://clickai.test/api/public/webhooks/telephony?provider=exotel&verify_token=wrong",
   );
   assert.equal(adapter.verifyWebhookSignature("", {}, url), false);
 });
 
 test("verifyWebhookSignature: missing verify_token fails closed", () => {
   const adapter = new ExotelTelephonyAdapter(config);
-  const url = new URL("https://vaani.app/api/public/webhooks/telephony?provider=exotel");
+  const url = new URL("https://clickai.test/api/public/webhooks/telephony?provider=exotel");
   assert.equal(adapter.verifyWebhookSignature("", {}, url), false);
 });
 
@@ -79,7 +79,7 @@ describe("verifyWebhookSignature: diagnostic logging never exposes either raw va
     try {
       const adapter = new ExotelTelephonyAdapter(config);
       const url = new URL(
-        "https://vaani.app/api/public/webhooks/telephony?provider=exotel&verify_token=correct-verify-token",
+        "https://clickai.test/api/public/webhooks/telephony?provider=exotel&verify_token=correct-verify-token",
       );
       adapter.verifyWebhookSignature("", {}, url);
     } finally {
@@ -106,7 +106,7 @@ describe("verifyWebhookSignature: diagnostic logging never exposes either raw va
       // into verify_token before the query string split into a second,
       // unrelated parameter.
       const url = new URL(
-        "https://vaani.app/api/public/webhooks/telephony?provider=exotel&verify_token=correct",
+        "https://clickai.test/api/public/webhooks/telephony?provider=exotel&verify_token=correct",
       );
       const result = adapter.verifyWebhookSignature("", {}, url);
       assert.equal(result, false);
@@ -129,7 +129,7 @@ describe("verifyWebhookSignature: diagnostic logging never exposes either raw va
     const { calls, restore } = captureLogs();
     try {
       const adapter = new ExotelTelephonyAdapter(config);
-      const url = new URL("https://vaani.app/api/public/webhooks/telephony?provider=exotel");
+      const url = new URL("https://clickai.test/api/public/webhooks/telephony?provider=exotel");
       assert.equal(adapter.verifyWebhookSignature("", {}, url), false);
     } finally {
       restore();
@@ -179,7 +179,7 @@ describe("normalizeWebhookEvent: To/From number normalization (live-call regress
     const event = adapter.normalizeWebhookEvent(body);
     assert.ok(event);
     assert.equal(event?.toE164, "+919513886363");
-    assert.equal(event?.vaaniE164, "+919513886363");
+    assert.equal(event?.destinationE164, "+919513886363");
     assert.equal(event?.fromE164, "+919876543210");
   });
 
@@ -193,7 +193,7 @@ describe("normalizeWebhookEvent: To/From number normalization (live-call regress
     const event = adapter.normalizeWebhookEvent(body);
     assert.ok(event);
     assert.equal(event?.toE164, "+919513886363");
-    assert.equal(event?.vaaniE164, "+919513886363");
+    assert.equal(event?.destinationE164, "+919513886363");
   });
 
   test("a different, legitimately-unprovisioned number normalizes to its OWN distinct E.164 value, never coerced to match the known/provisioned number", () => {

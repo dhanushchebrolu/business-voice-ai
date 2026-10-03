@@ -24,7 +24,7 @@ import { AccountStatusPanel } from "@/components/app/AccountStatusPanel";
 export const Route = createFileRoute("/app/")({
   head: () => ({
     meta: [
-      { title: "Overview — Vaani" },
+      { title: "Overview — ClickAI" },
       { name: "description", content: "Call volume, leads and receptionist status at a glance." },
       { name: "robots", content: "noindex" },
     ],

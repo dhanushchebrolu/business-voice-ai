@@ -6,12 +6,12 @@ import { Button } from "@/components/ui/button";
 export const Route = createFileRoute("/pricing")({
   head: () => ({
     meta: [
-      { title: "Pricing — Vaani AI receptionist" },
+      { title: "Pricing — ClickAI" },
       {
         name: "description",
         content: "Simple monthly plans for AI phone receptionists, with usage-based call minutes.",
       },
-      { property: "og:title", content: "Pricing — Vaani AI receptionist" },
+      { property: "og:title", content: "Pricing — ClickAI" },
       {
         property: "og:description",
         content: "Starter, Professional and Business plans with included call minutes.",

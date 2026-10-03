@@ -7,7 +7,7 @@ import { AuthenticatedShell } from "@/components/app/AuthenticatedShell";
 export const Route = createFileRoute("/account")({
   head: () => ({
     meta: [
-      { title: "Your account — Vaani" },
+      { title: "Your account — ClickAI" },
       { name: "description", content: "Profile, settings and workspace status." },
       { name: "robots", content: "noindex" },
     ],

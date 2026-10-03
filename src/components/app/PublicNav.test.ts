@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
  * Sign out), never the signed-out Sign in / Get started controls, and never
  * a customer-only Dashboard link they don't have backend-confirmed access
  * to. Conversely, an authenticated customer WITH access must see identity +
- * Sign out AND the Dashboard button together — "Vaani | Pricing | Dashboard
+ * Sign out AND the Dashboard button together — "ClickAI | Pricing | Dashboard
  * | user@email.com" — not one or the other.
  *
  * Source-scanned, matching this repo's established convention for files

@@ -17,7 +17,7 @@ import { Button } from "@/components/ui/button";
 export const Route = createFileRoute("/app/campaigns")({
   head: () => ({
     meta: [
-      { title: "Campaigns — Vaani" },
+      { title: "Campaigns — ClickAI" },
       {
         name: "description",
         content: "Automatically call your customers and leads with your AI receptionist.",

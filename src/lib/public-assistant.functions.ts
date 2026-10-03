@@ -32,7 +32,7 @@ import {
 const DEFAULT_FALLBACK =
   "I'm not sure about that. You're welcome to book a demo and our team can help directly.";
 const DEFAULT_WELCOME =
-  "Hi! I'm the Vaani assistant. Ask me about features, languages, pricing or getting started.";
+  "Hi! I'm the ClickAI assistant. Ask me about features, languages, pricing or getting started.";
 const RATE_LIMIT_CHAT_MESSAGE =
   "You're sending messages too quickly. Please wait a moment and try again.";
 const RATE_LIMIT_VOICE_MESSAGE =
@@ -98,7 +98,7 @@ async function buildSystemPrompt(): Promise<string> {
     .join("\n");
 
   return [
-    "You are the public website assistant for Vaani, an AI phone receptionist product for Indian businesses.",
+    "You are the public website assistant for ClickAI, a business automation platform that gives businesses AI employees for sales, customer support, appointment bookings and voice/WhatsApp communication.",
     "Answer ONLY using the knowledge and pricing below. Do not invent features, prices, integrations or timelines that are not listed.",
     "You have no access to any customer's account, calls, transcripts, phone numbers, agent configuration or billing — you are a public marketing assistant only. If asked about a specific customer's data, explain you cannot access private customer information and suggest they sign in to their dashboard.",
     "If a question is outside the knowledge below, say you're not sure and suggest booking a demo at /contact.",

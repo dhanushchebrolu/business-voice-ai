@@ -103,10 +103,10 @@ export function AdminShell({
       <aside className="hidden w-60 shrink-0 flex-col border-r border-border lg:flex">
         <div className="flex h-14 items-center gap-2 border-b border-border px-4">
           <span className="grid size-7 place-items-center rounded-md bg-foreground text-background text-[13px] font-bold">
-            V
+            C
           </span>
           <div className="leading-tight">
-            <p className="text-[13px] font-semibold">Vaani Control</p>
+            <p className="text-[13px] font-semibold">ClickAI Control</p>
             <p className="text-[10px] uppercase tracking-wider text-muted-foreground">
               Platform admin
             </p>
@@ -136,7 +136,7 @@ export function AdminShell({
 
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex h-14 items-center justify-between border-b border-border px-4 lg:hidden">
-          <span className="text-sm font-semibold">Vaani Control</span>
+          <span className="text-sm font-semibold">ClickAI Control</span>
           <Button size="icon" variant="ghost" onClick={() => setOpen((v) => !v)}>
             {open ? <X className="size-4" /> : <Menu className="size-4" />}
           </Button>

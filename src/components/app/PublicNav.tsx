@@ -59,7 +59,7 @@ export function useDashboardAccess() {
  * Three states, all backend-authoritative (never inferred from the mere
  * presence of a session):
  *   - Signed in -> identity + Sign out, plus a Dashboard button when (and
- *     only when) hasDashboard is true: Vaani | Pricing | Dashboard |
+ *     only when) hasDashboard is true: ClickAI | Pricing | Dashboard |
  *     user@email.com. Authentication is not customer entitlement: a signed-
  *     in visitor without dashboard access sees the normal public site (no
  *     Dashboard button, never a /app or /admin control), and is never shown

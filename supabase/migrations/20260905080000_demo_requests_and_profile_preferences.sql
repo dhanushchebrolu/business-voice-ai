@@ -2,7 +2,7 @@
 --  1. A real, non-fake destination for the public "Book a demo" CTA — a
 --     lead-capture table any visitor (including anon) can insert into, that
 --     only platform admins can read. No booking/scheduling logic is
---     implemented; a human on the Vaani team follows up.
+--     implemented; a human on the ClickAI team follows up.
 --  2. Per-user Settings needs somewhere durable to persist Preferences and
 --     Notifications — these are genuinely new user-scoped columns on the
 --     existing `profiles` table (already RLS'd to the owning user), not a

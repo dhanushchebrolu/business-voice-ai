@@ -12,7 +12,7 @@ import { AccountLocked } from "@/components/app/AccountLocked";
 export const Route = createFileRoute("/app")({
   head: () => ({
     meta: [
-      { title: "Dashboard — Vaani" },
+      { title: "Dashboard — ClickAI" },
       {
         name: "description",
         content: "Manage your AI receptionist, calls, leads and phone numbers.",

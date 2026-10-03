@@ -10,7 +10,7 @@ import { AccountStatusPanel } from "@/components/app/AccountStatusPanel";
 export const Route = createFileRoute("/app/billing")({
   head: () => ({
     meta: [
-      { title: "Usage & billing — Vaani" },
+      { title: "Usage & billing — ClickAI" },
       { name: "description", content: "Track call minutes, usage costs, payments and invoices for your workspace." },
       { name: "robots", content: "noindex" },
     ],

@@ -35,7 +35,10 @@ function loadCheckoutScript(): Promise<boolean> {
  * Opens the hosted payment sheet for a platform charge. The account is only
  * unlocked once the provider webhook confirms the payment server-side.
  */
-export function useCheckout(context?: { email?: string | null | undefined; name?: string | null | undefined }) {
+export function useCheckout(context?: {
+  email?: string | null | undefined;
+  name?: string | null | undefined;
+}) {
   const startOrder = useServerFn(createCheckoutOrder);
   const queryClient = useQueryClient();
   const [pending, setPending] = useState<CheckoutPurpose | null>(null);
@@ -54,7 +57,9 @@ export function useCheckout(context?: { email?: string | null | undefined; name?
 
         const ready = await loadCheckoutScript();
         if (!ready || !window.Razorpay) {
-          toast.error("Could not open the payment window", { description: "Check your connection and try again." });
+          toast.error("Could not open the payment window", {
+            description: "Check your connection and try again.",
+          });
           return;
         }
 
@@ -63,7 +68,7 @@ export function useCheckout(context?: { email?: string | null | undefined; name?
           order_id: order.orderId,
           amount: order.amount,
           currency: order.currency,
-          name: "Vaani",
+          name: "ClickAI",
           description: order.label,
           prefill: { email: context?.email ?? undefined, name: context?.name ?? undefined },
           theme: { color: "#000000" },
@@ -72,7 +77,8 @@ export function useCheckout(context?: { email?: string | null | undefined; name?
           },
           handler: () => {
             toast.success("Payment received", {
-              description: "We're confirming it with the payment provider — your account unlocks automatically.",
+              description:
+                "We're confirming it with the payment provider — your account unlocks automatically.",
             });
             setTimeout(() => {
               void queryClient.invalidateQueries();

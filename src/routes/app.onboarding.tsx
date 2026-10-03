@@ -19,8 +19,8 @@ import { cn } from "@/lib/utils";
 export const Route = createFileRoute("/app/onboarding")({
   head: () => ({
     meta: [
-      { title: "Set up your receptionist — Vaani" },
-      { name: "description", content: "Tell Vaani about your business so your AI receptionist can answer calls accurately." },
+      { title: "Set up your receptionist — ClickAI" },
+      { name: "description", content: "Tell ClickAI about your business so your AI receptionist can answer calls accurately." },
       { name: "robots", content: "noindex" },
     ],
   }),

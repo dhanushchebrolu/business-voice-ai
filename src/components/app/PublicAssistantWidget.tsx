@@ -28,7 +28,7 @@ export function PublicAssistantWidget() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(false);
-  const [welcome, setWelcome] = useState("Hi! Ask me anything about Vaani.");
+  const [welcome, setWelcome] = useState("Hi! Ask me anything about ClickAI.");
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [recording, setRecording] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState<string | null>(null);
@@ -135,7 +135,7 @@ export function PublicAssistantWidget() {
     <>
       <button
         onClick={() => setOpen((v) => !v)}
-        aria-label={open ? "Close Vaani assistant" : "Open Vaani assistant"}
+        aria-label={open ? "Close ClickAI assistant" : "Open ClickAI assistant"}
         className="fixed bottom-5 right-5 z-40 grid size-14 place-items-center rounded-full bg-primary text-primary-foreground shadow-lg transition-transform hover:scale-105"
       >
         {open ? <X className="size-5" /> : <MessageCircle className="size-5" />}
@@ -145,7 +145,7 @@ export function PublicAssistantWidget() {
         <div className="fixed bottom-24 right-5 z-40 flex h-[480px] w-[340px] max-w-[calc(100vw-2.5rem)] flex-col overflow-hidden rounded-xl border border-border bg-card shadow-2xl">
           <div className="flex items-center justify-between border-b border-border px-4 py-3">
             <div>
-              <p className="text-sm font-semibold">Talk to Vaani</p>
+              <p className="text-sm font-semibold">Talk to ClickAI</p>
               <p className="text-xs text-muted-foreground">Public assistant · no account data</p>
             </div>
             {voiceEnabled ? (
@@ -207,7 +207,7 @@ export function PublicAssistantWidget() {
               <Input
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                placeholder="Ask about Vaani…"
+                placeholder="Ask about ClickAI…"
                 disabled={busy}
                 autoFocus
               />

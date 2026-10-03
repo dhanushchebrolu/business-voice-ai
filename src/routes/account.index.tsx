@@ -27,7 +27,7 @@ function AccountOverview() {
     <div className="space-y-6">
       <PageHeader
         title={`Welcome${profile?.full_name ? `, ${profile.full_name}` : ""}`}
-        description="Your Vaani account — profile, workspace status and access."
+        description="Your ClickAI account — profile, workspace status and access."
       />
 
       {org && org.lifecycle_status !== "archived" ? (

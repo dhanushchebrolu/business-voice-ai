@@ -20,7 +20,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sh
 export const Route = createFileRoute("/app/calls")({
   head: () => ({
     meta: [
-      { title: "Calls — Vaani" },
+      { title: "Calls — ClickAI" },
       { name: "description", content: "Review every answered call, transcript and outcome." },
       { name: "robots", content: "noindex" },
     ],

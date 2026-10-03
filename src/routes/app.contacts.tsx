@@ -29,7 +29,7 @@ import {
 export const Route = createFileRoute("/app/contacts")({
   head: () => ({
     meta: [
-      { title: "Contacts — Vaani" },
+      { title: "Contacts — ClickAI" },
       { name: "description", content: "Your customer list — upload once, call in any campaign." },
       { name: "robots", content: "noindex" },
     ],

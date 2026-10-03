@@ -34,7 +34,7 @@ import {
 export const Route = createFileRoute("/app/knowledge")({
   head: () => ({
     meta: [
-      { title: "Knowledge base — Vaani" },
+      { title: "Knowledge base — ClickAI" },
       {
         name: "description",
         content:

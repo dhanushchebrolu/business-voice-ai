@@ -38,7 +38,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
 export const Route = createFileRoute("/app/campaigns/$campaignId")({
-  head: () => ({ meta: [{ title: "Campaign — Vaani" }, { name: "robots", content: "noindex" }] }),
+  head: () => ({ meta: [{ title: "Campaign — ClickAI" }, { name: "robots", content: "noindex" }] }),
   component: CampaignDetailPage,
 });
 

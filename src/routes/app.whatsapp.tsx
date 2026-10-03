@@ -49,7 +49,7 @@ import {
 export const Route = createFileRoute("/app/whatsapp")({
   head: () => ({
     meta: [
-      { title: "WhatsApp — Vaani" },
+      { title: "WhatsApp — ClickAI" },
       {
         name: "description",
         content: "Connect your business WhatsApp account to your AI agent.",

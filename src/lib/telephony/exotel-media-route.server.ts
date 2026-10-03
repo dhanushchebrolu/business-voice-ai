@@ -18,8 +18,8 @@
  *
  * IMPORTANT correlation design note: Exotel's Voicebot Applet WSS URL is
  * configured once, statically, in the Exotel dashboard's call-flow — it is
- * NOT dynamically generated per call by anything Vaani does for inbound
- * calls (Vaani never initiates that connection; Exotel does). That means
+ * NOT dynamically generated per call by anything ClickAI does for inbound
+ * calls (ClickAI never initiates that connection; Exotel does). That means
  * the *upgrade request itself* carries no reliable per-call identity — the
  * only place Exotel's protocol is documented to actually carry the CallSid
  * is inside the first WebSocket message, the "start" event. So this route

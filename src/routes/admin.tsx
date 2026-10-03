@@ -14,8 +14,8 @@ export const Route = createFileRoute("/admin")({
   ssr: false,
   head: () => ({
     meta: [
-      { title: "Vaani Control — Platform administration" },
-      { name: "description", content: "Internal Vaani platform control plane." },
+      { title: "ClickAI Control — Platform administration" },
+      { name: "description", content: "Internal ClickAI platform control plane." },
       { name: "robots", content: "noindex, nofollow" },
     ],
   }),
@@ -69,7 +69,7 @@ function AdminLayout() {
           <p className="mt-2 text-sm text-muted-foreground">
             {data?.bootstrapAvailable
               ? "No platform administrator exists yet. Enter the bootstrap secret to claim super admin for this account."
-              : "This area is restricted to Vaani platform administrators. Your customer account role does not grant access here."}
+              : "This area is restricted to ClickAI platform administrators. Your customer account role does not grant access here."}
           </p>
           {data?.bootstrapAvailable ? (
             <div className="mt-5 space-y-2 text-left">

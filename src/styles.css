@@ -5,7 +5,7 @@
 @custom-variant dark (&:is(.dark *));
 
 /*
- * Vaani — design system
+ * ClickAI — design system
  * Dark-first, high-density B2B console. Single warm accent (amber-copper).
  * All colors are oklch tokens. Never hardcode colors in components.
  */

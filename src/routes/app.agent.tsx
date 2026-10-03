@@ -36,7 +36,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 export const Route = createFileRoute("/app/agent")({
   head: () => ({
     meta: [
-      { title: "AI receptionist — Vaani" },
+      { title: "AI receptionist — ClickAI" },
       {
         name: "description",
         content: "Configure persona, voice, language and behaviour for your AI receptionist.",

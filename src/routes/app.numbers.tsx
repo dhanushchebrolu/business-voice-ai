@@ -37,7 +37,7 @@ const numberRequestQuery = (orgId: string | undefined) =>
 export const Route = createFileRoute("/app/numbers")({
   head: () => ({
     meta: [
-      { title: "Phone & AI Voice Service — Vaani" },
+      { title: "Phone & AI Voice Service — ClickAI" },
       {
         name: "description",
         content: "Your business phone number and the AI voice service that answers it.",

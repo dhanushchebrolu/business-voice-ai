@@ -14,7 +14,7 @@ import { Label } from "@/components/ui/label";
 export const Route = createFileRoute("/app/settings")({
   head: () => ({
     meta: [
-      { title: "Settings — Vaani" },
+      { title: "Settings — ClickAI" },
       { name: "description", content: "Workspace name, timezone and account settings." },
       { name: "robots", content: "noindex" },
     ],

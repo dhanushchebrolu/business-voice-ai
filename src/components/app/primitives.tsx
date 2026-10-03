@@ -6,10 +6,10 @@ export function Logo({ className }: { className?: string }) {
   return (
     <div className={cn("flex items-center gap-2", className)}>
       <span className="relative grid size-7 place-items-center rounded-md bg-primary text-primary-foreground">
-        <span className="text-[13px] font-bold leading-none">V</span>
+        <span className="text-[13px] font-bold leading-none">C</span>
         <span className="absolute inset-0 rounded-md ring-1 ring-inset ring-primary/40" />
       </span>
-      <span className="text-[15px] font-semibold tracking-tight">Vaani</span>
+      <span className="text-[15px] font-semibold tracking-tight">ClickAI</span>
     </div>
   );
 }
@@ -27,7 +27,9 @@ export function PageHeader({
     <div className="flex flex-col gap-3 border-b border-border pb-5 sm:flex-row sm:items-end sm:justify-between">
       <div className="space-y-1">
         <h1 className="text-[22px] font-semibold tracking-tight">{title}</h1>
-        {description ? <p className="max-w-2xl text-sm text-muted-foreground">{description}</p> : null}
+        {description ? (
+          <p className="max-w-2xl text-sm text-muted-foreground">{description}</p>
+        ) : null}
       </div>
       {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
     </div>
@@ -99,7 +101,10 @@ export function ErrorState({ message, onRetry }: { message: string; onRetry?: ()
       <div className="flex items-center justify-between gap-4">
         <span>{message}</span>
         {onRetry ? (
-          <button onClick={onRetry} className="shrink-0 rounded-md border border-destructive/40 px-2 py-1 text-xs font-medium">
+          <button
+            onClick={onRetry}
+            className="shrink-0 rounded-md border border-destructive/40 px-2 py-1 text-xs font-medium"
+          >
             Retry
           </button>
         ) : null}
@@ -130,8 +135,12 @@ export function StatCard({
 }) {
   return (
     <div className="panel px-4 py-3.5">
-      <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">{label}</p>
-      <p className={cn("mt-2 text-2xl font-semibold tabular", tone === "accent" && "text-primary")}>{value}</p>
+      <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+        {label}
+      </p>
+      <p className={cn("mt-2 text-2xl font-semibold tabular", tone === "accent" && "text-primary")}>
+        {value}
+      </p>
       {hint ? <p className="mt-1 text-xs text-muted-foreground">{hint}</p> : null}
     </div>
   );
@@ -155,7 +164,9 @@ export function SectionCard({
       <header className="flex flex-col gap-2 border-b border-border px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h2 className="text-sm font-semibold">{title}</h2>
-          {description ? <p className="mt-0.5 text-xs text-muted-foreground">{description}</p> : null}
+          {description ? (
+            <p className="mt-0.5 text-xs text-muted-foreground">{description}</p>
+          ) : null}
         </div>
         {actions ? <div className="flex items-center gap-2">{actions}</div> : null}
       </header>

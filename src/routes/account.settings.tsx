@@ -31,7 +31,7 @@ export const Route = createFileRoute("/account/settings")({
   validateSearch: searchSchema,
   head: () => ({
     meta: [
-      { title: "Settings — Vaani" },
+      { title: "Settings — ClickAI" },
       { name: "description", content: "Account, security, preferences and notifications." },
       { name: "robots", content: "noindex" },
     ],
@@ -351,7 +351,7 @@ function NotificationsTab({
   }
 
   return (
-    <SectionCard title="Notifications" description="What Vaani emails you about.">
+    <SectionCard title="Notifications" description="What ClickAI emails you about.">
       <ul className="divide-y divide-border">
         <li className="flex items-center justify-between gap-3 py-3">
           <div>

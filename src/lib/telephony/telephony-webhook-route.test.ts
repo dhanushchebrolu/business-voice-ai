@@ -55,7 +55,7 @@ describe("telephony webhook route — signature verification and idempotency (un
 describe("telephony webhook route — inbound tenant resolution (unchanged from pre-Sarvam)", () => {
   test("resolves the organization from Klyro's own phone_numbers table, keyed on the called number + active status", () => {
     assert.match(routeSrc, /from\("phone_numbers"\)/);
-    assert.match(routeSrc, /\.eq\("e164", vaaniNumber\)/);
+    assert.match(routeSrc, /\.eq\("e164", destinationNumber\)/);
     assert.match(routeSrc, /\.eq\("status", "active"\)/);
   });
 
@@ -92,7 +92,7 @@ describe("telephony webhook route — outbound tenant correlation (Sarvam additi
   test("an outbound event with no existing call_logs row is resolved ONLY via a validated clientReference, never via phone number or any other field", () => {
     const outboundBranch = routeSrc.slice(
       routeSrc.indexOf('if (event.direction === "outbound") {'),
-      routeSrc.indexOf("const vaaniNumber ="),
+      routeSrc.indexOf("const destinationNumber ="),
     );
     assert.match(outboundBranch, /isPlausibleClientReference\(event\.clientReference\)/);
     assert.match(
@@ -100,13 +100,16 @@ describe("telephony webhook route — outbound tenant correlation (Sarvam additi
       /resolveOutboundCallByClientReference\(providerId, event\.clientReference\)/,
     );
     // Never falls back to attributing by phone number/caller id for outbound.
-    assert.doesNotMatch(outboundBranch, /fromE164|toE164|vaaniE164|user_phone_number|caller/i);
+    assert.doesNotMatch(
+      outboundBranch,
+      /fromE164|toE164|destinationE164|user_phone_number|caller/i,
+    );
   });
 
   test("an unresolved outbound event is dropped (logged, no row created/updated), never guessed", () => {
     const outboundBranch = routeSrc.slice(
       routeSrc.indexOf('if (event.direction === "outbound") {'),
-      routeSrc.indexOf("const vaaniNumber ="),
+      routeSrc.indexOf("const destinationNumber ="),
     );
     assert.match(outboundBranch, /if \(!resolved\) \{/);
     assert.match(outboundBranch, /telephony:webhook_unknown_outbound_call/);
@@ -129,7 +132,7 @@ describe("telephony webhook route — reassignment safety (Phase 5 §8)", () => 
     const idx = routeSrc.indexOf('.from("phone_numbers")');
     assert.ok(idx > -1);
     const block = routeSrc.slice(idx, idx + 250);
-    assert.match(block, /\.eq\("e164", vaaniNumber\)/);
+    assert.match(block, /\.eq\("e164", destinationNumber\)/);
     assert.match(block, /\.eq\("provider", providerId\)/);
     assert.match(block, /\.eq\("status", "active"\)/);
   });
@@ -215,7 +218,7 @@ describe("telephony webhook route — unknown-number diagnostic (live-call regre
     assert.ok(idx > -1);
     const block = routeSrc.slice(Math.max(0, idx - 1200), idx + 250);
     assert.match(block, /\.select\("provider, status"\)/);
-    assert.match(block, /\.eq\("e164", vaaniNumber\)/);
+    assert.match(block, /\.eq\("e164", destinationNumber\)/);
     assert.doesNotMatch(block, /organization_id/);
   });
 
@@ -307,7 +310,7 @@ describe("telephony webhook route — Exotel 'initiated' runtime handoff (produc
   test("does not widen the 'initiated' trigger onto the outbound or existing-row (applyCallEvent) paths — only the inbound new-call insert branch", () => {
     const outboundBranch = routeSrc.slice(
       routeSrc.indexOf('if (event.direction === "outbound") {'),
-      routeSrc.indexOf("const vaaniNumber ="),
+      routeSrc.indexOf("const destinationNumber ="),
     );
     assert.doesNotMatch(outboundBranch, /event\.status === "initiated"/);
 

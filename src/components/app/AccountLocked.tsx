@@ -70,7 +70,7 @@ export function AccountLocked({
           </div>
 
           <h1 className="mt-5 text-2xl font-semibold tracking-tight">
-            {suspended ? "Your workspace is on hold" : `Welcome to Vaani, ${name}`}
+            {suspended ? "Your workspace is on hold" : `Welcome to ClickAI, ${name}`}
           </h1>
           <p className="mt-1 text-xs text-muted-foreground">Client ID: {clientId}</p>
           <p className="mt-2 max-w-xl text-sm text-muted-foreground">

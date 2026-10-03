@@ -28,7 +28,7 @@ const STATUSES = ["new", "contacted", "qualified", "won", "lost"];
 export const Route = createFileRoute("/app/leads")({
   head: () => ({
     meta: [
-      { title: "Leads — Vaani" },
+      { title: "Leads — ClickAI" },
       {
         name: "description",
         content: "Contacts your AI receptionist captured from inbound calls.",

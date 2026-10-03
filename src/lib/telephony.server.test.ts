@@ -160,7 +160,7 @@ test("getTelephonyAdapter('sarvam'): SARVAM_BASE_URL is read by nothing — Sarv
     adapter.verifyWebhookSignature(
       "",
       {},
-      new URL("https://vaani.app/api/public/webhooks/telephony?provider=sarvam&verify_token=x"),
+      new URL("https://clickai.test/api/public/webhooks/telephony?provider=sarvam&verify_token=x"),
     ),
     false,
     "no webhook secret was configured, so the request must still be rejected",
@@ -181,7 +181,7 @@ test("getTelephonyAdapter('sarvam'): SARVAM_WEBHOOK_SECRET (Phase 5), when set, 
       "",
       {},
       new URL(
-        "https://vaani.app/api/public/webhooks/telephony?provider=sarvam&verify_token=sarvam-shared-secret",
+        "https://clickai.test/api/public/webhooks/telephony?provider=sarvam&verify_token=sarvam-shared-secret",
       ),
     ),
     true,
@@ -191,7 +191,9 @@ test("getTelephonyAdapter('sarvam'): SARVAM_WEBHOOK_SECRET (Phase 5), when set, 
     adapter.verifyWebhookSignature(
       "",
       {},
-      new URL("https://vaani.app/api/public/webhooks/telephony?provider=sarvam&verify_token=wrong"),
+      new URL(
+        "https://clickai.test/api/public/webhooks/telephony?provider=sarvam&verify_token=wrong",
+      ),
     ),
     false,
   );

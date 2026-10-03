@@ -22,7 +22,7 @@ import {
 
 export const Route = createFileRoute("/app/campaigns/new")({
   head: () => ({
-    meta: [{ title: "Create campaign — Vaani" }, { name: "robots", content: "noindex" }],
+    meta: [{ title: "Create campaign — ClickAI" }, { name: "robots", content: "noindex" }],
   }),
   component: NewCampaignPage,
 });

@@ -81,13 +81,15 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Vaani — AI phone receptionists for Indian businesses" },
+      { title: "ClickAI — AI employees for sales, support, bookings and automation" },
       {
         name: "description",
         content:
-          "Vaani answers your business calls in 11 Indian languages. Configure your receptionist from your business details — no prompts, no code.",
+          "ClickAI gives businesses AI employees that answer calls, chat on WhatsApp, book appointments and support customers — configured from your business details, no prompts, no code.",
       },
       { property: "og:type", content: "website" },
+      { property: "og:site_name", content: "ClickAI" },
+      { property: "og:url", content: "https://clickai.in" },
       { name: "twitter:card", content: "summary_large_image" },
     ],
     links: [

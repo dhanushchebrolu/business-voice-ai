@@ -84,7 +84,7 @@ async function withSarvamEnvAndFetch<T>(
   process.env["SARVAM_API_KEY"] = "sk_test_key";
   process.env["SARVAM_ORG_ID"] = "org_1";
   process.env["SARVAM_WORKSPACE_ID"] = "ws_1";
-  process.env["TELEPHONY_WEBHOOK_BASE_URL"] = "https://vaani.example";
+  process.env["TELEPHONY_WEBHOOK_BASE_URL"] = "https://clickai.test";
   const originalFetch = globalThis.fetch;
   let requestBody: unknown;
   globalThis.fetch = (async (_url: string | URL, init?: RequestInit) => {

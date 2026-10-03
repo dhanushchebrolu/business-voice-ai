@@ -3,7 +3,7 @@
  *
  * Nothing outside this module and its concrete adapters may call a
  * telephony provider's API or import a provider SDK directly. Every other
- * part of Vaani — admin server functions, the outbound-call server function,
+ * part of ClickAI — admin server functions, the outbound-call server function,
  * the inbound webhook route — talks to `getTelephonyAdapter()` in
  * `telephony.server.ts`, never to a provider. Swapping the underlying
  * provider means writing one new class that implements this interface; it
@@ -61,15 +61,15 @@ export interface CallTranscriptTurn {
   indicText?: string | undefined;
 }
 
-/** A provider's webhook event, translated into Vaani's internal shape. */
+/** A provider's webhook event, translated into ClickAI's internal shape. */
 export interface NormalizedCallEvent {
   /** Uniquely identifies this specific event for idempotency, if the provider sends one. */
   eventId?: string | undefined;
   providerCallId: string;
   status: NormalizedCallStatus;
   direction?: "inbound" | "outbound" | undefined;
-  /** E.164 of the Vaani number involved (the number the event is routed by). */
-  vaaniE164?: string | undefined;
+  /** E.164 of the ClickAI number involved (the number the event is routed by). */
+  destinationE164?: string | undefined;
   fromE164?: string | undefined;
   toE164?: string | undefined;
   durationSeconds?: number | undefined;

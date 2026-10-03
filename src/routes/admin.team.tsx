@@ -62,7 +62,7 @@ function AdminTeam() {
         open={open}
         onOpenChange={setOpen}
         title="Grant platform admin access"
-        description="The person must already have a Vaani account. Access is verified server-side on every request."
+        description="The person must already have a ClickAI account. Access is verified server-side on every request."
         confirmLabel="Grant access"
         extra={
           <div className="space-y-2">

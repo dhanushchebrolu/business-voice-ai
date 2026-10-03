@@ -40,7 +40,7 @@ export interface AgentRuntimeHandoffInput {
   businessId: string | null;
   agentConfigId: string | null;
   phoneNumberId: string;
-  vaaniE164: string;
+  destinationE164: string;
   callerE164: string | null;
   direction: "inbound" | "outbound";
   provider: string;

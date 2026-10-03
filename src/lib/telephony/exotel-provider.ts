@@ -109,7 +109,7 @@ export class ExotelTelephonyAdapter implements TelephonyProviderAdapter {
 
   async releaseNumber(_providerNumberId: string): Promise<void> {
     throw new TelephonyAdapterError(
-      "Exotel numbers are released through your Exotel account, not this API. Detaching it from the customer in Vaani (already supported) does not delete it from Exotel.",
+      "Exotel numbers are released through your Exotel account, not this API. Detaching it from the customer in ClickAI (already supported) does not delete it from Exotel.",
       400,
     );
   }
@@ -291,7 +291,7 @@ export class ExotelTelephonyAdapter implements TelephonyProviderAdapter {
       direction: direction?.toLowerCase().startsWith("outbound") ? "outbound" : "inbound",
       fromE164,
       toE164,
-      vaaniE164: toE164,
+      destinationE164: toE164,
       durationSeconds: (() => {
         const v = firstString(fields, ["CallDuration", "Duration", "duration"]);
         const n = v ? Number(v) : NaN;
@@ -305,7 +305,7 @@ export class ExotelTelephonyAdapter implements TelephonyProviderAdapter {
   }
 
   /**
-   * Exotel is the WebSocket *client* — it connects to Vaani, not the other
+   * Exotel is the WebSocket *client* — it connects to ClickAI, not the other
    * way around (spec §6). This method never dials out; it only waits
    * (bounded) for src/server.ts's inbound WS route to have already fully
    * authorized a connection for this exact providerCallId and registered

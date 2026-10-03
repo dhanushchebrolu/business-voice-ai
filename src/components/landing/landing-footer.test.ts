@@ -11,9 +11,9 @@ const src = readFileSync(
 // Actual code only — strips the file's own doc comment, which legitimately
 // discusses (in prose) the very things these assertions check are absent
 // from the real markup below it.
-const code = src.replace(/\/\*\*[\s\S]*?\*\//, "");
+const code = src.replace(/\/\*\*[\s\S]*?\*\//g, "");
 
-describe("LandingFooter has no invented social/company links, no fake form, and only real destinations", () => {
+describe("LandingFooter has no invented social/company links, no fake form, real contact info, and only real destinations", () => {
   test("does not link to any social platform (none are real/verified for this app)", () => {
     for (const platform of [
       "twitter.com",
@@ -37,14 +37,80 @@ describe("LandingFooter has no invented social/company links, no fake form, and 
     assert.match(code, /to="\/contact"[\s\S]{0,200}Get in touch/);
   });
 
-  test("every footer link is either a real route or a real in-page scroll target", () => {
-    assert.match(src, /to: "\/pricing"/);
-    assert.match(src, /to: "\/contact"/);
-    assert.match(src, /to: "\/auth"/);
-    assert.match(src, /targetId: "value-propositions"/);
-    assert.match(src, /targetId: "voice-demo"/);
-    assert.match(src, /targetId: "feature-showcase"/);
-    assert.match(src, /targetId: "integrations"/);
+  test("every real-route footer link points to a page that actually exists in this build", () => {
+    for (const to of [
+      "/pricing",
+      "/contact",
+      "/auth",
+      "/about",
+      "/privacy-policy",
+      "/terms",
+      "/acceptable-use-policy",
+      "/messaging-policy",
+      "/cookie-policy",
+      "/refund-cancellation-policy",
+      "/ai-disclaimer",
+    ]) {
+      assert.match(
+        src,
+        new RegExp(`to:\\s*"${to.replace(/\//g, "\\/")}"|to="${to.replace(/\//g, "\\/")}"`),
+      );
+    }
+  });
+
+  test("every section-scroll link targets a real homepage section id", () => {
+    for (const id of [
+      "voice-demo",
+      "ai-sales-executive",
+      "ai-receptionist",
+      "ai-customer-care",
+      "integrations",
+      "ai-order-booking",
+      "value-propositions",
+      "industries",
+    ]) {
+      assert.match(src, new RegExp(`targetId:\\s*"${id}"`));
+    }
+  });
+
+  test("cross-page section links navigate home with a hash instead of silently no-oping off the homepage", () => {
+    assert.match(code, /Link to="\/" hash=\{targetId\}/);
+  });
+
+  test("the Legal column links to all seven required compliance pages", () => {
+    const legalBlock = code.slice(code.indexOf("LEGAL_LINKS"), code.indexOf("LEGAL_LINKS") + 800);
+    for (const label of [
+      "Privacy Policy",
+      "Terms & Conditions",
+      "Acceptable Use Policy",
+      "Messaging Policy",
+      "Cookie Policy",
+      "Refund & Cancellation Policy",
+      "AI Disclaimer",
+    ]) {
+      assert.match(legalBlock, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    }
+  });
+
+  test("shows the real, verified ClickAI company identity and contact details", () => {
+    assert.match(code, /ClickAI Private Limited/);
+    assert.match(code, /mailto:hello@clickai\.in/);
+    assert.match(code, /tel:\+917660001231/);
+    assert.match(code, /\+91 76600 01231/);
+  });
+
+  test("copyright year is computed, not a hardcoded past/future year", () => {
+    assert.match(code, /new Date\(\)\.getFullYear\(\)/);
+  });
+
+  test("does not fabricate a registered business address", () => {
+    assert.doesNotMatch(code, /\d{3}\s*(Street|St\.|Road|Rd\.|Avenue|Ave\.)/i);
+  });
+
+  test("the trust row names no fake certifications (SOC 2, ISO 27001, GDPR certified, etc.)", () => {
+    for (const fake of ["SOC 2", "SOC2", "ISO 27001", "ISO27001", "GDPR Certified", "HIPAA"]) {
+      assert.equal(src.includes(fake), false, `must not claim "${fake}"`);
+    }
   });
 
   test("no dead href/onClick placeholders", () => {

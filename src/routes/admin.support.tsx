@@ -5,7 +5,15 @@ import { useServerFn } from "@tanstack/react-start";
 import { ShieldAlert, LogOut } from "lucide-react";
 import { toast } from "sonner";
 import { getSupportSessionView, endSupportSession } from "@/lib/admin-clients.functions";
-import { PageHeader, SectionCard, StatCard, LoadingState, ErrorState, EmptyState, StatusPill } from "@/components/app/primitives";
+import {
+  PageHeader,
+  SectionCard,
+  StatCard,
+  LoadingState,
+  ErrorState,
+  EmptyState,
+  StatusPill,
+} from "@/components/app/primitives";
 import { formatMoney } from "@/lib/pricing";
 import { Button } from "@/components/ui/button";
 
@@ -20,7 +28,7 @@ interface StoredSession {
 
 function readSession(): StoredSession | null {
   try {
-    const raw = sessionStorage.getItem("vaani.support");
+    const raw = sessionStorage.getItem("clickai.support");
     return raw ? (JSON.parse(raw) as StoredSession) : null;
   } catch {
     return null;
@@ -61,7 +69,12 @@ function SupportSessionView() {
 
   if (isLoading) return <LoadingState label="Opening support session" />;
   if (error || !data)
-    return <ErrorState message={error instanceof Error ? error.message : "Session unavailable"} onRetry={() => void refetch()} />;
+    return (
+      <ErrorState
+        message={error instanceof Error ? error.message : "Session unavailable"}
+        onRetry={() => void refetch()}
+      />
+    );
 
   const org = data.organization;
 
@@ -80,7 +93,7 @@ function SupportSessionView() {
             try {
               await endSession({ data: { sessionId: stored.id } });
             } finally {
-              sessionStorage.removeItem("vaani.support");
+              sessionStorage.removeItem("clickai.support");
               toast.success("Support session ended");
               navigate({ to: "/admin/customers/$orgId", params: { orgId: org!.id } });
             }
@@ -124,7 +137,10 @@ function SupportSessionView() {
             </div>
           </dl>
         ) : (
-          <EmptyState title="No business configured" description="The customer has not completed onboarding yet." />
+          <EmptyState
+            title="No business configured"
+            description="The customer has not completed onboarding yet."
+          />
         )}
       </SectionCard>
 
@@ -135,13 +151,20 @@ function SupportSessionView() {
               <li key={c.id} className="flex items-center justify-between gap-3 py-2.5 text-sm">
                 <span className="capitalize">{c.direction}</span>
                 <span className="text-xs text-muted-foreground">{c.status}</span>
-                <span className="tabular text-xs">{Math.round((c.duration_seconds ?? 0) / 60)} min</span>
-                <span className="text-xs text-muted-foreground tabular">{new Date(c.started_at).toLocaleString()}</span>
+                <span className="tabular text-xs">
+                  {Math.round((c.duration_seconds ?? 0) / 60)} min
+                </span>
+                <span className="text-xs text-muted-foreground tabular">
+                  {new Date(c.started_at).toLocaleString()}
+                </span>
               </li>
             ))}
           </ul>
         ) : (
-          <EmptyState title="No calls yet" description="Nothing has been handled for this customer." />
+          <EmptyState
+            title="No calls yet"
+            description="Nothing has been handled for this customer."
+          />
         )}
       </SectionCard>
     </div>

@@ -22,12 +22,12 @@ export const Route = createFileRoute("/auth")({
   validateSearch: searchSchema,
   head: () => ({
     meta: [
-      { title: "Sign in — Vaani" },
+      { title: "Sign in — ClickAI" },
       {
         name: "description",
-        content: "Sign in or create your Vaani account to configure your AI phone receptionist.",
+        content: "Sign in or create your ClickAI account to configure your AI phone receptionist.",
       },
-      { property: "og:title", content: "Sign in — Vaani" },
+      { property: "og:title", content: "Sign in — ClickAI" },
       { property: "og:description", content: "Access your AI receptionist dashboard." },
       { name: "robots", content: "noindex" },
     ],
@@ -187,7 +187,7 @@ function AuthPage() {
             Your business details in. A receptionist who never misses a call out.
           </h2>
           <p className="mt-4 text-sm text-muted-foreground">
-            Configure hours, services, prices and rules once. Vaani compiles them into a versioned
+            Configure hours, services, prices and rules once. ClickAI compiles them into a versioned
             voice agent that answers in eleven Indian languages.
           </p>
         </div>

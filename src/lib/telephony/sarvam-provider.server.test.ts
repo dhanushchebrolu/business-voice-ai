@@ -65,7 +65,7 @@ test("normalizeWebhookEvent: inbound completion payload maps every verified fiel
   assert.equal(event.direction, "inbound");
   assert.equal(event.fromE164, "+919876543210");
   assert.equal(event.toE164, "+912222222222");
-  assert.equal(event.vaaniE164, "+912222222222");
+  assert.equal(event.destinationE164, "+912222222222");
   assert.equal(event.durationSeconds, 42);
   assert.equal(event.recordingUrl, null);
   assert.equal(event.occurredAt, new Date("2026-09-08T10:00:42Z").toISOString());
@@ -279,7 +279,7 @@ test("verifyWebhookSignature fails closed unconditionally — the real Sarvam we
     adapter.verifyWebhookSignature(
       "",
       {},
-      new URL("https://vaani.app/api/public/webhooks/telephony?provider=sarvam"),
+      new URL("https://clickai.test/api/public/webhooks/telephony?provider=sarvam"),
     ),
     false,
   );
@@ -289,7 +289,7 @@ test("verifyWebhookSignature: Phase 5 verify_token defense-in-depth accepts a ma
   const adapter = new SarvamTelephonyAdapter({ ...config, webhookSecret: "shared-secret" });
   const urlWith = (token: string) =>
     new URL(
-      `https://vaani.app/api/public/webhooks/telephony?provider=sarvam&verify_token=${token}`,
+      `https://clickai.test/api/public/webhooks/telephony?provider=sarvam&verify_token=${token}`,
     );
   assert.equal(adapter.verifyWebhookSignature("", {}, urlWith("shared-secret")), true);
   assert.equal(adapter.verifyWebhookSignature("", {}, urlWith("wrong-secret")), false);
@@ -297,7 +297,7 @@ test("verifyWebhookSignature: Phase 5 verify_token defense-in-depth accepts a ma
     adapter.verifyWebhookSignature(
       "",
       {},
-      new URL("https://vaani.app/api/public/webhooks/telephony?provider=sarvam"),
+      new URL("https://clickai.test/api/public/webhooks/telephony?provider=sarvam"),
     ),
     false,
     "no verify_token at all must still reject",
@@ -307,7 +307,7 @@ test("verifyWebhookSignature: Phase 5 verify_token defense-in-depth accepts a ma
 test("verifyWebhookSignature: the verify_token path never activates when webhookSecret is not configured — same fail-closed behavior as before Phase 5", () => {
   const adapter = new SarvamTelephonyAdapter(config); // no webhookSecret
   const url = new URL(
-    "https://vaani.app/api/public/webhooks/telephony?provider=sarvam&verify_token=anything",
+    "https://clickai.test/api/public/webhooks/telephony?provider=sarvam&verify_token=anything",
   );
   assert.equal(adapter.verifyWebhookSignature("", {}, url), false);
 });
@@ -315,7 +315,7 @@ test("verifyWebhookSignature: the verify_token path never activates when webhook
 test("verifyWebhookSignature: an empty configured webhookSecret behaves as not configured (falsy), never matches an empty verify_token", () => {
   const adapter = new SarvamTelephonyAdapter({ ...config, webhookSecret: "" });
   const url = new URL(
-    "https://vaani.app/api/public/webhooks/telephony?provider=sarvam&verify_token=",
+    "https://clickai.test/api/public/webhooks/telephony?provider=sarvam&verify_token=",
   );
   assert.equal(adapter.verifyWebhookSignature("", {}, url), false);
 });
@@ -331,7 +331,7 @@ test("normalizeWebhookEvent: malformed/non-E.164 phone numbers are dropped (unde
   assert.ok(event);
   assert.equal(event.fromE164, undefined);
   assert.equal(event.toE164, undefined);
-  assert.equal(event.vaaniE164, undefined);
+  assert.equal(event.destinationE164, undefined);
 });
 
 test("normalizeWebhookEvent: a plausible E.164 number is still accepted (no regression)", () => {
@@ -339,7 +339,7 @@ test("normalizeWebhookEvent: a plausible E.164 number is still accepted (no regr
   const event = adapter.normalizeWebhookEvent(JSON.stringify(INBOUND_SAMPLE));
   assert.ok(event);
   assert.equal(event.fromE164, "+919876543210");
-  assert.equal(event.vaaniE164, "+912222222222");
+  assert.equal(event.destinationE164, "+912222222222");
 });
 
 test("normalizeWebhookEvent: a SQL-injection-shaped or overlong 'phone number' string is rejected the same way as any other malformed value", () => {
@@ -348,7 +348,7 @@ test("normalizeWebhookEvent: a SQL-injection-shaped or overlong 'phone number' s
     const payload = { ...INBOUND_SAMPLE, agent_phone_number: bad };
     const event = adapter.normalizeWebhookEvent(JSON.stringify(payload));
     assert.ok(event);
-    assert.equal(event.vaaniE164, undefined, `expected "${bad}" to be rejected`);
+    assert.equal(event.destinationE164, undefined, `expected "${bad}" to be rejected`);
   }
 });
 
@@ -387,7 +387,7 @@ test("provisionNumber, releaseNumber and initiateOutboundCall reject honestly ra
       adapter.initiateOutboundCall({
         fromE164: "+912222222222",
         toE164: "+919876543210",
-        callbackUrl: "https://vaani.app/api/public/webhooks/telephony?provider=sarvam",
+        callbackUrl: "https://clickai.test/api/public/webhooks/telephony?provider=sarvam",
       }),
     TelephonyAdapterError,
   );

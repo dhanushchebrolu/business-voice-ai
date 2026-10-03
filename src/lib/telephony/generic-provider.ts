@@ -190,8 +190,10 @@ export class GenericTelephonyAdapter implements TelephonyProviderAdapter {
           : body["direction"] === "inbound"
             ? "inbound"
             : undefined,
-      vaaniE164:
-        typeof body["vaani_number"] === "string" ? (body["vaani_number"] as string) : undefined,
+      destinationE164:
+        typeof body["destination_number"] === "string"
+          ? (body["destination_number"] as string)
+          : undefined,
       fromE164: typeof body["from"] === "string" ? (body["from"] as string) : undefined,
       toE164: typeof body["to"] === "string" ? (body["to"] as string) : undefined,
       durationSeconds:

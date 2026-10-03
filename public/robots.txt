@@ -1,8 +1,18 @@
 User-agent: Googlebot
 Allow: /
+Disallow: /app/
+Disallow: /admin/
+Disallow: /account/
+Disallow: /auth/callback
+Disallow: /api/
 
 User-agent: Bingbot
 Allow: /
+Disallow: /app/
+Disallow: /admin/
+Disallow: /account/
+Disallow: /auth/callback
+Disallow: /api/
 
 User-agent: Twitterbot
 Allow: /
@@ -12,3 +22,10 @@ Allow: /
 
 User-agent: *
 Allow: /
+Disallow: /app/
+Disallow: /admin/
+Disallow: /account/
+Disallow: /auth/callback
+Disallow: /api/
+
+Sitemap: https://clickai.in/sitemap.xml

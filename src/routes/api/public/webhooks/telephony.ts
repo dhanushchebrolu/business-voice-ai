@@ -186,8 +186,8 @@ async function processTelephonyEvent(
     return;
   }
 
-  const vaaniNumber = event.vaaniE164 ?? event.toE164;
-  if (!vaaniNumber) {
+  const destinationNumber = event.destinationE164 ?? event.toE164;
+  if (!destinationNumber) {
     console.error("telephony:webhook_missing_destination_number", event.providerCallId);
     return;
   }
@@ -195,7 +195,7 @@ async function processTelephonyEvent(
   const { data: phoneNumber } = await supabaseAdmin
     .from("phone_numbers")
     .select("*")
-    .eq("e164", vaaniNumber)
+    .eq("e164", destinationNumber)
     .eq("provider", providerId)
     .eq("status", "active")
     .maybeSingle();
@@ -209,7 +209,7 @@ async function processTelephonyEvent(
     const { data: anyMatches } = await supabaseAdmin
       .from("phone_numbers")
       .select("provider, status")
-      .eq("e164", vaaniNumber)
+      .eq("e164", destinationNumber)
       .limit(5);
     // Also log which Supabase PROJECT this Worker is actually querying —
     // only the hostname (e.g. "abcxyz.supabase.co"), never the URL's own
@@ -229,7 +229,7 @@ async function processTelephonyEvent(
     }
     console.error("telephony:webhook_unknown_number", {
       provider: providerId,
-      normalized_number: vaaniNumber,
+      normalized_number: destinationNumber,
       matching_rows_for_number: (anyMatches ?? []).map((r) => ({
         provider: r.provider,
         status: r.status,
@@ -243,7 +243,7 @@ async function processTelephonyEvent(
     // have a null organization_id, and this query filters status='active' —
     // a pool number is never 'active'; see the phone_number_pool migration).
     // Guarded anyway rather than trusting that invariant blindly.
-    console.error("telephony:webhook_active_number_missing_org", vaaniNumber);
+    console.error("telephony:webhook_active_number_missing_org", destinationNumber);
     return;
   }
 
@@ -275,7 +275,7 @@ async function processTelephonyEvent(
   ) {
     console.error(
       "telephony:webhook_stale_deployment_mismatch",
-      vaaniNumber,
+      destinationNumber,
       event.providerDeploymentId,
     );
     return;
@@ -322,7 +322,7 @@ async function processTelephonyEvent(
       provider_call_id: event.providerCallId,
       direction: "inbound",
       caller_number: event.fromE164 ?? null,
-      destination_number: vaaniNumber,
+      destination_number: destinationNumber,
       status: gate.allowed ? event.status : "failed",
       failure_reason: gate.allowed ? null : gate.reason,
       started_at: event.occurredAt,
@@ -436,7 +436,7 @@ async function processTelephonyEvent(
         businessId: phoneNumber.business_id,
         agentConfigId: phoneNumber.agent_config_id,
         phoneNumberId: phoneNumber.id,
-        vaaniE164: phoneNumber.e164,
+        destinationE164: phoneNumber.e164,
         callerE164: event.fromE164 ?? null,
         direction: "inbound",
         provider: providerId,
@@ -555,7 +555,7 @@ async function applyCallEvent(
           businessId: phoneNumber.business_id,
           agentConfigId: phoneNumber.agent_config_id,
           phoneNumberId: phoneNumber.id,
-          vaaniE164: phoneNumber.e164,
+          destinationE164: phoneNumber.e164,
           callerE164: event.fromE164 ?? null,
           direction: "inbound",
           provider: call.provider,

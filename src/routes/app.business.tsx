@@ -18,7 +18,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 export const Route = createFileRoute("/app/business")({
   head: () => ({
     meta: [
-      { title: "Business profile — Vaani" },
+      { title: "Business profile — ClickAI" },
       { name: "description", content: "Business information, hours, services, FAQs and rules that ground your AI receptionist." },
       { name: "robots", content: "noindex" },
     ],

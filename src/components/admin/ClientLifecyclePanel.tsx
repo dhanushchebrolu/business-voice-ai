@@ -3,7 +3,11 @@ import { useNavigate } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
 import { toast } from "sonner";
 import { Archive, LogIn } from "lucide-react";
-import { setClientLifecycle, archiveClient, startSupportSession } from "@/lib/admin-clients.functions";
+import {
+  setClientLifecycle,
+  archiveClient,
+  startSupportSession,
+} from "@/lib/admin-clients.functions";
 import { LIFECYCLE, LIFECYCLE_ORDER, type LifecycleStatus } from "@/lib/lifecycle";
 import { SectionCard, StatusPill } from "@/components/app/primitives";
 import { Button } from "@/components/ui/button";
@@ -119,7 +123,10 @@ export function ClientLifecyclePanel({
         confirmLabel="Start session"
         onConfirm={async (reason) => {
           const session = await startSupport({ data: { orgId, reason } });
-          sessionStorage.setItem("vaani.support", JSON.stringify({ id: session.sessionId, token: session.token }));
+          sessionStorage.setItem(
+            "clickai.support",
+            JSON.stringify({ id: session.sessionId, token: session.token }),
+          );
           setSupportOpen(false);
           navigate({ to: "/admin/support" });
         }}

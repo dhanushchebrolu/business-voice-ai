@@ -1,4 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { useEffect } from "react";
 import { LandingNav } from "@/components/landing/landing-nav";
 import { Hero } from "@/components/landing/hero";
 import { ValuePropositions } from "@/components/landing/value-propositions";
@@ -31,6 +32,7 @@ export const Route = createFileRoute("/")({
       },
     ],
     links: [
+      { rel: "canonical", href: "https://clickai.in/" },
       { rel: "preconnect", href: "https://fonts.googleapis.com" },
       { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" },
       {
@@ -42,9 +44,56 @@ export const Route = createFileRoute("/")({
   component: Landing,
 });
 
+/**
+ * Organization structured data — only verified, real identity fields (name,
+ * legal name, url, logo, contact point). Deliberately omits founding date,
+ * employee count, social profiles, and ratings/awards: none of those are
+ * verified facts available in this codebase, and inventing them would be a
+ * fabricated claim, not a technical default.
+ */
+const ORGANIZATION_JSON_LD = {
+  "@context": "https://schema.org",
+  "@type": "Organization",
+  name: "ClickAI",
+  legalName: "ClickAI Private Limited",
+  url: "https://clickai.in",
+  logo: "https://clickai.in/favicon.ico",
+  email: "hello@clickai.in",
+  telephone: "+91-76600-01231",
+  contactPoint: [
+    {
+      "@type": "ContactPoint",
+      contactType: "customer support",
+      email: "hello@clickai.in",
+      telephone: "+91-76600-01231",
+      areaServed: "IN",
+    },
+  ],
+};
+
+/**
+ * Lets a visitor arrive at e.g. /#industries from anywhere on the site
+ * (LandingFooter's cross-page section links use `Link to="/" hash={id}`)
+ * and land scrolled to that real section, the same way clicking the
+ * equivalent in-page footer/nav link already does on the homepage itself.
+ */
+function useScrollToHashOnMount() {
+  useEffect(() => {
+    const hash = window.location.hash.replace(/^#/, "");
+    if (!hash) return;
+    document.getElementById(hash)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
+}
+
 function Landing() {
+  useScrollToHashOnMount();
   return (
     <div className="theme-light min-h-screen bg-white">
+      {/* Static, hardcoded JSON (ORGANIZATION_JSON_LD above) — never user input. */}
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(ORGANIZATION_JSON_LD) }}
+      />
       <LandingNav />
       <Hero />
       <ValuePropositions />
