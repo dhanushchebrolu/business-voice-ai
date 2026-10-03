@@ -34,6 +34,18 @@ import { dirname, join } from "node:path";
  *      there is no confirmation-link/OTP/"check your email" state left in
  *      this file (see "signup is email+password only" below), matching the
  *      exact scenarios the removal task required covered.
+ *   6. Production incident: a missing VITE_SUPABASE_URL/VITE_SUPABASE_PUBLISHABLE_KEY
+ *      build-time value makes client.ts's lazy Proxy throw "Application
+ *      configuration is incomplete." the moment supabase.auth is touched —
+ *      every onSubmit attempt (and, previously, an uncaught onGoogle
+ *      attempt) hit this. Two fixes: (a) onGoogle now has a catch clause
+ *      around the same throw signInWithOAuth's own `{ error }` return can't
+ *      catch, so a Google sign-in attempt during a config outage gets the
+ *      same feedback email/password does instead of silently doing nothing;
+ *      (b) every error toast this file can show on repeated retries shares
+ *      one stable sonner `id` (AUTH_ERROR_TOAST_ID) so a persistent failure
+ *      replaces its own toast in place instead of stacking a new one per
+ *      attempt (see "repeated auth error toasts are deduplicated" below).
  *
  * Source-scanned, matching this repo's established convention for route
  * files this test runner can't import/render directly.
@@ -219,9 +231,54 @@ describe("Google OAuth uses Supabase directly, not Lovable's relay", () => {
     const errBlock = onGoogle.slice(errIdx, errIdx + 150);
     assert.match(
       errBlock,
-      /toast\.error\("Google sign-in failed\. Please try again or use email\."\)/,
+      /toast\.error\("Google sign-in failed\. Please try again or use email\."/,
     );
     assert.doesNotMatch(errBlock, /error\.message/);
+  });
+
+  test("a synchronous throw from the supabase.auth proxy (e.g. missing config) is now caught — signInWithOAuth's own { error } return isn't the only failure path handled", () => {
+    const onGoogle = extractOnGoogle();
+    const tryIdx = onGoogle.indexOf("try {");
+    const catchIdx = onGoogle.indexOf("} catch (error) {", tryIdx);
+    const finallyIdx = onGoogle.indexOf("} finally {", catchIdx);
+    assert.ok(
+      tryIdx > -1 && catchIdx > -1 && finallyIdx > -1 && catchIdx < finallyIdx,
+      "expected onGoogle to wrap signInWithOAuth in try/catch/finally, not try/finally",
+    );
+    const catchBlock = onGoogle.slice(catchIdx, finallyIdx);
+    assert.match(catchBlock, /toast\.error\(/);
+    assert.match(catchBlock, /error instanceof Error/);
+  });
+});
+
+describe("repeated auth error toasts are deduplicated (production incident: config outage stacked identical toasts on every retry)", () => {
+  test("a single module-level AUTH_ERROR_TOAST_ID constant is defined, not a literal repeated ad hoc at each call site", () => {
+    assert.match(src, /const AUTH_ERROR_TOAST_ID = "[^"]+";/);
+  });
+
+  test("onSubmit's catch-all error toast passes { id: AUTH_ERROR_TOAST_ID }", () => {
+    const onSubmit = extractOnSubmit();
+    const catchIdx = onSubmit.indexOf("} catch (error) {");
+    assert.ok(catchIdx > -1);
+    const block = onSubmit.slice(catchIdx, catchIdx + 250);
+    assert.match(block, /toast\.error\(/);
+    assert.match(block, /id:\s*AUTH_ERROR_TOAST_ID/);
+  });
+
+  test("both onGoogle failure paths (returned error and thrown exception) pass { id: AUTH_ERROR_TOAST_ID }", () => {
+    function extractOnGoogle(): string {
+      const start = src.indexOf("async function onGoogle(");
+      const end = src.indexOf("\n  return (", start);
+      assert.ok(start > -1 && end > -1);
+      return src.slice(start, end);
+    }
+    const onGoogle = extractOnGoogle();
+    const idOccurrences = [...onGoogle.matchAll(/id:\s*AUTH_ERROR_TOAST_ID/g)];
+    assert.equal(
+      idOccurrences.length,
+      2,
+      "expected both the returned-error branch and the catch block to share the same toast id",
+    );
   });
 });
 

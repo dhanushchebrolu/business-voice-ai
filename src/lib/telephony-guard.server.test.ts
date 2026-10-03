@@ -1,6 +1,24 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { checkCallTransition, TERMINAL_CALL_STATUSES } from "./telephony-guard.server.ts";
+import {
+  checkCallTransition,
+  maskPhoneNumber,
+  TERMINAL_CALL_STATUSES,
+} from "./telephony-guard.server.ts";
+
+test("maskPhoneNumber: keeps only the last 4 digits, masking the rest", () => {
+  assert.equal(maskPhoneNumber("+919876543210"), "********3210");
+});
+
+test("maskPhoneNumber: handles a null/undefined/empty input without throwing", () => {
+  assert.equal(maskPhoneNumber(null), "(none)");
+  assert.equal(maskPhoneNumber(undefined), "(none)");
+  assert.equal(maskPhoneNumber(""), "(none)");
+});
+
+test("maskPhoneNumber: a short numeric string masks fully rather than exposing every digit", () => {
+  assert.equal(maskPhoneNumber("123"), "***");
+});
 
 test("checkCallTransition: same-state event is a no-op, not an error", () => {
   const r = checkCallTransition("in_progress", "in_progress");

@@ -58,6 +58,22 @@ export interface ExotelConfig {
 const STATUS_MAP: Record<string, NormalizedCallStatus> = {
   queued: "initiated",
   ringing: "ringing",
+  // "answered" was missing from this map entirely. checkTelephonyAccess's
+  // own state machine (telephony-guard.server.ts's ALLOWED_TRANSITIONS)
+  // treats "answered" as a distinct, valid status, and
+  // exotel-media-route.server.ts's WS authorization check previously
+  // required call_logs.status to already be exactly "answered" or
+  // "in_progress" before accepting Exotel's media stream. If Exotel's real
+  // status callback ever sends the literal string "answered" (some
+  // Twilio-shaped providers do, alongside or instead of "in-progress"), the
+  // unrecognized-status fallback below silently downgraded it to
+  // "initiated" — which then failed that WS check, Exotel's Voicebot
+  // Applet got its connection refused, and the call ended up reported
+  // FAILED with 0 duration despite everything upstream (number match,
+  // entitlement gate) having succeeded. Safe to add unconditionally: it
+  // only ever matches a real "answered" string Exotel might send, and maps
+  // to exactly the status this app's own schema already models.
+  answered: "answered",
   "in-progress": "in_progress",
   "in progress": "in_progress",
   completed: "completed",

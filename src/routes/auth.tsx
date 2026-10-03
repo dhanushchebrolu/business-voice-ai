@@ -18,6 +18,13 @@ const searchSchema = z.object({
   plan: z.string().optional(),
 });
 
+// A stable sonner toast id so a persistent failure (e.g. missing Supabase
+// configuration, surfaced as the same "Application configuration is
+// incomplete." message on every attempt) replaces its own prior toast
+// instead of stacking a new one per retry — sonner keys on `id` and updates
+// the existing toast in place rather than rendering a duplicate.
+const AUTH_ERROR_TOAST_ID = "auth-error";
+
 export const Route = createFileRoute("/auth")({
   validateSearch: searchSchema,
   head: () => ({
@@ -145,6 +152,7 @@ function AuthPage() {
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Something went wrong. Please try again.",
+        { id: AUTH_ERROR_TOAST_ID },
       );
     } finally {
       setBusy(false);
@@ -168,8 +176,27 @@ function AuthPage() {
         },
       });
       if (error) {
-        toast.error("Google sign-in failed. Please try again or use email.");
+        toast.error("Google sign-in failed. Please try again or use email.", {
+          id: AUTH_ERROR_TOAST_ID,
+        });
       }
+    } catch (error) {
+      // supabase.auth is a lazy proxy (client.ts) that can throw
+      // synchronously — e.g. "Application configuration is incomplete." when
+      // required env vars are missing — before signInWithOAuth ever returns
+      // its own { error } result. Without this catch that throw was an
+      // unhandled rejection: busy stayed stuck true-until-finally but the
+      // visitor saw no feedback at all. error.message here is always one of
+      // this app's own safe, generic strings (see client.ts's module doc),
+      // never provider/network detail, so showing it is safe.
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "Google sign-in failed. Please try again or use email.",
+        {
+          id: AUTH_ERROR_TOAST_ID,
+        },
+      );
     } finally {
       setBusy(false);
     }

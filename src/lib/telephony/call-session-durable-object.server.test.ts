@@ -1,6 +1,8 @@
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import {
   CallSessionDurableObject,
   type DurableObjectState,
@@ -738,31 +740,41 @@ describe("CallSessionDurableObject", () => {
   });
 });
 
-test("REGRESSION (production incident: 'initiated' calls rejected by media-session auth): the call_logs status eligibility check delegates to the shared isEligibleForMediaSession helper, not a local re-implementation", () => {
-  // Same rationale as exotel-media-route.server.test.ts's equivalent
-  // source-scan — this sandbox cannot exercise the live-Supabase branch
-  // that rejected a real Exotel call stuck at status "initiated", so this
-  // proves the production Durable Object path uses the exact same shared
-  // eligibility check exotel-media-route.server.ts's local-dev fallback
-  // does, rather than a second, independently-editable copy of the
-  // "answered"/"in_progress"-only comparison that caused the incident.
-  const source = readFileSync(
-    new URL("./call-session-durable-object.server.ts", import.meta.url),
+describe("CallSid correlation is delegated to the shared module (production incident regression)", () => {
+  // Production incident: a live Exotel test call produced
+  // `exotel_media_route:*`-prefixed log lines instead of `call_session_do:*`
+  // — this file's CALL_SESSION binding wasn't active for that request, so
+  // traffic fell back to exotel-media-route.server.ts's local-dev path. A
+  // status-check race fix had previously been applied ONLY to that fallback
+  // file and never reached this one, the file production traffic actually
+  // runs through whenever the binding IS active. Tracing this file's own
+  // handleFirstMessage found it still carried its own independent copy of
+  // the CallSid -> call_logs lookup/retry/status/token/entitlement logic —
+  // this test proves that duplication is gone, so a future fix to one
+  // path can never again silently miss the other.
+  const src = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "call-session-durable-object.server.ts"),
     "utf8",
   );
-  assert.match(
-    source,
-    /import\s*\{\s*isEligibleForMediaSession\s*\}\s*from\s*["']\.\/media-session-eligibility\.ts["']/,
-    "expected call-session-durable-object.server.ts to import the shared eligibility helper",
-  );
-  assert.match(
-    source,
-    /if\s*\(\s*!isEligibleForMediaSession\(call\.status\)\s*\)/,
-    "expected the status-eligibility check to call the shared helper, not a local comparison",
-  );
-  assert.doesNotMatch(
-    source,
-    /call\.status\s*!==\s*["']answered["']/,
-    "expected no local 'answered'/'in_progress'-only comparison left behind in this file",
-  );
+
+  test("imports authorizeExotelMediaSession from the shared module, not its own inline copy", () => {
+    assert.match(
+      src,
+      /import \{ authorizeExotelMediaSession, maskCallSid \} from "\.\/media-session-authorization\.server\.ts";/,
+    );
+    assert.match(src, /const auth = await authorizeExotelMediaSession\(callSid, optionalToken\);/);
+  });
+
+  test("no independent call_logs lookup/retry loop remains in this file", () => {
+    assert.doesNotMatch(src, /CALL_LOOKUP_ATTEMPTS/);
+    assert.doesNotMatch(src, /\.from\("call_logs"\)/);
+    assert.doesNotMatch(src, /checkTelephonyAccess\(/);
+  });
+
+  test("the accepted-session log masks the CallSid rather than printing it raw", () => {
+    const idx = src.indexOf('console.info("call_session_do:media_accepted"');
+    assert.ok(idx > -1);
+    const block = src.slice(idx, idx + 200);
+    assert.match(block, /callSid: maskCallSid\(callSid\)/);
+  });
 });

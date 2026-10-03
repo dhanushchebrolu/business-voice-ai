@@ -26,9 +26,10 @@
  * module doc for the provider-neutrality boundary this preserves.
  */
 
-import { checkTelephonyAccess } from "./telephony-guard.server";
+import { checkTelephonyAccess, maskPhoneNumber } from "./telephony-guard.server";
 import { getTelephonyAdapter } from "./telephony.server";
 import { getCallSessionStub } from "./telephony/cloudflare-env.server";
+import { maskCallSid } from "./telephony/media-session-authorization.server";
 import type {
   StartRuntimeRpcInput,
   AgentRuntimeRpcResult,
@@ -75,6 +76,7 @@ export async function routeToAgentRuntime(
     callId: input.callId,
     organizationId: input.organizationId,
     direction: input.direction,
+    calledNumber: maskPhoneNumber(input.destinationE164),
   });
 
   if (input.direction !== "inbound") {
@@ -104,7 +106,7 @@ export async function routeToAgentRuntime(
     // organization/business id itself, only whether one was found.
     console.info("telephony:runtime_stage", {
       callId: input.callId,
-      provider_call_id: input.providerCallId,
+      provider_call_id: input.providerCallId ? maskCallSid(input.providerCallId) : null,
       stage: "business_resolution",
       resolved: Boolean(businessId),
     });
@@ -159,10 +161,11 @@ export async function routeToAgentRuntime(
     // or instructions text.
     console.info("telephony:runtime_stage", {
       callId: input.callId,
-      provider_call_id: input.providerCallId,
+      provider_call_id: input.providerCallId ? maskCallSid(input.providerCallId) : null,
       stage: "agent_resolution",
       resolved: true,
       source: publishedVersion ? "published_version" : "live_snapshot",
+      agentVersion,
     });
 
     const rpcInput: StartRuntimeRpcInput = {
@@ -198,7 +201,7 @@ export async function routeToAgentRuntime(
       // trace of the response ever having been inspected at all.
       console.info("telephony:runtime_do_rpc_status", {
         callId: input.callId,
-        provider_call_id: input.providerCallId,
+        provider_call_id: input.providerCallId ? maskCallSid(input.providerCallId) : null,
         httpStatus: response.status,
       });
       if (!response.ok) {
@@ -221,7 +224,7 @@ export async function routeToAgentRuntime(
       // once in Exotel's own dashboard, never generated per-call.
       console.info("telephony:runtime_stage", {
         callId: input.callId,
-        provider_call_id: input.providerCallId,
+        provider_call_id: input.providerCallId ? maskCallSid(input.providerCallId) : null,
         stage: "media_and_runtime_handoff",
         resolved: result.handled,
         note: result.note,
@@ -232,7 +235,7 @@ export async function routeToAgentRuntime(
     const bridge = (await adapter.openMediaBridge?.(input.providerCallId)) ?? null;
     console.info("telephony:runtime_stage", {
       callId: input.callId,
-      provider_call_id: input.providerCallId,
+      provider_call_id: input.providerCallId ? maskCallSid(input.providerCallId) : null,
       stage: "media_bridge_open",
       resolved: Boolean(bridge),
     });

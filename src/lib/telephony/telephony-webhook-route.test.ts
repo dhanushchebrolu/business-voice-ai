@@ -250,7 +250,7 @@ describe("telephony webhook route — gate-rejection diagnostic (live-call regre
       gateIdx < logIdx && logIdx < insertIdx,
       "the rejection must be logged after the gate resolves but before the insert that turns it into status='failed'",
     );
-    const block = routeSrc.slice(logIdx, logIdx + 300);
+    const block = routeSrc.slice(logIdx, logIdx + 400);
     assert.match(block, /stage: "entitlement_gate"/);
     assert.match(block, /reason: gate\.reason/);
   });
@@ -267,7 +267,7 @@ describe("telephony webhook route — billing/entitlement reuse (requirement E: 
   test("still imports and calls the exact existing telephony-guard.server functions, not a parallel implementation", () => {
     assert.match(
       routeSrc,
-      /import\s*\{\s*\n?\s*checkCallTransition,\s*\n?\s*checkTelephonyAccess,\s*\n?\s*finalizeCallBilling,\s*\n?\s*TERMINAL_CALL_STATUSES,?\s*\n?\s*\}\s*from\s*"@\/lib\/telephony-guard\.server"/,
+      /import\s*\{\s*\n?\s*checkCallTransition,\s*\n?\s*checkTelephonyAccess,\s*\n?\s*finalizeCallBilling,\s*\n?\s*maskPhoneNumber,\s*\n?\s*TERMINAL_CALL_STATUSES,?\s*\n?\s*\}\s*from\s*"@\/lib\/telephony-guard\.server"/,
     );
     assert.match(routeSrc, /checkTelephonyAccess\(/);
     assert.match(routeSrc, /checkCallTransition\(/);
@@ -364,5 +364,42 @@ describe("telephony webhook route — Exotel Passthru/Voicebot deadlock fix (pro
     const sigIdx = routeSrc.indexOf("async function processTelephonyEvent(");
     const sig = routeSrc.slice(sigIdx, routeSrc.indexOf(")", routeSrc.indexOf("{", sigIdx)));
     assert.match(sig, /waitUntil:\s*WaitUntil\s*\|\s*undefined/);
+  });
+});
+
+describe("CallSid correlation diagnostics (production incident: media route said 'No known call' for a CallSid the webhook may never have processed)", () => {
+  test("the request is logged as received BEFORE signature verification can reject it silently", () => {
+    const receivedIdx = routeSrc.indexOf('console.info("telephony:webhook_request_received"');
+    const verifyIdx = routeSrc.indexOf("adapter.verifyWebhookSignature(");
+    assert.ok(receivedIdx > -1 && verifyIdx > -1);
+    assert.ok(
+      receivedIdx < verifyIdx,
+      "expected the receipt log before signature verification, so a 401 still leaves a trace",
+    );
+  });
+
+  test("a signature verification failure is logged, not silently 401'd", () => {
+    const idx = routeSrc.indexOf("if (!adapter.verifyWebhookSignature(raw, headers, url)) {");
+    assert.ok(idx > -1);
+    const block = routeSrc.slice(idx, idx + 250);
+    assert.match(block, /console\.error\("telephony:webhook_signature_invalid"/);
+  });
+
+  test("provider_call_id is masked (via the shared maskCallSid helper) everywhere this route logs it, never printed raw", () => {
+    assert.match(
+      routeSrc,
+      /import \{ maskCallSid \} from "@\/lib\/telephony\/media-session-authorization\.server";/,
+    );
+    // The only two places the raw value legitimately appears are the actual
+    // call_logs INSERT/UPDATE payloads (the stored value itself, not a log)
+    // — the resolved-outbound-call backfill update, and the new-row insert.
+    const rawOccurrences = [
+      ...routeSrc.matchAll(/provider_call_id: event\.providerCallId(?!\s*\?)/g),
+    ];
+    assert.equal(
+      rawOccurrences.length,
+      2,
+      "expected exactly two unmasked provider_call_id sites — the two DB write payloads",
+    );
   });
 });
