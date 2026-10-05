@@ -460,12 +460,22 @@ export async function processTelephonyEvent(
   // does — immediately, with no wait for a separate "answered" signal (see
   // vobiz-media-route.server.ts / vobiz-call-session-durable-object.server.ts)
   // — and Vobiz has no "answered" CallStatus at all (Twilio/Plivo-family
-  // semantics; see vobiz-provider.ts's STATUS_MAP). The answer_url's own
-  // first callback — the one that creates this call_logs row — carries no
-  // CallStatus field, so normalizeWebhookEvent falls back to "initiated"
-  // exactly like Exotel's documented case above. Without this provider
-  // also being in this condition, routeToAgentRuntime (and therefore the
-  // bridge's one and only onInboundFrame registration, in
+  // semantics; see vobiz-provider.ts's STATUS_MAP). An earlier version of
+  // this fix assumed the answer_url's own first callback carries no
+  // CallStatus field (falling back to "initiated", exactly like Exotel's
+  // documented case) and widened only that branch — but a further
+  // production call (328a707b) proved that assumption wrong: Vobiz's real
+  // first callback DOES carry a recognized CallStatus — "ringing"
+  // (STATUS_MAP maps it straight through, never the "initiated" fallback;
+  // call_log_inserted logged status=ringing, not initiated). "ringing" was
+  // not checked by this condition for any provider, so routeToAgentRuntime
+  // was never invoked at all for that call — not dropped after being
+  // called, never called in the first place (telephony:runtime_handoff,
+  // routeToAgentRuntime's own first log line, never appeared). "initiated"
+  // is kept alongside "ringing" defensively, in case some other Vobiz
+  // callback variant genuinely doesn't carry a recognized CallStatus.
+  // Without either status covered here, routeToAgentRuntime (and
+  // therefore the bridge's one and only onInboundFrame registration, in
   // startRuntimeSession) never fires until a later, separate Vobiz status
   // webhook reports "in-progress" — which, as the dc249661 incident
   // already showed (ringing -> completed with no intermediate status),
@@ -477,11 +487,13 @@ export async function processTelephonyEvent(
   // Exotel's case: routeToAgentRuntime/getVobizCallSessionStub are already
   // fully Vobiz-aware (telephony-runtime.ts), and startRuntimeSession's
   // idempotency makes firing this twice (here, and again later if a real
-  // "in-progress" event does arrive) a safe no-op.
+  // "in-progress" event does arrive) a safe no-op. Exotel's own clause is
+  // untouched — scoped to "initiated" only, exactly as before.
   if (
     event.status === "answered" ||
     event.status === "in_progress" ||
-    ((providerId === "exotel" || providerId === "vobiz") && event.status === "initiated")
+    (providerId === "exotel" && event.status === "initiated") ||
+    (providerId === "vobiz" && (event.status === "ringing" || event.status === "initiated"))
   ) {
     runInBackground(
       routeToAgentRuntime({

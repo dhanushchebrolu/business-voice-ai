@@ -284,24 +284,50 @@ describe("telephony webhook route — billing/entitlement reuse (requirement E: 
   });
 });
 
-describe("telephony webhook route — Exotel/Vobiz 'initiated' runtime handoff (production incidents: media session accepted, but the caller never heard Klyro's greeting / inbound audio dropped with no listener)", () => {
-  test("the new-call insert path routes to the agent runtime on 'initiated' too, but ONLY when providerId is exotel or vobiz — not for every provider", () => {
+/**
+ * Extracts the exact runtime-handoff trigger condition's source expression
+ * (the `if (...)` right after the inbound new-call INSERT, before
+ * `runInBackground(routeToAgentRuntime(...))`) and turns it into a real,
+ * callable predicate built from that literal text via `new Function` — so
+ * the regression tests below execute the ACTUAL route source, not a
+ * reimplementation that could independently drift from or misrepresent it.
+ */
+function extractRuntimeHandoffTrigger(): (
+  event: { status: string },
+  providerId: string,
+) => boolean {
+  const condStart = routeSrc.indexOf('if (\n    event.status === "answered" ||');
+  assert.ok(condStart > -1, "expected to find the runtime-handoff trigger's if-statement");
+  const condEnd = routeSrc.indexOf("\n  ) {\n    runInBackground(", condStart);
+  assert.ok(condEnd > -1, "expected to find the end of the trigger's if-statement");
+  const conditionExpr = routeSrc.slice(condStart + "if (".length, condEnd).trim();
+  return new Function("event", "providerId", `return (${conditionExpr});`) as (
+    event: { status: string },
+    providerId: string,
+  ) => boolean;
+}
+
+describe("telephony webhook route — Exotel/Vobiz runtime handoff on the first webhook event (production incidents: media session accepted, but the caller never heard Klyro's greeting / inbound audio dropped with no listener)", () => {
+  test("the new-call insert path routes to the agent runtime on Exotel's 'initiated' and Vobiz's 'ringing'/'initiated', but not unconditionally for every provider", () => {
     const idx = routeSrc.indexOf("if (!gate.allowed) return;");
     const insertBranch = routeSrc.slice(idx, routeSrc.indexOf("routeToAgentRuntime({", idx));
     assert.match(insertBranch, /event\.status === "answered"/);
     assert.match(insertBranch, /event\.status === "in_progress"/);
     assert.match(
       insertBranch,
-      /\(providerId === "exotel" \|\| providerId === "vobiz"\)\s*&&\s*event\.status === "initiated"/,
-      "expected the 'initiated' trigger to be scoped to providerId exotel or vobiz, not unconditional",
+      /\(providerId === "exotel" && event\.status === "initiated"\)/,
+      "expected Exotel's own clause, scoped to 'initiated' only, untouched",
+    );
+    assert.match(
+      insertBranch,
+      /\(providerId === "vobiz" && \(event\.status === "ringing" \|\| event\.status === "initiated"\)\)/,
+      "expected Vobiz's clause to cover both 'ringing' (the confirmed real first-event status) and 'initiated' (defensive fallback)",
     );
   });
 
-  test("the 'initiated' trigger is still gated by gate.allowed (entitlement) exactly like the pre-existing 'answered'/'in_progress' trigger — it does not bypass the gate", () => {
+  test("the widened trigger is still gated by gate.allowed (entitlement) exactly like the pre-existing 'answered'/'in_progress' trigger — it does not bypass the gate", () => {
     const gateIdx = routeSrc.indexOf("if (!gate.allowed) return;");
-    const triggerIdx = routeSrc.indexOf(
-      '(providerId === "exotel" || providerId === "vobiz") && event.status === "initiated"',
-    );
+    const triggerIdx = routeSrc.indexOf('providerId === "vobiz" && (event.status === "ringing"');
     assert.ok(gateIdx > -1 && triggerIdx > -1);
     assert.ok(
       gateIdx < triggerIdx,
@@ -309,18 +335,20 @@ describe("telephony webhook route — Exotel/Vobiz 'initiated' runtime handoff (
     );
   });
 
-  test("does not widen the 'initiated' trigger onto the outbound or existing-row (applyCallEvent) paths — only the inbound new-call insert branch", () => {
+  test("does not widen the trigger onto the outbound or existing-row (applyCallEvent) paths — only the inbound new-call insert branch", () => {
     const outboundBranch = routeSrc.slice(
       routeSrc.indexOf('if (event.direction === "outbound") {'),
       routeSrc.indexOf("const destinationNumber ="),
     );
     assert.doesNotMatch(outboundBranch, /event\.status === "initiated"/);
+    assert.doesNotMatch(outboundBranch, /event\.status === "ringing"/);
 
     const applyCallEventSrc = routeSrc.slice(
       routeSrc.indexOf("async function applyCallEvent"),
       routeSrc.indexOf("async function applyCampaignTerminalEvent"),
     );
     assert.doesNotMatch(applyCallEventSrc, /event\.status === "initiated"/);
+    assert.doesNotMatch(applyCallEventSrc, /event\.status === "ringing"/);
     // applyCallEvent's own pre-existing trigger is untouched (still answered/in_progress only).
     assert.match(
       applyCallEventSrc,
@@ -328,24 +356,56 @@ describe("telephony webhook route — Exotel/Vobiz 'initiated' runtime handoff (
     );
   });
 
-  test("REGRESSION (production incidents dc249661-d3d2-48f3-9391-243017527b26 / 328a707b: Vobiz's media WebSocket opens and streams audio immediately, same as Exotel's Voicebot Applet, but the first webhook event has no 'answered'/'in_progress' status for Vobiz either — see vobiz-provider.ts's STATUS_MAP, which has no 'answered' entry at all — so without this widening, routeToAgentRuntime, and therefore the bridge's only onInboundFrame registration, never fired for a short Vobiz call): providerId === \"vobiz\" is in the widened 'initiated' trigger, exactly like providerId === \"exotel\"", () => {
-    const idx = routeSrc.indexOf("if (!gate.allowed) return;");
-    const insertBranch = routeSrc.slice(idx, routeSrc.indexOf("routeToAgentRuntime({", idx));
-    assert.match(insertBranch, /providerId === "vobiz"/);
-  });
-
   test("getVobizCallSessionStub/routeToAgentRuntime are already fully Vobiz-aware downstream of this trigger — this change only widens WHEN the call fires, not the (already-correct, already-shipped) routing logic itself", () => {
     // Scoped to this file's own route source: telephony-runtime.ts's own
     // Vobiz-awareness is covered by telephony-runtime.test.ts.
     assert.match(routeSrc, /import \{ routeToAgentRuntime, terminateAgentRuntime \} from/);
   });
+
+  describe("REGRESSION (production incidents dc249661-d3d2-48f3-9391-243017527b26 / 328a707b): executes the real extracted trigger condition against each confirmed/possible scenario", () => {
+    const trigger = extractRuntimeHandoffTrigger();
+
+    test("Vobiz + 'ringing' -> true (the confirmed real production status for call 328a707b; call_log_inserted logged status=ringing, not initiated)", () => {
+      assert.equal(trigger({ status: "ringing" }, "vobiz"), true);
+    });
+
+    test("Vobiz + 'initiated' -> true (kept as a defensive fallback for a Vobiz callback variant that doesn't carry a recognized CallStatus)", () => {
+      assert.equal(trigger({ status: "initiated" }, "vobiz"), true);
+    });
+
+    test("Exotel + 'initiated' -> true (existing, already-shipped behavior — unchanged by this fix)", () => {
+      assert.equal(trigger({ status: "initiated" }, "exotel"), true);
+    });
+
+    test("Exotel + 'ringing' -> false (Exotel's own clause was never widened to 'ringing' — only Vobiz's was, based on Vobiz-specific production evidence)", () => {
+      assert.equal(trigger({ status: "ringing" }, "exotel"), false);
+    });
+
+    test("other providers (e.g. sarvam) + 'ringing' -> false (no unintended runtime start for a provider never shown to need this widening)", () => {
+      assert.equal(trigger({ status: "ringing" }, "sarvam"), false);
+    });
+
+    test("other providers (e.g. sarvam) + 'initiated' -> false (the pre-existing, intentional scoping — unaffected by this fix)", () => {
+      assert.equal(trigger({ status: "initiated" }, "sarvam"), false);
+    });
+
+    test("any provider + 'answered'/'in_progress' -> true regardless of providerId (the original, provider-neutral trigger is untouched)", () => {
+      assert.equal(trigger({ status: "answered" }, "some-future-provider"), true);
+      assert.equal(trigger({ status: "in_progress" }, "some-future-provider"), true);
+    });
+
+    test("Vobiz + an unrelated status (e.g. 'completed') -> false (the widening is scoped to ringing/initiated only, not a blanket allow for Vobiz)", () => {
+      assert.equal(trigger({ status: "completed" }, "vobiz"), false);
+      assert.equal(trigger({ status: "failed" }, "vobiz"), false);
+    });
+  });
 });
 
 describe("telephony webhook route — Exotel/Vobiz Passthru/Voicebot deadlock fix (production incident: media session accepted... no — call goes silent and hangs up within a few seconds, before any WebSocket ever arrives)", () => {
-  test("the 'initiated'/'answered'/'in_progress' runtime-handoff call is backgrounded (runInBackground), never awaited directly — awaiting it here re-creates the exact deadlock this fix resolves", () => {
+  test("the runtime-handoff call is backgrounded (runInBackground), never awaited directly — awaiting it here re-creates the exact deadlock this fix resolves", () => {
     const idx = routeSrc.indexOf("if (!gate.allowed) return;");
     const triggerIdx = routeSrc.indexOf(
-      '(providerId === "exotel" || providerId === "vobiz") && event.status === "initiated"',
+      'providerId === "vobiz" && (event.status === "ringing"',
       idx,
     );
     assert.ok(triggerIdx > -1);
