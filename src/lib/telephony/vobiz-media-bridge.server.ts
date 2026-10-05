@@ -1,26 +1,40 @@
 import type { AudioFormat, AudioFrame, AudioMediaBridge } from "./audio-bridge.ts";
 import { releaseVobizMediaSession } from "./vobiz-media-registry.server.ts";
+import { maskCallSid } from "./media-session-authorization.server.ts";
 
 /**
  * Wraps one Vobiz `<Stream>` WebSocket connection (already accepted — see
  * src/server.ts) as the provider-agnostic `AudioMediaBridge` the voice
  * runtime programs against.
  *
- * Protocol (see vobiz-provider.ts's module doc for sourcing/confidence):
- * inbound JSON messages carry `event: "start"|"media"|"dtmf"|"stop"`; the
+ * Protocol — confirmed directly against Vobiz's own documentation
+ * (vobiz.ai/docs/integrations/websockets, vobiz.ai/docs/xml/stream/audio-formats,
+ * docs.vobiz.ai/concepts/streaming-websockets), cross-checked against
+ * Plivo's identical documented protocol (VobizFrameSerializer is a
+ * documented subclass of Pipecat's PlivoFrameSerializer — Vobiz's
+ * media-stream wire format is Plivo's):
+ * inbound JSON messages carry `event: "start"|"media"|"dtmf"|"stop"`. The
  * `start` event's call/stream identifiers are nested one level down, inside
- * a `start` sub-object (`start.callId`/`start.streamId` — confirmed via
- * VobizFrameSerializer being a documented subclass of Pipecat's
- * PlivoFrameSerializer, which parses the identical Plivo-protocol shape; a
- * production incident where this was wrongly assumed flat is what surfaced
- * this). A `start` event's `mediaFormat` field (e.g. `["audio/x-mulaw", 8000]`)
- * names the negotiated codec, defaulting to 8kHz mu-law — the exact format
- * requested via the `contentType="audio/x-mulaw;rate=8000"` attribute on
- * the `<Stream>` Voice XML element Klyro returns from the answer route, so
- * this bridge's NATIVE_FORMAT below must stay in lockstep with whatever
- * that element actually requests. Outbound audio is sent as a `playAudio`
- * event carrying `{streamId, playAudio:{media, contentType, sampleRate}}`;
- * `clearAudio` signals barge-in; `stop` ends the stream from Vobiz's side.
+ * a `start` sub-object (`start.callId`/`start.streamId`/`start.mediaFormat`
+ * — a production incident where this was wrongly assumed flat is what
+ * first surfaced the nested-shape pattern this protocol uses throughout).
+ * `start.mediaFormat` names the negotiated codec, defaulting to 8kHz
+ * mu-law — the exact format requested via the
+ * `contentType="audio/x-mulaw;rate=8000"` attribute on the `<Stream>`
+ * Voice XML element Klyro returns from the answer route, so this bridge's
+ * NATIVE_FORMAT below must stay in lockstep with whatever that element
+ * actually requests. The `media` event is likewise nested: the base64
+ * audio is at `media.payload` (alongside `media.track`/`media.chunk`/
+ * `media.timestamp`), not a flat top-level `media` string — a second
+ * production incident (`vobiz_bridge:media_missing_payload` on every
+ * ~20ms frame) is what surfaced this one. Outbound audio is sent as a
+ * `playAudio` event carrying `{streamId, media:{contentType, sampleRate,
+ * payload}}` (same nested `media` shape as inbound, confirmed from the
+ * same sources — not the `{playAudio:{media, contentType, sampleRate}}`
+ * shape this file sent before that incident, which no real Vobiz-side
+ * parser would have recognized); `clearAudio` is `{event, streamId}` flat
+ * (confirmed, no payload) and signals barge-in; `stop` ends the stream
+ * from Vobiz's side.
  *
  * Message parsing is strict and defensive — every frame is validated
  * before use, a malformed frame is logged and dropped, never thrown out of
@@ -63,6 +77,7 @@ export class VobizMediaBridge implements AudioMediaBridge {
   private readonly startedAt = Date.now();
   private loggedDroppedFrameWarning = false;
   private loggedPostCloseSendWarning = false;
+  private loggedMediaShapeDiagnostic = false;
   private readonly onRelease: (providerCallId: string) => void;
 
   constructor(
@@ -158,9 +173,48 @@ export class VobizMediaBridge implements AudioMediaBridge {
   }
 
   private handleMediaEvent(msg: Record<string, unknown>) {
-    const payload = msg["media"];
+    // Production incident: this previously read msg["media"] directly as
+    // the base64 string. Vobiz's confirmed real shape nests it one level
+    // down — media.payload — so every real frame failed the
+    // `typeof payload !== "string"` check below and was dropped, logging
+    // vobiz_bridge:media_missing_payload on every ~20ms frame for the
+    // whole call. See this file's module doc for the sourcing.
+    const mediaRaw = msg["media"];
+    const media =
+      typeof mediaRaw === "object" && mediaRaw !== null
+        ? (mediaRaw as Record<string, unknown>)
+        : null;
+    const payload = media ? media["payload"] : undefined;
+
+    if (!this.loggedMediaShapeDiagnostic) {
+      this.loggedMediaShapeDiagnostic = true;
+      // TEMPORARY DIAGNOSTIC (same incident) — logged once per bridge
+      // instance, not per frame (frames arrive every ~20ms; a per-frame
+      // log here would flood production logs the same way the bug itself
+      // did). Field NAMES, TYPES, and LENGTHS only — never raw audio, the
+      // base64 payload contents, auth tokens, or signatures.
+      console.info("vobiz_bridge:media_event_shape", {
+        providerCallId: maskCallSid(this.providerCallId),
+        topLevelKeys: Object.keys(msg),
+        nestedMediaKeys: media ? Object.keys(media) : null,
+        mediaValueType: typeof mediaRaw,
+        payloadValueType: typeof payload,
+        payloadPresent: typeof payload === "string" && payload.length > 0,
+        payloadLength: typeof payload === "string" ? payload.length : null,
+        sequenceNumber:
+          typeof msg["sequenceNumber"] === "string" || typeof msg["sequenceNumber"] === "number"
+            ? msg["sequenceNumber"]
+            : null,
+        streamId: typeof msg["streamId"] === "string" ? msg["streamId"] : null,
+      });
+    }
+
     if (typeof payload !== "string" || payload.length === 0) {
-      console.error("vobiz_bridge:media_missing_payload", { providerCallId: this.providerCallId });
+      console.error("vobiz_bridge:media_missing_payload", {
+        providerCallId: maskCallSid(this.providerCallId),
+        topLevelKeys: Object.keys(msg),
+        nestedMediaKeys: media ? Object.keys(media) : null,
+      });
       return;
     }
     if (!BASE64_SHAPE.test(payload)) {
@@ -226,14 +280,20 @@ export class VobizMediaBridge implements AudioMediaBridge {
       return;
     }
     const payload = Buffer.from(frame.data).toString("base64");
+    // Confirmed real Vobiz/Plivo-protocol playAudio shape: the audio lives
+    // under media.payload, alongside media.contentType/media.sampleRate —
+    // not under a `playAudio` sub-object with a `media` string field (the
+    // speculative shape this sent before this fix, which no real
+    // Vobiz-side parser would have recognized — see this file's module
+    // doc for the sourcing).
     this.socket.send(
       JSON.stringify({
         event: "playAudio",
         streamId: this.streamId,
-        playAudio: {
-          media: payload,
+        media: {
           contentType: "audio/x-mulaw",
           sampleRate: this.outboundFormat.sampleRateHz,
+          payload,
         },
       }),
     );

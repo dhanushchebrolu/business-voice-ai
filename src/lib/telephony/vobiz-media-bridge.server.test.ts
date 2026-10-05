@@ -60,8 +60,25 @@ test("Vobiz protocol simulation: full connected->start->media->media->stop seque
   // Flat top-level streamId — the defensive fallback shape, exercised here
   // alongside the real nested shape in the dedicated test below.
   socket.emitMessage(JSON.stringify({ event: "start", streamId: "st-123", callId: "cu-testcall" }));
-  socket.emitMessage(JSON.stringify({ event: "media", media: b64("frame-one") }));
-  socket.emitMessage(JSON.stringify({ event: "media", media: b64("frame-two") }));
+  // The real, confirmed Vobiz/Plivo-protocol media event shape: the base64
+  // payload is nested under media.payload, alongside media.track/chunk/
+  // timestamp — not a flat top-level media string.
+  socket.emitMessage(
+    JSON.stringify({
+      event: "media",
+      sequenceNumber: "1",
+      streamId: "st-123",
+      media: { track: "inbound", chunk: "1", timestamp: "0", payload: b64("frame-one") },
+    }),
+  );
+  socket.emitMessage(
+    JSON.stringify({
+      event: "media",
+      sequenceNumber: "2",
+      streamId: "st-123",
+      media: { track: "inbound", chunk: "2", timestamp: "20", payload: b64("frame-two") },
+    }),
+  );
 
   assert.deepEqual(received, ["frame-one", "frame-two"]);
 
@@ -71,14 +88,14 @@ test("Vobiz protocol simulation: full connected->start->media->media->stop seque
   const sentPlayAudio = JSON.parse(socket.sent.at(-1)!) as {
     event: string;
     streamId: string;
-    playAudio: { media: string; contentType: string; sampleRate: number };
+    media: { payload: string; contentType: string; sampleRate: number };
   };
   assert.equal(sentPlayAudio.event, "playAudio");
   assert.equal(sentPlayAudio.streamId, "st-123");
-  assert.equal(sentPlayAudio.playAudio.contentType, "audio/x-mulaw");
-  assert.equal(sentPlayAudio.playAudio.sampleRate, 8000);
+  assert.equal(sentPlayAudio.media.contentType, "audio/x-mulaw");
+  assert.equal(sentPlayAudio.media.sampleRate, 8000);
   assert.equal(
-    Buffer.from(sentPlayAudio.playAudio.media, "base64").toString("utf8"),
+    Buffer.from(sentPlayAudio.media.payload, "base64").toString("utf8"),
     "assistant-audio",
   );
 
@@ -112,19 +129,19 @@ test("REGRESSION (production incident: Vobiz's real start event nests streamId u
   );
 });
 
-test("a malformed media frame (invalid base64) is dropped, not thrown, and never reaches onInboundFrame", () => {
+test("a malformed media frame (invalid base64 inside media.payload) is dropped, not thrown, and never reaches onInboundFrame", () => {
   const socket = new FakeVobizSocket();
   const bridge = new VobizMediaBridge(socket, "st-1", "cu-1");
   const received: string[] = [];
   bridge.onInboundFrame((frame) => received.push(Buffer.from(frame.data).toString("utf8")));
 
   assert.doesNotThrow(() =>
-    socket.emitMessage(JSON.stringify({ event: "media", media: "not-base64!!!" })),
+    socket.emitMessage(JSON.stringify({ event: "media", media: { payload: "not-base64!!!" } })),
   );
   assert.deepEqual(received, []);
 });
 
-test("a missing media payload is dropped, not thrown", () => {
+test("a missing media payload (no 'media' key at all) is dropped, not thrown", () => {
   const socket = new FakeVobizSocket();
   const bridge = new VobizMediaBridge(socket, "st-1", "cu-1");
   const received: string[] = [];
@@ -132,6 +149,117 @@ test("a missing media payload is dropped, not thrown", () => {
 
   assert.doesNotThrow(() => socket.emitMessage(JSON.stringify({ event: "media" })));
   assert.deepEqual(received, []);
+});
+
+test("REGRESSION (production incident dc249661-d3d2-48f3-9391-243017527b26: vobiz_bridge:media_missing_payload fired on every ~20ms frame because 'media' is an object, not a flat base64 string): the OLD flat shape is no longer treated as a valid payload — it never reaches onInboundFrame and still logs media_missing_payload, proving the bug is understood, not just coincidentally fixed", () => {
+  const socket = new FakeVobizSocket();
+  const bridge = new VobizMediaBridge(socket, "st-1", "cu-1");
+  const received: string[] = [];
+  bridge.onInboundFrame((frame) => received.push(Buffer.from(frame.data).toString("utf8")));
+
+  const originalError = console.error;
+  const errors: unknown[] = [];
+  console.error = (event: unknown, data?: unknown) => {
+    errors.push({ event, data });
+  };
+  try {
+    // The OLD (wrong) shape this bridge used to accept: a flat top-level
+    // base64 string instead of a nested media.payload object.
+    socket.emitMessage(JSON.stringify({ event: "media", media: b64("should-not-arrive") }));
+  } finally {
+    console.error = originalError;
+  }
+
+  assert.deepEqual(received, [], "a flat top-level media string must never reach onInboundFrame");
+  const missingPayloadLog = errors.find(
+    (e) => (e as { event: unknown }).event === "vobiz_bridge:media_missing_payload",
+  );
+  assert.ok(missingPayloadLog, "expected media_missing_payload for the old, now-invalid shape");
+});
+
+test("REGRESSION (same incident): the real nested media.payload shape is correctly extracted and reaches onInboundFrame with the exact decoded bytes", () => {
+  const socket = new FakeVobizSocket();
+  const bridge = new VobizMediaBridge(socket, "st-1", "cu-1");
+  const received: string[] = [];
+  bridge.onInboundFrame((frame) => received.push(Buffer.from(frame.data).toString("utf8")));
+
+  socket.emitMessage(
+    JSON.stringify({
+      event: "media",
+      sequenceNumber: "7",
+      streamId: "st-1",
+      media: { track: "inbound", chunk: "7", timestamp: "140", payload: b64("caller-audio") },
+    }),
+  );
+
+  assert.deepEqual(received, ["caller-audio"]);
+});
+
+test("REGRESSION (same incident): outbound playAudio sends the real nested {streamId, media:{contentType, sampleRate, payload}} shape, not the old {playAudio:{media, contentType, sampleRate}} shape", () => {
+  const socket = new FakeVobizSocket();
+  const bridge = new VobizMediaBridge(socket, "st-1", "cu-1", () => {});
+
+  bridge.sendOutboundFrame({ data: new TextEncoder().encode("agent-reply"), timestampMs: 0 });
+
+  const sent = JSON.parse(socket.sent.at(-1)!) as Record<string, unknown>;
+  assert.equal(sent["event"], "playAudio");
+  assert.equal(sent["streamId"], "st-1");
+  assert.ok(!("playAudio" in sent), "the old 'playAudio' wrapper key must be gone");
+  const media = sent["media"] as { contentType: string; sampleRate: number; payload: string };
+  assert.ok(media, "expected a top-level 'media' object, not a 'playAudio' sub-object");
+  assert.equal(media.contentType, "audio/x-mulaw");
+  assert.equal(media.sampleRate, 8000);
+  assert.equal(Buffer.from(media.payload, "base64").toString("utf8"), "agent-reply");
+});
+
+test("DIAGNOSTIC: media_event_shape logs field NAMES/TYPES/LENGTHS only, once per bridge instance (not per frame), and never the raw audio payload", () => {
+  const socket = new FakeVobizSocket();
+  const bridge = new VobizMediaBridge(socket, "st-1", "cu-1");
+  bridge.onInboundFrame(() => {});
+
+  const originalInfo = console.info;
+  const infoLogs: { event: unknown; data: unknown }[] = [];
+  console.info = (event: unknown, data?: unknown) => {
+    infoLogs.push({ event, data });
+  };
+  try {
+    socket.emitMessage(
+      JSON.stringify({
+        event: "media",
+        sequenceNumber: "1",
+        streamId: "st-1",
+        media: { track: "inbound", chunk: "1", timestamp: "0", payload: b64("secret-audio-frame") },
+      }),
+    );
+    socket.emitMessage(
+      JSON.stringify({
+        event: "media",
+        sequenceNumber: "2",
+        streamId: "st-1",
+        media: { track: "inbound", chunk: "2", timestamp: "20", payload: b64("second-frame") },
+      }),
+    );
+  } finally {
+    console.info = originalInfo;
+  }
+
+  const shapeLogs = infoLogs.filter((l) => l.event === "vobiz_bridge:media_event_shape");
+  assert.equal(shapeLogs.length, 1, "expected exactly one shape diagnostic, not one per frame");
+
+  const data = shapeLogs[0]!.data as {
+    topLevelKeys: string[];
+    nestedMediaKeys: string[];
+    payloadPresent: boolean;
+    payloadLength: number;
+  };
+  assert.deepEqual(data.topLevelKeys.sort(), ["event", "media", "sequenceNumber", "streamId"]);
+  assert.deepEqual(data.nestedMediaKeys.sort(), ["chunk", "payload", "timestamp", "track"]);
+  assert.equal(data.payloadPresent, true);
+  assert.equal(data.payloadLength, b64("secret-audio-frame").length);
+
+  const allLoggedText = JSON.stringify(infoLogs);
+  assert.doesNotMatch(allLoggedText, /secret-audio-frame/);
+  assert.doesNotMatch(allLoggedText, new RegExp(b64("secret-audio-frame")));
 });
 
 test("malformed JSON on the socket is dropped, not thrown", () => {
