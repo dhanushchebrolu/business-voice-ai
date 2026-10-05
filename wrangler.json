@@ -10,6 +10,10 @@
       {
         "name": "CALL_SESSION",
         "class_name": "CallSessionDurableObject"
+      },
+      {
+        "name": "VOBIZ_CALL_SESSION",
+        "class_name": "VobizCallSessionDurableObject"
       }
     ]
   },
@@ -17,6 +21,10 @@
     {
       "tag": "v1-call-session",
       "new_sqlite_classes": ["CallSessionDurableObject"]
+    },
+    {
+      "tag": "v2-vobiz-call-session",
+      "new_sqlite_classes": ["VobizCallSessionDurableObject"]
     }
   ]
 }

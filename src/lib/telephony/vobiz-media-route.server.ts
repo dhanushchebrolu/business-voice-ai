@@ -3,18 +3,14 @@
  * connects to — the Vobiz counterpart of exotel-media-route.server.ts.
  *
  * This is the local-dev / no-Durable-Object fallback path only (same scope
- * as Exotel's equivalent file). Vobiz calls are NOT yet routed through
- * CallSessionDurableObject — that class is Exotel-specific today (it
- * imports ExotelMediaBridge/authorizeExotelMediaSession/
- * EXOTEL_MEDIA_STREAM_PATH directly, see its own module doc), and
- * generalizing it to a second provider is explicitly out of scope for this
- * development/testing integration (see the Vobiz migration report's "known
- * limitations" section) — giving Vobiz a parallel, non-Durable-Object path
- * mirrors the precedent this repo already set for Sarvam (which has no
- * live-media path at all) rather than risking Exotel's hardened production
- * coordinator. src/server.ts intercepts this path unconditionally (no
- * CALL_SESSION-binding branch), so it is what runs Vobiz media in every
- * environment today, including a real Cloudflare deploy.
+ * as Exotel's equivalent file). In production, Vobiz media is routed
+ * through its own dedicated VobizCallSessionDurableObject instead (see
+ * vobiz-call-session-durable-object.server.ts and src/server.ts) — a
+ * separate class/binding from Exotel's CallSessionDurableObject, so the
+ * two providers never share Durable Object instance state. src/server.ts
+ * only falls back to this file's handleVobizMediaUpgrade when the
+ * VOBIZ_CALL_SESSION binding isn't configured (local `vite dev`, where
+ * there is no cross-isolate risk in the first place).
  *
  * Same correlation design as Exotel's: Vobiz's `<Stream>` URL carries no
  * reliable per-call identity in the upgrade request itself, so the upgrade

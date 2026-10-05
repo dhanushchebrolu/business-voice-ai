@@ -41,6 +41,8 @@ export interface DurableObjectNamespace {
 export interface CloudflareEnv {
   /** Binding name configured in wrangler.json for CallSessionDurableObject. */
   CALL_SESSION?: DurableObjectNamespace;
+  /** Binding name configured in wrangler.json for VobizCallSessionDurableObject. */
+  VOBIZ_CALL_SESSION?: DurableObjectNamespace;
 }
 
 /**
@@ -83,3 +85,25 @@ export function getCallSessionStub(): DurableObjectStub | null {
  * WebSocket URL itself, which this codebase does not control.
  */
 export const CALL_SESSION_COORDINATOR_NAME = "exotel-call-session-coordinator";
+
+/** The one Durable Object instance every Vobiz media call is coordinated through. */
+export function getVobizCallSessionStub(): DurableObjectStub | null {
+  const env = getCloudflareEnv();
+  const namespace = env?.VOBIZ_CALL_SESSION;
+  if (!namespace) return null;
+  return namespace.get(namespace.idFromName(VOBIZ_CALL_SESSION_COORDINATOR_NAME));
+}
+
+/**
+ * Same hard constraint as Exotel's CALL_SESSION_COORDINATOR_NAME above:
+ * Vobiz's `<Stream>` WSS URL carries no per-call identity the Worker could
+ * use to address a per-call Durable Object before accepting the
+ * connection — the callId is only known once the socket's first ("start")
+ * message arrives. This uses ONE fixed-name Durable Object instance as the
+ * durable coordinator for every in-flight Vobiz media call, separate from
+ * Exotel's own coordinator so the two providers never share instance
+ * state. Per-call isolation is still deterministic and keyed by callId
+ * *within* that one instance (see
+ * vobiz-call-session-durable-object.server.ts).
+ */
+export const VOBIZ_CALL_SESSION_COORDINATOR_NAME = "vobiz-call-session-coordinator";

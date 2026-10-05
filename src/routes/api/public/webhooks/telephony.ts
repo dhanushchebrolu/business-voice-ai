@@ -482,7 +482,7 @@ export async function processTelephonyEvent(
   }
 
   if (TERMINAL_CALL_STATUSES.includes(event.status)) {
-    await terminateAgentRuntime(call.id, `call ended: ${event.status}`);
+    await terminateAgentRuntime(call.id, `call ended: ${event.status}`, providerId);
     await finalizeCallBilling(call, event.durationSeconds ?? 0);
   }
 }
@@ -602,7 +602,7 @@ async function applyCallEvent(
   }
 
   if (TERMINAL_CALL_STATUSES.includes(event.status)) {
-    await terminateAgentRuntime(call.id, `call ended: ${event.status}`);
+    await terminateAgentRuntime(call.id, `call ended: ${event.status}`, call.provider);
     await finalizeCallBilling(
       {
         id: call.id,

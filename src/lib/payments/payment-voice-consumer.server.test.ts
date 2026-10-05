@@ -80,6 +80,11 @@ describe("handlePaymentEventForVoice", () => {
         op: "select.maybeSingle",
         result: { data: { call_id: "call-1" }, error: null },
       },
+      {
+        table: "call_logs",
+        op: "select.maybeSingle",
+        result: { data: { provider: "exotel" }, error: null },
+      },
       { table: "payment_requests", op: "select.maybeSingle", result: { data: null, error: null } },
     ]);
     await assert.doesNotReject(() => handlePaymentEventForVoice(client, BASE_EVENT));
@@ -91,6 +96,11 @@ describe("handlePaymentEventForVoice", () => {
         table: "bookings",
         op: "select.maybeSingle",
         result: { data: { call_id: "call-1" }, error: null },
+      },
+      {
+        table: "call_logs",
+        op: "select.maybeSingle",
+        result: { data: { provider: "exotel" }, error: null },
       },
       {
         table: "payment_requests",
@@ -105,8 +115,8 @@ describe("handlePaymentEventForVoice", () => {
     await handlePaymentEventForVoice(client, { ...BASE_EVENT, event_type: "SOMETHING_ELSE" });
     assert.equal(
       calls.length,
-      2,
-      "reads both rows, but composes no message and injects nothing further",
+      3,
+      "reads all three rows, but composes no message and injects nothing further",
     );
   });
 
@@ -116,6 +126,11 @@ describe("handlePaymentEventForVoice", () => {
         table: "bookings",
         op: "select.maybeSingle",
         result: { data: { call_id: "call-does-not-exist" }, error: null },
+      },
+      {
+        table: "call_logs",
+        op: "select.maybeSingle",
+        result: { data: { provider: "exotel" }, error: null },
       },
       {
         table: "payment_requests",
@@ -129,6 +144,31 @@ describe("handlePaymentEventForVoice", () => {
     await assert.doesNotReject(() => handlePaymentEventForVoice(client, BASE_EVENT));
   });
 
+  test("PAYMENT_CAPTURED composes a message and safely no-ops via the local fallback for a Vobiz call too", async () => {
+    const { client, calls } = makeFakeSupabase([
+      {
+        table: "bookings",
+        op: "select.maybeSingle",
+        result: { data: { call_id: "call-does-not-exist" }, error: null },
+      },
+      {
+        table: "call_logs",
+        op: "select.maybeSingle",
+        result: { data: { provider: "vobiz" }, error: null },
+      },
+      {
+        table: "payment_requests",
+        op: "select.maybeSingle",
+        result: {
+          data: { amount_minor_units: 50000, currency: "INR", payment_link_url: null },
+          error: null,
+        },
+      },
+    ]);
+    await assert.doesNotReject(() => handlePaymentEventForVoice(client, BASE_EVENT));
+    assert.equal(calls[1]?.table, "call_logs", "looks up the call's provider before dispatching");
+  });
+
   test("PAYMENT_CAPTURED_AFTER_EXPIRY, PAYMENT_FAILED, and PAYMENT_EXPIRED all compose without throwing", async () => {
     for (const eventType of [
       "PAYMENT_CAPTURED_AFTER_EXPIRY",
@@ -140,6 +180,11 @@ describe("handlePaymentEventForVoice", () => {
           table: "bookings",
           op: "select.maybeSingle",
           result: { data: { call_id: "call-x" }, error: null },
+        },
+        {
+          table: "call_logs",
+          op: "select.maybeSingle",
+          result: { data: { provider: "exotel" }, error: null },
         },
         {
           table: "payment_requests",

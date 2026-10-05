@@ -6,6 +6,7 @@ import { handleExotelMediaUpgrade } from "./lib/telephony/exotel-media-route.ser
 import { handleVobizMediaUpgrade } from "./lib/telephony/vobiz-media-route.server";
 import {
   CALL_SESSION_COORDINATOR_NAME,
+  VOBIZ_CALL_SESSION_COORDINATOR_NAME,
   type CloudflareEnv,
 } from "./lib/telephony/cloudflare-env.server";
 import { EXOTEL_MEDIA_STREAM_PATH as MEDIA_STREAM_PATH } from "./lib/telephony/exotel-media-stream-path";
@@ -101,17 +102,24 @@ export default {
 
       // Vobiz's `<Stream>` Voice XML element is likewise a WS client
       // connecting to us (see vobiz-provider.ts's module doc) — same
-      // interception reason as Exotel above. Not yet routed through
-      // CALL_SESSION: that Durable Object is Exotel-specific today: see
-      // vobiz-media-route.server.ts's module doc for why this
-      // development/testing integration deliberately does not generalize
-      // it, and handles Vobiz media directly in this ambient fetch handler
-      // instead (the same non-durable behavior Exotel's own fallback path
-      // has when the binding isn't configured).
+      // interception reason, and same production-durability fix, as Exotel
+      // above: when the VOBIZ_CALL_SESSION Durable Object binding is
+      // configured, forward the upgrade to it unconditionally (see
+      // vobiz-call-session-durable-object.server.ts). Fall back to the
+      // original in-process handler only when the binding isn't configured
+      // (local `vite dev`, where there is no cross-isolate risk).
       if (
         url.pathname === VOBIZ_MEDIA_STREAM_PATH &&
         (request.headers.get("upgrade") ?? "").toLowerCase() === "websocket"
       ) {
+        const cfEnv = env as CloudflareEnv | null | undefined;
+        const vobizNamespace = cfEnv?.VOBIZ_CALL_SESSION;
+        if (vobizNamespace) {
+          const stub = vobizNamespace.get(
+            vobizNamespace.idFromName(VOBIZ_CALL_SESSION_COORDINATOR_NAME),
+          );
+          return await stub.fetch(request);
+        }
         const vobizMediaUpgrade = await handleVobizMediaUpgrade(request);
         if (vobizMediaUpgrade) return vobizMediaUpgrade;
       }

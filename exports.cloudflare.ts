@@ -18,5 +18,10 @@
  * class name is registered under, and
  * src/lib/telephony/call-session-durable-object.server.ts for what it does
  * and why it exists (production audit finding E1).
+ *
+ * VobizCallSessionDurableObject is the same mechanism for the Vobiz
+ * provider's own, separate Durable Object (binding `VOBIZ_CALL_SESSION`,
+ * migration `v2-vobiz-call-session`) — see that file's module doc.
  */
 export { CallSessionDurableObject } from "./src/lib/telephony/call-session-durable-object.server";
+export { VobizCallSessionDurableObject } from "./src/lib/telephony/vobiz-call-session-durable-object.server";

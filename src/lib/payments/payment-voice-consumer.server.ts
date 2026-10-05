@@ -11,9 +11,10 @@
  * state/timer mechanics. This file has no knowledge of RuntimeState.
  *
  * Reaches the live call the same way telephony-runtime.ts's own
- * routeToAgentRuntime/terminateAgentRuntime do: via the
- * CallSessionDurableObject RPC surface when the CALL_SESSION binding is
- * configured (production), falling back to calling
+ * routeToAgentRuntime/terminateAgentRuntime do: via the call's own
+ * provider's Durable Object RPC surface (CallSessionDurableObject for
+ * Exotel, VobizCallSessionDurableObject for Vobiz) when that provider's
+ * binding is configured (production), falling back to calling
  * voice-runtime.server.ts directly when it isn't (local dev/tests,
  * everything in one process) — same fallback convention, not a new one.
  *
@@ -76,6 +77,15 @@ export async function handlePaymentEventForVoice(
   if (bookingError) throw bookingError;
   if (!booking?.call_id) return; // no live call was ever associated with this booking
 
+  // Needed to pick the right provider's Durable Object below — payment
+  // events can arrive for either an Exotel or a Vobiz call.
+  const { data: callRow, error: callRowError } = await supabaseAdmin
+    .from("call_logs")
+    .select("provider")
+    .eq("id", booking.call_id)
+    .maybeSingle();
+  if (callRowError) throw callRowError;
+
   const { data: paymentRequest, error: prError } = await supabaseAdmin
     .from("payment_requests")
     .select("amount_minor_units, currency, payment_link_url")
@@ -92,8 +102,9 @@ export async function handlePaymentEventForVoice(
   );
   if (!message) return; // unrecognized event type — nothing to say
 
-  const { getCallSessionStub } = await import("../telephony/cloudflare-env.server.ts");
-  const doStub = getCallSessionStub();
+  const { getCallSessionStub, getVobizCallSessionStub } =
+    await import("../telephony/cloudflare-env.server.ts");
+  const doStub = callRow?.provider === "vobiz" ? getVobizCallSessionStub() : getCallSessionStub();
 
   if (doStub) {
     let response: Response;
