@@ -60,10 +60,19 @@ export function Hero() {
           </p>
 
           <div className="mt-9 flex flex-wrap items-center gap-3">
-            <Link to="/contact">
+            <Link to="/auth" search={{ mode: "signup" }}>
               <Button
                 size="lg"
                 className="rounded-full bg-violet-600 px-6 text-white hover:bg-violet-700"
+              >
+                Get Started
+              </Button>
+            </Link>
+            <Link to="/contact">
+              <Button
+                size="lg"
+                variant="outline"
+                className="rounded-full border-slate-300 bg-transparent px-6 text-slate-900 hover:bg-slate-50"
               >
                 Book a Demo
               </Button>

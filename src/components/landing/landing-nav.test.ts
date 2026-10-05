@@ -95,4 +95,29 @@ describe("LandingNav reuses the existing dashboard-access hook and has only real
     assert.match(src, /await signOut\(\)/);
     assert.match(src, /navigate\(\{ to: "\/" \}\)/);
   });
+
+  test("desktop bar exposes Sign In and a primary Get Started CTA, both routing to the real /auth route, hidden while signed in", () => {
+    const desktopBarStart = src.indexOf('<div className="flex items-center gap-3">');
+    const contactIdx = src.indexOf('<Link to="/contact" className="hidden sm:block">');
+    assert.ok(desktopBarStart > -1 && contactIdx > -1 && desktopBarStart < contactIdx);
+    const block = src.slice(desktopBarStart, contactIdx);
+    assert.match(block, /session && !loading \? null : \(/);
+    assert.match(block, /<Link to="\/auth">/);
+    assert.match(block, />\s*Sign In\s*</);
+    assert.match(block, /to="\/auth" search=\{\{ mode: "signup" \}\}/);
+    assert.match(block, />\s*Get Started\s*</);
+  });
+
+  test("mobile menu's signed-out CTAs read Sign In / Get Started, both targeting /auth", () => {
+    // "Sign out" also appears once in this file's own module doc comment —
+    // the real button is the LAST occurrence, immediately before the
+    // `) : (` that opens the signed-out branch this test checks.
+    const signOutIdx = src.lastIndexOf("Sign out");
+    assert.ok(signOutIdx > -1, "expected the signed-in branch's Sign out button as an anchor");
+    const block = src.slice(signOutIdx, signOutIdx + 900);
+    assert.match(block, /<Link to="\/auth" onClick/);
+    assert.match(block, />\s*Sign In\s*</);
+    assert.match(block, /to="\/auth" search=\{\{ mode: "signup" \}\}/);
+    assert.match(block, />\s*Get Started\s*</);
+  });
 });

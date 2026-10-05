@@ -16,7 +16,12 @@ import { dirname, join } from "node:path";
 
 const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "hero.tsx"), "utf8");
 
-describe("Hero has two real, working CTAs and the animated flow diagram", () => {
+describe("Hero has real, working CTAs and the animated flow diagram", () => {
+  test('"Get Started" is the primary CTA and routes to the real /auth signup flow', () => {
+    assert.match(src, /to="\/auth" search=\{\{ mode: "signup" \}\}/);
+    assert.match(src, />\s*Get Started\s*</);
+  });
+
   test('"Book a Demo" links to the real /contact route', () => {
     assert.match(src, /to="\/contact"/);
     assert.match(src, />\s*Book a Demo\s*</);

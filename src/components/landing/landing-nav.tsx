@@ -144,120 +144,153 @@ export function LandingNav() {
   }, [menuOpen]);
 
   return (
-    <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/85 backdrop-blur">
-      <div className="mx-auto flex h-20 max-w-[1400px] items-center justify-between px-5 sm:px-8">
-        <Link to="/" className="flex items-center gap-2">
-          <span
-            className="grid size-7 place-items-center rounded-full bg-violet-600 text-[11px] font-semibold text-white"
-            aria-hidden="true"
-          >
-            C
-          </span>
-          <span className="text-[15px] font-semibold tracking-tight text-slate-900">ClickAI</span>
-        </Link>
-
-        <nav className="hidden items-center gap-8 md:flex" aria-label="Primary">
-          <NavDropdown
-            label="Products"
-            panelClassName="w-80"
-            renderPanel={(close) => (
-              <div className="space-y-1">
-                {PRODUCT_ITEMS.map((item) => (
-                  <button
-                    key={item.targetId}
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      close();
-                      scrollToSection(item.targetId);
-                    }}
-                    className="block w-full rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-violet-50"
-                  >
-                    <span className="block text-sm font-medium text-slate-900">{item.label}</span>
-                    <span className="mt-0.5 block text-xs text-slate-500">{item.blurb}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-          />
-
-          <Link
-            to="/pricing"
-            className="text-sm text-slate-600 transition-colors hover:text-violet-600"
-          >
-            Pricing
-          </Link>
-
-          <NavDropdown
-            label="Integrations"
-            panelClassName="w-72"
-            renderPanel={(close) => (
-              <div className="grid grid-cols-2 gap-1">
-                {INTEGRATION_ITEMS.map((item) => (
-                  <button
-                    key={item.label}
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      close();
-                      scrollToSection(item.targetId);
-                    }}
-                    className="rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-violet-50 hover:text-violet-700"
-                  >
-                    {item.label}
-                  </button>
-                ))}
-              </div>
-            )}
-          />
-
-          <NavDropdown
-            label="Industries"
-            panelClassName="w-[560px]"
-            renderPanel={(close) => (
-              <div className="grid grid-cols-3 gap-1">
-                {INDUSTRY_ITEMS.map((item) => (
-                  <button
-                    key={item.label}
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      close();
-                      scrollToSection(item.targetId);
-                    }}
-                    className="rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-violet-50 hover:text-violet-700"
-                  >
-                    {item.label}
-                  </button>
-                ))}
-              </div>
-            )}
-          />
-        </nav>
-
-        <div className="flex items-center gap-3">
-          <Link to="/contact" className="hidden sm:block">
-            <Button
-              size="sm"
-              className="rounded-full bg-violet-600 px-5 text-white hover:bg-violet-700"
+    <>
+      <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/85 backdrop-blur">
+        <div className="mx-auto flex h-20 max-w-[1400px] items-center justify-between px-5 sm:px-8">
+          <Link to="/" className="flex items-center gap-2">
+            <span
+              className="grid size-7 place-items-center rounded-full bg-violet-600 text-[11px] font-semibold text-white"
+              aria-hidden="true"
             >
-              Contact
-            </Button>
+              C
+            </span>
+            <span className="text-[15px] font-semibold tracking-tight text-slate-900">ClickAI</span>
           </Link>
 
-          <button
-            type="button"
-            className="grid size-10 place-items-center rounded-full border border-slate-200 text-slate-700 hover:bg-slate-50"
-            aria-expanded={menuOpen}
-            aria-controls="landing-menu"
-            aria-label={menuOpen ? "Close menu" : "Open menu"}
-            onClick={() => setMenuOpen((v) => !v)}
-          >
-            {menuOpen ? <X className="size-4" /> : <Menu className="size-4" />}
-          </button>
-        </div>
-      </div>
+          <nav className="hidden items-center gap-8 md:flex" aria-label="Primary">
+            <NavDropdown
+              label="Products"
+              panelClassName="w-80"
+              renderPanel={(close) => (
+                <div className="space-y-1">
+                  {PRODUCT_ITEMS.map((item) => (
+                    <button
+                      key={item.targetId}
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        close();
+                        scrollToSection(item.targetId);
+                      }}
+                      className="block w-full rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-violet-50"
+                    >
+                      <span className="block text-sm font-medium text-slate-900">{item.label}</span>
+                      <span className="mt-0.5 block text-xs text-slate-500">{item.blurb}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            />
 
+            <Link
+              to="/pricing"
+              className="text-sm text-slate-600 transition-colors hover:text-violet-600"
+            >
+              Pricing
+            </Link>
+
+            <NavDropdown
+              label="Integrations"
+              panelClassName="w-72"
+              renderPanel={(close) => (
+                <div className="grid grid-cols-2 gap-1">
+                  {INTEGRATION_ITEMS.map((item) => (
+                    <button
+                      key={item.label}
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        close();
+                        scrollToSection(item.targetId);
+                      }}
+                      className="rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-violet-50 hover:text-violet-700"
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            />
+
+            <NavDropdown
+              label="Industries"
+              panelClassName="w-[560px]"
+              renderPanel={(close) => (
+                <div className="grid grid-cols-3 gap-1">
+                  {INDUSTRY_ITEMS.map((item) => (
+                    <button
+                      key={item.label}
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        close();
+                        scrollToSection(item.targetId);
+                      }}
+                      className="rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-violet-50 hover:text-violet-700"
+                    >
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            />
+          </nav>
+
+          <div className="flex items-center gap-3">
+            {session && !loading ? null : (
+              <div className="hidden items-center gap-2 sm:flex">
+                <Link to="/auth">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="rounded-full text-slate-600 hover:bg-slate-50 hover:text-violet-600"
+                  >
+                    Sign In
+                  </Button>
+                </Link>
+                <Link to="/auth" search={{ mode: "signup" }}>
+                  <Button
+                    size="sm"
+                    className="rounded-full bg-violet-600 px-5 text-white hover:bg-violet-700"
+                  >
+                    Get Started
+                  </Button>
+                </Link>
+              </div>
+            )}
+
+            <Link to="/contact" className="hidden sm:block">
+              <Button
+                size="sm"
+                className="rounded-full bg-violet-600 px-5 text-white hover:bg-violet-700"
+              >
+                Contact
+              </Button>
+            </Link>
+
+            <button
+              type="button"
+              className="grid size-10 place-items-center rounded-full border border-slate-200 text-slate-700 hover:bg-slate-50"
+              aria-expanded={menuOpen}
+              aria-controls="landing-menu"
+              aria-label={menuOpen ? "Close menu" : "Open menu"}
+              onClick={() => setMenuOpen((v) => !v)}
+            >
+              {menuOpen ? <X className="size-4" /> : <Menu className="size-4" />}
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/*
+      Rendered as a sibling of <header>, not nested inside it: the header's
+      `backdrop-blur` (backdrop-filter) spec-correctly establishes a new
+      containing block for any `position: fixed` descendant, which was
+      silently collapsing this overlay to the header's own 80px height
+      instead of the full viewport (`inset-0` resolving against the
+      header's box, not the viewport) — a real, pre-existing bug this fix
+      closes, not a new constraint being introduced.
+    */}
       {menuOpen ? (
         <div
           id="landing-menu"
@@ -364,7 +397,7 @@ export function LandingNav() {
                       className="w-full rounded-full border-slate-300 text-slate-900 hover:bg-slate-50"
                       size="lg"
                     >
-                      Login
+                      Sign In
                     </Button>
                   </Link>
                   <Link to="/auth" search={{ mode: "signup" }} onClick={() => setMenuOpen(false)}>
@@ -381,6 +414,6 @@ export function LandingNav() {
           </div>
         </div>
       ) : null}
-    </header>
+    </>
   );
 }
