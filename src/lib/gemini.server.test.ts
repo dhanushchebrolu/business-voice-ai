@@ -54,6 +54,83 @@ describe("gemini.isConfigured", () => {
   });
 });
 
+describe('gemini model resolution — production incident: Google returned 404 "models/gemini-2.5-flash is no longer available to new users", naming models/gemini-3.8-flash as the replacement', () => {
+  test("defaults to gemini-3.8-flash when GEMINI_MODEL is unset", async () => {
+    await withEnv({ GEMINI_API_KEY: "k", GEMINI_MODEL: undefined }, async () => {
+      let seenUrl = "";
+      await withFetch(
+        (async (url: string | URL) => {
+          seenUrl = String(url);
+          return new Response(JSON.stringify({ candidates: [{ content: { parts: [] } }] }), {
+            status: 200,
+          });
+        }) as typeof fetch,
+        async () => {
+          await gemini.runConversation([{ role: "user", content: "hi" }]);
+        },
+      );
+      assert.match(seenUrl, /\/models\/gemini-3\.8-flash:generateContent\?/);
+    });
+  });
+
+  test("never defaults back to gemini-2.5-flash under any code path", async () => {
+    await withEnv({ GEMINI_API_KEY: "k", GEMINI_MODEL: undefined }, async () => {
+      let seenUrl = "";
+      await withFetch(
+        (async (url: string | URL) => {
+          seenUrl = String(url);
+          return new Response(JSON.stringify({ candidates: [{ content: { parts: [] } }] }), {
+            status: 200,
+          });
+        }) as typeof fetch,
+        async () => {
+          await gemini.runConversation([{ role: "user", content: "hi" }]);
+        },
+      );
+      assert.doesNotMatch(seenUrl, /gemini-2\.5-flash/);
+    });
+  });
+
+  test("GEMINI_MODEL, when explicitly set, still overrides the default — an operator can point at a different model without a code change", async () => {
+    await withEnv({ GEMINI_API_KEY: "k", GEMINI_MODEL: "gemini-3.8-flash-lite" }, async () => {
+      let seenUrl = "";
+      await withFetch(
+        (async (url: string | URL) => {
+          seenUrl = String(url);
+          return new Response(JSON.stringify({ candidates: [{ content: { parts: [] } }] }), {
+            status: 200,
+          });
+        }) as typeof fetch,
+        async () => {
+          await gemini.runConversation([{ role: "user", content: "hi" }]);
+        },
+      );
+      assert.match(seenUrl, /\/models\/gemini-3\.8-flash-lite:generateContent\?/);
+    });
+  });
+});
+
+describe("gemini generationConfig — 3.8 Flash compatibility: temperature/top_p/top_k are deprecated and silently ignored by the backend, so they must not be sent at all (not merely harmless to leave in)", () => {
+  test("generationConfig carries only maxOutputTokens — no temperature, topP, topK, candidateCount, or thinking_budget/thinking_level", async () => {
+    await withEnv({ GEMINI_API_KEY: "k" }, async () => {
+      let seenBody: { generationConfig?: Record<string, unknown> } = {};
+      await withFetch(
+        (async (_url: string | URL, init?: RequestInit) => {
+          seenBody = JSON.parse(init!.body as string) as typeof seenBody;
+          return new Response(
+            JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] } }] }),
+            { status: 200 },
+          );
+        }) as typeof fetch,
+        async () => {
+          await gemini.runConversation([{ role: "user", content: "hi" }]);
+        },
+      );
+      assert.deepEqual(seenBody.generationConfig, { maxOutputTokens: 400 });
+    });
+  });
+});
+
 describe("gemini.runConversation — request shape and success path", () => {
   test("sends the platform key as the documented `key` query parameter, to the correct model endpoint", async () => {
     await withEnv({ GEMINI_API_KEY: "super-secret-abc123" }, async () => {
@@ -80,7 +157,7 @@ describe("gemini.runConversation — request shape and success path", () => {
       );
       assert.equal(
         seenUrl,
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=super-secret-abc123",
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=super-secret-abc123",
       );
       assert.equal((seenBody as { contents: unknown[] }).contents.length, 1);
     });

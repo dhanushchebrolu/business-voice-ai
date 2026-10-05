@@ -50,8 +50,18 @@
 const BASE_URL = "https://generativelanguage.googleapis.com";
 const REQUEST_TIMEOUT_MS = 15_000;
 
-/** Overridable via GEMINI_MODEL — defaults to the latest Flash model id at the time this was written. */
-const DEFAULT_MODEL = "gemini-2.5-flash";
+/**
+ * Overridable via GEMINI_MODEL — defaults to the latest Flash model id at
+ * the time this was written.
+ *
+ * gemini-2.5-flash -> gemini-3.8-flash (production incident: Google's API
+ * returned 404 "models/gemini-2.5-flash is no longer available to new
+ * users", explicitly naming models/gemini-3.8-flash as the replacement).
+ * If GEMINI_MODEL is set as a Cloudflare dashboard secret, it still wins
+ * over this constant (see `model()` below) — this fix does not reach a
+ * deployment that has GEMINI_MODEL explicitly pinned to the old id.
+ */
+const DEFAULT_MODEL = "gemini-3.8-flash";
 
 function model(): string {
   return process.env["GEMINI_MODEL"] || DEFAULT_MODEL;
@@ -182,7 +192,13 @@ export const gemini = {
       ...(systemInstruction
         ? { system_instruction: { parts: [{ text: systemInstruction }] } }
         : {}),
-      generationConfig: { maxOutputTokens: 400, temperature: 0.3, topP: 0.9 },
+      // temperature/topP removed for the gemini-3.8-flash migration: Google's
+      // 3.8 Flash backend deprecates and silently ignores temperature/
+      // top_p/top_k (replaced, where sampling control is needed at all, by
+      // thinking_level — not used here, since this codebase never set
+      // thinking_budget/candidate_count/top_k either). maxOutputTokens is
+      // unaffected and kept.
+      generationConfig: { maxOutputTokens: 400 },
       ...(options?.tools ? { tools: options.tools } : {}),
     });
     const reply = (data.candidates?.[0]?.content?.parts ?? [])
