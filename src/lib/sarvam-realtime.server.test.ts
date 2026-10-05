@@ -634,3 +634,227 @@ describe("tts:config_sent / tts:text_sent / tts:flush_sent — temporary per-sen
     assert.deepEqual(entry!.data, { shape: { type: "flush" } });
   });
 });
+
+describe('STT outbound audio wire shape — production incident round 3 (after TTS was fixed and confirmed working): STT connects and accepts query params with no error, but never produces a transcript. sendAudioFrame sent the raw Uint8Array as a BINARY WebSocket frame with no JSON envelope at all; the current realtime protocol expects a JSON text frame {"event":"audio_input","audio":"<base64>"}', () => {
+  const originalKey = process.env["SARVAM_API_KEY"];
+  afterEach(() => {
+    if (originalKey === undefined) delete process.env["SARVAM_API_KEY"];
+    else process.env["SARVAM_API_KEY"] = originalKey;
+  });
+
+  async function connectAndGetSttSession(opts?: {
+    sampleRateHz?: number;
+    encoding?: "linear16" | "mulaw";
+  }) {
+    const { connectSarvamStt } = await import("./sarvam-realtime.server.ts");
+    const connectPromise = connectSarvamStt({
+      language: "hi-IN",
+      sampleRateHz: opts?.sampleRateHz ?? 8000,
+      encoding: opts?.encoding ?? "mulaw",
+      onEvent: () => {},
+    });
+    const socket = FakeWebSocket.instances[0]!;
+    socket.simulateOpen();
+    const session = await connectPromise;
+    return { socket, session };
+  }
+
+  test('sendAudioFrame sends a JSON TEXT frame {"event":"audio_input","audio":"<base64>"}, never a raw binary frame', async () => {
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    await withFakeWebSocket(async () => {
+      const { socket, session } = await connectAndGetSttSession();
+      const audio = new Uint8Array([1, 2, 3, 4, 5]);
+      session.sendAudioFrame(audio);
+
+      assert.equal(socket.sent.length, 1);
+      const sent = socket.sent[0];
+      assert.equal(
+        typeof sent,
+        "string",
+        "must be a JSON text frame, not a binary Uint8Array frame",
+      );
+      const parsed = JSON.parse(sent as string) as Record<string, unknown>;
+      assert.equal(parsed["event"], "audio_input");
+      assert.equal(typeof parsed["audio"], "string");
+      assert.equal(parsed["audio"], Buffer.from(audio).toString("base64"));
+    });
+  });
+
+  test("sendAudioFrame base64-encodes the exact same bytes handed to it — no resampling, no re-encoding of the audio data itself", async () => {
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    await withFakeWebSocket(async () => {
+      const { socket, session } = await connectAndGetSttSession();
+      // Arbitrary mulaw-looking bytes — the point is round-tripping them
+      // unchanged, not that they decode to anything meaningful.
+      const audio = new Uint8Array([0xff, 0x00, 0x7e, 0x81, 0x55]);
+      session.sendAudioFrame(audio);
+      const parsed = JSON.parse(socket.sent[0] as string) as { audio: string };
+      const roundTripped = new Uint8Array(Buffer.from(parsed.audio, "base64"));
+      assert.deepEqual(Array.from(roundTripped), Array.from(audio));
+    });
+  });
+
+  test("multiple sendAudioFrame calls each produce their own audio_input message, in order", async () => {
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    await withFakeWebSocket(async () => {
+      const { socket, session } = await connectAndGetSttSession();
+      session.sendAudioFrame(new Uint8Array([1]));
+      session.sendAudioFrame(new Uint8Array([2]));
+      session.sendAudioFrame(new Uint8Array([3]));
+      assert.equal(socket.sent.length, 3);
+      for (const raw of socket.sent) {
+        const parsed = JSON.parse(raw as string) as Record<string, unknown>;
+        assert.equal(parsed["event"], "audio_input");
+      }
+    });
+  });
+});
+
+function captureSttInfoLogs() {
+  const calls: { event: string; data: unknown }[] = [];
+  const original = console.info;
+  console.info = (event: unknown, data?: unknown) => {
+    calls.push({ event: String(event), data });
+  };
+  return {
+    calls,
+    restore: () => {
+      console.info = original;
+    },
+  };
+}
+
+describe("stt:audio_sent / stt:event_received — temporary per-send/per-receive diagnostics (production incident: STT connects and accepts audio with no error, but never produces a transcript — this traces every outbound audio frame and inbound wire message so a silently-ignored call is distinguishable from one that never got any audio at all). Safe fields only: never the base64 audio, never the full transcript text.", () => {
+  const originalKey = process.env["SARVAM_API_KEY"];
+  afterEach(() => {
+    if (originalKey === undefined) delete process.env["SARVAM_API_KEY"];
+    else process.env["SARVAM_API_KEY"] = originalKey;
+  });
+
+  test("stt:audio_sent logs length/duration/sequence/format metadata — never the base64 audio itself", async () => {
+    const logs = captureSttInfoLogs();
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    try {
+      await withFakeWebSocket(async () => {
+        const { connectSarvamStt } = await import("./sarvam-realtime.server.ts");
+        const connectPromise = connectSarvamStt({
+          language: "hi-IN",
+          sampleRateHz: 8000,
+          encoding: "mulaw",
+          onEvent: () => {},
+        });
+        FakeWebSocket.instances[0]!.simulateOpen();
+        const session = await connectPromise;
+        // 160 bytes at 8kHz mulaw (1 byte/sample) = 20ms — the real Vobiz frame size.
+        session.sendAudioFrame(new Uint8Array(160));
+      });
+    } finally {
+      logs.restore();
+    }
+
+    const entry = logs.calls.find((c) => c.event === "stt:audio_sent");
+    assert.ok(entry, "expected stt:audio_sent to fire");
+    const data = entry!.data as Record<string, unknown>;
+    assert.equal(data["byteLength"], 160);
+    assert.equal(data["durationMs"], 20);
+    assert.equal(data["sequence"], 1);
+    assert.equal(data["sampleRateHz"], 8000);
+    assert.equal(data["encoding"], "mulaw");
+    assert.equal(data["event"], "audio_input");
+    assert.equal(typeof data["base64Length"], "number");
+
+    const serialized = JSON.stringify(logs.calls);
+    assert.doesNotMatch(serialized, /test-key-not-a-real-secret/);
+  });
+
+  test("stt:audio_sent computes durationMs correctly for linear16 (2 bytes/sample)", async () => {
+    const logs = captureSttInfoLogs();
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    try {
+      await withFakeWebSocket(async () => {
+        const { connectSarvamStt } = await import("./sarvam-realtime.server.ts");
+        const connectPromise = connectSarvamStt({
+          language: "en-IN",
+          sampleRateHz: 8000,
+          encoding: "linear16",
+          onEvent: () => {},
+        });
+        FakeWebSocket.instances[0]!.simulateOpen();
+        const session = await connectPromise;
+        // 320 bytes at 8kHz linear16 (2 bytes/sample) = 160 samples = 20ms.
+        session.sendAudioFrame(new Uint8Array(320));
+      });
+    } finally {
+      logs.restore();
+    }
+
+    const entry = logs.calls.find((c) => c.event === "stt:audio_sent");
+    const data = entry!.data as Record<string, unknown>;
+    assert.equal(data["durationMs"], 20);
+  });
+
+  test("stt:event_received logs transcript presence/length but never the transcript text itself", async () => {
+    const logs = captureSttInfoLogs();
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    try {
+      await withFakeWebSocket(async () => {
+        const { connectSarvamStt } = await import("./sarvam-realtime.server.ts");
+        const connectPromise = connectSarvamStt({
+          language: "hi-IN",
+          sampleRateHz: 8000,
+          encoding: "mulaw",
+          onEvent: () => {},
+        });
+        const socket = FakeWebSocket.instances[0]!;
+        socket.simulateOpen();
+        await connectPromise;
+        socket.simulateMessage(
+          JSON.stringify({ type: "final_transcript", transcript: "a secret caller said this" }),
+        );
+      });
+    } finally {
+      logs.restore();
+    }
+
+    const entry = logs.calls.find((c) => c.event === "stt:event_received");
+    assert.ok(entry, "expected stt:event_received to fire");
+    const data = entry!.data as Record<string, unknown>;
+    assert.equal(data["hasTranscript"], true);
+    assert.equal(data["transcriptLength"], "a secret caller said this".length);
+    assert.equal(data["isError"], false);
+
+    const serialized = JSON.stringify(logs.calls);
+    assert.doesNotMatch(serialized, /a secret caller said this/);
+  });
+
+  test("stt:event_received surfaces an error's code/message safely when the wire event is an error", async () => {
+    const logs = captureSttInfoLogs();
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    try {
+      await withFakeWebSocket(async () => {
+        const { connectSarvamStt } = await import("./sarvam-realtime.server.ts");
+        const connectPromise = connectSarvamStt({
+          language: "hi-IN",
+          sampleRateHz: 8000,
+          encoding: "mulaw",
+          onEvent: () => {},
+        });
+        const socket = FakeWebSocket.instances[0]!;
+        socket.simulateOpen();
+        await connectPromise;
+        socket.simulateMessage(
+          JSON.stringify({ type: "error", data: { code: 422, message: "bad request" } }),
+        );
+      });
+    } finally {
+      logs.restore();
+    }
+
+    const entry = logs.calls.find((c) => c.event === "stt:event_received");
+    assert.ok(entry);
+    const data = entry!.data as Record<string, unknown>;
+    assert.equal(data["isError"], true);
+    assert.equal(data["errorCode"], 422);
+    assert.equal(data["errorMessage"], "bad request");
+  });
+});

@@ -79,6 +79,31 @@
  * below) combined with these per-send traces will show exactly which
  * frame Sarvam rejected and why.
  *
+ * TTS CONFIRMED WORKING END TO END (production): all of the TTS fixes
+ * above (query param, config fields, message type) together produced a
+ * full, working call — `tts:config_sent`/`tts:text_sent`/`tts:flush_sent`,
+ * `first_outbound_audio_frame`, and the greeting actually played to the
+ * caller. `/text-to-speech/ws` (no dedicated realtime path) is therefore
+ * confirmed correct for TTS — the "TTS WS path" hypothesis previously
+ * listed under NOT CONFIRMED is resolved and removed below.
+ *
+ * STT AUDIO TRANSPORT — CONFIRMED BY PRODUCTION (round 3, after TTS was
+ * fixed and confirmed working): STT connects and accepts its query params
+ * with no error, but produces zero transcripts for a caller who is
+ * audibly speaking. Root cause: `sendAudioFrame` sent the raw `Uint8Array`
+ * as a BINARY WebSocket frame, with no JSON envelope and no base64
+ * encoding at all — not even the legacy shape, just unwrapped bytes. This
+ * was flagged, unconfirmed, as this file's very first NOT CONFIRMED item
+ * before any live test; current Sarvam documentation now confirms it
+ * directly: the realtime endpoint expects a JSON **text** frame,
+ * `{"event":"audio_input","audio":"<base64>"}`. Fixed. The bytes
+ * themselves are unchanged — still Vobiz's raw mulaw/8kHz, decoded once in
+ * vobiz-media-bridge.server.ts and handed through unmodified; only the
+ * wire transport here changes, confirmed by `stt:audio_sent`/
+ * `stt:event_received` diagnostics (see connectSarvamStt) that trace every
+ * outbound audio frame and inbound wire message without ever logging the
+ * base64 audio or the transcript text itself.
+ *
  * VERIFICATION NOTE (re-checked, still unresolved for everything below this
  * line — see docs/voice-pipeline-testing.md): this sandbox's network egress
  * cannot reach docs.sarvam.ai or any other documentation host directly
@@ -101,27 +126,21 @@
  *     compatible `WebSocket` constructor, which Node's global also is).
  *
  * NOT CONFIRMED — specific, actionable leads (highest-value diagnostic: if
- * STT connects but never emits a single transcript event for audio that is
- * clearly being sent, check these in order):
- *   1. STT audio transport: this file sends raw binary frames
- *      (`socket.send(data)` on a `Uint8Array`). The same SDK instead
- *      base64-encodes each chunk and sends a JSON **text** frame:
- *      `{"event":"audio_input","audio":"<base64>"}`. If real audio frames
- *      produce zero STT events, this is the first thing to try.
- *   2. STT `vad-signals` query param casing: unlike `language_code`/
+ * STT still connects but never emits a transcript after the audio-transport
+ * fix above, check these in order):
+ *   1. STT `vad-signals` query param casing: unlike `language_code`/
  *      `sample_rate` (confirmed underscored by production), this one has no
  *      direct evidence either way and was deliberately left as-is.
- *   3. TTS `pace` config field: still unconfirmed either way — not part of
+ *   2. TTS `pace` config field: still unconfirmed either way — not part of
  *      the minimal documented contract, but nothing in production evidence
  *      suggests it's wrong either (unlike `model`/`output_audio_bitrate`,
  *      now fixed — see the TTS notes above), and it's needed for the
  *      configurable speaking rate feature, so left unchanged.
- *   4. TTS WS path: by analogy with STT's confirmed endpoint bug, Sarvam may
- *      also require a dedicated realtime path (e.g.
- *      `/text-to-speech-realtime/ws`) distinct from `/text-to-speech/ws` for
- *      `bulbul:v3`. Still an unconfirmed hypothesis, not evidence — nothing
- *      in production has named an unsupported model/endpoint for TTS the
- *      way it did for STT.
+ *   3. STT `session.begin`/`session.end` control messages: `normalizeSttMessage`
+ *      doesn't special-case either kind today — both fall through to a
+ *      logged, harmless `{type:"unknown"}` event. Not believed to be a bug
+ *      (nothing in this runtime currently needs to react to either), but
+ *      flagged here since it's untested against a real payload.
  * Every incoming message is parsed defensively (`normalizeSttMessage` /
  * `normalizeTtsMessage`) against multiple plausible shapes rather than
  * assuming one is correct, and an unrecognized shape is surfaced as a
@@ -319,11 +338,33 @@ export async function connectSarvamStt(opts: ConnectSttOptions): Promise<SttSess
 
   socket.addEventListener("message", (ev) => {
     if (typeof ev.data !== "string") return; // binary frames from this endpoint are not expected inbound
+    let parsed: unknown;
     try {
-      opts.onEvent(normalizeSttMessage(JSON.parse(ev.data)));
+      parsed = JSON.parse(ev.data);
     } catch {
       opts.onEvent({ type: "unknown", raw: ev.data });
+      return;
     }
+    // TEMPORARY DIAGNOSTIC (production incident: STT connects and accepts
+    // audio with no error, but never produces a single transcript — this
+    // traces every inbound wire message's shape so a "connected but silent"
+    // call is distinguishable from "never received a recognizable event".
+    // Safe fields only: never the full transcript text, just whether one is
+    // present and how long it is.
+    const msg =
+      typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {};
+    const eventType = String(msg["type"] ?? msg["event"] ?? "unknown");
+    const data = (msg["data"] as Record<string, unknown> | undefined) ?? msg;
+    const transcript = data["transcript"];
+    console.info("stt:event_received", {
+      eventType,
+      hasTranscript: typeof transcript === "string",
+      transcriptLength: typeof transcript === "string" ? transcript.length : null,
+      isError: eventType === "error",
+      errorCode: typeof data["code"] === "number" ? data["code"] : null,
+      errorMessage: eventType === "error" ? (extractErrorDetail(msg) ?? null) : null,
+    });
+    opts.onEvent(normalizeSttMessage(parsed));
   });
   socket.addEventListener("close", (ev) => {
     opts.onEvent({ type: "closed", code: ev.code, reason: ev.reason });
@@ -332,9 +373,38 @@ export async function connectSarvamStt(opts: ConnectSttOptions): Promise<SttSess
     opts.onEvent({ type: "error", message: "Speech recognition connection error" });
   });
 
+  let audioFrameSequence = 0;
+
   return {
     sendAudioFrame(data: Uint8Array) {
-      if (socket.readyState === WebSocket.OPEN) socket.send(data);
+      if (socket.readyState !== WebSocket.OPEN) return;
+      audioFrameSequence += 1;
+      // FIX (production incident: STT connects and accepts query params
+      // fine, but never produces a single transcript for audio that is
+      // clearly arriving — this file previously sent the raw Uint8Array as
+      // a BINARY WebSocket frame with no JSON envelope at all. The current
+      // realtime protocol expects a JSON **text** frame:
+      // {"event":"audio_input","audio":"<base64>"} — this was flagged,
+      // unconfirmed, in this file's very first module doc before any live
+      // test, and is now directly confirmed. The bytes themselves are
+      // unchanged (still Vobiz's raw mulaw/8kHz, decoded once in
+      // vobiz-media-bridge.server.ts) — only the transport wrapping here
+      // changes; no resampling or re-encoding of the audio itself.
+      const audioBase64 = Buffer.from(data).toString("base64");
+      const payload = { event: "audio_input", audio: audioBase64 };
+      // TEMPORARY DIAGNOSTIC — never logs the base64 audio itself, only its
+      // length and the frame's known encoding/sample-rate metadata.
+      const bytesPerSample = opts.encoding === "linear16" ? 2 : 1;
+      console.info("stt:audio_sent", {
+        base64Length: audioBase64.length,
+        byteLength: data.length,
+        durationMs: Math.round((data.length / bytesPerSample / opts.sampleRateHz) * 1000),
+        sequence: audioFrameSequence,
+        sampleRateHz: opts.sampleRateHz,
+        encoding: opts.encoding,
+        event: payload.event,
+      });
+      socket.send(JSON.stringify(payload));
     },
     close() {
       if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)
