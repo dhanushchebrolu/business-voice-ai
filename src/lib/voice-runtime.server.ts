@@ -772,7 +772,11 @@ function onSttEvent(session: Session, event: SttEvent) {
       log("language_detected", session, { language: event.language });
       break;
     case "error":
-      log("stt_error", session, { message: event.message });
+      // event.raw is Sarvam's own inbound error payload (never our outgoing
+      // API key, which is only ever sent as a WS auth subprotocol) — safe
+      // to log in full so a rejection's real detail is never silently
+      // reduced to the generic fallback message.
+      log("stt_error", session, { message: event.message, raw: event.raw });
       break;
     case "closed":
       log("stt_disconnected", session, { code: event.code, reason: event.reason });
@@ -791,7 +795,11 @@ function onTtsEvent(session: Session, event: TtsEvent) {
       break;
     }
     case "error":
-      log("tts_error", session, { message: event.message });
+      // event.raw is Sarvam's own inbound error payload (never our outgoing
+      // API key, which is only ever sent as a WS auth subprotocol) — safe
+      // to log in full so a rejection's real detail is never silently
+      // reduced to the generic fallback message.
+      log("tts_error", session, { message: event.message, raw: event.raw });
       break;
     case "closed":
       log("tts_disconnected", session, { code: event.code, reason: event.reason });

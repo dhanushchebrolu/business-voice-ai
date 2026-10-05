@@ -4,12 +4,38 @@
  * Speech-to-text: `saaras:v3-realtime` streaming API.
  * Text-to-speech: `bulbul:v3` streaming API.
  *
- * VERIFICATION NOTE (re-checked, still unresolved — see docs/voice-pipeline-testing.md):
- * this sandbox's network egress cannot reach docs.sarvam.ai or any other
- * documentation host directly (confirmed again on a second pass: WebFetch
- * to docs.sarvam.ai, docs.pipecat.ai, docs.slng.ai, and a personal blog all
- * returned EGRESS_BLOCKED). WebSearch itself works (routed differently) and
- * a third-party community Rust SDK (github.com/skundu42/sarvam-rs) was
+ * STT ENDPOINT — CONFIRMED BY PRODUCTION (no longer speculative): a live
+ * call against `/speech-to-text/ws` with `model=saaras:v3-realtime` was
+ * rejected by Sarvam's own server with close code 4000, reason "Invalid
+ * model 'saaras:v3-realtime'. Supported models: 'saarika...'" — proving
+ * `/speech-to-text/ws` is the batch/legacy endpoint (saarika:* models
+ * only), not the realtime one. This exact gap had been flagged, unconfirmed,
+ * below before any live test (sourced from the skundu42/sarvam-rs community
+ * SDK, which builds a distinct `/speech-to-text-realtime/ws` path
+ * specifically for `saaras:v3-realtime`) — production confirmed it. Fixed:
+ * STT now connects to `/speech-to-text-realtime/ws`, same model, same query
+ * params, unchanged otherwise.
+ *
+ * TTS — NOT YET CONFIRMED either way. The same live call produced
+ * `tts_error`/`tts_disconnected` too, but both observed TTS error strings
+ * are this file's own hardcoded fallback text (normalizeTtsMessage's
+ * `kind === "error"` branch, and the WS-level `error` listener) — meaning
+ * Sarvam's actual rejection detail, if any, was being discarded rather than
+ * surfaced. `normalizeSttMessage`/`normalizeTtsMessage` now check a wider
+ * set of plausible error-detail field names and pass through the raw
+ * payload on an `error` event, so the next live call will show Sarvam's
+ * real TTS message instead of the generic fallback. Do not change the TTS
+ * endpoint or the `target_language_code` config field speculatively (see
+ * "NOT CONFIRMED" item 4 below) until that live message is seen — unlike
+ * STT, nothing currently proves which part of the TTS config is wrong.
+ *
+ * VERIFICATION NOTE (re-checked, still unresolved for everything below this
+ * line — see docs/voice-pipeline-testing.md): this sandbox's network egress
+ * cannot reach docs.sarvam.ai or any other documentation host directly
+ * (confirmed again on a second pass: WebFetch to docs.sarvam.ai,
+ * docs.pipecat.ai, docs.slng.ai, and a personal blog all returned
+ * EGRESS_BLOCKED). WebSearch itself works (routed differently) and a
+ * third-party community Rust SDK (github.com/skundu42/sarvam-rs) was
  * reachable via raw.githubusercontent.com — neither is Sarvam's own primary
  * documentation, so nothing below is "confirmed"; it is the most specific,
  * sourced information obtainable without a live SARVAM_API_KEY call.
@@ -21,29 +47,29 @@
  *     subprotocol — the one auth-attachment method available to a browser-
  *     compatible `WebSocket` constructor, which Node's global also is).
  *
- * NOT CONFIRMED — specific, actionable leads for the first live test
- * (highest-value diagnostic: if STT connects but never emits a single
- * transcript event for audio that is clearly being sent, check these in
- * order):
- *   1. STT WS path: this file uses `/speech-to-text/ws`. The
- *      skundu42/sarvam-rs SDK's `stt_realtime_ws.rs` instead builds
- *      `/speech-to-text-realtime/ws` specifically for `saaras:v3-realtime`
- *      — a dedicated endpoint for the realtime model, distinct from
- *      whatever `/speech-to-text/ws` actually serves.
- *   2. STT audio transport: this file sends raw binary frames
+ * NOT CONFIRMED — specific, actionable leads (highest-value diagnostic: if
+ * STT connects but never emits a single transcript event for audio that is
+ * clearly being sent, check these in order):
+ *   1. STT audio transport: this file sends raw binary frames
  *      (`socket.send(data)` on a `Uint8Array`). The same SDK instead
  *      base64-encodes each chunk and sends a JSON **text** frame:
  *      `{"event":"audio_input","audio":"<base64>"}`. If real audio frames
  *      produce zero STT events, this is the first thing to try.
- *   3. STT query param casing: this file sends `language-code`/
+ *   2. STT query param casing: this file sends `language-code`/
  *      `sample-rate` (hyphenated). Two sources disagree here — a WebSearch
  *      summary of Sarvam's own docs also said hyphenated `language-code`,
  *      but the Rust SDK's query-building code uses `language_code`/
  *      `sample_rate` (underscored). Not resolved either way.
- *   4. TTS config field name: this file sends `target_language_code`
+ *   3. TTS config field name: this file sends `target_language_code`
  *      (matching a WebSearch summary of Sarvam's TTS docs). The Rust SDK's
  *      `WsConfigData` struct instead uses `language_code`. Also not
- *      resolved.
+ *      resolved — see the TTS note above for why this is not being
+ *      speculatively changed yet.
+ *   4. TTS WS path: by analogy with STT's confirmed bug, Sarvam may also
+ *      require a dedicated realtime path (e.g. `/text-to-speech-realtime/ws`)
+ *      distinct from `/text-to-speech/ws` for `bulbul:v3`. This is an
+ *      unconfirmed hypothesis, not evidence — nothing in production has
+ *      named an unsupported model/endpoint for TTS the way it did for STT.
  * Every incoming message is parsed defensively (`normalizeSttMessage` /
  * `normalizeTtsMessage`) against multiple plausible shapes rather than
  * assuming one is correct, and an unrecognized shape is surfaced as a
@@ -60,7 +86,7 @@
  * "bulbul:v3") were not part of that change and remain as they were.
  */
 
-const STT_WS_URL = "wss://api.sarvam.ai/speech-to-text/ws";
+const STT_WS_URL = "wss://api.sarvam.ai/speech-to-text-realtime/ws";
 const TTS_WS_URL = "wss://api.sarvam.ai/text-to-speech/ws";
 
 export const SARVAM_REALTIME_MODELS = {
@@ -88,6 +114,33 @@ export class SarvamRealtimeError extends Error {
     super(message);
     this.code = code;
   }
+}
+
+/**
+ * Extracts a human-readable error detail from a Sarvam error frame, trying
+ * several plausible field names rather than assuming `message` — added
+ * after production proved `normalizeTtsMessage`'s old `message`-only check
+ * was silently discarding Sarvam's actual rejection text for TTS (the
+ * observed "Speech synthesis error" was this file's own generic fallback,
+ * not anything Sarvam sent). Never reads from the outgoing auth
+ * subprotocol/API key — this only inspects an inbound server payload.
+ */
+function extractErrorDetail(msg: Record<string, unknown>): string | undefined {
+  const data = (msg["data"] as Record<string, unknown> | undefined) ?? msg;
+  for (const source of [data, msg]) {
+    for (const key of [
+      "message",
+      "error",
+      "detail",
+      "reason",
+      "error_message",
+      "error_description",
+    ]) {
+      const value = source[key];
+      if (typeof value === "string" && value) return value;
+    }
+  }
+  return undefined;
 }
 
 const CONNECT_TIMEOUT_MS = 8_000;
@@ -146,7 +199,7 @@ export type SttEvent =
   | { type: "speech_start" }
   | { type: "speech_end" }
   | { type: "language_detected"; language: string }
-  | { type: "error"; message: string }
+  | { type: "error"; message: string; raw?: unknown }
   | { type: "closed"; code: number; reason: string }
   | { type: "unknown"; raw: unknown };
 
@@ -163,7 +216,7 @@ export interface ConnectSttOptions {
   onEvent: (event: SttEvent) => void;
 }
 
-function normalizeSttMessage(raw: unknown): SttEvent {
+export function normalizeSttMessage(raw: unknown): SttEvent {
   if (typeof raw !== "object" || raw === null) return { type: "unknown", raw };
   const msg = raw as Record<string, unknown>;
   const kind = String(msg["type"] ?? msg["event"] ?? "");
@@ -172,9 +225,8 @@ function normalizeSttMessage(raw: unknown): SttEvent {
   if (kind === "vad.speech_end" || kind === "speech_end") return { type: "speech_end" };
 
   if (kind === "error") {
-    const message =
-      typeof msg["message"] === "string" ? (msg["message"] as string) : "Speech recognition error";
-    return { type: "error", message };
+    const message = extractErrorDetail(msg) ?? "Speech recognition error";
+    return { type: "error", message, raw: msg };
   }
 
   // Two plausible transcript envelopes: a flat {type:"transcript", transcript, is_final}
@@ -246,7 +298,7 @@ export async function connectSarvamStt(opts: ConnectSttOptions): Promise<SttSess
 export type TtsEvent =
   | { type: "audio"; data: Uint8Array }
   | { type: "flushed" }
-  | { type: "error"; message: string }
+  | { type: "error"; message: string; raw?: unknown }
   | { type: "closed"; code: number; reason: string }
   | { type: "unknown"; raw: unknown };
 
@@ -268,7 +320,7 @@ export interface ConnectTtsOptions {
   onEvent: (event: TtsEvent) => void;
 }
 
-function normalizeTtsMessage(raw: unknown): TtsEvent {
+export function normalizeTtsMessage(raw: unknown): TtsEvent {
   if (typeof raw !== "object" || raw === null) return { type: "unknown", raw };
   const msg = raw as Record<string, unknown>;
   const kind = String(msg["type"] ?? msg["event"] ?? "");
@@ -286,9 +338,8 @@ function normalizeTtsMessage(raw: unknown): TtsEvent {
   }
   if (kind === "flushed" || kind === "flush_ack") return { type: "flushed" };
   if (kind === "error") {
-    const message =
-      typeof msg["message"] === "string" ? (msg["message"] as string) : "Speech synthesis error";
-    return { type: "error", message };
+    const message = extractErrorDetail(msg) ?? "Speech synthesis error";
+    return { type: "error", message, raw: msg };
   }
   return { type: "unknown", raw };
 }
