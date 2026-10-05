@@ -510,6 +510,77 @@ describe(
   },
 );
 
+describe('normalizeSttMessage transcript extraction — production incident round 4: STT connected, accepted audio, and Sarvam returned session.begin/vad.speech_start/transcript.partial/vad.speech_end/transcript.final with no error, but the caller still heard only the greeting. Root cause: this parser looked for the transcript under a field named `transcript`; the current realtime protocol\'s field is `text` (confirmed by https://docs.sarvam.ai/api/api-guides-tutorials/speech-to-text/realtime-streaming — message.text). Since there was no dedicated transcript.partial/transcript.final branch — only a generic "does a transcript field exist" check — every transcript event was misclassified as {type:"unknown"}, so handleUserUtterance (the only path to the LLM/spoken reply) was never invoked.', () => {
+  test("extracts text from a representative transcript.partial event using the current realtime field name", () => {
+    const event = normalizeSttMessage({ event: "transcript.partial", text: "book a table for" });
+    assert.deepEqual(event, {
+      type: "partial_transcript",
+      text: "book a table for",
+      language: undefined,
+    });
+  });
+
+  test("extracts text from a representative transcript.final event using the current realtime field name", () => {
+    const event = normalizeSttMessage({
+      event: "transcript.final",
+      text: "book a table for two at seven",
+      language_code: "en-IN",
+    });
+    assert.deepEqual(event, {
+      type: "final_transcript",
+      text: "book a table for two at seven",
+      language: "en-IN",
+    });
+  });
+
+  test("transcript.final is recognized as final via the event kind even without an explicit is_final flag", () => {
+    const event = normalizeSttMessage({ event: "transcript.final", text: "done" });
+    assert.equal(event.type, "final_transcript");
+  });
+
+  test("transcript.partial is never mistaken for final", () => {
+    const event = normalizeSttMessage({ event: "transcript.partial", text: "still talk" });
+    assert.equal(event.type, "partial_transcript");
+  });
+
+  test("still falls back to the legacy `transcript` field when `text` is absent — no past-confirmed shape is broken by preferring `text`", () => {
+    const event = normalizeSttMessage({
+      type: "final_transcript",
+      transcript: "legacy shape still works",
+    });
+    assert.equal(event.type, "final_transcript");
+    assert.equal((event as { text: string }).text, "legacy shape still works");
+  });
+
+  test("prefers `text` over `transcript` when both happen to be present", () => {
+    const event = normalizeSttMessage({
+      event: "transcript.final",
+      text: "current field wins",
+      transcript: "stale field must be ignored",
+    });
+    assert.equal((event as { text: string }).text, "current field wins");
+  });
+
+  test("an empty-string transcript is extracted safely as an empty final_transcript, not thrown or misclassified as unknown", () => {
+    const event = normalizeSttMessage({ event: "transcript.final", text: "" });
+    assert.deepEqual(event, { type: "final_transcript", text: "", language: undefined });
+  });
+
+  test("a transcript event with neither `text` nor `transcript` present falls through to unknown, not a crash", () => {
+    const event = normalizeSttMessage({ event: "transcript.final" });
+    assert.equal(event.type, "unknown");
+  });
+
+  test("also works when text is nested under a data wrapper, matching this file's own two-plausible-envelopes convention", () => {
+    const event = normalizeSttMessage({
+      event: "transcript.partial",
+      data: { text: "nested shape", is_final: false },
+    });
+    assert.equal(event.type, "partial_transcript");
+    assert.equal((event as { text: string }).text, "nested shape");
+  });
+});
+
 function captureInfoLogs() {
   const calls: { event: string; data: unknown }[] = [];
   const original = console.info;
@@ -793,7 +864,7 @@ describe("stt:audio_sent / stt:event_received — temporary per-send/per-receive
     assert.equal(data["durationMs"], 20);
   });
 
-  test("stt:event_received logs transcript presence/length but never the transcript text itself", async () => {
+  test('stt:event_received logs textPresent/textLength for the current realtime "text" field, but never the transcript text itself', async () => {
     const logs = captureSttInfoLogs();
     process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
     try {
@@ -809,7 +880,7 @@ describe("stt:audio_sent / stt:event_received — temporary per-send/per-receive
         socket.simulateOpen();
         await connectPromise;
         socket.simulateMessage(
-          JSON.stringify({ type: "final_transcript", transcript: "a secret caller said this" }),
+          JSON.stringify({ event: "transcript.final", text: "a secret caller said this" }),
         );
       });
     } finally {
@@ -819,12 +890,55 @@ describe("stt:audio_sent / stt:event_received — temporary per-send/per-receive
     const entry = logs.calls.find((c) => c.event === "stt:event_received");
     assert.ok(entry, "expected stt:event_received to fire");
     const data = entry!.data as Record<string, unknown>;
-    assert.equal(data["hasTranscript"], true);
-    assert.equal(data["transcriptLength"], "a secret caller said this".length);
+    assert.equal(data["eventType"], "transcript.final");
+    assert.equal(data["textPresent"], true);
+    assert.equal(data["textLength"], "a secret caller said this".length);
+    assert.equal(data["extractedTextPresent"], true);
+    assert.equal(
+      data["transcriptFieldPresent"],
+      false,
+      "no `transcript` field was sent on this message",
+    );
     assert.equal(data["isError"], false);
+    assert.deepEqual(data["topLevelKeys"], ["event", "text"]);
+    assert.deepEqual(data["dataKeys"], ["event", "text"]);
 
     const serialized = JSON.stringify(logs.calls);
     assert.doesNotMatch(serialized, /a secret caller said this/);
+  });
+
+  test("stt:event_received reports transcriptFieldPresent (but not textPresent) for the legacy `transcript` field, while extractedTextPresent still succeeds via the fallback", async () => {
+    const logs = captureSttInfoLogs();
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    try {
+      await withFakeWebSocket(async () => {
+        const { connectSarvamStt } = await import("./sarvam-realtime.server.ts");
+        const connectPromise = connectSarvamStt({
+          language: "hi-IN",
+          sampleRateHz: 8000,
+          encoding: "mulaw",
+          onEvent: () => {},
+        });
+        const socket = FakeWebSocket.instances[0]!;
+        socket.simulateOpen();
+        await connectPromise;
+        socket.simulateMessage(
+          JSON.stringify({ type: "final_transcript", transcript: "legacy shape" }),
+        );
+      });
+    } finally {
+      logs.restore();
+    }
+
+    const entry = logs.calls.find((c) => c.event === "stt:event_received");
+    assert.ok(entry);
+    const data = entry!.data as Record<string, unknown>;
+    assert.equal(data["textPresent"], false);
+    assert.equal(data["transcriptFieldPresent"], true);
+    assert.equal(data["extractedTextPresent"], true, "the transcript fallback must still work");
+
+    const serialized = JSON.stringify(logs.calls);
+    assert.doesNotMatch(serialized, /legacy shape/);
   });
 
   test("stt:event_received surfaces an error's code/message safely when the wire event is an error", async () => {

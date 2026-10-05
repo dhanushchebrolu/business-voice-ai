@@ -104,6 +104,25 @@
  * outbound audio frame and inbound wire message without ever logging the
  * base64 audio or the transcript text itself.
  *
+ * STT TRANSCRIPT FIELD NAME — CONFIRMED BY PRODUCTION (round 4, after audio
+ * transport was fixed and confirmed working: session.begin, vad.speech_start,
+ * multiple transcript.partial, vad.speech_end, and transcript.final all
+ * arrive with no error — but the caller still heard only the greeting, then
+ * silence). Root cause: this file looked for the transcript text under a
+ * field named `transcript`; the current realtime protocol's field is `text`
+ * (confirmed by https://docs.sarvam.ai/api/api-guides-tutorials/speech-to-text/realtime-streaming
+ * — `message.text`, read directly off the parsed message, same object as
+ * `message.event`). Since the transcript branch in `normalizeSttMessage` has
+ * no dedicated `kind === "transcript.partial"/"transcript.final"` case of
+ * its own — it fires only via the generic "does a transcript field exist"
+ * check — every transcript.partial/transcript.final message was
+ * misclassified as `{type:"unknown"}`, so `handleUserUtterance`
+ * (voice-runtime.server.ts's only path to the LLM and a spoken reply) was
+ * never invoked, for any call, regardless of what the caller said. Fixed:
+ * `data["text"] ?? data["transcript"]`, preferring the confirmed-correct
+ * field and keeping `transcript` only as a fallback for the legacy,
+ * non-realtime shape this file no longer connects to.
+ *
  * VERIFICATION NOTE (re-checked, still unresolved for everything below this
  * line — see docs/voice-pipeline-testing.md): this sandbox's network egress
  * cannot reach docs.sarvam.ai or any other documentation host directly
@@ -300,12 +319,16 @@ export function normalizeSttMessage(raw: unknown): SttEvent {
     return { type: "error", message, raw: msg };
   }
 
-  // Two plausible transcript envelopes: a flat {type:"transcript", transcript, is_final}
-  // and a nested {type:"data", data:{transcript, is_final|metrics}} (the shape confirmed
-  // for Sarvam's legacy, non-realtime streaming API — kept as a fallback since the
-  // realtime envelope could not be independently confirmed).
+  // `text` is the current realtime protocol's field name for transcript.partial/
+  // transcript.final (confirmed by official docs: message.text, read directly off
+  // the top-level parsed message — https://docs.sarvam.ai/api/api-guides-tutorials/
+  // speech-to-text/realtime-streaming). `transcript` is kept as a fallback for
+  // Sarvam's legacy, non-realtime streaming API shape, which this file's own
+  // STT_WS_URL no longer talks to but which a future shape change could plausibly
+  // revert toward — see STT TRANSCRIPT FIELD NAME in this file's module doc for why
+  // `text` was wrong to omit.
   const data = (msg["data"] as Record<string, unknown> | undefined) ?? msg;
-  const transcript = data["transcript"];
+  const transcript = data["text"] ?? data["transcript"];
   if (typeof transcript === "string") {
     const isFinal =
       Boolean(data["is_final"] ?? msg["is_final"]) ||
@@ -346,20 +369,29 @@ export async function connectSarvamStt(opts: ConnectSttOptions): Promise<SttSess
       return;
     }
     // TEMPORARY DIAGNOSTIC (production incident: STT connects and accepts
-    // audio with no error, but never produces a single transcript — this
-    // traces every inbound wire message's shape so a "connected but silent"
-    // call is distinguishable from "never received a recognizable event".
-    // Safe fields only: never the full transcript text, just whether one is
-    // present and how long it is.
+    // audio with no error, and Sarvam returns session.begin/vad.speech_start/
+    // transcript.partial/vad.speech_end/transcript.final — but every
+    // transcript event's text was being silently dropped, because this file
+    // checked a field named `transcript` while the current realtime
+    // protocol's field is `text`. textPresent/transcriptFieldPresent are
+    // reported SEPARATELY (unlike the old hasTranscript field, which only
+    // checked the wrong one) specifically so a shape regression on either
+    // field name is visible, not just whichever one happens to be checked
+    // this round. Safe fields only: never the transcript text itself, just
+    // whether one is present and how long it is.
     const msg =
       typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : {};
     const eventType = String(msg["type"] ?? msg["event"] ?? "unknown");
     const data = (msg["data"] as Record<string, unknown> | undefined) ?? msg;
-    const transcript = data["transcript"];
+    const extractedText = data["text"] ?? data["transcript"];
     console.info("stt:event_received", {
       eventType,
-      hasTranscript: typeof transcript === "string",
-      transcriptLength: typeof transcript === "string" ? transcript.length : null,
+      topLevelKeys: Object.keys(msg),
+      textPresent: typeof data["text"] === "string",
+      textLength: typeof data["text"] === "string" ? (data["text"] as string).length : null,
+      dataKeys: Object.keys(data),
+      transcriptFieldPresent: typeof data["transcript"] === "string",
+      extractedTextPresent: typeof extractedText === "string",
       isError: eventType === "error",
       errorCode: typeof data["code"] === "number" ? data["code"] : null,
       errorMessage: eventType === "error" ? (extractErrorDetail(msg) ?? null) : null,

@@ -298,6 +298,72 @@ describe("silence/timeout handling — wiring", () => {
 });
 
 /**
+ * stt:transcript_final_forwarded (production incident round 4): once
+ * sarvam-realtime.server.ts's transcript field-name bug was fixed
+ * (`text` vs `transcript`), final_transcript events finally reach
+ * onSttEvent — but nothing here proved they actually reach
+ * handleUserUtterance, the only path to the LLM and a spoken reply, versus
+ * being silently dropped by the duplicate-delivery guard or an empty
+ * string. Source-scanned since onSttEvent/handleUserUtterance aren't
+ * exported (same convention as the silence-timer suite above).
+ */
+describe("stt:transcript_final_forwarded — verifies a final transcript actually reaches handleUserUtterance (the LLM/reply path), not just that an event fired", () => {
+  function finalTranscriptCaseBody() {
+    const caseStart = src.indexOf('case "final_transcript": {');
+    const caseEnd = src.indexOf('case "language_detected"', caseStart);
+    return src.slice(caseStart, caseEnd);
+  }
+
+  test("the duplicate-delivery guard logs forwarded:false with reason duplicate_within_window and never reaches handleUserUtterance", () => {
+    const body = finalTranscriptCaseBody();
+    const dupGuardIdx = body.indexOf('log("duplicate_final_transcript_ignored"');
+    const dupBreakIdx = body.indexOf("break;", dupGuardIdx);
+    const dupSection = body.slice(dupGuardIdx, dupBreakIdx);
+    assert.match(dupSection, /log\("stt:transcript_final_forwarded", session, \{/);
+    assert.match(dupSection, /forwarded: false/);
+    assert.match(dupSection, /reason: "duplicate_within_window"/);
+    assert.doesNotMatch(dupSection, /handleUserUtterance/);
+  });
+
+  test("an empty event.text logs forwarded:false with reason empty_text and never reaches handleUserUtterance", () => {
+    const body = finalTranscriptCaseBody();
+    const emptyGuardIdx = body.indexOf("if (!event.text) {");
+    assert.ok(emptyGuardIdx > -1, "expected an explicit empty-text guard");
+    const emptyBreakIdx = body.indexOf("break;", emptyGuardIdx);
+    const emptySection = body.slice(emptyGuardIdx, emptyBreakIdx);
+    assert.match(emptySection, /log\("stt:transcript_final_forwarded", session, \{/);
+    assert.match(emptySection, /forwarded: false/);
+    assert.match(emptySection, /reason: "empty_text"/);
+    assert.doesNotMatch(emptySection, /handleUserUtterance/);
+  });
+
+  test("a valid, non-duplicate, non-empty transcript logs forwarded:true with reason ok and then calls handleUserUtterance with that same text", () => {
+    const body = finalTranscriptCaseBody();
+    const okLogIdx = body.lastIndexOf('log("stt:transcript_final_forwarded", session, {');
+    const callIdx = body.indexOf("void handleUserUtterance(session, event.text);", okLogIdx);
+    assert.ok(callIdx > okLogIdx, "the forwarded:true log must precede the actual call");
+    const okSection = body.slice(okLogIdx, callIdx);
+    assert.match(okSection, /forwarded: true/);
+    assert.match(okSection, /reason: "ok"/);
+  });
+
+  test("none of the three stt:transcript_final_forwarded log calls include the transcript text itself — only textLength", () => {
+    const body = finalTranscriptCaseBody();
+    const logCalls =
+      body.match(/log\("stt:transcript_final_forwarded", session, \{[\s\S]*?\}\);/g) ?? [];
+    assert.equal(logCalls.length, 3, "expected exactly three call sites: duplicate, empty, and ok");
+    for (const call of logCalls) {
+      assert.match(call, /textLength:/);
+      assert.doesNotMatch(
+        call,
+        /\btext:/,
+        "must never pass the transcript text itself, only its length",
+      );
+    }
+  });
+});
+
+/**
  * Format-verification diagnostic (production incident follow-up): once
  * Sarvam's TTS config schema bugs were fixed (model moved to a WS URL query
  * param, the bogus output_audio_bitrate field removed), nothing in this

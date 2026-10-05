@@ -764,11 +764,36 @@ function onSttEvent(session: Session, event: SttEvent) {
         Date.now() - last.at < DUPLICATE_TRANSCRIPT_WINDOW_MS
       ) {
         log("duplicate_final_transcript_ignored", session, { text: event.text });
+        log("stt:transcript_final_forwarded", session, {
+          textLength: event.text.length,
+          forwarded: false,
+          reason: "duplicate_within_window",
+        });
         break;
       }
       session.lastFinalTranscript = { text: event.text, at: Date.now() };
 
       log("transcript_final", session, { language: event.language });
+
+      // An empty extracted transcript (e.g. a malformed or genuinely empty
+      // final_transcript event) must not reach the LLM — pushing an empty
+      // user turn would waste a round trip on nothing the caller actually
+      // said. This is also what makes the diagnostic below's `reason` field
+      // meaningful rather than always "ok".
+      if (!event.text) {
+        log("stt:transcript_final_forwarded", session, {
+          textLength: 0,
+          forwarded: false,
+          reason: "empty_text",
+        });
+        break;
+      }
+
+      log("stt:transcript_final_forwarded", session, {
+        textLength: event.text.length,
+        forwarded: true,
+        reason: "ok",
+      });
       void handleUserUtterance(session, event.text);
       break;
     }
