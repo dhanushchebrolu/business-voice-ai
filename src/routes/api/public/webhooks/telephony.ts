@@ -453,10 +453,35 @@ export async function processTelephonyEvent(
   // already active, so startRuntimeSession's own idempotency makes that a
   // fast no-op rather than another 15s wait — it was never part of this
   // deadlock.
+  //
+  // THIRD PRODUCTION INCIDENT (Vobiz, calls dc249661-.../328a707b):
+  // identical root cause, different provider. Vobiz's `<Stream>` Voice XML
+  // opens its own media WebSocket the same way Exotel's Voicebot Applet
+  // does — immediately, with no wait for a separate "answered" signal (see
+  // vobiz-media-route.server.ts / vobiz-call-session-durable-object.server.ts)
+  // — and Vobiz has no "answered" CallStatus at all (Twilio/Plivo-family
+  // semantics; see vobiz-provider.ts's STATUS_MAP). The answer_url's own
+  // first callback — the one that creates this call_logs row — carries no
+  // CallStatus field, so normalizeWebhookEvent falls back to "initiated"
+  // exactly like Exotel's documented case above. Without this provider
+  // also being in this condition, routeToAgentRuntime (and therefore the
+  // bridge's one and only onInboundFrame registration, in
+  // startRuntimeSession) never fires until a later, separate Vobiz status
+  // webhook reports "in-progress" — which, as the dc249661 incident
+  // already showed (ringing -> completed with no intermediate status),
+  // is not guaranteed to ever arrive before the call ends. Confirmed in
+  // production: media session accepted, media frames correctly parsed
+  // (vobiz_bridge:media_event_shape), but every frame dropped with no
+  // listener (vobiz_bridge:media_frame_dropped_no_listener) because
+  // nothing had called onInboundFrame yet. Same safety reasoning as
+  // Exotel's case: routeToAgentRuntime/getVobizCallSessionStub are already
+  // fully Vobiz-aware (telephony-runtime.ts), and startRuntimeSession's
+  // idempotency makes firing this twice (here, and again later if a real
+  // "in-progress" event does arrive) a safe no-op.
   if (
     event.status === "answered" ||
     event.status === "in_progress" ||
-    (providerId === "exotel" && event.status === "initiated")
+    ((providerId === "exotel" || providerId === "vobiz") && event.status === "initiated")
   ) {
     runInBackground(
       routeToAgentRuntime({

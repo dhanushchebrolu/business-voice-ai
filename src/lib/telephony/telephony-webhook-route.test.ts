@@ -284,22 +284,24 @@ describe("telephony webhook route — billing/entitlement reuse (requirement E: 
   });
 });
 
-describe("telephony webhook route — Exotel 'initiated' runtime handoff (production incident: media session accepted, but the caller never heard Klyro's greeting)", () => {
-  test("the new-call insert path routes to the agent runtime on 'initiated' too, but ONLY when providerId is exotel — not for every provider", () => {
+describe("telephony webhook route — Exotel/Vobiz 'initiated' runtime handoff (production incidents: media session accepted, but the caller never heard Klyro's greeting / inbound audio dropped with no listener)", () => {
+  test("the new-call insert path routes to the agent runtime on 'initiated' too, but ONLY when providerId is exotel or vobiz — not for every provider", () => {
     const idx = routeSrc.indexOf("if (!gate.allowed) return;");
     const insertBranch = routeSrc.slice(idx, routeSrc.indexOf("routeToAgentRuntime({", idx));
     assert.match(insertBranch, /event\.status === "answered"/);
     assert.match(insertBranch, /event\.status === "in_progress"/);
     assert.match(
       insertBranch,
-      /providerId === "exotel"\s*&&\s*event\.status === "initiated"/,
-      "expected the 'initiated' trigger to be scoped to providerId === \"exotel\", not unconditional",
+      /\(providerId === "exotel" \|\| providerId === "vobiz"\)\s*&&\s*event\.status === "initiated"/,
+      "expected the 'initiated' trigger to be scoped to providerId exotel or vobiz, not unconditional",
     );
   });
 
   test("the 'initiated' trigger is still gated by gate.allowed (entitlement) exactly like the pre-existing 'answered'/'in_progress' trigger — it does not bypass the gate", () => {
     const gateIdx = routeSrc.indexOf("if (!gate.allowed) return;");
-    const triggerIdx = routeSrc.indexOf('providerId === "exotel" && event.status === "initiated"');
+    const triggerIdx = routeSrc.indexOf(
+      '(providerId === "exotel" || providerId === "vobiz") && event.status === "initiated"',
+    );
     assert.ok(gateIdx > -1 && triggerIdx > -1);
     assert.ok(
       gateIdx < triggerIdx,
@@ -325,15 +327,28 @@ describe("telephony webhook route — Exotel 'initiated' runtime handoff (produc
       /event\.status === "answered" \|\| event\.status === "in_progress"/,
     );
   });
+
+  test("REGRESSION (production incidents dc249661-d3d2-48f3-9391-243017527b26 / 328a707b: Vobiz's media WebSocket opens and streams audio immediately, same as Exotel's Voicebot Applet, but the first webhook event has no 'answered'/'in_progress' status for Vobiz either — see vobiz-provider.ts's STATUS_MAP, which has no 'answered' entry at all — so without this widening, routeToAgentRuntime, and therefore the bridge's only onInboundFrame registration, never fired for a short Vobiz call): providerId === \"vobiz\" is in the widened 'initiated' trigger, exactly like providerId === \"exotel\"", () => {
+    const idx = routeSrc.indexOf("if (!gate.allowed) return;");
+    const insertBranch = routeSrc.slice(idx, routeSrc.indexOf("routeToAgentRuntime({", idx));
+    assert.match(insertBranch, /providerId === "vobiz"/);
+  });
+
+  test("getVobizCallSessionStub/routeToAgentRuntime are already fully Vobiz-aware downstream of this trigger — this change only widens WHEN the call fires, not the (already-correct, already-shipped) routing logic itself", () => {
+    // Scoped to this file's own route source: telephony-runtime.ts's own
+    // Vobiz-awareness is covered by telephony-runtime.test.ts.
+    assert.match(routeSrc, /import \{ routeToAgentRuntime, terminateAgentRuntime \} from/);
+  });
 });
 
-describe("telephony webhook route — Exotel Passthru/Voicebot deadlock fix (production incident: media session accepted... no — call goes silent and hangs up within a few seconds, before any WebSocket ever arrives)", () => {
+describe("telephony webhook route — Exotel/Vobiz Passthru/Voicebot deadlock fix (production incident: media session accepted... no — call goes silent and hangs up within a few seconds, before any WebSocket ever arrives)", () => {
   test("the 'initiated'/'answered'/'in_progress' runtime-handoff call is backgrounded (runInBackground), never awaited directly — awaiting it here re-creates the exact deadlock this fix resolves", () => {
     const idx = routeSrc.indexOf("if (!gate.allowed) return;");
     const triggerIdx = routeSrc.indexOf(
-      'providerId === "exotel" && event.status === "initiated"',
+      '(providerId === "exotel" || providerId === "vobiz") && event.status === "initiated"',
       idx,
     );
+    assert.ok(triggerIdx > -1);
     const callSite = routeSrc.slice(
       triggerIdx,
       routeSrc.indexOf("providerCallId: event.providerCallId,\n      }),", triggerIdx),
@@ -342,7 +357,7 @@ describe("telephony webhook route — Exotel Passthru/Voicebot deadlock fix (pro
     assert.doesNotMatch(
       callSite,
       /await routeToAgentRuntime\(/,
-      "must not synchronously await routeToAgentRuntime here — Exotel's Voicebot Applet only opens the media WebSocket this call waits on AFTER this webhook responds, so awaiting it deadlocks the response",
+      "must not synchronously await routeToAgentRuntime here — the media WebSocket this call waits on only opens AFTER this webhook responds, so awaiting it deadlocks the response",
     );
   });
 
