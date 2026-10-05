@@ -253,11 +253,16 @@ describe('TTS config message — production incident: the WS handshake and tts_c
       );
       assert.equal(configMessage.data["speaker"], "ritu");
       assert.equal(configMessage.data["output_audio_codec"], "mulaw");
-      assert.equal(configMessage.data["speech_sample_rate"], 8000);
+      assert.equal(
+        configMessage.data["speech_sample_rate"],
+        "8000",
+        "speech_sample_rate must be a STRING — a current working Sarvam implementation sends it as a string, not a number",
+      );
+      assert.equal(typeof configMessage.data["speech_sample_rate"], "string");
     });
   });
 
-  test("connectSarvamTts sends speech_sample_rate matching opts.outputSampleRateHz exactly — never a hardcoded value", async () => {
+  test("connectSarvamTts sends speech_sample_rate as a string matching opts.outputSampleRateHz exactly — never a hardcoded value", async () => {
     process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
     await withFakeWebSocket(async () => {
       const { connectSarvamTts } = await import("./sarvam-realtime.server.ts");
@@ -277,9 +282,10 @@ describe('TTS config message — production incident: the WS handshake and tts_c
       };
       assert.equal(
         configMessage.data["speech_sample_rate"],
-        16000,
-        "speech_sample_rate must track whatever the bridge actually declared, not a hardcoded 8000 — a non-Vobiz bridge with a different rate must not silently get 8000",
+        "16000",
+        "speech_sample_rate must track whatever the bridge actually declared (as a string), not a hardcoded 8000 — a non-Vobiz bridge with a different rate must not silently get 8000",
       );
+      assert.equal(typeof configMessage.data["speech_sample_rate"], "string");
     });
   });
 
@@ -329,7 +335,89 @@ describe('TTS config message — production incident: the WS handshake and tts_c
           output_audio_codec: configMessage.data["output_audio_codec"],
           speech_sample_rate: configMessage.data["speech_sample_rate"],
         },
-        { output_audio_codec: "mulaw", speech_sample_rate: 8000 },
+        { output_audio_codec: "mulaw", speech_sample_rate: "8000" },
+      );
+    });
+  });
+});
+
+describe('TTS text/flush wire messages — production incident round 3: the 422 "Input parameters has to be a valid dictionary" persisted unchanged across two config-only fixes, revealing the real bug was never the config — sendText() sent {"type":"convert",...}, but the current protocol\'s text-input type is "text"; "convert" was never a recognized type', () => {
+  async function connectAndGetSession() {
+    const { connectSarvamTts } = await import("./sarvam-realtime.server.ts");
+    const connectPromise = connectSarvamTts({
+      voiceId: "ritu",
+      language: "hi-IN",
+      pace: 1,
+      outputCodec: "mulaw",
+      outputSampleRateHz: 8000,
+      onEvent: () => {},
+    });
+    const socket = FakeWebSocket.instances[0]!;
+    socket.simulateOpen();
+    const session = await connectPromise;
+    return { socket, session };
+  }
+
+  const originalKey = process.env["SARVAM_API_KEY"];
+  afterEach(() => {
+    if (originalKey === undefined) delete process.env["SARVAM_API_KEY"];
+    else process.env["SARVAM_API_KEY"] = originalKey;
+  });
+
+  test('sendText sends {"type":"text","data":{"text":...}} — never "convert"', async () => {
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    await withFakeWebSocket(async () => {
+      const { socket, session } = await connectAndGetSession();
+      session.sendText("Hello, thanks for calling.");
+
+      assert.equal(socket.sent.length, 2, "config, then this one text message");
+      const textMessage = JSON.parse(socket.sent[1] as string) as {
+        type: string;
+        data: Record<string, unknown>;
+      };
+      assert.equal(textMessage.type, "text", 'must be "text", not "convert"');
+      assert.equal(typeof textMessage.data, "object");
+      assert.ok(!Array.isArray(textMessage.data));
+      assert.equal(typeof textMessage.data["text"], "string");
+      assert.equal(textMessage.data["text"], "Hello, thanks for calling.");
+    });
+  });
+
+  test("sendText is valid, parseable JSON with exactly the type/data top-level keys", async () => {
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    await withFakeWebSocket(async () => {
+      const { socket, session } = await connectAndGetSession();
+      session.sendText("hi");
+      const raw = socket.sent[1] as string;
+      assert.doesNotThrow(() => JSON.parse(raw), "must be valid JSON");
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      assert.deepEqual(Object.keys(parsed).sort(), ["data", "type"]);
+      assert.deepEqual(Object.keys(parsed["data"] as object).sort(), ["text"]);
+    });
+  });
+
+  test('flush sends valid JSON {"type":"flush"} with no data field', async () => {
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    await withFakeWebSocket(async () => {
+      const { socket, session } = await connectAndGetSession();
+      session.flush();
+      assert.equal(socket.sent.length, 2, "config, then this one flush message");
+      const raw = socket.sent[1] as string;
+      assert.doesNotThrow(() => JSON.parse(raw));
+      const flushMessage = JSON.parse(raw) as Record<string, unknown>;
+      assert.deepEqual(flushMessage, { type: "flush" });
+    });
+  });
+
+  test("an empty string is never sent as a text message (sendText no-ops on falsy text, matching speak()'s per-chunk loop)", async () => {
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    await withFakeWebSocket(async () => {
+      const { socket, session } = await connectAndGetSession();
+      session.sendText("");
+      assert.equal(
+        socket.sent.length,
+        1,
+        "only the config message — sendText('') must not send anything",
       );
     });
   });
@@ -421,3 +509,128 @@ describe(
     });
   },
 );
+
+function captureInfoLogs() {
+  const calls: { event: string; data: unknown }[] = [];
+  const original = console.info;
+  console.info = (event: unknown, data?: unknown) => {
+    calls.push({ event: String(event), data });
+  };
+  return {
+    calls,
+    restore: () => {
+      console.info = original;
+    },
+  };
+}
+
+describe("tts:config_sent / tts:text_sent / tts:flush_sent — temporary per-send diagnostics (production incident: synchronous fire-and-forget sends made log order alone insufficient to tell which outbound frame a later tts_error belonged to). Safe fields only: never the API key/auth subprotocol, never audio, never more than a short preview of spoken text.", () => {
+  const originalKey = process.env["SARVAM_API_KEY"];
+  afterEach(() => {
+    if (originalKey === undefined) delete process.env["SARVAM_API_KEY"];
+    else process.env["SARVAM_API_KEY"] = originalKey;
+  });
+
+  test("tts:config_sent logs safe config shape/type info — never the raw auth subprotocol or API key", async () => {
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret-xyz987";
+    const logs = captureInfoLogs();
+    try {
+      await withFakeWebSocket(async () => {
+        const { connectSarvamTts } = await import("./sarvam-realtime.server.ts");
+        const connectPromise = connectSarvamTts({
+          voiceId: "ritu",
+          language: "hi-IN",
+          pace: 1,
+          outputCodec: "mulaw",
+          outputSampleRateHz: 8000,
+          onEvent: () => {},
+        });
+        FakeWebSocket.instances[0]!.simulateOpen();
+        await connectPromise;
+      });
+    } finally {
+      logs.restore();
+    }
+
+    const entry = logs.calls.find((c) => c.event === "tts:config_sent");
+    assert.ok(entry, "expected tts:config_sent to fire");
+    const data = entry!.data as Record<string, unknown>;
+    assert.deepEqual(data["topLevelKeys"], ["type", "data"]);
+    assert.equal(data["codec"], "mulaw");
+    assert.equal(data["sampleRateValue"], "8000");
+    assert.equal(data["sampleRateType"], "string");
+    assert.equal(data["languageCode"], "hi-IN");
+    assert.equal(data["speaker"], "ritu");
+
+    const serialized = JSON.stringify(logs.calls);
+    assert.doesNotMatch(serialized, /test-key-not-a-real-secret-xyz987/);
+    assert.doesNotMatch(serialized, /api-subscription-key/);
+  });
+
+  test("tts:text_sent logs only a length and a <=20-char preview — never the full text", async () => {
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    const longText =
+      "This sentence is deliberately much longer than twenty characters so the preview truncation is actually exercised.";
+    const logs = captureInfoLogs();
+    try {
+      await withFakeWebSocket(async () => {
+        const { connectSarvamTts } = await import("./sarvam-realtime.server.ts");
+        const connectPromise = connectSarvamTts({
+          voiceId: "ritu",
+          language: "hi-IN",
+          pace: 1,
+          outputCodec: "mulaw",
+          outputSampleRateHz: 8000,
+          onEvent: () => {},
+        });
+        FakeWebSocket.instances[0]!.simulateOpen();
+        const session = await connectPromise;
+        session.sendText(longText);
+      });
+    } finally {
+      logs.restore();
+    }
+
+    const entry = logs.calls.find((c) => c.event === "tts:text_sent");
+    assert.ok(entry, "expected tts:text_sent to fire");
+    const data = entry!.data as Record<string, unknown>;
+    assert.equal(data["textType"], "string");
+    assert.equal(data["textLength"], longText.length);
+    assert.equal(data["textPreview"], longText.slice(0, 20));
+    assert.ok((data["textPreview"] as string).length <= 20);
+
+    const serialized = JSON.stringify(logs.calls);
+    assert.doesNotMatch(
+      serialized,
+      /deliberately much longer than twenty characters/,
+      "the full transcript must never appear in logs, only the 20-char preview",
+    );
+  });
+
+  test("tts:flush_sent logs the exact safe flush shape", async () => {
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    const logs = captureInfoLogs();
+    try {
+      await withFakeWebSocket(async () => {
+        const { connectSarvamTts } = await import("./sarvam-realtime.server.ts");
+        const connectPromise = connectSarvamTts({
+          voiceId: "ritu",
+          language: "hi-IN",
+          pace: 1,
+          outputCodec: "mulaw",
+          outputSampleRateHz: 8000,
+          onEvent: () => {},
+        });
+        FakeWebSocket.instances[0]!.simulateOpen();
+        const session = await connectPromise;
+        session.flush();
+      });
+    } finally {
+      logs.restore();
+    }
+
+    const entry = logs.calls.find((c) => c.event === "tts:flush_sent");
+    assert.ok(entry, "expected tts:flush_sent to fire");
+    assert.deepEqual(entry!.data, { shape: { type: "flush" } });
+  });
+});

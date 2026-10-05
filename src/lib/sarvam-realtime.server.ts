@@ -58,9 +58,26 @@
  * the declared format next to whatever metadata Sarvam's own audio event
  * happens to carry, so a mismatch is visible after the fact — it is not
  * itself what makes the format correct; `speech_sample_rate` in the config
- * message is. If "Input parameters has to be a valid dictionary" recurs
+ * message is.
+ *
+ * TTS MESSAGE TYPE — the 422 "Input parameters has to be a valid
+ * dictionary" persisted, UNCHANGED, across both of the above fixes
+ * (`language_code`, then `speech_sample_rate`) — strong evidence the config
+ * message was never the actual problem. `sendText()` sent
+ * `{"type":"convert","data":{"text":...}}`; the current protocol's
+ * text-input message type is `"text"`, not `"convert"` — `convert` was
+ * never a recognized type at all. Fixed to `type: "text"`. Also sending
+ * `speech_sample_rate` as a STRING (`"8000"`), not a number — per a
+ * current working Sarvam implementation (user-supplied; like the fields
+ * above, not independently verifiable from this sandbox). `flush`
+ * (`{"type":"flush"}`, no `data`) was already correct and is unchanged.
+ * `tts:config_sent`/`tts:text_sent`/`tts:flush_sent` diagnostics (see
+ * connectSarvamTts) now trace every outbound frame's safe shape, since
+ * synchronous fire-and-forget sends make log *order* alone insufficient to
+ * attribute a later `tts_error` to a specific message. If the 422 recurs
  * after this fix, `tts_error`'s `raw` field (see `extractErrorDetail`
- * below) will show Sarvam's exact next rejection.
+ * below) combined with these per-send traces will show exactly which
+ * frame Sarvam rejected and why.
  *
  * VERIFICATION NOTE (re-checked, still unresolved for everything below this
  * line — see docs/voice-pipeline-testing.md): this sandbox's network egress
@@ -75,7 +92,10 @@
  *
  * CONFIRMED (converging from multiple independent sources):
  *   - TTS: `wss://api.sarvam.ai/text-to-speech/ws`, config message first,
- *     then `convert`/`flush`/`close` client message types, `bulbul:v3`.
+ *     then `text`/`flush`/`close` client message types, `bulbul:v3`. (This
+ *     file sent `convert` instead of `text` until the TTS MESSAGE TYPE fix
+ *     below — a stale, incorrect value in this very doc comment, not just
+ *     the code; the two had drifted apart.)
  *   - Auth: an `api-subscription-key` mechanism (this file uses it as a WS
  *     subprotocol — the one auth-attachment method available to a browser-
  *     compatible `WebSocket` constructor, which Node's global also is).
@@ -427,29 +447,70 @@ export async function connectSarvamTts(opts: ConnectTtsOptions): Promise<TtsSess
   // without resampling — not a connection error, just corrupted/garbled
   // audio on the call. See this file's module doc for why bitrate
   // specifically was still wrong (a compressed-codec bitrate, not a sample
-  // rate — never reintroduce output_audio_bitrate).
-  socket.send(
-    JSON.stringify({
-      type: "config",
-      data: {
-        language_code: opts.language,
-        speaker: opts.voiceId,
-        pace: Math.min(2, Math.max(0.5, opts.pace)),
-        output_audio_codec: opts.outputCodec,
-        speech_sample_rate: opts.outputSampleRateHz,
-      },
-    }),
-  );
+  // rate — never reintroduce output_audio_bitrate). speech_sample_rate is
+  // sent as a STRING, not a number — per a current working Sarvam
+  // implementation (user-supplied; not independently verifiable from this
+  // sandbox, see module doc's VERIFICATION NOTE).
+  const configPayload = {
+    type: "config",
+    data: {
+      language_code: opts.language,
+      speaker: opts.voiceId,
+      pace: Math.min(2, Math.max(0.5, opts.pace)),
+      output_audio_codec: opts.outputCodec,
+      speech_sample_rate: String(opts.outputSampleRateHz),
+    },
+  };
+  // TEMPORARY DIAGNOSTIC (production incident: Sarvam rejects the TTS
+  // session with a 422 "Input parameters has to be a valid dictionary"
+  // even after two rounds of config-only fixes — this traces every send on
+  // the wire so the next call shows the exact sequence rather than
+  // inferring it from log order, which synchronous fire-and-forget sends
+  // make unreliable. Safe fields only: never the API key/auth subprotocol,
+  // never audio, never the full transcript (text gets only a length and a
+  // ≤20-char preview — see tts:text_sent below).
+  console.info("tts:config_sent", {
+    topLevelKeys: Object.keys(configPayload),
+    dataKeys: Object.keys(configPayload.data),
+    dataValueTypes: Object.fromEntries(
+      Object.entries(configPayload.data).map(([k, v]) => [k, typeof v]),
+    ),
+    modelInUrl: url.searchParams.get("model"),
+    codec: configPayload.data.output_audio_codec,
+    sampleRateValue: configPayload.data.speech_sample_rate,
+    sampleRateType: typeof configPayload.data.speech_sample_rate,
+    languageCode: configPayload.data.language_code,
+    speaker: configPayload.data.speaker,
+    pace: configPayload.data.pace,
+  });
+  socket.send(JSON.stringify(configPayload));
 
   return {
     sendText(text: string) {
       if (!text) return;
       if (socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: "convert", data: { text } }));
+        // "text", not "convert" — per the current Sarvam realtime TTS
+        // protocol (user-supplied); "convert" was never a recognized
+        // message type, and is the leading suspect for the persistent 422
+        // that survived two unrelated config-field fixes.
+        const textPayload = { type: "text", data: { text } };
+        console.info("tts:text_sent", {
+          topLevelKeys: Object.keys(textPayload),
+          dataKeys: Object.keys(textPayload.data),
+          dataType: typeof textPayload.data,
+          textType: typeof textPayload.data.text,
+          textLength: text.length,
+          textPreview: text.slice(0, 20),
+        });
+        socket.send(JSON.stringify(textPayload));
       }
     },
     flush() {
-      if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "flush" }));
+      if (socket.readyState === WebSocket.OPEN) {
+        const flushPayload = { type: "flush" };
+        console.info("tts:flush_sent", { shape: flushPayload });
+        socket.send(JSON.stringify(flushPayload));
+      }
     },
     close() {
       if (socket.readyState === WebSocket.OPEN) {
