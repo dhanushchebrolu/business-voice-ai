@@ -112,3 +112,58 @@ describe('unresolved-call diagnostic (production incident: +918071580870 — pro
     assert.doesNotMatch(routeSrc, /calledNumberExact/);
   });
 });
+
+describe("stream_response diagnostic (production incident: media WebSocket never reached us at all — no log confirmed which XML branch this route actually returned)", () => {
+  test("logs immediately before the Stream-XML return, the only log statement on this route's success path", () => {
+    const logIdx = routeSrc.indexOf('console.info("vobiz_answer:stream_response"');
+    const returnIdx = routeSrc.indexOf("return xmlResponse(buildVobizStreamXml(wsUrl));");
+    assert.ok(logIdx > -1, "expected a vobiz_answer:stream_response log");
+    assert.ok(returnIdx > -1);
+    assert.ok(
+      logIdx < returnIdx,
+      "the diagnostic must log before returning the Stream XML, not after",
+    );
+    // There must be exactly one Stream-XML return in the whole file (the
+    // success path), and the log must sit directly before it — not before
+    // some other, earlier return.
+    assert.strictEqual(
+      (routeSrc.match(/return xmlResponse\(buildVobizStreamXml\(wsUrl\)\);/g) ?? []).length,
+      1,
+    );
+  });
+
+  test("records the HTTP method, the wsUrl Vobiz was told to connect to, and that the Stream branch was reached", () => {
+    const logIdx = routeSrc.indexOf('console.info("vobiz_answer:stream_response"');
+    assert.ok(logIdx > -1);
+    const block = routeSrc.slice(logIdx, routeSrc.indexOf("});", logIdx));
+    assert.match(block, /method: request\.method/);
+    assert.match(block, /wsUrl,/);
+    assert.match(block, /calledNumber,/);
+    assert.match(block, /streamXmlReturned: true/);
+  });
+
+  test("carries a non-sensitive per-invocation id so two answer_url deliveries for the same call (e.g. a duplicate delivery) can be told apart in logs", () => {
+    assert.match(routeSrc, /const invocationId = crypto\.randomUUID\(\)/);
+    const logIdx = routeSrc.indexOf('console.info("vobiz_answer:stream_response"');
+    const block = routeSrc.slice(logIdx, routeSrc.indexOf("});", logIdx));
+    assert.match(block, /invocationId,/);
+  });
+
+  test("never logs the webhook verify token, Vobiz signature, auth token, or any other secret", () => {
+    const logIdx = routeSrc.indexOf('console.info("vobiz_answer:stream_response"');
+    assert.ok(logIdx > -1);
+    const block = routeSrc.slice(logIdx, routeSrc.indexOf("});", logIdx));
+    assert.doesNotMatch(block, /\bheaders\b/);
+    assert.doesNotMatch(block, /authToken/);
+    assert.doesNotMatch(block, /webhookVerifyToken/);
+    assert.doesNotMatch(block, /x-vobiz-signature/i);
+    assert.doesNotMatch(block, /\bnonce\b/i);
+    assert.doesNotMatch(block, /\braw\b/);
+  });
+
+  test("does not change the actual XML generation or call flow — buildVobizStreamXml is still called with the same wsUrl immediately after", () => {
+    const logIdx = routeSrc.indexOf('console.info("vobiz_answer:stream_response"');
+    const afterLog = routeSrc.slice(routeSrc.indexOf("});", logIdx));
+    assert.match(afterLog, /^\s*\}\);\s*\n\s*return xmlResponse\(buildVobizStreamXml\(wsUrl\)\);/);
+  });
+});

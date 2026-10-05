@@ -41,6 +41,10 @@ export const Route = createFileRoute("/api/public/webhooks/vobiz-answer")({
 async function handleVobizAnswer(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const waitUntil = getRequestWaitUntil(request);
+  // Non-sensitive per-request id, logged only to distinguish two
+  // answer_url invocations for the same call (e.g. a duplicate delivery)
+  // in the stream_response diagnostic below — carries no call/account data.
+  const invocationId = crypto.randomUUID().slice(0, 8);
 
   const { getTelephonyAdapter } = await import("@/lib/telephony.server");
   const adapter = getTelephonyAdapter("vobiz");
@@ -150,6 +154,17 @@ async function handleVobizAnswer(request: Request): Promise<Response> {
   }
 
   const wsUrl = `${url.protocol === "https:" ? "wss:" : "ws:"}//${url.host}${VOBIZ_MEDIA_STREAM_PATH}`;
+  // DIAGNOSTIC (production incident: media WebSocket never reached us, no
+  // log confirmed what XML this route actually returned): the only log on
+  // this route's success path. No secret/signature/token is logged — just
+  // which branch was taken and the wsUrl Vobiz is told to connect to.
+  console.info("vobiz_answer:stream_response", {
+    method: request.method,
+    invocationId,
+    calledNumber,
+    wsUrl,
+    streamXmlReturned: true,
+  });
   return xmlResponse(buildVobizStreamXml(wsUrl));
 }
 
