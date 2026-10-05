@@ -66,6 +66,7 @@ class FakeWebSocket {
   binaryType = "blob";
   readonly url: string;
   readonly protocols: string[];
+  readonly sent: unknown[] = [];
   private readonly listeners = new Map<string, ((ev: unknown) => void)[]>();
 
   constructor(url: string, protocols: string[]) {
@@ -80,7 +81,9 @@ class FakeWebSocket {
     this.listeners.set(type, list);
   }
 
-  send(_data: unknown) {}
+  send(data: unknown) {
+    this.sent.push(data);
+  }
 
   close() {
     this.readyState = FakeWebSocket.CLOSED;
@@ -150,6 +153,100 @@ describe(
     });
   },
 );
+
+describe("STT query param names — production incident round 2: once the endpoint was fixed, Sarvam rejected the connection with \"Missing required query parameter 'language_code'.\" because this file sent the hyphenated `language-code`/`sample-rate` instead of underscored `language_code`/`sample_rate`", () => {
+  const originalKey = process.env["SARVAM_API_KEY"];
+  afterEach(() => {
+    if (originalKey === undefined) delete process.env["SARVAM_API_KEY"];
+    else process.env["SARVAM_API_KEY"] = originalKey;
+  });
+
+  test("connectSarvamStt sends language_code and sample_rate with underscores, not hyphens", async () => {
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    await withFakeWebSocket(async () => {
+      const { connectSarvamStt } = await import("./sarvam-realtime.server.ts");
+      const connectPromise = connectSarvamStt({
+        language: "te-IN",
+        sampleRateHz: 8000,
+        encoding: "mulaw",
+        onEvent: () => {},
+      });
+      const socket = FakeWebSocket.instances[0]!;
+      const url = new URL(socket.url);
+      assert.equal(url.searchParams.get("language_code"), "te-IN");
+      assert.equal(url.searchParams.get("sample_rate"), "8000");
+      assert.equal(
+        url.searchParams.has("language-code"),
+        false,
+        "the hyphenated param name production proved Sarvam rejects must not be sent",
+      );
+      assert.equal(url.searchParams.has("sample-rate"), false);
+      assert.equal(url.searchParams.get("encoding"), "mulaw");
+      socket.simulateOpen();
+      await connectPromise;
+    });
+  });
+});
+
+describe('TTS config message — production incident: the WS handshake and tts_connected succeed, but Sarvam rejects the first config message with "Input parameters has to be a valid dictionary." because this file sent `target_language_code` instead of the documented `language_code` field', () => {
+  const originalKey = process.env["SARVAM_API_KEY"];
+  afterEach(() => {
+    if (originalKey === undefined) delete process.env["SARVAM_API_KEY"];
+    else process.env["SARVAM_API_KEY"] = originalKey;
+  });
+
+  test("connectSarvamTts sends a config message using the documented language_code field, not target_language_code", async () => {
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    await withFakeWebSocket(async () => {
+      const { connectSarvamTts } = await import("./sarvam-realtime.server.ts");
+      const socket = (() => {
+        // The config send happens synchronously once openSocket's promise
+        // resolves, so simulateOpen() must fire before awaiting connect.
+        const connectPromise = connectSarvamTts({
+          voiceId: "ritu",
+          language: "hi-IN",
+          pace: 1,
+          outputCodec: "mulaw",
+          outputSampleRateHz: 8000,
+          onEvent: () => {},
+        });
+        const s = FakeWebSocket.instances[0]!;
+        s.simulateOpen();
+        return connectPromise.then(() => s);
+      })();
+      const s = await socket;
+
+      assert.equal(s.sent.length, 1, "exactly one message (config) must be sent on connect");
+      const configMessage = JSON.parse(s.sent[0] as string) as {
+        type: string;
+        data: Record<string, unknown>;
+      };
+      assert.equal(configMessage.type, "config");
+      assert.equal(typeof configMessage.data, "object");
+      assert.ok(
+        !Array.isArray(configMessage.data),
+        "data must serialize as a JSON object, not an array",
+      );
+
+      assert.equal(
+        configMessage.data["language_code"],
+        "hi-IN",
+        "must use the documented `language_code` field",
+      );
+      assert.equal(
+        "target_language_code" in configMessage.data,
+        false,
+        'the field name production proved Sarvam rejects ("Input parameters has to be a valid dictionary") must not be sent',
+      );
+      assert.equal(configMessage.data["speaker"], "ritu");
+      // Unconfirmed-but-unchanged fields: still present, not blindly
+      // stripped out without evidence they're the actual cause.
+      assert.equal(configMessage.data["model"], "bulbul:v3");
+      assert.equal(configMessage.data["output_audio_codec"], "mulaw");
+      assert.equal(configMessage.data["output_audio_bitrate"], 8000);
+    });
+  });
+});
 
 describe(
   "TTS/STT error-detail extraction — production incident: both tts_error " +

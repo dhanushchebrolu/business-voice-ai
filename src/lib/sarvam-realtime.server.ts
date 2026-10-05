@@ -4,30 +4,35 @@
  * Speech-to-text: `saaras:v3-realtime` streaming API.
  * Text-to-speech: `bulbul:v3` streaming API.
  *
- * STT ENDPOINT — CONFIRMED BY PRODUCTION (no longer speculative): a live
- * call against `/speech-to-text/ws` with `model=saaras:v3-realtime` was
- * rejected by Sarvam's own server with close code 4000, reason "Invalid
- * model 'saaras:v3-realtime'. Supported models: 'saarika...'" — proving
+ * STT ENDPOINT — CONFIRMED BY PRODUCTION: a live call against
+ * `/speech-to-text/ws` with `model=saaras:v3-realtime` was rejected by
+ * Sarvam's own server with close code 4000, reason "Invalid model
+ * 'saaras:v3-realtime'. Supported models: 'saarika...'" — proving
  * `/speech-to-text/ws` is the batch/legacy endpoint (saarika:* models
- * only), not the realtime one. This exact gap had been flagged, unconfirmed,
- * below before any live test (sourced from the skundu42/sarvam-rs community
- * SDK, which builds a distinct `/speech-to-text-realtime/ws` path
- * specifically for `saaras:v3-realtime`) — production confirmed it. Fixed:
- * STT now connects to `/speech-to-text-realtime/ws`, same model, same query
- * params, unchanged otherwise.
+ * only), not the realtime one. Fixed: STT now connects to
+ * `/speech-to-text-realtime/ws`.
  *
- * TTS — NOT YET CONFIRMED either way. The same live call produced
- * `tts_error`/`tts_disconnected` too, but both observed TTS error strings
- * are this file's own hardcoded fallback text (normalizeTtsMessage's
- * `kind === "error"` branch, and the WS-level `error` listener) — meaning
- * Sarvam's actual rejection detail, if any, was being discarded rather than
- * surfaced. `normalizeSttMessage`/`normalizeTtsMessage` now check a wider
- * set of plausible error-detail field names and pass through the raw
- * payload on an `error` event, so the next live call will show Sarvam's
- * real TTS message instead of the generic fallback. Do not change the TTS
- * endpoint or the `target_language_code` config field speculatively (see
- * "NOT CONFIRMED" item 4 below) until that live message is seen — unlike
- * STT, nothing currently proves which part of the TTS config is wrong.
+ * STT QUERY PARAM NAMES — CONFIRMED BY PRODUCTION (round 2): the realtime
+ * endpoint then rejected the connection with "Missing required query
+ * parameter 'language_code'." — this file was sending `language-code`
+ * (hyphenated). Fixed to `language_code` (underscore); `sample-rate` was
+ * the identical bug and is now `sample_rate` too. `model` and `encoding`
+ * were already spelled correctly. `vad-signals` remains unconfirmed either
+ * way (no production evidence yet) and was left untouched.
+ *
+ * TTS CONFIG FIELD NAME — CONFIRMED BY PRODUCTION: the WS handshake and
+ * `tts_connected` succeed, but the server rejects the first `config`
+ * message with "Input parameters has to be a valid dictionary." This file
+ * was sending `target_language_code`; the documented config contract is
+ * `{"type":"config","data":{"language_code":"...","speaker":"..."}}`.
+ * Fixed to `language_code`. `model`/`pace`/`output_audio_codec`/
+ * `output_audio_bitrate` are NOT part of that minimal documented contract
+ * and are unconfirmed either way — nothing in production evidence pins the
+ * rejection on them specifically rather than the field-name mismatch, and
+ * they're needed for correct 8kHz mulaw output, so they were left
+ * unchanged rather than guessed at. If "Input parameters has to be a valid
+ * dictionary" recurs after this fix, `tts_error`'s `raw` field (see
+ * `extractErrorDetail` below) will show Sarvam's exact next rejection.
  *
  * VERIFICATION NOTE (re-checked, still unresolved for everything below this
  * line — see docs/voice-pipeline-testing.md): this sandbox's network egress
@@ -55,21 +60,19 @@
  *      base64-encodes each chunk and sends a JSON **text** frame:
  *      `{"event":"audio_input","audio":"<base64>"}`. If real audio frames
  *      produce zero STT events, this is the first thing to try.
- *   2. STT query param casing: this file sends `language-code`/
- *      `sample-rate` (hyphenated). Two sources disagree here — a WebSearch
- *      summary of Sarvam's own docs also said hyphenated `language-code`,
- *      but the Rust SDK's query-building code uses `language_code`/
- *      `sample_rate` (underscored). Not resolved either way.
- *   3. TTS config field name: this file sends `target_language_code`
- *      (matching a WebSearch summary of Sarvam's TTS docs). The Rust SDK's
- *      `WsConfigData` struct instead uses `language_code`. Also not
- *      resolved — see the TTS note above for why this is not being
- *      speculatively changed yet.
- *   4. TTS WS path: by analogy with STT's confirmed bug, Sarvam may also
- *      require a dedicated realtime path (e.g. `/text-to-speech-realtime/ws`)
- *      distinct from `/text-to-speech/ws` for `bulbul:v3`. This is an
- *      unconfirmed hypothesis, not evidence — nothing in production has
- *      named an unsupported model/endpoint for TTS the way it did for STT.
+ *   2. STT `vad-signals` query param casing: unlike `language_code`/
+ *      `sample_rate` (confirmed underscored by production), this one has no
+ *      direct evidence either way and was deliberately left as-is.
+ *   3. TTS config fields beyond `language_code`/`speaker`: `model`, `pace`,
+ *      `output_audio_codec`, `output_audio_bitrate` are not part of the
+ *      minimal documented config contract — see the TTS note above for why
+ *      they were left unchanged rather than guessed at.
+ *   4. TTS WS path: by analogy with STT's confirmed endpoint bug, Sarvam may
+ *      also require a dedicated realtime path (e.g.
+ *      `/text-to-speech-realtime/ws`) distinct from `/text-to-speech/ws` for
+ *      `bulbul:v3`. Still an unconfirmed hypothesis, not evidence — nothing
+ *      in production has named an unsupported model/endpoint for TTS the
+ *      way it did for STT.
  * Every incoming message is parsed defensively (`normalizeSttMessage` /
  * `normalizeTtsMessage`) against multiple plausible shapes rather than
  * assuming one is correct, and an unrecognized shape is surfaced as a
@@ -257,8 +260,8 @@ export function normalizeSttMessage(raw: unknown): SttEvent {
 export async function connectSarvamStt(opts: ConnectSttOptions): Promise<SttSession> {
   const url = new URL(STT_WS_URL);
   url.searchParams.set("model", SARVAM_REALTIME_MODELS.stt);
-  url.searchParams.set("language-code", opts.language);
-  url.searchParams.set("sample-rate", String(opts.sampleRateHz));
+  url.searchParams.set("language_code", opts.language);
+  url.searchParams.set("sample_rate", String(opts.sampleRateHz));
   url.searchParams.set("encoding", opts.encoding);
   // Server-driven VAD (the documented default) — no manual speech_start/end framing needed.
   url.searchParams.set("vad-signals", "true");
@@ -367,7 +370,7 @@ export async function connectSarvamTts(opts: ConnectTtsOptions): Promise<TtsSess
     JSON.stringify({
       type: "config",
       data: {
-        target_language_code: opts.language,
+        language_code: opts.language,
         speaker: opts.voiceId,
         model: SARVAM_REALTIME_MODELS.tts,
         pace: Math.min(2, Math.max(0.5, opts.pace)),
