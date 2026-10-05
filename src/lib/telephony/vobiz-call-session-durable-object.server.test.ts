@@ -422,6 +422,62 @@ describe("VobizCallSessionDurableObject", () => {
     }
   });
 
+  test("REGRESSION (production incident: a legitimate Vobiz call was rejected with 'Media session token present but invalid or mismatched' — Klyro never mints a token for Vobiz, so any top-level 'token'/'session_token' field in Vobiz's own start event is Vobiz's own, unrelated data): an arbitrary token field on the start event never triggers a token-mismatch rejection", async () => {
+    const originalPair = (globalThis as Record<string, unknown>)["WebSocketPair"];
+    FakeWebSocketPair.instances = [];
+    (globalThis as Record<string, unknown>)["WebSocketPair"] = FakeWebSocketPair;
+    const logs = captureLogs();
+    try {
+      const doInstance = new VobizCallSessionDurableObject(fakeState("v-token-regression"), {});
+      await doInstance.fetch(
+        new Request("https://vobiz-call-session/api/public/media-stream/vobiz", {
+          headers: { upgrade: "websocket" },
+        }),
+      );
+      const serverSocket = FakeWebSocketPair.instances[0]![0];
+
+      // An arbitrary, garbage-shaped "token" — nothing close to
+      // mintMediaSessionToken's `${base64url}.${hmac}` format. If this were
+      // still being read and verified (the pre-fix behavior), it would
+      // deterministically fail verifyMediaSessionToken and reject with
+      // "Media session token present but invalid or mismatched...".
+      serverSocket.emit("message", {
+        data: JSON.stringify({
+          event: "start",
+          callId: "vobiz-call-token-regression",
+          token: "vobiz-own-unrelated-stream-token-xyz",
+        }),
+      } as never);
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      assert.ok(serverSocket.closedWith, "expected the socket to be closed, not left open");
+      // No live Postgres/Supabase instance is available in this environment
+      // (documented, repo-wide limitation) — authorizeMediaSession's
+      // call_logs lookup itself can't succeed here, so this exercises
+      // whichever of the two paths that limitation produces: either a
+      // clean reject() (vobiz_call_session_do:media_rejected) with a
+      // "No known call..." reason, or the DB call throwing, caught by
+      // media_validation_crashed (same safety net the BUGFIX regression
+      // test above this one already exercises/documents). The actual
+      // call_logs-lookup success path remains a NEEDS LIVE TEST item.
+      // What THIS test proves, true under either path: the token field is
+      // never read or validated at all now — no log anywhere carries the
+      // old, exact rejection phrase authorizeMediaSession only ever
+      // produces from its token-mismatch branch. (Not a blanket "token"
+      // text search: an unrelated Supabase/auth error in the crash path
+      // could legitimately mention "token" for its own reasons and would
+      // be a false failure here.)
+      const allLoggedText = JSON.stringify(logs.calls);
+      assert.doesNotMatch(allLoggedText, /Media session token present but invalid or mismatched/);
+    } finally {
+      logs.restore();
+      if (originalPair === undefined)
+        delete (globalThis as Record<string, unknown>)["WebSocketPair"];
+      else (globalThis as Record<string, unknown>)["WebSocketPair"] = originalPair;
+    }
+  });
+
   test("DIAGNOSTIC: a bridge that never arrives logs start_runtime_received then start_runtime_no_bridge, never a raw secret/payload value", async () => {
     const doInstance = new VobizCallSessionDurableObject(fakeState("vdiag-no-bridge"), {});
     const logs = captureLogs();
@@ -470,10 +526,7 @@ describe("Vobiz callId correlation is delegated to the shared module (same produ
       src,
       /import \{ authorizeMediaSession, maskCallSid \} from "\.\/media-session-authorization\.server\.ts";/,
     );
-    assert.match(
-      src,
-      /const auth = await authorizeMediaSession\("vobiz", callId, optionalToken\);/,
-    );
+    assert.match(src, /const auth = await authorizeMediaSession\("vobiz", callId, undefined\);/);
   });
 
   test("no independent call_logs lookup/retry loop remains in this file", () => {
@@ -493,5 +546,11 @@ describe("Vobiz callId correlation is delegated to the shared module (same produ
     assert.doesNotMatch(src, /ExotelMediaBridge/);
     assert.doesNotMatch(src, /authorizeExotelMediaSession/);
     assert.doesNotMatch(src, /EXOTEL_MEDIA_STREAM_PATH/);
+  });
+
+  test("media-session token fix (production incident): no longer extracts a 'token'/'session_token' field from the Vobiz start event, and passes undefined to authorizeMediaSession instead", () => {
+    assert.doesNotMatch(src, /firstDefinedString\(msg, \["token", "session_token"\]\)/);
+    assert.doesNotMatch(src, /optionalToken/);
+    assert.match(src, /authorizeMediaSession\("vobiz", callId, undefined\)/);
   });
 });

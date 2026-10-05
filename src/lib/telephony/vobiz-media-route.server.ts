@@ -111,11 +111,24 @@ export async function handleVobizMediaUpgrade(request: Request): Promise<Respons
     pending = [];
     const callId = firstDefinedString(msg, ["callId", "call_id", "CallId", "CallUUID"]);
     const streamId = firstDefinedString(msg, ["streamId", "stream_id", "StreamId"]);
-    const optionalToken = firstDefinedString(msg, ["token", "session_token"]);
 
     if (!callId) return reject("Missing callId on start event");
 
-    const auth = await authorizeMediaSession("vobiz", callId, optionalToken);
+    // No optional token is ever read here, unlike Exotel's equivalent path:
+    // Klyro never mints a media-session token for Vobiz (mintMediaSessionToken
+    // is only ever called from exotel.media-token.ts, and buildVobizStreamXml
+    // embeds nothing but the bare wss:// URL — no custom parameter Vobiz
+    // could echo back). Production incident: Vobiz's own "start" message
+    // apparently carries a top-level field this code previously mistook for
+    // Klyro's own HMAC-signed token (same key names as Exotel's, inherited
+    // from that flow without the corresponding mint-and-embed half); since
+    // it was never minted by Klyro, verifyMediaSessionToken deterministically
+    // rejected it, failing an otherwise fully legitimate, correctly
+    // call_logs-authorized Vobiz call. The callId -> call_logs cross-check
+    // and entitlement gate below remain the mandatory, unweakened baseline —
+    // this only removes a check that could never legitimately pass for
+    // Vobiz in the first place.
+    const auth = await authorizeMediaSession("vobiz", callId, undefined);
     if (!auth.ok) return reject(auth.reason);
 
     if (!claimVobizMediaSession(callId))

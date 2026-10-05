@@ -256,7 +256,6 @@ export class VobizCallSessionDurableObject {
     // protocol in this codebase.
     const callId = firstDefinedString(msg, ["callId", "call_id", "CallId", "CallUUID"]);
     const streamId = firstDefinedString(msg, ["streamId", "stream_id", "StreamId"]);
-    const optionalToken = firstDefinedString(msg, ["token", "session_token"]);
 
     const reject = (reason: string): null => {
       console.error("vobiz_call_session_do:media_rejected", { reason });
@@ -270,11 +269,20 @@ export class VobizCallSessionDurableObject {
 
     if (!callId) return reject("Missing callId on start event");
 
-    // The actual callId -> call_logs correlation, retry, status, token and
-    // entitlement checks all live in the shared module also used by
+    // The actual callId -> call_logs correlation, status and entitlement
+    // checks all live in the shared module also used by
     // vobiz-media-route.server.ts (the local-dev fallback path) — see that
-    // module's doc for why sharing this matters.
-    const auth = await authorizeMediaSession("vobiz", callId, optionalToken);
+    // module's doc for why sharing this matters. No optional token is read
+    // here (unlike Exotel's equivalent path): Klyro never mints a
+    // media-session token for Vobiz (mintMediaSessionToken is only ever
+    // called from exotel.media-token.ts; buildVobizStreamXml embeds nothing
+    // but the bare wss:// URL), so a top-level "token"/"session_token" field
+    // in Vobiz's own "start" message can only ever be Vobiz's own,
+    // unrelated data — reading it as Klyro's HMAC-signed token was
+    // deterministically rejecting otherwise fully legitimate, correctly
+    // call_logs-authorized calls (production incident). The callId lookup
+    // and entitlement gate below remain the mandatory, unweakened baseline.
+    const auth = await authorizeMediaSession("vobiz", callId, undefined);
     if (!auth.ok) return reject(auth.reason);
 
     if (!this.claim(callId))
