@@ -90,6 +90,22 @@ export const CALL_SESSION_COORDINATOR_NAME = "exotel-call-session-coordinator";
 export function getVobizCallSessionStub(): DurableObjectStub | null {
   const env = getCloudflareEnv();
   const namespace = env?.VOBIZ_CALL_SESSION;
+  // TEMPORARY DIAGNOSTIC (production incident: a WebSocket-upgrade request
+  // for a call fell back to the non-DO path — src/server.ts's own
+  // "server:vobiz_ws_routing_decision" log — while this function, called
+  // moments later from the SAME call's /internal/start-runtime RPC,
+  // resolved the binding fine). This function reads the binding via
+  // globalThis.__env__ (Nitro's own mechanism — see this file's module
+  // doc); src/server.ts reads it as a direct fetch(request, env, ctx)
+  // parameter instead. Logging the same shape here lets the two
+  // acquisition paths be compared directly for the same call. Only
+  // booleans/counts — never the env object's contents or a secret.
+  console.info("telephony:vobiz_call_session_stub_lookup", {
+    hasEnv: Boolean(env),
+    envKeyCount: env ? Object.keys(env).length : null,
+    hasVobizCallSessionBinding: Boolean(namespace),
+    hasCallSessionBinding: Boolean(env?.CALL_SESSION),
+  });
   if (!namespace) return null;
   return namespace.get(namespace.idFromName(VOBIZ_CALL_SESSION_COORDINATOR_NAME));
 }

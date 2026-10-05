@@ -114,6 +114,29 @@ export default {
       ) {
         const cfEnv = env as CloudflareEnv | null | undefined;
         const vobizNamespace = cfEnv?.VOBIZ_CALL_SESSION;
+        // TEMPORARY DIAGNOSTIC (production incident: the WebSocket upgrade
+        // and the /internal/start-runtime RPC for the same call used two
+        // different, disconnected Vobiz bridge registries — proven by
+        // vobiz_media_route:accepted, which only the non-DO fallback below
+        // can emit, appearing alongside vobiz_call_session_do:* logs from
+        // the SAME call's RPC path). This fires unconditionally, right at
+        // the routing decision, so the exact state of the binding at this
+        // precise moment is never inferred from which branch ran — it's
+        // logged directly. Only booleans/identifiers/request metadata —
+        // never the env object's contents, never a secret, never a token.
+        console.info("server:vobiz_ws_routing_decision", {
+          pathname: url.pathname,
+          hasEnv: Boolean(cfEnv),
+          // Count only, not names — avoids logging the names of unrelated
+          // bindings/secrets this investigation has no reason to touch.
+          envKeyCount: cfEnv ? Object.keys(cfEnv).length : null,
+          hasVobizCallSessionBinding: Boolean(vobizNamespace),
+          hasCallSessionBinding: Boolean(cfEnv?.CALL_SESSION),
+          routingPath: vobizNamespace ? "durable_object" : "fallback",
+          coordinatorName: VOBIZ_CALL_SESSION_COORDINATOR_NAME,
+          cfRay: request.headers.get("cf-ray"),
+          cfColo: (request as { cf?: { colo?: string } }).cf?.colo ?? null,
+        });
         if (vobizNamespace) {
           const stub = vobizNamespace.get(
             vobizNamespace.idFromName(VOBIZ_CALL_SESSION_COORDINATOR_NAME),
