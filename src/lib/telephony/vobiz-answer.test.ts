@@ -44,7 +44,7 @@ describe("vobiz-answer route — reuses the existing call-session pipeline, neve
   test("reuses checkTelephonyAccess (the one entitlement gate every telephony path shares) rather than a parallel authorization rule", () => {
     assert.match(
       routeSrc,
-      /import \{ checkTelephonyAccess, maskPhoneNumber \} from "@\/lib\/telephony-guard\.server"/,
+      /import\s*\{\s*\n?\s*checkTelephonyAccess,\s*\n?\s*resolveActivePhoneNumberByDestination,?\s*\n?\s*\}\s*from\s*"@\/lib\/telephony-guard\.server"/,
     );
     assert.match(routeSrc, /checkTelephonyAccess\(\s*organizationId,\s*phoneNumberId,/);
   });
@@ -80,40 +80,35 @@ describe("vobiz-answer route — reuses the existing call-session pipeline, neve
     assert.match(routeSrc, /\.eq\("provider_call_id", event\.providerCallId\)/);
   });
 
-  test("inbound call resolution uses the same (e164, provider, active) lookup the shared webhook route uses — never a different rule", () => {
-    assert.match(routeSrc, /\.eq\("e164", calledNumber\)/);
-    assert.match(routeSrc, /\.eq\("provider", "vobiz"\)/);
-    assert.match(routeSrc, /\.eq\("status", "active"\)/);
+  test("inbound call resolution uses the shared resolveActivePhoneNumberByDestination helper — the same (e164, provider, active) rule the shared webhook route uses, case-insensitive on provider (see telephony-guard.server.test.ts's own regression coverage for why)", () => {
+    assert.match(
+      routeSrc,
+      /const phoneNumber = await resolveActivePhoneNumberByDestination\("vobiz", calledNumber\);/,
+    );
   });
 });
 
-describe("TEMPORARY diagnostics (production incident: +918071580870 unresolved — see vobiz-provider.test.ts for the normalization-side coverage)", () => {
-  test("logs the raw destination-field value and the normalized value, unmasked — a destination DID is not a secret", () => {
-    assert.match(routeSrc, /vobiz_answer:destination_diagnostic/);
-    assert.match(routeSrc, /rawFieldsPresent: Object\.keys\(event\.raw\)/);
-    assert.match(routeSrc, /normalizedToE164: event\.toE164 \?\? null/);
-    assert.match(routeSrc, /normalizedDestinationE164: event\.destinationE164 \?\? null/);
-  });
-
-  test("the unresolved-call diagnostic logs the exact (unmasked) queried value plus any matching phone_numbers rows regardless of provider/status", () => {
-    assert.match(routeSrc, /calledNumberExact: calledNumber/);
+describe('unresolved-call diagnostic (production incident: +918071580870 — provider stored as "Vobiz" vs. the code\'s lowercase "vobiz"; fixed via resolveActivePhoneNumberByDestination\'s case-insensitive match, see telephony-guard.server.ts/.test.ts)', () => {
+  test("logs the exact (unmasked) queried value plus any matching phone_numbers rows regardless of provider/status — a destination DID routed to a business's own line is not a secret", () => {
+    assert.match(routeSrc, /vobiz_answer:unresolved_call/);
+    assert.match(routeSrc, /calledNumber,/);
     assert.match(routeSrc, /matchingRowsForNumber/);
   });
 
-  test("the new diagnostic log blocks never reference headers, auth tokens, verify_token, or signature/nonce values — only event/payload-derived, non-secret fields", () => {
-    const diagIdx = routeSrc.indexOf('console.info("vobiz_answer:destination_diagnostic"');
+  test("the diagnostic log block never references headers, auth tokens, verify_token, or signature/nonce values — only event/payload-derived, non-secret fields", () => {
     const unresolvedIdx = routeSrc.indexOf('console.error("vobiz_answer:unresolved_call"');
-    assert.ok(diagIdx > -1 && unresolvedIdx > -1);
-    // Slice from the actual console call (not any preceding explanatory
-    // comment — those legitimately name the header/nonce fields being
-    // deliberately excluded) through its closing `});`.
-    for (const idx of [diagIdx, unresolvedIdx]) {
-      const block = routeSrc.slice(idx, routeSrc.indexOf("});", idx));
-      assert.doesNotMatch(block, /\bheaders\b/);
-      assert.doesNotMatch(block, /authToken/);
-      assert.doesNotMatch(block, /webhookVerifyToken/);
-      assert.doesNotMatch(block, /x-vobiz-signature/i);
-      assert.doesNotMatch(block, /\bnonce\b/i);
-    }
+    assert.ok(unresolvedIdx > -1);
+    const block = routeSrc.slice(unresolvedIdx, routeSrc.indexOf("});", unresolvedIdx));
+    assert.doesNotMatch(block, /\bheaders\b/);
+    assert.doesNotMatch(block, /authToken/);
+    assert.doesNotMatch(block, /webhookVerifyToken/);
+    assert.doesNotMatch(block, /x-vobiz-signature/i);
+    assert.doesNotMatch(block, /\bnonce\b/i);
+  });
+
+  test("the verbose TEMPORARY diagnostics added in commit 0ceb15f (raw-field dump, destination_diagnostic log) are gone now that the root cause is confirmed and fixed", () => {
+    assert.doesNotMatch(routeSrc, /vobiz_answer:destination_diagnostic/);
+    assert.doesNotMatch(routeSrc, /rawFieldsPresent/);
+    assert.doesNotMatch(routeSrc, /calledNumberExact/);
   });
 });

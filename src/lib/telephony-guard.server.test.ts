@@ -1,5 +1,8 @@
-import { test } from "node:test";
+import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import {
   checkCallTransition,
   maskPhoneNumber,
@@ -49,4 +52,135 @@ test("checkCallTransition: every terminal status has no outgoing transitions", (
     const r = checkCallTransition(status, "answered");
     assert.equal(r.ok, false, `${status} -> answered should be rejected`);
   }
+});
+
+describe('resolveActivePhoneNumberByDestination: production incident regression — +918071580870 provisioned with provider stored as "Vobiz" (free-text admin field, no casing validation) must still resolve against this codebase\'s lowercase-literal provider id "vobiz"', () => {
+  // No live Postgres instance is available in this environment (same
+  // documented limitation as every supabase/migrations/*.test.ts file in
+  // this repo) — checkTelephonyAccess/resolveActivePhoneNumberByDestination
+  // both resolve `supabaseAdmin` via a dynamic import, not dependency
+  // injection, so the real .ilike() query itself is a NEEDS LIVE TEST item.
+  // What this file CAN and does prove: (1) the source uses a
+  // case-insensitive match, not the exact-match that caused the incident,
+  // and (2) the matching RULE itself — mirroring Postgres ILIKE with no
+  // wildcards (a plain case-insensitive equality, which is all this call
+  // site ever passes it: a literal provider id, never a pattern) — behaves
+  // correctly for the exact real-world row this incident involves.
+
+  const guardSrc = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "telephony-guard.server.ts"),
+    "utf8",
+  );
+
+  test("the shared resolver matches provider case-insensitively (.ilike), not with the exact-match .eq that caused the incident", () => {
+    const fnStart = guardSrc.indexOf(
+      "export async function resolveActivePhoneNumberByDestination(",
+    );
+    assert.ok(fnStart > -1, "expected the shared resolver to exist in telephony-guard.server.ts");
+    const fnBody = guardSrc.slice(fnStart, guardSrc.indexOf("\n}\n", fnStart));
+    assert.match(fnBody, /\.eq\("e164", destinationE164\)/);
+    assert.match(fnBody, /\.ilike\("provider", provider\)/);
+    assert.match(fnBody, /\.eq\("status", "active"\)/);
+    assert.doesNotMatch(fnBody, /\.eq\("provider", provider\)/);
+  });
+
+  test('ILIKE-with-no-wildcards semantics (a plain case-insensitive equality — the only pattern shape this call site ever passes) resolve "Vobiz" against the query value "vobiz" for the real incident number', () => {
+    // Mirrors exactly what Postgres ILIKE does for a pattern with no
+    // special characters: a case-insensitive string comparison. The real
+    // call site never passes `%`/`_` wildcards — `provider` is always one
+    // of this codebase's own literal ids ("vobiz", "exotel", ...), never
+    // user input — so this is a faithful, if locally-reproduced, model of
+    // the production query's actual matching behavior for this row.
+    function matchesIlikeLiteral(column: string, pattern: string): boolean {
+      return column.toLowerCase() === pattern.toLowerCase();
+    }
+
+    const row = {
+      e164: "+918071580870",
+      provider: "Vobiz", // exactly as stored in production
+      status: "active",
+    };
+    const queriedDestination = "+918071580870"; // event.destinationE164, already normalized
+    const queriedProvider = "vobiz"; // the literal this codebase's call sites pass
+
+    const resolved =
+      row.e164 === queriedDestination &&
+      matchesIlikeLiteral(row.provider, queriedProvider) &&
+      row.status === "active";
+
+    assert.equal(
+      resolved,
+      true,
+      'the Vobiz row (provider stored as "Vobiz") must resolve for destination +918071580870',
+    );
+
+    // The old exact-match behavior is the one being fixed — pinned here so
+    // a future revert back to .eq would be caught by this same test file.
+    const resolvedUnderOldExactMatch =
+      row.e164 === queriedDestination &&
+      row.provider === queriedProvider && // .eq("provider", "vobiz") — case-sensitive
+      row.status === "active";
+    assert.equal(
+      resolvedUnderOldExactMatch,
+      false,
+      'confirms the OLD exact-match behavior is exactly what caused the incident — "Vobiz" !== "vobiz"',
+    );
+  });
+
+  test("case-insensitive matching is a pure widening — it cannot change the result for an already-correctly-lowercase-cased row (e.g. Exotel's own)", () => {
+    function matchesIlikeLiteral(column: string, pattern: string): boolean {
+      return column.toLowerCase() === pattern.toLowerCase();
+    }
+    const exotelRow = { provider: "exotel" };
+    assert.equal(matchesIlikeLiteral(exotelRow.provider, "exotel"), true);
+    assert.equal(
+      exotelRow.provider === "exotel", // what .eq("provider", "exotel") would have matched
+      matchesIlikeLiteral(exotelRow.provider, "exotel"), // what .ilike(...) now matches
+      "exact-match and case-insensitive-match must agree for an already-lowercase row — Exotel's behavior is unchanged",
+    );
+  });
+
+  test("both callers (vobiz-answer.ts and telephony.ts) use the shared resolver — the fix is centralized, not duplicated", () => {
+    const vobizAnswerSrc = readFileSync(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        "..",
+        "routes",
+        "api",
+        "public",
+        "webhooks",
+        "vobiz-answer.ts",
+      ),
+      "utf8",
+    );
+    const telephonySrc = readFileSync(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        "..",
+        "routes",
+        "api",
+        "public",
+        "webhooks",
+        "telephony.ts",
+      ),
+      "utf8",
+    );
+    assert.match(vobizAnswerSrc, /resolveActivePhoneNumberByDestination\("vobiz", calledNumber\)/);
+    assert.match(
+      telephonySrc,
+      /resolveActivePhoneNumberByDestination\(providerId, destinationNumber\)/,
+    );
+    // Neither file inlines its own .eq("provider", ...) phone_numbers
+    // match anymore for destination resolution (call_logs lookups for
+    // outbound correlation are untouched — a separate, unconfirmed-as-
+    // affected concern).
+    assert.doesNotMatch(
+      vobizAnswerSrc,
+      /\.from\("phone_numbers"\)\s*\n\s*\.select\("id, organization_id"\)/,
+    );
+    assert.doesNotMatch(
+      telephonySrc,
+      /\.from\("phone_numbers"\)\s*\n\s*\.select\("\*"\)\s*\n\s*\.eq\("e164", destinationNumber\)\s*\n\s*\.eq\("provider", providerId\)/,
+    );
+  });
 });

@@ -53,10 +53,11 @@ describe("telephony webhook route — signature verification and idempotency (un
 });
 
 describe("telephony webhook route — inbound tenant resolution (unchanged from pre-Sarvam)", () => {
-  test("resolves the organization from Klyro's own phone_numbers table, keyed on the called number + active status", () => {
-    assert.match(routeSrc, /from\("phone_numbers"\)/);
-    assert.match(routeSrc, /\.eq\("e164", destinationNumber\)/);
-    assert.match(routeSrc, /\.eq\("status", "active"\)/);
+  test("resolves the organization via the shared resolveActivePhoneNumberByDestination helper, keyed on the called number + active status (see telephony-guard.server.test.ts for that helper's own matching-rule coverage)", () => {
+    assert.match(
+      routeSrc,
+      /const phoneNumber = await resolveActivePhoneNumberByDestination\(providerId, destinationNumber\);/,
+    );
   });
 
   test("there is exactly one call_logs INSERT in the whole route, and it only fires on the inbound (not outbound) new-call path", () => {
@@ -128,17 +129,15 @@ describe("telephony webhook route — outbound tenant correlation (Sarvam additi
 });
 
 describe("telephony webhook route — reassignment safety (Phase 5 §8)", () => {
-  test("the inbound phone_numbers lookup is scoped by provider, not just e164+active", () => {
-    const idx = routeSrc.indexOf('.from("phone_numbers")');
-    assert.ok(idx > -1);
-    const block = routeSrc.slice(idx, idx + 250);
-    assert.match(block, /\.eq\("e164", destinationNumber\)/);
-    assert.match(block, /\.eq\("provider", providerId\)/);
-    assert.match(block, /\.eq\("status", "active"\)/);
+  test("the inbound phone_numbers lookup is scoped by provider, not just e164+active (delegated to resolveActivePhoneNumberByDestination, which takes providerId as its first argument)", () => {
+    assert.match(
+      routeSrc,
+      /resolveActivePhoneNumberByDestination\(providerId, destinationNumber\)/,
+    );
   });
 
   test("a mismatched event.providerDeploymentId vs phoneNumber.provider_deployment_id is dropped before checkTelephonyAccess/call_logs insert are ever reached", () => {
-    const lookupIdx = routeSrc.indexOf('.from("phone_numbers")');
+    const lookupIdx = routeSrc.indexOf("resolveActivePhoneNumberByDestination(providerId");
     const mismatchIdx = routeSrc.indexOf("telephony:webhook_stale_deployment_mismatch");
     const gateIdx = routeSrc.indexOf("checkTelephonyAccess(phoneNumber.organization_id");
     const insertIdx = routeSrc.indexOf('.from("call_logs")\n    .insert(');
@@ -267,11 +266,12 @@ describe("telephony webhook route — billing/entitlement reuse (requirement E: 
   test("still imports and calls the exact existing telephony-guard.server functions, not a parallel implementation", () => {
     assert.match(
       routeSrc,
-      /import\s*\{\s*\n?\s*checkCallTransition,\s*\n?\s*checkTelephonyAccess,\s*\n?\s*finalizeCallBilling,\s*\n?\s*maskPhoneNumber,\s*\n?\s*TERMINAL_CALL_STATUSES,?\s*\n?\s*\}\s*from\s*"@\/lib\/telephony-guard\.server"/,
+      /import\s*\{\s*\n?\s*checkCallTransition,\s*\n?\s*checkTelephonyAccess,\s*\n?\s*finalizeCallBilling,\s*\n?\s*maskPhoneNumber,\s*\n?\s*resolveActivePhoneNumberByDestination,\s*\n?\s*TERMINAL_CALL_STATUSES,?\s*\n?\s*\}\s*from\s*"@\/lib\/telephony-guard\.server"/,
     );
     assert.match(routeSrc, /checkTelephonyAccess\(/);
     assert.match(routeSrc, /checkCallTransition\(/);
     assert.match(routeSrc, /finalizeCallBilling\(/);
+    assert.match(routeSrc, /resolveActivePhoneNumberByDestination\(/);
   });
 
   test("finalizeCallBilling is only ever invoked once a status is confirmed terminal via the shared TERMINAL_CALL_STATUSES list", () => {

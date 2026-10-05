@@ -31,6 +31,46 @@ export function maskPhoneNumber(e164: string | null | undefined): string {
   return "*".repeat(digitsOnly.length - 4) + digitsOnly.slice(-4);
 }
 
+/**
+ * Resolves the active phone_numbers row for a provider's destination
+ * E.164, matching `provider` case-insensitively.
+ *
+ * Why case-insensitive: `phone_numbers.provider` is free text (no CHECK
+ * constraint — see the Phase D telephony migration; the column's own
+ * DEFAULT is the lowercase literal 'sarvam'), and every call site across
+ * this codebase that filters by provider — telephony, payments, calendar,
+ * messaging — compares against a lowercase literal ("vobiz", "exotel",
+ * "sarvam", "google", "razorpay", "whatsapp", "instagram"). Nothing
+ * validates or normalizes casing where a number is provisioned (the admin
+ * "Provision a number" dialog's Provider field is free text), so a number
+ * provisioned with provider stored as "Vobiz" silently matched none of
+ * this codebase's `.eq("provider", "vobiz")` lookups — a confirmed
+ * production incident (+918071580870 reaching vobiz-answer.ts/
+ * telephony.ts with a correctly-normalized destination number, but
+ * `vobiz_answer:unresolved_call`/`telephony:webhook_unknown_number`
+ * regardless). Centralized here, the one shared module both
+ * vobiz-answer.ts and telephony.ts already import from for exactly this
+ * kind of cross-call-site rule, rather than fixed independently in each.
+ *
+ * Case-insensitive matching cannot change the result for any row whose
+ * provider is already stored in the canonical lowercase form (Exotel's
+ * own rows included) — it only widens what also matches, never narrows.
+ */
+export async function resolveActivePhoneNumberByDestination(
+  provider: string,
+  destinationE164: string,
+): Promise<PhoneNumberRow | null> {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const { data } = await supabaseAdmin
+    .from("phone_numbers")
+    .select("*")
+    .eq("e164", destinationE164)
+    .ilike("provider", provider)
+    .eq("status", "active")
+    .maybeSingle();
+  return data ?? null;
+}
+
 /* ------------------------------------------------------------------ */
 /* Entitlement gate (spec §5)                                          */
 /* ------------------------------------------------------------------ */

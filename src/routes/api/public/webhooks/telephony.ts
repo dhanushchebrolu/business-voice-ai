@@ -4,6 +4,7 @@ import {
   checkTelephonyAccess,
   finalizeCallBilling,
   maskPhoneNumber,
+  resolveActivePhoneNumberByDestination,
   TERMINAL_CALL_STATUSES,
 } from "@/lib/telephony-guard.server";
 import { routeToAgentRuntime, terminateAgentRuntime } from "@/lib/telephony-runtime";
@@ -222,13 +223,7 @@ export async function processTelephonyEvent(
     return;
   }
 
-  const { data: phoneNumber } = await supabaseAdmin
-    .from("phone_numbers")
-    .select("*")
-    .eq("e164", destinationNumber)
-    .eq("provider", providerId)
-    .eq("status", "active")
-    .maybeSingle();
+  const phoneNumber = await resolveActivePhoneNumberByDestination(providerId, destinationNumber);
   if (!phoneNumber) {
     // Diagnostic: does ANY row exist for this exact (already-normalized)
     // e164 at all, under any provider/status? Distinguishes "genuinely no
