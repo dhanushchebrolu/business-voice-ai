@@ -59,6 +59,17 @@ import { normalizeToE164 } from "../contacts-import.ts";
  *     RecordingID/CallUUID/RecordingEndReason
  *   - Numbers: GET /inventory/numbers, POST /numbers/purchase-from-inventory
  *     {e164}, DELETE /numbers/{e164}
+ *   - The media WebSocket's "start" event nests its call/stream identifiers
+ *     one level down, inside a `start` sub-object (`start.callId`/
+ *     `start.streamId`), not flat on the message. Confirmed via
+ *     VobizFrameSerializer (vobiz-ai/Vobiz-X-Pipecat's Pipecat integration)
+ *     being a documented subclass of Pipecat's own PlivoFrameSerializer —
+ *     Vobiz's media-stream protocol is Plivo's — cross-checked against
+ *     Pipecat's official Plivo example source, which parses the identical
+ *     `data.get("start")` / `start_data.get("callId")` shape. A wrong flat-
+ *     schema assumption here previously rejected every real Vobiz call with
+ *     "Missing callId on start event" (see vobiz-media-route.server.ts and
+ *     vobiz-call-session-durable-object.server.ts).
  *
  * NOT independently confirmed (documented honestly, handled defensively):
  *   - The exact X-Vobiz-Signature-V3 HMAC formula below

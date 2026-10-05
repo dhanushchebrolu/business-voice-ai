@@ -57,6 +57,8 @@ test("Vobiz protocol simulation: full connected->start->media->media->stop seque
   });
 
   socket.emitMessage(JSON.stringify({ event: "connected" }));
+  // Flat top-level streamId — the defensive fallback shape, exercised here
+  // alongside the real nested shape in the dedicated test below.
   socket.emitMessage(JSON.stringify({ event: "start", streamId: "st-123", callId: "cu-testcall" }));
   socket.emitMessage(JSON.stringify({ event: "media", media: b64("frame-one") }));
   socket.emitMessage(JSON.stringify({ event: "media", media: b64("frame-two") }));
@@ -87,6 +89,27 @@ test("Vobiz protocol simulation: full connected->start->media->media->stop seque
 
   socket.emitMessage(JSON.stringify({ event: "stop" }));
   assert.equal(closedReason, "provider stop event");
+});
+
+test("REGRESSION (production incident: Vobiz's real start event nests streamId under start.streamId, not flat): a start event with the real nested shape updates the bridge's streamId", () => {
+  const socket = new FakeVobizSocket();
+  const bridge = new VobizMediaBridge(socket, "placeholder", "cu-testcall");
+
+  socket.emitMessage(
+    JSON.stringify({
+      event: "start",
+      sequenceNumber: "1",
+      start: { streamId: "st-nested-456", callId: "cu-testcall", tracks: ["inbound"] },
+    }),
+  );
+
+  bridge.sendOutboundFrame({ data: new TextEncoder().encode("assistant-audio"), timestampMs: 0 });
+  const sentPlayAudio = JSON.parse(socket.sent.at(-1)!) as { streamId: string };
+  assert.equal(
+    sentPlayAudio.streamId,
+    "st-nested-456",
+    "expected the nested start.streamId to be read, not just the top-level fallback",
+  );
 });
 
 test("a malformed media frame (invalid base64) is dropped, not thrown, and never reaches onInboundFrame", () => {

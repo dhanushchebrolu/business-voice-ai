@@ -7,8 +7,13 @@ import { releaseVobizMediaSession } from "./vobiz-media-registry.server.ts";
  * runtime programs against.
  *
  * Protocol (see vobiz-provider.ts's module doc for sourcing/confidence):
- * inbound JSON messages carry `event: "start"|"media"|"dtmf"|"stop"`; a
- * `start` event's `mediaFormat` field (e.g. `["audio/x-mulaw", 8000]`)
+ * inbound JSON messages carry `event: "start"|"media"|"dtmf"|"stop"`; the
+ * `start` event's call/stream identifiers are nested one level down, inside
+ * a `start` sub-object (`start.callId`/`start.streamId` — confirmed via
+ * VobizFrameSerializer being a documented subclass of Pipecat's
+ * PlivoFrameSerializer, which parses the identical Plivo-protocol shape; a
+ * production incident where this was wrongly assumed flat is what surfaced
+ * this). A `start` event's `mediaFormat` field (e.g. `["audio/x-mulaw", 8000]`)
  * names the negotiated codec, defaulting to 8kHz mu-law — the exact format
  * requested via the `contentType="audio/x-mulaw;rate=8000"` attribute on
  * the `<Stream>` Voice XML element Klyro returns from the answer route, so
@@ -114,7 +119,19 @@ export class VobizMediaBridge implements AudioMediaBridge {
         console.info("vobiz_bridge:connected", { providerCallId: this.providerCallId });
         return;
       case "start": {
-        const sid = firstDefinedString(msg, ["streamId", "stream_id", "StreamId"]);
+        // Same nested-vs-flat fix as vobiz-media-route.server.ts /
+        // vobiz-call-session-durable-object.server.ts: Vobiz's "start"
+        // event nests streamId inside a "start" sub-object (confirmed
+        // Plivo-protocol shape — see those files' comments for the
+        // sourcing chain). Nested lookup first; flat top-level kept as a
+        // defensive fallback only.
+        const startData =
+          typeof msg["start"] === "object" && msg["start"] !== null
+            ? (msg["start"] as Record<string, unknown>)
+            : null;
+        const sid =
+          (startData && firstDefinedString(startData, ["streamId", "stream_id", "StreamId"])) ??
+          firstDefinedString(msg, ["streamId", "stream_id", "StreamId"]);
         if (sid) this.streamId = sid;
         console.info("vobiz_bridge:start", {
           providerCallId: this.providerCallId,

@@ -109,8 +109,35 @@ export async function handleVobizMediaUpgrade(request: Request): Promise<Respons
 
     settled = true;
     pending = [];
-    const callId = firstDefinedString(msg, ["callId", "call_id", "CallId", "CallUUID"]);
-    const streamId = firstDefinedString(msg, ["streamId", "stream_id", "StreamId"]);
+
+    // Production incident: "Missing callId on start event" rejected every
+    // real Vobiz call. Vobiz's own reference Pipecat integration
+    // (VobizFrameSerializer — a documented subclass of Pipecat's
+    // PlivoFrameSerializer; see vobiz-provider.ts's module doc for the
+    // sourcing chain) nests the call/stream identifiers one level down,
+    // inside a "start" sub-object (start.callId / start.streamId) — the
+    // same shape Pipecat's own official Plivo integration parses
+    // (`start_data = data.get("start"); start_data.get("callId")`). This
+    // file previously only checked top-level keys, so a real start event's
+    // callId was never found. Nested lookup is tried first now (the
+    // confirmed real shape); the flat top-level keys are kept as a
+    // defensive fallback only.
+    const startData =
+      typeof msg["start"] === "object" && msg["start"] !== null
+        ? (msg["start"] as Record<string, unknown>)
+        : null;
+    // TEMPORARY DIAGNOSTIC (same incident) — field NAMES only, never
+    // values: no audio, call id, auth token, or signature is logged here.
+    console.info("vobiz_media_route:start_event_shape", {
+      topLevelKeys: Object.keys(msg),
+      nestedStartKeys: startData ? Object.keys(startData) : null,
+    });
+    const callId =
+      (startData && firstDefinedString(startData, ["callId", "call_id", "CallId", "CallUUID"])) ??
+      firstDefinedString(msg, ["callId", "call_id", "CallId", "CallUUID"]);
+    const streamId =
+      (startData && firstDefinedString(startData, ["streamId", "stream_id", "StreamId"])) ??
+      firstDefinedString(msg, ["streamId", "stream_id", "StreamId"]);
 
     if (!callId) return reject("Missing callId on start event");
 

@@ -21,10 +21,13 @@ import type { VobizSocketLike } from "./vobiz-media-bridge.server.ts";
  * Same sandbox limitations as the Exotel suite (no live Cloudflare Workers
  * runtime, no reachable Supabase/Sarvam) — this proves the bridge-rendezvous
  * state machine, the RPC surface, and the Vobiz-specific "start" event
- * parsing (flat callId/streamId fields, unlike Exotel's nested start.call_sid)
- * using the real (not mocked) class. A real end-to-end Vobiz call against a
- * deployed Cloudflare Worker + VOBIZ_CALL_SESSION binding is still a NEEDS
- * LIVE TEST item, same as Exotel's.
+ * parsing (callId/streamId nested under start.callId/start.streamId — the
+ * confirmed real Plivo-protocol shape Vobiz's own reference Pipecat
+ * integration uses, see vobiz-provider.ts's module doc — with flat
+ * top-level keys kept as a defensive fallback only) using the real (not
+ * mocked) class. A real end-to-end Vobiz call against a deployed Cloudflare
+ * Worker + VOBIZ_CALL_SESSION binding is still a NEEDS LIVE TEST item, same
+ * as Exotel's.
  */
 
 function fakeState(name: string): DurableObjectState {
@@ -370,8 +373,10 @@ describe("VobizCallSessionDurableObject", () => {
       );
       const serverSocket = FakeWebSocketPair.instances[0]![0];
 
-      // Vobiz's "start" fields are flat on the message (callId, not a
-      // nested start.call_sid like Exotel) — see vobiz-media-route.server.ts.
+      // Flat callId is still accepted as a defensive fallback (see the
+      // "real nested start-event shape" describe block below for the
+      // confirmed real Vobiz/Plivo-protocol nested shape) — this race only
+      // needs *some* valid-looking start event, not the real shape.
       serverSocket.emit("message", {
         data: JSON.stringify({ event: "start", callId: "vobiz-call-race-1" }),
       } as never);
@@ -470,6 +475,157 @@ describe("VobizCallSessionDurableObject", () => {
       // be a false failure here.)
       const allLoggedText = JSON.stringify(logs.calls);
       assert.doesNotMatch(allLoggedText, /Media session token present but invalid or mismatched/);
+    } finally {
+      logs.restore();
+      if (originalPair === undefined)
+        delete (globalThis as Record<string, unknown>)["WebSocketPair"];
+      else (globalThis as Record<string, unknown>)["WebSocketPair"] = originalPair;
+    }
+  });
+
+  test("REGRESSION (production incident: every real Vobiz call was rejected with 'Missing callId on start event' because callId/streamId are nested under start.callId/start.streamId, not flat): a start event with the real nested shape is NOT rejected for a missing callId", async () => {
+    const originalPair = (globalThis as Record<string, unknown>)["WebSocketPair"];
+    FakeWebSocketPair.instances = [];
+    (globalThis as Record<string, unknown>)["WebSocketPair"] = FakeWebSocketPair;
+    const logs = captureLogs();
+    try {
+      const doInstance = new VobizCallSessionDurableObject(fakeState("v-nested-start"), {});
+      await doInstance.fetch(
+        new Request("https://vobiz-call-session/api/public/media-stream/vobiz", {
+          headers: { upgrade: "websocket" },
+        }),
+      );
+      const serverSocket = FakeWebSocketPair.instances[0]![0];
+
+      // The confirmed real Vobiz/Plivo-protocol shape: callId and streamId
+      // live inside a "start" sub-object, not at the top level.
+      serverSocket.emit("message", {
+        data: JSON.stringify({
+          event: "start",
+          sequenceNumber: "1",
+          start: {
+            callId: "vobiz-call-nested-shape",
+            streamId: "ST-nested-shape",
+            accountId: "acct-1",
+            tracks: ["inbound"],
+          },
+        }),
+      } as never);
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // No live Supabase in this sandbox, so this call still ends up
+      // closed (authorizeMediaSession's call_logs lookup can't succeed
+      // here) — what this test proves is that it is never rejected for
+      // the OLD reason: the nested callId must have been found.
+      assert.ok(serverSocket.closedWith, "expected the socket to eventually close");
+      const allLoggedText = JSON.stringify(logs.calls);
+      assert.doesNotMatch(allLoggedText, /Missing callId on start event/);
+    } finally {
+      logs.restore();
+      if (originalPair === undefined)
+        delete (globalThis as Record<string, unknown>)["WebSocketPair"];
+      else (globalThis as Record<string, unknown>)["WebSocketPair"] = originalPair;
+    }
+  });
+
+  test("a start event with ONLY a flat top-level callId (no nested start object) still works — the flat fallback is preserved, not replaced", async () => {
+    const originalPair = (globalThis as Record<string, unknown>)["WebSocketPair"];
+    FakeWebSocketPair.instances = [];
+    (globalThis as Record<string, unknown>)["WebSocketPair"] = FakeWebSocketPair;
+    const logs = captureLogs();
+    try {
+      const doInstance = new VobizCallSessionDurableObject(fakeState("v-flat-fallback"), {});
+      await doInstance.fetch(
+        new Request("https://vobiz-call-session/api/public/media-stream/vobiz", {
+          headers: { upgrade: "websocket" },
+        }),
+      );
+      const serverSocket = FakeWebSocketPair.instances[0]![0];
+
+      serverSocket.emit("message", {
+        data: JSON.stringify({ event: "start", callId: "vobiz-call-flat-fallback" }),
+      } as never);
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const allLoggedText = JSON.stringify(logs.calls);
+      assert.doesNotMatch(allLoggedText, /Missing callId on start event/);
+    } finally {
+      logs.restore();
+      if (originalPair === undefined)
+        delete (globalThis as Record<string, unknown>)["WebSocketPair"];
+      else (globalThis as Record<string, unknown>)["WebSocketPair"] = originalPair;
+    }
+  });
+
+  test("a start event with neither a nested nor a flat callId is still rejected with 'Missing callId on start event' — the check is widened, never weakened", async () => {
+    const originalPair = (globalThis as Record<string, unknown>)["WebSocketPair"];
+    FakeWebSocketPair.instances = [];
+    (globalThis as Record<string, unknown>)["WebSocketPair"] = FakeWebSocketPair;
+    try {
+      const doInstance = new VobizCallSessionDurableObject(fakeState("v-still-rejects"), {});
+      await doInstance.fetch(
+        new Request("https://vobiz-call-session/api/public/media-stream/vobiz", {
+          headers: { upgrade: "websocket" },
+        }),
+      );
+      const serverSocket = FakeWebSocketPair.instances[0]![0];
+
+      serverSocket.emit("message", {
+        data: JSON.stringify({ event: "start", start: { streamId: "ST-no-call-id" } }),
+      } as never);
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      assert.ok(serverSocket.closedWith, "expected the socket to be closed, not left open");
+      assert.equal(serverSocket.closedWith!.code, 1008);
+    } finally {
+      if (originalPair === undefined)
+        delete (globalThis as Record<string, unknown>)["WebSocketPair"];
+      else (globalThis as Record<string, unknown>)["WebSocketPair"] = originalPair;
+    }
+  });
+
+  test("DIAGNOSTIC: start_event_shape logs top-level and nested field NAMES only, never the callId/streamId values themselves or any secret", async () => {
+    const originalPair = (globalThis as Record<string, unknown>)["WebSocketPair"];
+    FakeWebSocketPair.instances = [];
+    (globalThis as Record<string, unknown>)["WebSocketPair"] = FakeWebSocketPair;
+    const logs = captureLogs();
+    try {
+      const doInstance = new VobizCallSessionDurableObject(fakeState("v-shape-diag"), {});
+      await doInstance.fetch(
+        new Request("https://vobiz-call-session/api/public/media-stream/vobiz", {
+          headers: { upgrade: "websocket" },
+        }),
+      );
+      const serverSocket = FakeWebSocketPair.instances[0]![0];
+
+      serverSocket.emit("message", {
+        data: JSON.stringify({
+          event: "start",
+          start: {
+            callId: "vobiz-secret-looking-call-id-value",
+            streamId: "ST-shape-diag",
+            authToken: "should-never-be-logged",
+          },
+        }),
+      } as never);
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const shapeLog = logs.calls.find(
+        (c) => c.event === "vobiz_call_session_do:start_event_shape",
+      );
+      assert.ok(shapeLog, "expected a start_event_shape diagnostic log");
+      const data = shapeLog!.data as { topLevelKeys: string[]; nestedStartKeys: string[] | null };
+      assert.deepEqual(data.topLevelKeys.sort(), ["event", "start"]);
+      assert.deepEqual(data.nestedStartKeys?.sort(), ["authToken", "callId", "streamId"]);
+
+      // The values must never appear anywhere in the logs — only the key names.
+      const allLoggedText = JSON.stringify(logs.calls);
+      assert.doesNotMatch(allLoggedText, /vobiz-secret-looking-call-id-value/);
+      assert.doesNotMatch(allLoggedText, /should-never-be-logged/);
     } finally {
       logs.restore();
       if (originalPair === undefined)

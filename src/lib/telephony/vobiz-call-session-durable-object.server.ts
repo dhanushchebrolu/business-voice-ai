@@ -250,12 +250,6 @@ export class VobizCallSessionDurableObject {
     if (eventName !== "start") return null; // ignore anything else until we've seen start
 
     markSettled();
-    // Vobiz's "start" event carries its fields flat on the message itself
-    // (not nested, unlike Exotel's) — same extraction as
-    // vobiz-media-route.server.ts, the authoritative parsing for this
-    // protocol in this codebase.
-    const callId = firstDefinedString(msg, ["callId", "call_id", "CallId", "CallUUID"]);
-    const streamId = firstDefinedString(msg, ["streamId", "stream_id", "StreamId"]);
 
     const reject = (reason: string): null => {
       console.error("vobiz_call_session_do:media_rejected", { reason });
@@ -266,6 +260,37 @@ export class VobizCallSessionDurableObject {
       }
       return null;
     };
+
+    // Production incident: "Missing callId on start event" rejected every
+    // real Vobiz call here (this is the production path — Cloudflare
+    // routes media through this Durable Object, not the plain-Worker
+    // fallback). The prior assumption below — that Vobiz's "start" event
+    // carries callId/streamId flat, not nested — was wrong. Vobiz's own
+    // reference Pipecat integration (VobizFrameSerializer — a documented
+    // subclass of Pipecat's PlivoFrameSerializer; see vobiz-provider.ts's
+    // module doc for the sourcing chain) nests both one level down, inside
+    // a "start" sub-object (start.callId / start.streamId) — the same
+    // shape Pipecat's own official Plivo integration parses (`start_data =
+    // data.get("start"); start_data.get("callId")`). Nested lookup is
+    // tried first now; the flat top-level keys are kept as a defensive
+    // fallback only, same extraction as vobiz-media-route.server.ts.
+    const startData =
+      typeof msg["start"] === "object" && msg["start"] !== null
+        ? (msg["start"] as Record<string, unknown>)
+        : null;
+    // TEMPORARY DIAGNOSTIC (same incident) — field NAMES only, never
+    // values: no audio, call id, auth token, or signature is logged here.
+    console.info("vobiz_call_session_do:start_event_shape", {
+      doId: this.state.id.toString(),
+      topLevelKeys: Object.keys(msg),
+      nestedStartKeys: startData ? Object.keys(startData) : null,
+    });
+    const callId =
+      (startData && firstDefinedString(startData, ["callId", "call_id", "CallId", "CallUUID"])) ??
+      firstDefinedString(msg, ["callId", "call_id", "CallId", "CallUUID"]);
+    const streamId =
+      (startData && firstDefinedString(startData, ["streamId", "stream_id", "StreamId"])) ??
+      firstDefinedString(msg, ["streamId", "stream_id", "StreamId"]);
 
     if (!callId) return reject("Missing callId on start event");
 

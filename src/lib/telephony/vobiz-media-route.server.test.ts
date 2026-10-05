@@ -54,3 +54,42 @@ describe("vobiz-media-route.server.ts: media-session token fix (production incid
     assert.doesNotMatch(src, /from\s*"\.\/media-session-token/);
   });
 });
+
+describe("vobiz-media-route.server.ts: nested start-event shape fix (production incident: 'Missing callId on start event' rejected every real Vobiz call — callId/streamId are nested under start.callId/start.streamId, the confirmed real Plivo-protocol shape, not flat)", () => {
+  test("checks for a nested 'start' sub-object before falling back to flat top-level keys", () => {
+    assert.match(
+      src,
+      /const startData =\s*\n\s*typeof msg\["start"\] === "object" && msg\["start"\] !== null/,
+    );
+    assert.match(
+      src,
+      /\(startData && firstDefinedString\(startData, \["callId", "call_id", "CallId", "CallUUID"\]\)\) \?\?/,
+    );
+    assert.match(
+      src,
+      /\(startData && firstDefinedString\(startData, \["streamId", "stream_id", "StreamId"\]\)\) \?\?/,
+    );
+  });
+
+  test("the flat top-level lookup is kept as a fallback, not removed — never weakens what used to work", () => {
+    assert.match(src, /firstDefinedString\(msg, \["callId", "call_id", "CallId", "CallUUID"\]\)/);
+    assert.match(src, /firstDefinedString\(msg, \["streamId", "stream_id", "StreamId"\]\)/);
+  });
+
+  test("the 'Missing callId on start event' rejection is still reached when neither nested nor flat callId is present — the check is widened, never dropped", () => {
+    assert.match(src, /if \(!callId\) return reject\("Missing callId on start event"\);/);
+  });
+
+  test("logs a start_event_shape diagnostic with field NAMES only (topLevelKeys, nestedStartKeys) — never the raw message, never Object.values", () => {
+    const idx = src.indexOf('console.info("vobiz_media_route:start_event_shape"');
+    assert.ok(idx > -1, "expected a start_event_shape diagnostic log");
+    const block = src.slice(idx, src.indexOf("});", idx));
+    assert.match(block, /topLevelKeys: Object\.keys\(msg\)/);
+    assert.match(block, /nestedStartKeys: startData \? Object\.keys\(startData\) : null/);
+    assert.doesNotMatch(block, /Object\.values/);
+    // Only the Object.keys(...) calls above may reference msg/startData
+    // inside this log block — nothing else, so no raw field value can leak.
+    assert.equal((block.match(/\bmsg\b/g) ?? []).length, 1);
+    assert.equal((block.match(/\bstartData\b/g) ?? []).length, 2);
+  });
+});
