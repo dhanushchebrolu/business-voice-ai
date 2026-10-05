@@ -298,6 +298,43 @@ describe("silence/timeout handling — wiring", () => {
 });
 
 /**
+ * Format-verification diagnostic (production incident follow-up): once
+ * Sarvam's TTS config schema bugs were fixed (model moved to a WS URL query
+ * param, the bogus output_audio_bitrate field removed), nothing in this
+ * codebase actually confirmed Sarvam's synthesized audio matches the
+ * format declared to it — the Vobiz bridge trusts frame bytes as mulaw/8kHz
+ * without checking. onTtsEvent now logs a one-time comparison on the first
+ * audio chunk of each session, source-scanned here since onTtsEvent/Session
+ * aren't exported (same convention as the silence-timer suite above).
+ */
+describe("first_outbound_audio_frame — verifies synthesized audio format against what was declared, rather than assuming a match", () => {
+  test("fires exactly once per session, gated by firstOutboundAudioFrameLogged, inside the audio case", () => {
+    const caseStart = src.indexOf('case "audio": {', src.indexOf("function onTtsEvent"));
+    const caseEnd = src.indexOf('case "error":', caseStart);
+    const caseBody = src.slice(caseStart, caseEnd);
+    assert.match(caseBody, /if \(!session\.firstOutboundAudioFrameLogged\) \{/);
+    assert.match(caseBody, /session\.firstOutboundAudioFrameLogged = true;/);
+    assert.match(caseBody, /log\("first_outbound_audio_frame", session, \{/);
+  });
+
+  test("logs the declared codec/sample rate alongside whatever metadata Sarvam's own audio event carried, never a guessed field", () => {
+    const caseStart = src.indexOf('case "audio": {', src.indexOf("function onTtsEvent"));
+    const caseEnd = src.indexOf('case "error":', caseStart);
+    const caseBody = src.slice(caseStart, caseEnd);
+    assert.match(caseBody, /declaredCodec: session\.declaredTtsOutputCodec/);
+    assert.match(caseBody, /declaredSampleRateHz: session\.declaredTtsOutputSampleRateHz/);
+    assert.match(caseBody, /sarvamMeta: event\.meta/);
+  });
+
+  test("declaredTtsOutputCodec/declaredTtsOutputSampleRateHz are set from the same values actually sent to connectTts, not re-derived separately", () => {
+    const connectIdx = src.indexOf("session.tts = await deps.connectTts({");
+    const before = src.slice(Math.max(0, connectIdx - 400), connectIdx);
+    assert.match(before, /session\.declaredTtsOutputCodec = outputCodec;/);
+    assert.match(before, /session\.declaredTtsOutputSampleRateHz = outputSampleRateHz;/);
+  });
+});
+
+/**
  * Provider adapter boundary (requirement 8): the AI runtime must not know
  * whether audio came from Exotel, Twilio, Plivo, SIP, or a test harness —
  * it programs only against AudioMediaBridge (audio-bridge.ts) and

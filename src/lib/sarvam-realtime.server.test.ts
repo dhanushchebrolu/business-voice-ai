@@ -188,36 +188,49 @@ describe("STT query param names — production incident round 2: once the endpoi
   });
 });
 
-describe('TTS config message — production incident: the WS handshake and tts_connected succeed, but Sarvam rejects the first config message with "Input parameters has to be a valid dictionary." because this file sent `target_language_code` instead of the documented `language_code` field', () => {
+describe('TTS config message — production incident: the WS handshake and tts_connected succeed, but Sarvam rejects the first config message with "Input parameters has to be a valid dictionary." because this file sent `target_language_code` instead of the documented `language_code` field, plus two schema bugs in the same payload (`model` sent as a data field instead of a query param, and a bogus `output_audio_bitrate` field)', () => {
   const originalKey = process.env["SARVAM_API_KEY"];
   afterEach(() => {
     if (originalKey === undefined) delete process.env["SARVAM_API_KEY"];
     else process.env["SARVAM_API_KEY"] = originalKey;
   });
 
+  async function connectAndCaptureConfig() {
+    const { connectSarvamTts } = await import("./sarvam-realtime.server.ts");
+    // The config send happens synchronously once openSocket's promise
+    // resolves, so simulateOpen() must fire before awaiting connect.
+    const connectPromise = connectSarvamTts({
+      voiceId: "ritu",
+      language: "hi-IN",
+      pace: 1,
+      outputCodec: "mulaw",
+      outputSampleRateHz: 8000,
+      onEvent: () => {},
+    });
+    const socket = FakeWebSocket.instances[0]!;
+    socket.simulateOpen();
+    await connectPromise;
+    return socket;
+  }
+
+  test("connectSarvamTts sends model=bulbul:v3 as a WS URL query param, mirroring STT's proven-correct shape", async () => {
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    await withFakeWebSocket(async () => {
+      const socket = await connectAndCaptureConfig();
+      const url = new URL(socket.url);
+      assert.equal(url.host, "api.sarvam.ai");
+      assert.equal(url.pathname, "/text-to-speech/ws");
+      assert.equal(url.searchParams.get("model"), "bulbul:v3");
+    });
+  });
+
   test("connectSarvamTts sends a config message using the documented language_code field, not target_language_code", async () => {
     process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
     await withFakeWebSocket(async () => {
-      const { connectSarvamTts } = await import("./sarvam-realtime.server.ts");
-      const socket = (() => {
-        // The config send happens synchronously once openSocket's promise
-        // resolves, so simulateOpen() must fire before awaiting connect.
-        const connectPromise = connectSarvamTts({
-          voiceId: "ritu",
-          language: "hi-IN",
-          pace: 1,
-          outputCodec: "mulaw",
-          outputSampleRateHz: 8000,
-          onEvent: () => {},
-        });
-        const s = FakeWebSocket.instances[0]!;
-        s.simulateOpen();
-        return connectPromise.then(() => s);
-      })();
-      const s = await socket;
+      const socket = await connectAndCaptureConfig();
 
-      assert.equal(s.sent.length, 1, "exactly one message (config) must be sent on connect");
-      const configMessage = JSON.parse(s.sent[0] as string) as {
+      assert.equal(socket.sent.length, 1, "exactly one message (config) must be sent on connect");
+      const configMessage = JSON.parse(socket.sent[0] as string) as {
         type: string;
         data: Record<string, unknown>;
       };
@@ -239,12 +252,61 @@ describe('TTS config message — production incident: the WS handshake and tts_c
         'the field name production proved Sarvam rejects ("Input parameters has to be a valid dictionary") must not be sent',
       );
       assert.equal(configMessage.data["speaker"], "ritu");
-      // Unconfirmed-but-unchanged fields: still present, not blindly
-      // stripped out without evidence they're the actual cause.
-      assert.equal(configMessage.data["model"], "bulbul:v3");
       assert.equal(configMessage.data["output_audio_codec"], "mulaw");
-      assert.equal(configMessage.data["output_audio_bitrate"], 8000);
     });
+  });
+
+  test("connectSarvamTts never puts model inside the config data object — it belongs only in the WS URL query string", async () => {
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    await withFakeWebSocket(async () => {
+      const socket = await connectAndCaptureConfig();
+      const configMessage = JSON.parse(socket.sent[0] as string) as {
+        data: Record<string, unknown>;
+      };
+      assert.equal(
+        "model" in configMessage.data,
+        false,
+        "model is a connection-level query param, not a data field — sending it as both/either in data is the schema bug production proved",
+      );
+    });
+  });
+
+  test("connectSarvamTts never sends output_audio_bitrate — mulaw is a fixed 8kHz telephony codec with no bitrate to declare", async () => {
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    await withFakeWebSocket(async () => {
+      const socket = await connectAndCaptureConfig();
+      const configMessage = JSON.parse(socket.sent[0] as string) as {
+        data: Record<string, unknown>;
+      };
+      assert.equal(
+        "output_audio_bitrate" in configMessage.data,
+        false,
+        "output_audio_bitrate named a compressed-codec bitrate, not a PCM/companded sample rate — never valid for bulbul:v3/mulaw",
+      );
+    });
+  });
+});
+
+describe("normalizeTtsMessage audio event — surfaces whatever format metadata Sarvam includes alongside the payload (if any), so callers can verify actual output format against what was declared rather than assuming a match", () => {
+  test("meta carries every field of the audio event's data object except the base64 payload itself", () => {
+    const event = normalizeTtsMessage({
+      type: "audio",
+      data: { audio: Buffer.from("hi").toString("base64"), sample_rate: 8000, format: "mulaw" },
+    });
+    assert.equal(event.type, "audio");
+    assert.deepEqual((event as { meta?: Record<string, unknown> }).meta, {
+      sample_rate: 8000,
+      format: "mulaw",
+    });
+  });
+
+  test("meta is an empty object (not undefined) when Sarvam's audio event carries no extra fields", () => {
+    const event = normalizeTtsMessage({
+      type: "audio",
+      data: { audio: Buffer.from("hi").toString("base64") },
+    });
+    assert.equal(event.type, "audio");
+    assert.deepEqual((event as { meta?: Record<string, unknown> }).meta, {});
   });
 });
 

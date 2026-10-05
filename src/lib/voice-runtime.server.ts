@@ -355,6 +355,11 @@ interface Session {
   firstInboundFrameLogged: boolean;
   /** Bytes of synthesized audio received for the current utterance, reset per speak() call, logged (and reset) on Sarvam's "flushed" event — see onTtsEvent. */
   ttsBytesInFlight: number;
+  /** The output codec/sample rate this session told Sarvam to synthesize into (from connectTts's options) — compared against Sarvam's actual first audio chunk in onTtsEvent's first_outbound_audio_frame diagnostic, so a provider that silently ignores the declared format is visible rather than assumed. */
+  declaredTtsOutputCodec: "mulaw" | "linear16" | "wav" | null;
+  declaredTtsOutputSampleRateHz: number | null;
+  /** Logged once, the first synthesized audio frame actually forwarded to the telephony bridge — see onTtsEvent. */
+  firstOutboundAudioFrameLogged: boolean;
 }
 
 const activeSessions = new Map<string, Session>();
@@ -789,6 +794,26 @@ function onSttEvent(session: Session, event: SttEvent) {
 function onTtsEvent(session: Session, event: TtsEvent) {
   switch (event.type) {
     case "audio": {
+      if (!session.firstOutboundAudioFrameLogged) {
+        session.firstOutboundAudioFrameLogged = true;
+        // Verifies the audio actually forwarded to the telephony bridge
+        // matches the format we declared to Sarvam, rather than assuming
+        // it: declaredCodec/declaredSampleRateHz are what this session
+        // told Sarvam to synthesize into (connectTts's options); sarvamMeta
+        // is whatever else — if anything — Sarvam's own audio event
+        // carried alongside the payload (e.g. a sample rate/codec field),
+        // surfaced as-is rather than guessed at. The bridge (e.g. Vobiz's
+        // sendOutboundFrame) declares this same codec/sample rate to the
+        // telephony provider and forwards these bytes verbatim, so a
+        // provider that silently ignored the requested format would
+        // otherwise only show up as garbled/silent audio on the call.
+        log("first_outbound_audio_frame", session, {
+          bytes: event.data.length,
+          declaredCodec: session.declaredTtsOutputCodec,
+          declaredSampleRateHz: session.declaredTtsOutputSampleRateHz,
+          sarvamMeta: event.meta,
+        });
+      }
       session.ttsBytesInFlight += event.data.length;
       const frame: AudioFrame = { data: event.data, timestampMs: Date.now() - session.startedAt };
       session.input.bridge.sendOutboundFrame(frame);
@@ -866,6 +891,9 @@ export async function startRuntimeSession(
     lastFinalTranscript: null,
     firstInboundFrameLogged: false,
     ttsBytesInFlight: 0,
+    declaredTtsOutputCodec: null,
+    declaredTtsOutputSampleRateHz: null,
+    firstOutboundAudioFrameLogged: false,
   };
   activeSessions.set(input.callId, session);
   log("runtime_started", session);
@@ -900,6 +928,8 @@ export async function startRuntimeSession(
   try {
     const outputCodec = outputCodecFor(input.bridge);
     const outputSampleRateHz = input.bridge.outboundFormat.sampleRateHz;
+    session.declaredTtsOutputCodec = outputCodec;
+    session.declaredTtsOutputSampleRateHz = outputSampleRateHz;
     session.tts = await deps.connectTts({
       voiceId: input.snapshotAgent.voice_id,
       language: input.snapshotAgent.primary_language,
