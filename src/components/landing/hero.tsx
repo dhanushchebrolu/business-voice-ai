@@ -1,7 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import { Sparkles, PhoneCall, Users, AudioLines } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { HeroVoiceDemo } from "./hero-voice-demo";
+import { HeroFlow } from "./hero-flow/hero-flow";
 
 function scrollToSection(id: string) {
   document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -15,14 +15,18 @@ const FEATURES = [
 
 /**
  * White + violet hero: left-aligned headline/copy/two CTAs/feature strip,
- * right-aligned real audio player (hero-voice-demo.tsx) a visitor can
- * actually press play on — built as original ClickAI artwork and copy.
+ * right-aligned animated AI-employee workflow diagram (hero-flow/) showing
+ * how one AI agent fans out across channels and converges back into
+ * customers, leads, and outcomes — built as original ClickAI artwork and
+ * copy, no third-party imagery.
  *
  * "Book a Demo" links to the real /contact route (same CTA final-cta.tsx
  * uses); "Test Agent" scrolls to the real #voice-demo section further down
  * the page (feature-showcase.tsx) rather than linking to the authenticated,
  * per-business testAgentText dashboard feature, which requires a signed-in
  * account and an existing agent config neither of which a visitor has yet.
+ * That section (voice-demo.tsx) is a separate component from this hero's
+ * visual and is untouched by it.
  */
 export function Hero() {
   return (
@@ -88,7 +92,7 @@ export function Hero() {
         </div>
 
         <div className="lg:pl-8">
-          <HeroVoiceDemo />
+          <HeroFlow />
         </div>
       </div>
     </section>
