@@ -172,6 +172,19 @@ export async function processTelephonyEvent(
   event: NormalizedCallEvent,
   waitUntil: WaitUntil | undefined,
 ) {
+  // TEMPORARY DIAGNOSTIC (production incident: routeToAgentRuntime never
+  // fires for Vobiz despite the status check being correct — see the
+  // runtime-trigger diagnostics below). Fires on every event this function
+  // receives, before any branch decision, so the two possible call-graph
+  // paths (fresh insert vs. existing-row applyCallEvent) can be told apart
+  // from logs alone. No secret/signature/token is logged.
+  console.info("telephony:process_event_received", {
+    providerId,
+    status: event.status,
+    direction: event.direction,
+    providerCallId: event.providerCallId ? maskCallSid(event.providerCallId) : null,
+  });
+
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
   const { data: existingCall } = await supabaseAdmin
@@ -180,6 +193,19 @@ export async function processTelephonyEvent(
     .eq("provider", providerId)
     .eq("provider_call_id", event.providerCallId)
     .maybeSingle();
+
+  // TEMPORARY DIAGNOSTIC (same incident): the "isNewCall" branch decision
+  // itself — the fresh-insert path (below) and applyCallEvent's path
+  // (existingCall branch, reached here or via the 23505 race further down)
+  // have historically carried DIFFERENT runtime-handoff trigger conditions;
+  // this proves which one a given event actually takes.
+  console.info("telephony:process_event_branch", {
+    providerId,
+    status: event.status,
+    providerCallId: event.providerCallId ? maskCallSid(event.providerCallId) : null,
+    existingCallFound: Boolean(existingCall),
+    branch: existingCall ? "existing_call_apply_event" : "new_call_insert",
+  });
 
   if (existingCall) {
     await applyCallEvent(existingCall, event);
@@ -489,12 +515,39 @@ export async function processTelephonyEvent(
   // idempotency makes firing this twice (here, and again later if a real
   // "in-progress" event does arrive) a safe no-op. Exotel's own clause is
   // untouched — scoped to "initiated" only, exactly as before.
-  if (
-    event.status === "answered" ||
-    event.status === "in_progress" ||
-    (providerId === "exotel" && event.status === "initiated") ||
-    (providerId === "vobiz" && (event.status === "ringing" || event.status === "initiated"))
-  ) {
+  const isAnswered = event.status === "answered";
+  const isInProgress = event.status === "in_progress";
+  const isExotelInitiated = providerId === "exotel" && event.status === "initiated";
+  const isVobizRinging = providerId === "vobiz" && event.status === "ringing";
+  const isVobizInitiated = providerId === "vobiz" && event.status === "initiated";
+  const newCallTriggerMatched =
+    isAnswered || isInProgress || isExotelInitiated || isVobizRinging || isVobizInitiated;
+  // TEMPORARY DIAGNOSTIC (production incident: routeToAgentRuntime never
+  // fires for Vobiz) — logs the exact boolean evaluated at this trigger,
+  // site "new_call_insert", every time this branch is reached, regardless
+  // of outcome. No secret/signature/token is logged.
+  console.info("telephony:runtime_trigger_evaluated", {
+    site: "new_call_insert",
+    providerId,
+    status: event.status,
+    direction: event.direction,
+    isAnswered,
+    isInProgress,
+    isInitiated: isExotelInitiated || isVobizInitiated,
+    isVobizRinging,
+    matched: newCallTriggerMatched,
+  });
+  if (newCallTriggerMatched) {
+    console.info("telephony:runtime_trigger_matched", {
+      site: "new_call_insert",
+      providerId,
+      status: event.status,
+    });
+    console.info("telephony:runtime_handoff_start", {
+      site: "new_call_insert",
+      callId: call.id,
+      providerId,
+    });
     runInBackground(
       routeToAgentRuntime({
         callId: call.id,
@@ -560,6 +613,20 @@ async function applyCallEvent(
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
   const transition = checkCallTransition(call.status, event.status);
+  // TEMPORARY DIAGNOSTIC (production incident: routeToAgentRuntime never
+  // fires for Vobiz) — this branch (applyCallEvent, reached whenever a row
+  // for this provider_call_id already exists) has TWO early returns before
+  // ever reaching its own runtime-handoff trigger below; both are silent
+  // with respect to that trigger today, so logging them here closes the
+  // gap. No secret/signature/token is logged.
+  console.info("telephony:apply_call_event_transition", {
+    callId: call.id,
+    provider: call.provider,
+    fromStatus: call.status,
+    toStatus: event.status,
+    transitionOk: transition.ok,
+    transitionChanged: transition.changed,
+  });
   if (!transition.ok) {
     console.error("telephony:illegal_transition", call.id, transition.reason);
     return;
@@ -593,17 +660,54 @@ async function applyCallEvent(
     to_status: event.status,
   });
 
-  // The very first webhook event for a call can arrive already "answered"
-  // (handled in processTelephonyEvent's new-call branch below), but the
-  // common case is ringing -> answered as two separate events on an
-  // already-existing row — this is that second path into the runtime.
-  // startRuntimeSession is idempotent per call_id, so both paths converging
-  // here is safe.
-  if (
+  // FOURTH PRODUCTION INCIDENT (Vobiz, call 03da4fdb): the new-call insert
+  // branch's trigger (processTelephonyEvent, above) was fixed three times
+  // to cover Vobiz's "ringing"/"initiated" first-event status — but this
+  // function's OWN, separate trigger below was never touched. Any event
+  // for a call row that already exists (a second/duplicate webhook
+  // delivery, or a race lost against another in-flight insert — see
+  // processTelephonyEvent's existingCall check and its 23505 fallback)
+  // reaches THIS trigger instead, and it only ever checked "answered"/
+  // "in_progress" — never "ringing"/"initiated", for any provider. The
+  // comment immediately above (describing "ringing -> answered as two
+  // separate events on an already-existing row") already anticipated
+  // "ringing" reaching this exact function, but the condition beneath it
+  // never implemented that check. Widened the same way as the insert
+  // branch: Vobiz's "ringing"/"initiated" now also match here. Exotel is
+  // untouched — it was never added to this particular trigger and still
+  // isn't; its own fast path is the insert-branch "initiated" clause,
+  // which normally makes its runtime already active by the time a second
+  // event reaches this function (startRuntimeSession's idempotency makes
+  // that a safe no-op either way).
+  const isApplyAnswered = event.status === "answered";
+  const isApplyInProgress = event.status === "in_progress";
+  const isApplyVobizRinging = call.provider === "vobiz" && event.status === "ringing";
+  const isApplyVobizInitiated = call.provider === "vobiz" && event.status === "initiated";
+  const applyTriggerMatched =
     call.direction === "inbound" &&
-    call.phone_number_id &&
-    (event.status === "answered" || event.status === "in_progress")
-  ) {
+    Boolean(call.phone_number_id) &&
+    (isApplyAnswered || isApplyInProgress || isApplyVobizRinging || isApplyVobizInitiated);
+  // TEMPORARY DIAGNOSTIC (same incident) — logs the exact boolean evaluated
+  // at this trigger, site "existing_call_apply_event", every time this
+  // function reaches this point, regardless of outcome.
+  console.info("telephony:runtime_trigger_evaluated", {
+    site: "existing_call_apply_event",
+    providerId: call.provider,
+    status: event.status,
+    direction: call.direction,
+    hasPhoneNumberId: Boolean(call.phone_number_id),
+    isAnswered: isApplyAnswered,
+    isInProgress: isApplyInProgress,
+    isVobizRinging: isApplyVobizRinging,
+    isInitiated: isApplyVobizInitiated,
+    matched: applyTriggerMatched,
+  });
+  if (applyTriggerMatched && call.phone_number_id) {
+    console.info("telephony:runtime_trigger_matched", {
+      site: "existing_call_apply_event",
+      providerId: call.provider,
+      status: event.status,
+    });
     const { data: phoneNumber } = await supabaseAdmin
       .from("phone_numbers")
       .select("*")
@@ -615,6 +719,11 @@ async function applyCallEvent(
     if (phoneNumber) {
       const gate = await checkTelephonyAccess(call.organization_id, phoneNumber.id, "inbound");
       if (gate.allowed) {
+        console.info("telephony:runtime_handoff_start", {
+          site: "existing_call_apply_event",
+          callId: call.id,
+          providerId: call.provider,
+        });
         await routeToAgentRuntime({
           callId: call.id,
           organizationId: call.organization_id,
