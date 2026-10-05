@@ -318,6 +318,39 @@ test("getTelephonyAdapter('vobiz'): does not fall through to the generic REST/HM
   );
 });
 
+test("getTelephonyAdapter('vobiz'): VOBIZ_REQUIRE_SIGNATURE defaults to required (true) — an unsigned webhook is rejected even with a correct verify_token", () => {
+  withEnv(
+    { VOBIZ_AUTH_ID: "AUTH1", VOBIZ_AUTH_TOKEN: "TOKEN1", VOBIZ_WEBHOOK_VERIFY_TOKEN: "VT1" },
+    () => {
+      const adapter = getTelephonyAdapter("vobiz");
+      assert.ok(adapter);
+      const url = new URL(
+        "https://clickai.test/api/public/webhooks/telephony?provider=vobiz&verify_token=VT1",
+      );
+      assert.equal(adapter!.verifyWebhookSignature("", {}, url), false);
+    },
+  );
+});
+
+test("getTelephonyAdapter('vobiz'): VOBIZ_REQUIRE_SIGNATURE='false' reaches the adapter as an explicit opt-out", () => {
+  withEnv(
+    {
+      VOBIZ_AUTH_ID: "AUTH1",
+      VOBIZ_AUTH_TOKEN: "TOKEN1",
+      VOBIZ_WEBHOOK_VERIFY_TOKEN: "VT1",
+      VOBIZ_REQUIRE_SIGNATURE: "false",
+    },
+    () => {
+      const adapter = getTelephonyAdapter("vobiz");
+      assert.ok(adapter);
+      const url = new URL(
+        "https://clickai.test/api/public/webhooks/telephony?provider=vobiz&verify_token=VT1",
+      );
+      assert.equal(adapter!.verifyWebhookSignature("", {}, url), true);
+    },
+  );
+});
+
 test("providerStatus: vobiz reports configured:false with all three secrets named as missing until every one is set", () => {
   withEnv(Object.fromEntries(VOBIZ_ENV_VARS.map((k) => [k, undefined])), () => {
     const status = providerStatus().find((p) => p.id === "vobiz");

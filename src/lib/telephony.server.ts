@@ -281,8 +281,8 @@ export function getTelephonyAdapter(providerId: string): TelephonyProviderAdapte
   }
 
   // Vobiz's real auth (X-Auth-ID/X-Auth-Token headers) and webhook
-  // authentication (a Klyro-generated verify_token query parameter, plus an
-  // optional Vobiz-signed defense-in-depth check — see
+  // authentication (a Klyro-generated verify_token query parameter, plus a
+  // required-by-default Vobiz-signed check — see
   // VobizTelephonyAdapter.verifyWebhookSignature's doc) don't fit
   // GenericTelephonyAdapter's single-apiKey/HMAC-over-body assumption, same
   // reasoning as Exotel's dedicated branch above.
@@ -297,6 +297,10 @@ export function getTelephonyAdapter(providerId: string): TelephonyProviderAdapte
       baseUrl: process.env["VOBIZ_BASE_URL"] || undefined,
       phoneNumber: process.env["VOBIZ_PHONE_NUMBER"] || undefined,
       webhookVerifyToken,
+      // Defaults to required (true) unless explicitly set to the literal
+      // string "false" — see VobizConfig's doc for why this must stay an
+      // explicit opt-out, never a silent default.
+      requireVobizSignature: process.env["VOBIZ_REQUIRE_SIGNATURE"] !== "false",
     });
   }
 

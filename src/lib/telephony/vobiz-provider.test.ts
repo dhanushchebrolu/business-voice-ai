@@ -9,21 +9,33 @@ const config = {
   webhookVerifyToken: "correct-verify-token",
 };
 
-describe("verifyWebhookSignature: Klyro's own verify_token is the primary, guaranteed-correct gate", () => {
-  test("correct verify_token query param passes (no Vobiz signature present)", () => {
+function signHmac(url: URL, nonce: string, authToken = config.authToken): string {
+  const addressNoQuery = `${url.origin}${url.pathname}`;
+  return createHmac("sha256", authToken).update(`${addressNoQuery}.${nonce}`).digest("base64");
+}
+
+function signedHeaders(url: URL, nonce = "12345678901234567890") {
+  return {
+    "x-vobiz-signature-v3": signHmac(url, nonce),
+    "x-vobiz-signature-v3-nonce": nonce,
+  };
+}
+
+describe("verifyWebhookSignature: Klyro's own verify_token is always checked first", () => {
+  test("correct verify_token but no Vobiz signature is REJECTED by default (requireVobizSignature defaults to true)", () => {
     const adapter = new VobizTelephonyAdapter(config);
     const url = new URL(
       "https://clickai.test/api/public/webhooks/telephony?provider=vobiz&verify_token=correct-verify-token",
     );
-    assert.equal(adapter.verifyWebhookSignature("", {}, url), true);
+    assert.equal(adapter.verifyWebhookSignature("", {}, url), false);
   });
 
-  test("wrong verify_token fails", () => {
+  test("wrong verify_token fails even with a correct Vobiz signature present", () => {
     const adapter = new VobizTelephonyAdapter(config);
     const url = new URL(
       "https://clickai.test/api/public/webhooks/telephony?provider=vobiz&verify_token=wrong",
     );
-    assert.equal(adapter.verifyWebhookSignature("", {}, url), false);
+    assert.equal(adapter.verifyWebhookSignature("", signedHeaders(url), url), false);
   });
 
   test("missing verify_token fails closed", () => {
@@ -38,7 +50,7 @@ describe("verifyWebhookSignature: Klyro's own verify_token is the primary, guara
   });
 });
 
-describe("verifyWebhookSignature: Vobiz's own X-Vobiz-Signature-V3 header, when present, is an additional mandatory check", () => {
+describe("verifyWebhookSignature: Vobiz's own X-Vobiz-Signature-V3 header is REQUIRED by default, per Vobiz's own documented behavior", () => {
   function signedUrl() {
     return new URL(
       "https://clickai.test/api/public/webhooks/telephony?provider=vobiz&verify_token=correct-verify-token",
@@ -70,9 +82,70 @@ describe("verifyWebhookSignature: Vobiz's own X-Vobiz-Signature-V3 header, when 
     assert.equal(adapter.verifyWebhookSignature("", headers, url), false);
   });
 
-  test("no X-Vobiz-Signature-V3 header at all still passes on verify_token alone (graceful degradation)", () => {
+  test("no X-Vobiz-Signature-V3 header at all is REJECTED by default, never silently waved through on verify_token alone", () => {
     const adapter = new VobizTelephonyAdapter(config);
-    assert.equal(adapter.verifyWebhookSignature("", {}, signedUrl()), true);
+    assert.equal(adapter.verifyWebhookSignature("", {}, signedUrl()), false);
+  });
+
+  test("a different nonce produces a different signature — the nonce is genuinely part of the signed input, not decorative", () => {
+    const url = signedUrl();
+    const sigA = signHmac(url, "11111111111111111111");
+    const sigB = signHmac(url, "22222222222222222222");
+    assert.notEqual(sigA, sigB);
+  });
+
+  test("a correct signature computed for the wrong nonce fails — nonce and signature must agree", () => {
+    const adapter = new VobizTelephonyAdapter(config);
+    const url = signedUrl();
+    const wrongSignature = signHmac(url, "99999999999999999999");
+    const headers = {
+      "x-vobiz-signature-v3": wrongSignature,
+      "x-vobiz-signature-v3-nonce": "12345678901234567890", // different nonce than the one signed
+    };
+    assert.equal(adapter.verifyWebhookSignature("", headers, url), false);
+  });
+
+  test("the sub-account X-Vobiz-Signature-MA-V3 header is accepted as a fallback, verified with the exact same HMAC construction", () => {
+    const adapter = new VobizTelephonyAdapter(config);
+    const url = signedUrl();
+    const nonce = "12345678901234567890";
+    const headers = {
+      "x-vobiz-signature-ma-v3": signHmac(url, nonce),
+      "x-vobiz-signature-v3-nonce": nonce,
+    };
+    assert.equal(adapter.verifyWebhookSignature("", headers, url), true);
+  });
+});
+
+describe("verifyWebhookSignature: requireVobizSignature: false is an explicit, documented opt-out — never the default", () => {
+  const optOutConfig = { ...config, requireVobizSignature: false };
+
+  test("a correct verify_token with NO Vobiz signature now passes, only because of the explicit opt-out", () => {
+    const adapter = new VobizTelephonyAdapter(optOutConfig);
+    const url = new URL(
+      "https://clickai.test/api/public/webhooks/telephony?provider=vobiz&verify_token=correct-verify-token",
+    );
+    assert.equal(adapter.verifyWebhookSignature("", {}, url), true);
+  });
+
+  test("a present-but-wrong signature is STILL rejected even with the opt-out — the opt-out only covers absence, never a wrong value", () => {
+    const adapter = new VobizTelephonyAdapter(optOutConfig);
+    const url = new URL(
+      "https://clickai.test/api/public/webhooks/telephony?provider=vobiz&verify_token=correct-verify-token",
+    );
+    const headers = {
+      "x-vobiz-signature-v3": "not-a-real-signature",
+      "x-vobiz-signature-v3-nonce": "12345678901234567890",
+    };
+    assert.equal(adapter.verifyWebhookSignature("", headers, url), false);
+  });
+
+  test("verify_token is still mandatory even with the signature requirement opted out — the opt-out never removes the one guaranteed-correct check", () => {
+    const adapter = new VobizTelephonyAdapter(optOutConfig);
+    const url = new URL(
+      "https://clickai.test/api/public/webhooks/telephony?provider=vobiz&verify_token=wrong",
+    );
+    assert.equal(adapter.verifyWebhookSignature("", {}, url), false);
   });
 });
 

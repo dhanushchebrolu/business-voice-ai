@@ -63,21 +63,36 @@ import { normalizeToE164 } from "../contacts-import.ts";
  * NOT independently confirmed (documented honestly, handled defensively):
  *   - The exact X-Vobiz-Signature-V3 HMAC formula below
  *     (base64(HMAC-SHA256(authToken, requestUrlWithoutQuery + "." + nonce)),
- *     nonce in an X-Vobiz-Signature-V3-Nonce header) comes from a Vobiz
- *     community-maintained n8n-node's signature-verification PR, which
- *     itself cites Vobiz's "Validating Callbacks" doc page by name — real,
- *     tested verification code, but not a first-party read. For this
- *     reason it is treated as a defense-in-depth SECONDARY check, not the
- *     sole gate: the PRIMARY, guaranteed-correct check is a `verify_token`
- *     query parameter Klyro itself appends to every answer_url/hangup_url
- *     it ever gives Vobiz (the exact same proven pattern
- *     ExotelTelephonyAdapter uses for exactly this reason — see that
- *     file's own verification note). A request is accepted only if the
- *     verify_token matches; the HMAC check, when a signature header is
- *     actually present, must ALSO pass (a present-but-invalid signature is
- *     always rejected, never ignored) — mirroring
- *     SarvamTelephonyAdapter's layered verify_token + provider-signature
- *     pattern.
+ *     nonce in an X-Vobiz-Signature-V3-Nonce header, sub-account requests
+ *     additionally/instead carrying X-Vobiz-Signature-MA-V3 with the same
+ *     nonce header) comes from a Vobiz community-maintained n8n-node's
+ *     signature-verification PR, which itself cites Vobiz's "Validating
+ *     Callbacks" doc page by name and implements the exact string
+ *     construction (`${base}${separator}${nonce}`, base64-decoded
+ *     signature bytes) — real, tested verification code, but not a
+ *     first-party read.
+ *
+ *     That same reference also surfaces the one normative detail worth
+ *     calling out explicitly: Vobiz's own documented guidance is that the
+ *     signature is only ABSENT when the callback URL has no auth
+ *     configured on Vobiz's side — a correctly-configured integration
+ *     should expect it on every request, and the community tool's own
+ *     default is to REJECT an unsigned request (403), with an explicit,
+ *     visible "Require Vobiz Signature" toggle to opt out (e.g. during
+ *     initial setup before that auth is configured). This adapter mirrors
+ *     that default: `requireVobizSignature` (VobizConfig) defaults to
+ *     `true`, so a request missing the signature/nonce headers is
+ *     REJECTED, not silently waved through on Klyro's own verify_token
+ *     alone. Set it to `false` only for a development account where
+ *     Vobiz-side signing genuinely isn't configured yet — verify_token
+ *     alone still guards that path, same as before. Regardless of this
+ *     setting, Klyro's OWN `verify_token` query parameter (appended to
+ *     every answer_url/hangup_url it gives Vobiz, the same proven pattern
+ *     ExotelTelephonyAdapter uses) is checked first and must always match
+ *     — a request is never accepted on the Vobiz signature alone, since
+ *     that part of the implementation remains unverified against a live
+ *     account. A present-but-invalid signature is always rejected,
+ *     regardless of `requireVobizSignature`.
  *   - The exact hangup/live-call-control REST path (`DELETE
  *     /Account/{auth_id}/Call/{call_uuid}`) is inferred from the Vobiz
  *     Python SDK's `client.live_calls.hangup_call(auth_id, call_uuid)`
@@ -98,8 +113,19 @@ export interface VobizConfig {
   phoneNumber?: string | undefined;
   /** Shared secret Klyro appends as `?verify_token=` to every answer_url/hangup_url it gives Vobiz. */
   webhookVerifyToken: string;
+  /**
+   * Whether a request missing the X-Vobiz-Signature-V3(/-MA-V3) + nonce
+   * headers is rejected outright. Defaults to `true` — Vobiz's own
+   * documented behavior is that the signature is absent only when the
+   * callback URL has no auth configured on their side, so a correctly
+   * configured integration should always see it; see this file's module
+   * doc. Set to `false` only for a dev account where that Vobiz-side
+   * config genuinely isn't set up yet — Klyro's own verify_token still
+   * gates the request either way.
+   */
+  requireVobizSignature?: boolean | undefined;
   /** How long (ms) openMediaBridge waits for Vobiz's WS connection to arrive before giving up. */
-  mediaBridgeTimeoutMs?: number;
+  mediaBridgeTimeoutMs?: number | undefined;
 }
 
 const DEFAULT_BASE_URL = "https://api.vobiz.ai/api/v1";
@@ -291,10 +317,13 @@ export class VobizTelephonyAdapter implements TelephonyProviderAdapter {
 
   /**
    * Layered check (see the module doc's verification note): Klyro's own
-   * verify_token query parameter is the guaranteed-correct primary gate;
-   * Vobiz's X-Vobiz-Signature-V3 header, when present, must ALSO pass — a
-   * present-but-wrong signature is always rejected, never ignored, exactly
-   * like SarvamTelephonyAdapter's verify_token + provider-signature layering.
+   * verify_token query parameter is always the first, guaranteed-correct
+   * gate. Vobiz's own X-Vobiz-Signature-V3 (or the sub-account
+   * X-Vobiz-Signature-MA-V3 variant) is checked next and, by default
+   * (`requireVobizSignature: true`), is REQUIRED — a request missing it is
+   * rejected, matching Vobiz's own documented default rather than silently
+   * degrading to verify_token-only. A present-but-wrong signature is
+   * always rejected regardless of `requireVobizSignature`.
    */
   verifyWebhookSignature(
     _rawBody: string,
@@ -326,18 +355,30 @@ export class VobizTelephonyAdapter implements TelephonyProviderAdapter {
       return false;
     }
 
-    const signature = headers["x-vobiz-signature-v3"];
+    // V3 primary, falling back to the sub-account (MA_) header variant —
+    // both carry the nonce in the same -v3-nonce header per the reference
+    // implementation (see module doc).
+    const signature = headers["x-vobiz-signature-v3"] ?? headers["x-vobiz-signature-ma-v3"];
     const nonce = headers["x-vobiz-signature-v3-nonce"];
+    const requireSignature = this.config.requireVobizSignature ?? true;
+
     if (!signature || !nonce || !url) {
-      // No Vobiz-side signature to additionally verify — Klyro's own
+      if (requireSignature) {
+        console.error("vobiz_provider:webhook_signature_check", {
+          providerSignaturePresent: false,
+          matched: false,
+          requireVobizSignature: true,
+          reason: "missing X-Vobiz-Signature-V3/-nonce header",
+        });
+        return false;
+      }
+      // Explicit opt-out only (requireVobizSignature: false) — Klyro's own
       // verify_token (already matched above) is the full authentication
-      // this request gets, same graceful degradation Sarvam's adapter uses
-      // when its own provider-signature header isn't present.
-      console.info("vobiz_provider:webhook_verify_token_check", {
-        secretConfigured: true,
-        receivedTokenPresent: true,
-        matched: true,
+      // this request gets. Never the default.
+      console.info("vobiz_provider:webhook_signature_check", {
         providerSignaturePresent: false,
+        matched: true,
+        requireVobizSignature: false,
       });
       return true;
     }
