@@ -69,6 +69,24 @@ async function handleVobizAnswer(request: Request): Promise<Response> {
     providerCallId: maskCallSid(event.providerCallId),
   });
 
+  // TEMPORARY DIAGNOSTIC (production incident: +918071580870 reaches this
+  // route — signature verification passes — but phone_numbers resolution
+  // fails with vobiz_answer:unresolved_call / telephony:webhook_unknown_number).
+  // Destination phone numbers routed to a business's own ClickAI line are
+  // not secrets (telephony.ts's own existing webhook_unknown_number log
+  // already logs the equivalent `normalized_number` value unmasked, for the
+  // exact same reason) — this never logs auth tokens, the webhook
+  // verify_token, or either X-Vobiz-Signature header/nonce. Remove once the
+  // root cause is confirmed.
+  console.info("vobiz_answer:destination_diagnostic", {
+    providerCallId: maskCallSid(event.providerCallId),
+    rawFieldsPresent: Object.keys(event.raw),
+    rawTo: typeof event.raw["To"] === "string" ? event.raw["To"] : null,
+    rawToLowercase: typeof event.raw["to"] === "string" ? event.raw["to"] : null,
+    normalizedToE164: event.toE164 ?? null,
+    normalizedDestinationE164: event.destinationE164 ?? null,
+  });
+
   // Background: the exact same call_logs/entitlement/runtime-routing
   // pipeline a normal telephony webhook event causes — see this file's own
   // module doc for why this must not block the XML response below.
@@ -114,10 +132,28 @@ async function handleVobizAnswer(request: Request): Promise<Response> {
   }
 
   if (!organizationId || !phoneNumberId) {
+    // TEMPORARY DIAGNOSTIC (same production incident as above): the masked
+    // calledNumber below was never enough to tell "wrong value" apart from
+    // "right value, wrong provider/status row" — calledNumberExact and
+    // matchingRowsForNumber close that gap. calledNumberExact is the exact
+    // string this route queried phone_numbers.e164 with; a destination
+    // number is not a secret (see the diagnostic above). Remove once the
+    // root cause is confirmed.
+    let matchingRowsForNumber: { provider: string; status: string }[] = [];
+    if (calledNumber) {
+      const { data: anyMatches } = await supabaseAdmin
+        .from("phone_numbers")
+        .select("provider, status")
+        .eq("e164", calledNumber)
+        .limit(5);
+      matchingRowsForNumber = anyMatches ?? [];
+    }
     console.error("vobiz_answer:unresolved_call", {
       direction: event.direction,
       providerCallId: maskCallSid(event.providerCallId),
       calledNumber: calledNumber ? maskPhoneNumber(calledNumber) : null,
+      calledNumberExact: calledNumber,
+      matchingRowsForNumber,
     });
     return xmlResponse(buildVobizDeniedXml("This number is not configured yet."));
   }

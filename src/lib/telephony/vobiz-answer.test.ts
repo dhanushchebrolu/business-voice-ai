@@ -86,3 +86,34 @@ describe("vobiz-answer route — reuses the existing call-session pipeline, neve
     assert.match(routeSrc, /\.eq\("status", "active"\)/);
   });
 });
+
+describe("TEMPORARY diagnostics (production incident: +918071580870 unresolved — see vobiz-provider.test.ts for the normalization-side coverage)", () => {
+  test("logs the raw destination-field value and the normalized value, unmasked — a destination DID is not a secret", () => {
+    assert.match(routeSrc, /vobiz_answer:destination_diagnostic/);
+    assert.match(routeSrc, /rawFieldsPresent: Object\.keys\(event\.raw\)/);
+    assert.match(routeSrc, /normalizedToE164: event\.toE164 \?\? null/);
+    assert.match(routeSrc, /normalizedDestinationE164: event\.destinationE164 \?\? null/);
+  });
+
+  test("the unresolved-call diagnostic logs the exact (unmasked) queried value plus any matching phone_numbers rows regardless of provider/status", () => {
+    assert.match(routeSrc, /calledNumberExact: calledNumber/);
+    assert.match(routeSrc, /matchingRowsForNumber/);
+  });
+
+  test("the new diagnostic log blocks never reference headers, auth tokens, verify_token, or signature/nonce values — only event/payload-derived, non-secret fields", () => {
+    const diagIdx = routeSrc.indexOf('console.info("vobiz_answer:destination_diagnostic"');
+    const unresolvedIdx = routeSrc.indexOf('console.error("vobiz_answer:unresolved_call"');
+    assert.ok(diagIdx > -1 && unresolvedIdx > -1);
+    // Slice from the actual console call (not any preceding explanatory
+    // comment — those legitimately name the header/nonce fields being
+    // deliberately excluded) through its closing `});`.
+    for (const idx of [diagIdx, unresolvedIdx]) {
+      const block = routeSrc.slice(idx, routeSrc.indexOf("});", idx));
+      assert.doesNotMatch(block, /\bheaders\b/);
+      assert.doesNotMatch(block, /authToken/);
+      assert.doesNotMatch(block, /webhookVerifyToken/);
+      assert.doesNotMatch(block, /x-vobiz-signature/i);
+      assert.doesNotMatch(block, /\bnonce\b/i);
+    }
+  });
+});

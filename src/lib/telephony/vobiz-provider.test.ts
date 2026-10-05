@@ -149,6 +149,102 @@ describe("verifyWebhookSignature: requireVobizSignature: false is an explicit, d
   });
 });
 
+describe("normalizeWebhookEvent: destination-number resolution (production incident — +918071580870 answer_url callbacks reach vobiz-answer.ts with signature verification passing, but phone_numbers lookup fails with vobiz_answer:unresolved_call / telephony:webhook_unknown_number)", () => {
+  const REAL_NUMBER_E164 = "+918071580870";
+
+  test("'To' already in E.164 with a leading + resolves to the real DID unchanged", () => {
+    const adapter = new VobizTelephonyAdapter(config);
+    const event = adapter.normalizeWebhookEvent(
+      new URLSearchParams({
+        CallUUID: "cu-e164",
+        CallStatus: "ringing",
+        To: REAL_NUMBER_E164,
+      }).toString(),
+    );
+    assert.ok(event);
+    assert.equal(event?.toE164, REAL_NUMBER_E164);
+    assert.equal(event?.destinationE164, REAL_NUMBER_E164);
+  });
+
+  test("'To' as a bare 12-digit 91-prefixed number with no leading + still resolves to the real DID (normalizeToE164's digit-length fallback)", () => {
+    const adapter = new VobizTelephonyAdapter(config);
+    const event = adapter.normalizeWebhookEvent(
+      new URLSearchParams({
+        CallUUID: "cu-bare12",
+        CallStatus: "ringing",
+        To: "918071580870",
+      }).toString(),
+    );
+    assert.ok(event);
+    assert.equal(event?.toE164, REAL_NUMBER_E164);
+    assert.equal(event?.destinationE164, REAL_NUMBER_E164);
+  });
+
+  test("'To' as a bare 10-digit number (no country code) still resolves to the real DID", () => {
+    const adapter = new VobizTelephonyAdapter(config);
+    const event = adapter.normalizeWebhookEvent(
+      new URLSearchParams({
+        CallUUID: "cu-bare10",
+        CallStatus: "ringing",
+        To: "8071580870",
+      }).toString(),
+    );
+    assert.ok(event);
+    assert.equal(event?.toE164, REAL_NUMBER_E164);
+    assert.equal(event?.destinationE164, REAL_NUMBER_E164);
+  });
+
+  test("a leading '+' arriving as a literal space (GET answer_url query string, unescaped '+' decoded as space by URLSearchParams/form-urlencoded parsing) still resolves correctly, because trim() + the 12-digit fallback recover it", () => {
+    const adapter = new VobizTelephonyAdapter(config);
+    // Simulates exactly what `new URLSearchParams("To=+918071580870")` produces
+    // for the "+" character per the application/x-www-form-urlencoded spec:
+    // it is NOT percent-decoded back to "+", it becomes a literal space.
+    const event = adapter.normalizeWebhookEvent(
+      new URLSearchParams([
+        ["CallUUID", "cu-plusasspace"],
+        ["CallStatus", "ringing"],
+        ["To", " 918071580870"],
+      ]).toString(),
+    );
+    assert.ok(event);
+    assert.equal(event?.toE164, REAL_NUMBER_E164);
+  });
+
+  test("HYPOTHESIS (unconfirmed — documents the exact failure mode a wrong field name would cause): if the destination field were sent under any key other than 'To'/'to', it is silently NOT extracted — toE164/destinationE164 come back undefined, not the DID", () => {
+    const adapter = new VobizTelephonyAdapter(config);
+    const event = adapter.normalizeWebhookEvent(
+      new URLSearchParams({
+        CallUUID: "cu-wrongfield",
+        CallStatus: "ringing",
+        // A plausible alternate name for the dialed number in other
+        // Twilio/Plivo-family providers' payloads — NOT confirmed as
+        // Vobiz's actual field name (vobiz.ai is network-blocked from this
+        // environment; see this file's module doc). This test exists only
+        // to prove the code's current, exact behavior if the real field
+        // name turns out to differ from "To"/"to" — it does NOT assert
+        // this is the real cause.
+        CalledNumber: REAL_NUMBER_E164,
+      }).toString(),
+    );
+    assert.ok(event);
+    assert.equal(event?.toE164, undefined);
+    assert.equal(event?.destinationE164, undefined);
+  });
+
+  test("the raw parsed fields are preserved on the event (event.raw) regardless of whether 'To' extraction succeeds — this is what the vobiz-answer.ts diagnostic logging depends on", () => {
+    const adapter = new VobizTelephonyAdapter(config);
+    const event = adapter.normalizeWebhookEvent(
+      new URLSearchParams({
+        CallUUID: "cu-raw",
+        CallStatus: "ringing",
+        To: REAL_NUMBER_E164,
+      }).toString(),
+    );
+    assert.ok(event);
+    assert.equal(event?.raw["To"], REAL_NUMBER_E164);
+  });
+});
+
 describe("normalizeWebhookEvent: CallUUID + status mapping", () => {
   test("form-urlencoded hangup callback parses correctly", () => {
     const adapter = new VobizTelephonyAdapter(config);
