@@ -796,17 +796,23 @@ function onTtsEvent(session: Session, event: TtsEvent) {
     case "audio": {
       if (!session.firstOutboundAudioFrameLogged) {
         session.firstOutboundAudioFrameLogged = true;
-        // Verifies the audio actually forwarded to the telephony bridge
-        // matches the format we declared to Sarvam, rather than assuming
-        // it: declaredCodec/declaredSampleRateHz are what this session
-        // told Sarvam to synthesize into (connectTts's options); sarvamMeta
-        // is whatever else — if anything — Sarvam's own audio event
-        // carried alongside the payload (e.g. a sample rate/codec field),
-        // surfaced as-is rather than guessed at. The bridge (e.g. Vobiz's
+        // VERIFICATION ONLY — this log does not itself guarantee the audio
+        // format is correct, and fixing a mismatch here would be the wrong
+        // place: that's connectSarvamTts's job (output_audio_codec +
+        // speech_sample_rate in the config message actually sent to
+        // Sarvam; see sarvam-realtime.server.ts's module doc for why both
+        // are required, not just the codec). All this does is make a
+        // mismatch *visible* after the fact: declaredCodec/
+        // declaredSampleRateHz are what this session told Sarvam to
+        // synthesize into (connectTts's options); sarvamMeta is whatever
+        // else — if anything — Sarvam's own audio event carried alongside
+        // the payload (e.g. a sample rate/codec field), surfaced as-is
+        // rather than guessed at. The bridge (e.g. Vobiz's
         // sendOutboundFrame) declares this same codec/sample rate to the
-        // telephony provider and forwards these bytes verbatim, so a
-        // provider that silently ignored the requested format would
-        // otherwise only show up as garbled/silent audio on the call.
+        // telephony provider and forwards these bytes verbatim without any
+        // resampling, so if Sarvam silently honored a different format,
+        // this log — not a connection error — is the only place it would
+        // show up before a caller hears garbled/silent audio.
         log("first_outbound_audio_frame", session, {
           bytes: event.data.length,
           declaredCodec: session.declaredTtsOutputCodec,

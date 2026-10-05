@@ -332,6 +332,26 @@ describe("first_outbound_audio_frame — verifies synthesized audio format again
     assert.match(before, /session\.declaredTtsOutputCodec = outputCodec;/);
     assert.match(before, /session\.declaredTtsOutputSampleRateHz = outputSampleRateHz;/);
   });
+
+  test("its own comment states plainly that this diagnostic is verification only, not the mechanism that makes the format correct", () => {
+    const caseStart = src.indexOf('case "audio": {', src.indexOf("function onTtsEvent"));
+    const logIdx = src.indexOf('log("first_outbound_audio_frame"', caseStart);
+    const comment = src.slice(caseStart, logIdx);
+    assert.match(comment, /VERIFICATION ONLY/);
+    assert.match(comment, /does not itself guarantee the audio[\s\S]*format is correct/);
+  });
+
+  test("no resampling/transcoding: event.data is forwarded to the bridge byte-for-byte, never passed through a transform call first", () => {
+    const caseStart = src.indexOf('case "audio": {', src.indexOf("function onTtsEvent"));
+    const caseEnd = src.indexOf('case "error":', caseStart);
+    const caseBody = src.slice(caseStart, caseEnd);
+    assert.match(
+      caseBody,
+      /const frame: AudioFrame = \{ data: event\.data, timestampMs: Date\.now\(\) - session\.startedAt \};/,
+      "the AudioFrame handed to the bridge must use event.data verbatim — any resample()/transcode()-style wrapper here would mean the declared format and the actual bytes could silently diverge",
+    );
+    assert.doesNotMatch(caseBody, /resample|transcode|convertSampleRate/i);
+  });
 });
 
 /**

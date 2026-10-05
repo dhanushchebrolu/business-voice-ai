@@ -27,24 +27,40 @@
  * `{"type":"config","data":{"language_code":"...","speaker":"..."}}`.
  * Fixed to `language_code`.
  *
- * TTS CONFIG SCHEMA — CONFIRMED: two more fields in that same rejected
- * config payload were wrong. `model` is a connection-level query param
+ * TTS CONFIG SCHEMA — `model` CONFIRMED BY PRODUCTION, `speech_sample_rate`
+ * per user-supplied Sarvam documentation (not yet independently verified by
+ * a live call the way the fixes above were — this sandbox still cannot
+ * reach docs.sarvam.ai directly; see the VERIFICATION NOTE below). `model`
+ * is a connection-level query param
  * (`?model=bulbul:v3` on TTS_WS_URL), exactly mirroring STT's
  * `?model=saaras:v3-realtime` — not a `data` field, which is why the
  * documented minimal contract above never lists it. `output_audio_bitrate`
  * has been removed outright: "bitrate" names a compressed-codec property
- * (kbps), not a PCM/companded sample rate, and mulaw (G.711) is a fixed
- * 8kHz telephony codec in the first place — `output_audio_codec: "mulaw"`
- * alone fully and correctly declares the output format; there was never a
- * sample rate to negotiate. `outputSampleRateHz` is still threaded through
- * `ConnectTtsOptions` (see its own doc comment) and voice-runtime.server.ts
- * now logs a one-time `first_outbound_audio_frame` diagnostic comparing
- * that declared format against whatever metadata Sarvam's own audio event
- * carries, so an undeclared mismatch between what we ask for and what
- * actually reaches the Vobiz bridge is visible in logs rather than assumed.
- * If "Input parameters has to be a valid dictionary" recurs after this fix,
- * `tts_error`'s `raw` field (see `extractErrorDetail` below) will show
- * Sarvam's exact next rejection.
+ * (kbps), not a sample rate, so it was never a valid field for a PCM/
+ * companded codec like mulaw.
+ *
+ * CORRECTION (do not repeat this mistake): an earlier revision of this
+ * comment claimed `output_audio_codec: "mulaw"` alone fully declared the
+ * output format because mulaw is a fixed-rate telephony codec. That is
+ * wrong — codec and sample rate are independent, separately-negotiated
+ * settings in Sarvam's realtime API, and bulbul:v3's documented default
+ * sample rate is 24000 Hz regardless of codec (8000 Hz is supported, but
+ * only if asked for). `speech_sample_rate` is now sent explicitly in
+ * `config.data` alongside `output_audio_codec`. Getting this wrong would
+ * not have surfaced as a connection error — Sarvam would have happily
+ * generated 24kHz audio that the Vobiz bridge forwards byte-for-byte
+ * (declaring mulaw/8kHz the whole time) without resampling, producing
+ * corrupted/garbled audio on a live call with no error anywhere in the
+ * logs. `outputSampleRateHz` (`ConnectTtsOptions`, see its own doc
+ * comment) is the single source for this value — never hardcode 8000
+ * elsewhere in this file. voice-runtime.server.ts's
+ * `first_outbound_audio_frame` diagnostic is verification only: it logs
+ * the declared format next to whatever metadata Sarvam's own audio event
+ * happens to carry, so a mismatch is visible after the fact — it is not
+ * itself what makes the format correct; `speech_sample_rate` in the config
+ * message is. If "Input parameters has to be a valid dictionary" recurs
+ * after this fix, `tts_error`'s `raw` field (see `extractErrorDetail`
+ * below) will show Sarvam's exact next rejection.
  *
  * VERIFICATION NOTE (re-checked, still unresolved for everything below this
  * line — see docs/voice-pipeline-testing.md): this sandbox's network egress
@@ -334,10 +350,14 @@ export interface ConnectTtsOptions {
   outputCodec: "mulaw" | "linear16" | "wav";
   /**
    * Sample rate the telephony leg expects — resolved from the audio
-   * bridge's outbound format. NOT sent to Sarvam (mulaw is a fixed 8kHz
-   * telephony codec with nothing to negotiate; see connectSarvamTts). Kept
-   * here purely for the caller's own format-verification diagnostics
-   * (declaredTtsOutputSampleRateHz in voice-runtime.server.ts).
+   * bridge's outbound format. Sent to Sarvam as `speech_sample_rate`
+   * (separate from `outputCodec`/`output_audio_codec`: codec and sample
+   * rate are independent settings, and bulbul:v3 otherwise defaults to
+   * 24000 Hz regardless of codec — see connectSarvamTts). Also kept for
+   * the caller's own format-verification diagnostics
+   * (declaredTtsOutputSampleRateHz in voice-runtime.server.ts), which
+   * verify the declared value was honored — they don't by themselves
+   * cause it to be.
    */
   outputSampleRateHz: number;
   onEvent: (event: TtsEvent) => void;
@@ -398,12 +418,16 @@ export async function connectSarvamTts(opts: ConnectTtsOptions): Promise<TtsSess
 
   // Config must be the first message on the socket (documented requirement).
   // model is a connection-level query param (set above), matching STT's
-  // proven-correct shape, not a config field — and mulaw is a fixed-rate
-  // (8kHz, G.711) telephony codec, so output_audio_codec alone fully
-  // declares the output format; there is no separate output sample rate to
-  // negotiate. See this file's module doc for why bitrate specifically was
-  // wrong here (a compressed-codec bitrate, not a PCM/companded sample
-  // rate — never a valid thing to ask bulbul:v3 for).
+  // proven-correct shape, not a config field. output_audio_codec and
+  // speech_sample_rate are separate, independent settings — codec alone
+  // does NOT imply a sample rate: Sarvam's documented default for
+  // bulbul:v3 is 24000 Hz regardless of codec, with 8000 Hz supported for
+  // streaming. Both must be declared explicitly, or Sarvam will generate
+  // 24kHz audio that a mulaw/8kHz telephony bridge forwards byte-for-byte
+  // without resampling — not a connection error, just corrupted/garbled
+  // audio on the call. See this file's module doc for why bitrate
+  // specifically was still wrong (a compressed-codec bitrate, not a sample
+  // rate — never reintroduce output_audio_bitrate).
   socket.send(
     JSON.stringify({
       type: "config",
@@ -412,6 +436,7 @@ export async function connectSarvamTts(opts: ConnectTtsOptions): Promise<TtsSess
         speaker: opts.voiceId,
         pace: Math.min(2, Math.max(0.5, opts.pace)),
         output_audio_codec: opts.outputCodec,
+        speech_sample_rate: opts.outputSampleRateHz,
       },
     }),
   );

@@ -188,7 +188,7 @@ describe("STT query param names — production incident round 2: once the endpoi
   });
 });
 
-describe('TTS config message — production incident: the WS handshake and tts_connected succeed, but Sarvam rejects the first config message with "Input parameters has to be a valid dictionary." because this file sent `target_language_code` instead of the documented `language_code` field, plus two schema bugs in the same payload (`model` sent as a data field instead of a query param, and a bogus `output_audio_bitrate` field)', () => {
+describe('TTS config message — production incident: the WS handshake and tts_connected succeed, but Sarvam rejects the first config message with "Input parameters has to be a valid dictionary." because this file sent `target_language_code` instead of the documented `language_code` field, plus further schema bugs in the same payload (`model` sent as a data field instead of a query param, a bogus `output_audio_bitrate` field, and a missing `speech_sample_rate` — codec and sample rate are independent settings, and bulbul:v3 defaults to 24000 Hz regardless of codec)', () => {
   const originalKey = process.env["SARVAM_API_KEY"];
   afterEach(() => {
     if (originalKey === undefined) delete process.env["SARVAM_API_KEY"];
@@ -253,6 +253,33 @@ describe('TTS config message — production incident: the WS handshake and tts_c
       );
       assert.equal(configMessage.data["speaker"], "ritu");
       assert.equal(configMessage.data["output_audio_codec"], "mulaw");
+      assert.equal(configMessage.data["speech_sample_rate"], 8000);
+    });
+  });
+
+  test("connectSarvamTts sends speech_sample_rate matching opts.outputSampleRateHz exactly — never a hardcoded value", async () => {
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    await withFakeWebSocket(async () => {
+      const { connectSarvamTts } = await import("./sarvam-realtime.server.ts");
+      const connectPromise = connectSarvamTts({
+        voiceId: "ritu",
+        language: "en-IN",
+        pace: 1,
+        outputCodec: "linear16",
+        outputSampleRateHz: 16000,
+        onEvent: () => {},
+      });
+      const socket = FakeWebSocket.instances[0]!;
+      socket.simulateOpen();
+      await connectPromise;
+      const configMessage = JSON.parse(socket.sent[0] as string) as {
+        data: Record<string, unknown>;
+      };
+      assert.equal(
+        configMessage.data["speech_sample_rate"],
+        16000,
+        "speech_sample_rate must track whatever the bridge actually declared, not a hardcoded 8000 — a non-Vobiz bridge with a different rate must not silently get 8000",
+      );
     });
   });
 
@@ -271,7 +298,7 @@ describe('TTS config message — production incident: the WS handshake and tts_c
     });
   });
 
-  test("connectSarvamTts never sends output_audio_bitrate — mulaw is a fixed 8kHz telephony codec with no bitrate to declare", async () => {
+  test("connectSarvamTts never sends output_audio_bitrate — the sample rate belongs in speech_sample_rate, not a bitrate field", async () => {
     process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
     await withFakeWebSocket(async () => {
       const socket = await connectAndCaptureConfig();
@@ -281,7 +308,28 @@ describe('TTS config message — production incident: the WS handshake and tts_c
       assert.equal(
         "output_audio_bitrate" in configMessage.data,
         false,
-        "output_audio_bitrate named a compressed-codec bitrate, not a PCM/companded sample rate — never valid for bulbul:v3/mulaw",
+        "output_audio_bitrate named a compressed-codec bitrate (kbps), never a valid field for bulbul:v3 — must not be reintroduced even after adding speech_sample_rate",
+      );
+    });
+  });
+
+  test("the exact Vobiz call shape: output_audio_codec mulaw + speech_sample_rate 8000 together, matching Vobiz's own declared NATIVE_FORMAT", async () => {
+    // Mirrors vobiz-media-bridge.server.ts's NATIVE_FORMAT = { encoding:
+    // "mulaw", sampleRateHz: 8000 } verbatim, without importing or touching
+    // that file — this is the exact opts a real Vobiz call produces via
+    // voice-runtime.server.ts's outputCodecFor()/outboundFormat.sampleRateHz.
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    await withFakeWebSocket(async () => {
+      const socket = await connectAndCaptureConfig();
+      const configMessage = JSON.parse(socket.sent[0] as string) as {
+        data: Record<string, unknown>;
+      };
+      assert.deepEqual(
+        {
+          output_audio_codec: configMessage.data["output_audio_codec"],
+          speech_sample_rate: configMessage.data["speech_sample_rate"],
+        },
+        { output_audio_codec: "mulaw", speech_sample_rate: 8000 },
       );
     });
   });
