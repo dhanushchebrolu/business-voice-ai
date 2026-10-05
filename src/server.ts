@@ -7,6 +7,7 @@ import { handleVobizMediaUpgrade } from "./lib/telephony/vobiz-media-route.serve
 import {
   CALL_SESSION_COORDINATOR_NAME,
   VOBIZ_CALL_SESSION_COORDINATOR_NAME,
+  getCloudflareEnv,
   type CloudflareEnv,
 } from "./lib/telephony/cloudflare-env.server";
 import { EXOTEL_MEDIA_STREAM_PATH as MEDIA_STREAM_PATH } from "./lib/telephony/exotel-media-stream-path";
@@ -112,7 +113,29 @@ export default {
         url.pathname === VOBIZ_MEDIA_STREAM_PATH &&
         (request.headers.get("upgrade") ?? "").toLowerCase() === "websocket"
       ) {
-        const cfEnv = env as CloudflareEnv | null | undefined;
+        // ROOT CAUSE (production incident: the WebSocket upgrade and the
+        // same call's /internal/start-runtime RPC resolved
+        // VOBIZ_CALL_SESSION differently — server:vobiz_ws_routing_decision
+        // logged hasEnv:false/routingPath:"fallback" for the WS upgrade,
+        // while telephony:vobiz_call_session_stub_lookup logged hasEnv:true
+        // for the RPC, same deployed version, same call). This file is NOT
+        // Nitro's actual top-level Cloudflare Worker entry — it's
+        // registered as TanStack Start's own `server.entry` and invoked
+        // from inside Nitro's internal app dispatch (see this file's own
+        // module doc), which does not reliably thread the real `env`
+        // through as this fetch(request, env, ctx)'s second parameter for
+        // a WebSocket-upgrade request. getCloudflareEnv() (globalThis.
+        // __env__) is set unconditionally, synchronously, as the literal
+        // first statement of Nitro's own top-level entry
+        // (_module-handler.mjs), before any internal routing/dispatch
+        // happens — proven reliable by the RPC path, which already uses it
+        // (getVobizCallSessionStub -> getCloudflareEnv). Preferring it here
+        // too, with the direct parameter kept only as a fallback (local
+        // `vite dev`, where Nitro's module-handler doesn't run and
+        // getCloudflareEnv() already returns null), fixes the WS-upgrade
+        // path without changing anything about how the binding itself is
+        // configured or how the Durable Object/fallback choice is made.
+        const cfEnv = getCloudflareEnv() ?? (env as CloudflareEnv | null | undefined);
         const vobizNamespace = cfEnv?.VOBIZ_CALL_SESSION;
         // TEMPORARY DIAGNOSTIC (production incident: the WebSocket upgrade
         // and the /internal/start-runtime RPC for the same call used two

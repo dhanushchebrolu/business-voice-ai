@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { getCloudflareEnv } from "./lib/telephony/cloudflare-env.server.ts";
 
 /**
  * Regression coverage for src/server.ts — the raw Cloudflare Workers fetch
@@ -86,5 +87,75 @@ describe("src/server.ts — Vobiz WS routing diagnostic (production incident: WS
     assert.match(src, /if \(vobizNamespace\) \{/);
     assert.match(src, /return await stub\.fetch\(request\);/);
     assert.match(src, /const vobizMediaUpgrade = await handleVobizMediaUpgrade\(request\);/);
+  });
+});
+
+function withGlobalEnv<T>(env: unknown, fn: () => T): T {
+  const original = (globalThis as { __env__?: unknown }).__env__;
+  (globalThis as { __env__?: unknown }).__env__ = env;
+  try {
+    return fn();
+  } finally {
+    (globalThis as { __env__?: unknown }).__env__ = original;
+  }
+}
+
+describe("src/server.ts — FIX (production incident: VOBIZ_CALL_SESSION resolved for the RPC but not the WebSocket upgrade for the same call, same deployed version — root cause: this file's cfEnv came only from its own fetch(request, env, ctx) parameter, never getCloudflareEnv()/globalThis.__env__, which the RPC path already used and which the evidence proved reliable)", () => {
+  test("the Vobiz cfEnv resolution now prefers getCloudflareEnv() over the direct fetch() parameter, with the parameter kept only as a fallback", () => {
+    assert.match(
+      src,
+      /const cfEnv = getCloudflareEnv\(\) \?\? \(env as CloudflareEnv \| null \| undefined\);/,
+      "expected getCloudflareEnv() to be tried first, exactly matching the proven-reliable RPC-path mechanism",
+    );
+  });
+
+  test("getCloudflareEnv is actually imported from the shared module, not reimplemented locally", () => {
+    assert.match(
+      src,
+      /import\s*\{[\s\S]*?getCloudflareEnv[\s\S]*?\}\s*from\s*"\.\/lib\/telephony\/cloudflare-env\.server"/,
+    );
+  });
+
+  test("Exotel's own WS-upgrade block is untouched — still resolves cfEnv only from the direct parameter, never getCloudflareEnv()", () => {
+    const exotelBlockStart = src.indexOf("url.pathname === MEDIA_STREAM_PATH &&");
+    const vobizBlockStart = src.indexOf("url.pathname === VOBIZ_MEDIA_STREAM_PATH &&");
+    assert.ok(exotelBlockStart > -1 && vobizBlockStart > -1 && exotelBlockStart < vobizBlockStart);
+    const exotelBlock = src.slice(exotelBlockStart, vobizBlockStart);
+    assert.match(exotelBlock, /const cfEnv = env as CloudflareEnv \| null \| undefined;/);
+    assert.doesNotMatch(exotelBlock, /getCloudflareEnv/);
+  });
+
+  test("BEHAVIORAL (using the real getCloudflareEnv — the exact function the fix calls, not a reimplementation): globalThis.__env__ wins over the direct parameter when both are present", () => {
+    withGlobalEnv({ VOBIZ_CALL_SESSION: "from-global" }, () => {
+      const directParamEnv = { VOBIZ_CALL_SESSION: "from-param" };
+      const cfEnv =
+        getCloudflareEnv() ?? (directParamEnv as typeof directParamEnv | null | undefined);
+      assert.equal((cfEnv as { VOBIZ_CALL_SESSION: string }).VOBIZ_CALL_SESSION, "from-global");
+    });
+  });
+
+  test("BEHAVIORAL: falls back to the direct parameter when globalThis.__env__ is unset (local vite dev — getCloudflareEnv() genuinely returns null there)", () => {
+    withGlobalEnv(undefined, () => {
+      const directParamEnv = { VOBIZ_CALL_SESSION: "from-param" };
+      const cfEnv =
+        getCloudflareEnv() ?? (directParamEnv as typeof directParamEnv | null | undefined);
+      assert.equal((cfEnv as { VOBIZ_CALL_SESSION: string }).VOBIZ_CALL_SESSION, "from-param");
+    });
+  });
+
+  test("REGRESSION: the no-binding/failure case — neither source has the binding — degrades to the existing fallback path, not a crash", () => {
+    withGlobalEnv(undefined, () => {
+      const directParamEnv: unknown = undefined;
+      const cfEnv =
+        getCloudflareEnv() ??
+        (directParamEnv as { VOBIZ_CALL_SESSION?: unknown } | null | undefined);
+      const vobizNamespace = cfEnv?.VOBIZ_CALL_SESSION;
+      assert.equal(vobizNamespace, undefined);
+      // This is exactly the condition src/server.ts's own `if (vobizNamespace)`
+      // branches on — confirming the local-dev/no-binding degraded path
+      // (handleVobizMediaUpgrade, the in-process fallback) is still reached
+      // correctly, not accidentally broken by preferring getCloudflareEnv().
+      assert.equal(Boolean(vobizNamespace), false);
+    });
   });
 });
