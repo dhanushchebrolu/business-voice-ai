@@ -340,6 +340,18 @@ export class VobizCallSessionDurableObject {
 
   private registerBridge(providerCallId: string, bridge: AudioMediaBridge): void {
     const waiter = this.waiters.get(providerCallId);
+    // TEMPORARY DIAGNOSTIC (production incident: awaitBridge times out the
+    // full 15s even though the media WebSocket/parser are confirmed
+    // working elsewhere) — the exact key this bridge registers under, and
+    // whether a waiter (an in-flight /internal/start-runtime RPC) was
+    // already present for it. Masked, never the raw callId/token/signature.
+    console.info("vobiz_call_session_do:bridge_registered", {
+      doId: this.state.id.toString(),
+      providerCallId: maskCallSid(providerCallId),
+      waiterAlreadyPresent: Boolean(waiter),
+      waitersSize: this.waiters.size,
+      arrivedSize: this.arrived.size,
+    });
     if (waiter) {
       clearTimeout(waiter.timeout);
       this.waiters.delete(providerCallId);
@@ -364,7 +376,19 @@ export class VobizCallSessionDurableObject {
   }
 
   private awaitBridge(providerCallId: string, timeoutMs: number): Promise<AudioMediaBridge | null> {
+    // TEMPORARY DIAGNOSTIC (same incident) — the exact key this call is
+    // about to look up/wait on, whether it was already in `arrived` at
+    // this instant, and the registry's current size (never its raw
+    // contents). Masked, never the raw callId/token/signature.
     const already = this.arrived.get(providerCallId);
+    console.info("vobiz_call_session_do:await_bridge_start", {
+      doId: this.state.id.toString(),
+      providerCallId: maskCallSid(providerCallId),
+      timeoutMs,
+      alreadyArrived: Boolean(already),
+      waitersSize: this.waiters.size,
+      arrivedSize: this.arrived.size,
+    });
     if (already) {
       this.arrived.delete(providerCallId);
       return Promise.resolve(already);
@@ -372,9 +396,24 @@ export class VobizCallSessionDurableObject {
     return new Promise((resolve) => {
       const timeout = setTimeout(() => {
         this.waiters.delete(providerCallId);
+        console.info("vobiz_call_session_do:await_bridge_timeout", {
+          doId: this.state.id.toString(),
+          providerCallId: maskCallSid(providerCallId),
+          timeoutMs,
+        });
         resolve(null);
       }, timeoutMs);
-      this.waiters.set(providerCallId, { resolve: (bridge) => resolve(bridge), timeout });
+      this.waiters.set(providerCallId, {
+        resolve: (bridge) => {
+          console.info("vobiz_call_session_do:await_bridge_resolved_by_waiter", {
+            doId: this.state.id.toString(),
+            providerCallId: maskCallSid(providerCallId),
+            bridgeFound: bridge !== null,
+          });
+          resolve(bridge);
+        },
+        timeout,
+      });
     });
   }
 
@@ -386,9 +425,20 @@ export class VobizCallSessionDurableObject {
   private async handleStartRuntime(request: Request): Promise<Response> {
     const body = (await request.json()) as VobizStartRuntimeRpcInput;
     const requestedTimeoutMs = body.timeoutMs ?? DEFAULT_BRIDGE_TIMEOUT_MS;
+    // TEMPORARY DIAGNOSTIC (production incident: awaitBridge times out the
+    // full 15s with no visible reason): body.providerCallId — the exact
+    // key awaitBridge is about to search for — was never logged anywhere
+    // in this handler before. Guarded against a non-string value (the
+    // request body cast above is unchecked) so a genuinely null/missing
+    // providerCallId is itself visible rather than crashing this log line.
+    const maskedProviderCallId =
+      typeof body.providerCallId === "string"
+        ? maskCallSid(body.providerCallId)
+        : body.providerCallId;
     console.info("vobiz_call_session_do:start_runtime_received", {
       doId: this.state.id.toString(),
       callId: body.callId,
+      providerCallId: maskedProviderCallId,
       requestedTimeoutMs,
     });
 
@@ -412,9 +462,13 @@ export class VobizCallSessionDurableObject {
     const waitedMs = Date.now() - bridgeWaitStarted;
     if (!bridge) {
       console.error("vobiz_call_session_do:start_runtime_no_bridge", {
+        doId: this.state.id.toString(),
         callId: body.callId,
+        providerCallId: maskedProviderCallId,
         requestedTimeoutMs,
         waitedMs,
+        arrivedSize: this.arrived.size,
+        waitersSize: this.waiters.size,
       });
       return jsonResponse({
         handled: false,
@@ -422,7 +476,9 @@ export class VobizCallSessionDurableObject {
       } satisfies VobizAgentRuntimeRpcResult);
     }
     console.info("vobiz_call_session_do:start_runtime_bridge_found", {
+      doId: this.state.id.toString(),
       callId: body.callId,
+      providerCallId: maskedProviderCallId,
       waitedMs,
     });
 

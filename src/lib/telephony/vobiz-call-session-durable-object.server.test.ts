@@ -669,6 +669,137 @@ describe("VobizCallSessionDurableObject", () => {
       "expected start_runtime_no_bridge to log the exact reason for handled:false",
     );
   });
+
+  test("DIAGNOSTIC (production incident: awaitBridge times out the full 15s even though the media WebSocket/parser are confirmed working elsewhere — the exact lookup/registration key was never visible in logs): start_runtime_received and start_runtime_no_bridge both log the masked providerCallId, not just callId", async () => {
+    const doInstance = new VobizCallSessionDurableObject(fakeState("vdiag-provider-call-id"), {});
+    const logs = captureLogs();
+    try {
+      await doInstance.fetch(
+        new Request("https://vobiz-call-session/internal/start-runtime", {
+          method: "POST",
+          body: JSON.stringify({
+            ...BASE_RPC_FIELDS,
+            callId: "call-diag-provider-id",
+            providerCallId: "vobiz-callsid-diag-provider-id",
+            timeoutMs: 50,
+          }),
+        }),
+      );
+    } finally {
+      logs.restore();
+    }
+
+    const received = logs.calls.find(
+      (c) => c.event === "vobiz_call_session_do:start_runtime_received",
+    );
+    assert.ok(received);
+    assert.ok(
+      (received!.data as { providerCallId?: unknown }).providerCallId,
+      "expected providerCallId to be present in start_runtime_received",
+    );
+
+    const noBridge = logs.calls.find(
+      (c) => c.event === "vobiz_call_session_do:start_runtime_no_bridge",
+    );
+    assert.ok(noBridge);
+    assert.ok(
+      (noBridge!.data as { providerCallId?: unknown }).providerCallId,
+      "expected providerCallId to be present in start_runtime_no_bridge",
+    );
+
+    // Never the raw, unmasked callId — only the last-6-characters mask.
+    const allLoggedText = JSON.stringify(logs.calls);
+    assert.doesNotMatch(allLoggedText, /vobiz-callsid-diag-provider-id/);
+  });
+
+  test("DIAGNOSTIC (same incident): registerBridge logs bridge_registered with the exact masked key and waiter-presence, awaitBridge logs await_bridge_start with the exact masked key it is about to look up — the SAME masked suffix for the SAME real call, so a lookup/registration key mismatch would be directly visible by comparing the two logs", async () => {
+    const rawInstance = new VobizCallSessionDurableObject(fakeState("vdiag-key-visibility"), {});
+    const doInstance = rawInstance as unknown as {
+      registerBridge: (id: string, bridge: AudioMediaBridge) => void;
+    };
+    const logs = captureLogs();
+    try {
+      // RPC arrives first (awaitBridge starts waiting)...
+      const rpcPromise = rawInstance.fetch(
+        new Request("https://vobiz-call-session/internal/start-runtime", {
+          method: "POST",
+          body: JSON.stringify({
+            ...BASE_RPC_FIELDS,
+            callId: "call-diag-key-visibility",
+            providerCallId: "vobiz-callsid-key-visibility-match",
+            timeoutMs: 5000,
+          }),
+        }),
+      );
+      // ...then the media WebSocket's bridge registers under the SAME key
+      // shortly after — the late-arrival ordering this incident is about.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      doInstance.registerBridge("vobiz-callsid-key-visibility-match", fakeBridge());
+      await rpcPromise;
+    } finally {
+      logs.restore();
+    }
+
+    const awaitStart = logs.calls.find(
+      (c) => c.event === "vobiz_call_session_do:await_bridge_start",
+    );
+    const registered = logs.calls.find(
+      (c) => c.event === "vobiz_call_session_do:bridge_registered",
+    );
+    const resolvedByWaiter = logs.calls.find(
+      (c) => c.event === "vobiz_call_session_do:await_bridge_resolved_by_waiter",
+    );
+    assert.ok(awaitStart, "expected await_bridge_start to log when the RPC starts waiting");
+    assert.ok(registered, "expected bridge_registered to log when the WS bridge registers");
+    assert.ok(
+      resolvedByWaiter,
+      "expected await_bridge_resolved_by_waiter to log — the late-arrival rendezvous must still resolve the waiting RPC, not just the already-arrived fast path",
+    );
+
+    const awaitKey = (awaitStart!.data as { providerCallId: string }).providerCallId;
+    const registeredKey = (registered!.data as { providerCallId: string }).providerCallId;
+    assert.equal(
+      awaitKey,
+      registeredKey,
+      "the masked key awaitBridge searched for must equal the masked key registerBridge registered under, for the same real call",
+    );
+    assert.equal(
+      (registered!.data as { waiterAlreadyPresent: boolean }).waiterAlreadyPresent,
+      true,
+      "the RPC was already waiting when the bridge registered",
+    );
+    assert.equal((resolvedByWaiter!.data as { bridgeFound: boolean }).bridgeFound, true);
+
+    const allLoggedText = JSON.stringify(logs.calls);
+    assert.doesNotMatch(allLoggedText, /vobiz-callsid-key-visibility-match/);
+  });
+
+  test("DIAGNOSTIC (same incident): await_bridge_timeout logs the exact masked key that never matched, distinguishable from a key that resolved via a waiter or an already-arrived bridge", async () => {
+    const doInstance = new VobizCallSessionDurableObject(fakeState("vdiag-timeout-key"), {});
+    const logs = captureLogs();
+    try {
+      await doInstance.fetch(
+        new Request("https://vobiz-call-session/internal/start-runtime", {
+          method: "POST",
+          body: JSON.stringify({
+            ...BASE_RPC_FIELDS,
+            callId: "call-diag-timeout-key",
+            providerCallId: "vobiz-callsid-never-registered",
+            timeoutMs: 50,
+          }),
+        }),
+      );
+    } finally {
+      logs.restore();
+    }
+
+    const timeout = logs.calls.find(
+      (c) => c.event === "vobiz_call_session_do:await_bridge_timeout",
+    );
+    assert.ok(timeout, "expected await_bridge_timeout to log when no matching key ever arrives");
+    assert.ok((timeout!.data as { providerCallId?: unknown }).providerCallId);
+    assert.doesNotMatch(JSON.stringify(logs.calls), /vobiz-callsid-never-registered/);
+  });
 });
 
 describe("Vobiz callId correlation is delegated to the shared module (same production-incident class of regression as Exotel's)", () => {
