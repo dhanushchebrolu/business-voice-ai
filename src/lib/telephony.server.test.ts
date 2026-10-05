@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { TELEPHONY_PROVIDERS, providerStatus, getTelephonyAdapter } from "./telephony.server.ts";
 import { SarvamTelephonyAdapter } from "./telephony/sarvam-provider.server.ts";
+import { VobizTelephonyAdapter } from "./telephony/vobiz-provider.ts";
 
 /**
  * Config-validation coverage for the Sarvam migration's requirement A: reuse
@@ -253,4 +254,86 @@ test("getTelephonyAdapter('sarvam'): SARVAM_ORG_ID/SARVAM_WORKSPACE_ID, when set
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+const VOBIZ_ENV_VARS = ["VOBIZ_AUTH_ID", "VOBIZ_AUTH_TOKEN", "VOBIZ_WEBHOOK_VERIFY_TOKEN"];
+
+/**
+ * Vobiz migration (development/testing provider alongside Exotel — see
+ * vobiz-provider.ts's module doc): registry dispatch coverage mirroring
+ * the Sarvam/Exotel pattern above. The `vobiz` TELEPHONY_PROVIDERS entry
+ * previously had no dedicated construction branch at all and listed the
+ * wrong required secret (VOBIZ_API_KEY) — these tests pin the corrected
+ * requiredSecrets and prove the dedicated branch is actually reached.
+ */
+
+test("TELEPHONY_PROVIDERS: the vobiz entry lists the real X-Auth-ID/X-Auth-Token/verify-token secrets, not a single generic API key", () => {
+  const def = TELEPHONY_PROVIDERS.find((p) => p.id === "vobiz");
+  assert.ok(def);
+  assert.deepEqual(def!.requiredSecrets, [
+    "VOBIZ_AUTH_ID",
+    "VOBIZ_AUTH_TOKEN",
+    "VOBIZ_WEBHOOK_VERIFY_TOKEN",
+  ]);
+  assert.equal(def!.supportsPurchase, true);
+});
+
+test("getTelephonyAdapter('vobiz'): returns null when any required credential is missing", () => {
+  withEnv(Object.fromEntries(VOBIZ_ENV_VARS.map((k) => [k, undefined])), () => {
+    assert.equal(getTelephonyAdapter("vobiz"), null);
+  });
+  withEnv(
+    { VOBIZ_AUTH_ID: "a", VOBIZ_AUTH_TOKEN: undefined, VOBIZ_WEBHOOK_VERIFY_TOKEN: "t" },
+    () => {
+      assert.equal(getTelephonyAdapter("vobiz"), null);
+    },
+  );
+});
+
+test("getTelephonyAdapter('vobiz'): returns a real VobizTelephonyAdapter once all three credentials are set", () => {
+  withEnv(
+    { VOBIZ_AUTH_ID: "AUTH1", VOBIZ_AUTH_TOKEN: "TOKEN1", VOBIZ_WEBHOOK_VERIFY_TOKEN: "VT1" },
+    () => {
+      const adapter = getTelephonyAdapter("vobiz");
+      assert.ok(adapter instanceof VobizTelephonyAdapter);
+      assert.equal(adapter!.id, "vobiz");
+      assert.equal(adapter!.supportsPurchase, true);
+    },
+  );
+});
+
+test("getTelephonyAdapter('vobiz'): does not fall through to the generic REST/HMAC adapter even if VOBIZ_BASE_URL/VOBIZ_WEBHOOK_SECRET happen to be set", () => {
+  withEnv(
+    {
+      VOBIZ_AUTH_ID: "AUTH1",
+      VOBIZ_AUTH_TOKEN: "TOKEN1",
+      VOBIZ_WEBHOOK_VERIFY_TOKEN: "VT1",
+      VOBIZ_BASE_URL: "https://attacker.example",
+      VOBIZ_WEBHOOK_SECRET: "unused-generic-secret",
+    },
+    () => {
+      const adapter = getTelephonyAdapter("vobiz");
+      assert.ok(adapter instanceof VobizTelephonyAdapter);
+    },
+  );
+});
+
+test("providerStatus: vobiz reports configured:false with all three secrets named as missing until every one is set", () => {
+  withEnv(Object.fromEntries(VOBIZ_ENV_VARS.map((k) => [k, undefined])), () => {
+    const status = providerStatus().find((p) => p.id === "vobiz");
+    assert.ok(status);
+    assert.equal(status!.configured, false);
+    assert.deepEqual([...status!.missing].sort(), [...VOBIZ_ENV_VARS].sort());
+  });
+});
+
+test("providerStatus: vobiz reports configured:true once all three secrets are set", () => {
+  withEnv(
+    { VOBIZ_AUTH_ID: "AUTH1", VOBIZ_AUTH_TOKEN: "TOKEN1", VOBIZ_WEBHOOK_VERIFY_TOKEN: "VT1" },
+    () => {
+      const status = providerStatus().find((p) => p.id === "vobiz");
+      assert.equal(status!.configured, true);
+      assert.deepEqual(status!.missing, []);
+    },
+  );
 });

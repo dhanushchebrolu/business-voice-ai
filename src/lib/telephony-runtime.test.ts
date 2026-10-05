@@ -173,10 +173,18 @@ describe("#20 Cross-tenant access rejection — the actual isolation mechanism",
       ),
       "utf8",
     );
+    // Generalized (Vobiz migration) to take a `provider` parameter so a
+    // second provider with the same "connects to us as a WS client" media
+    // shape reuses this exact function rather than carrying its own copy —
+    // see that module's own doc. The lookup itself is still scoped by
+    // provider (never a bare provider_call_id match across providers), and
+    // the original Exotel entry point still passes "exotel" literally via
+    // an unchanged, behavior-identical wrapper.
     assert.match(
       authSrc,
-      /\.from\("call_logs"\)\s*\n\s*\.select\("id, organization_id, phone_number_id, status"\)\s*\n\s*\.eq\("provider", "exotel"\)\s*\n\s*\.eq\("provider_call_id", callSid\)/,
+      /\.from\("call_logs"\)\s*\n\s*\.select\("id, organization_id, phone_number_id, status"\)\s*\n\s*\.eq\("provider", provider\)\s*\n\s*\.eq\("provider_call_id", callSid\)/,
     );
+    assert.match(authSrc, /return authorizeMediaSession\("exotel", callSid, optionalToken\);/);
     assert.match(
       authSrc,
       /const gate = await checkTelephonyAccess\(call\.organization_id, phoneNumber\.id, "inbound"\);/,

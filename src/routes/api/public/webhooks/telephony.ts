@@ -158,7 +158,15 @@ async function handleTelephonyWebhook(request: Request): Promise<Response> {
   return new Response("ok");
 }
 
-async function processTelephonyEvent(
+/**
+ * Exported so vobiz-answer.ts (the only route whose job requires an
+ * immediate XML response body, not just a 200) can trigger the exact same
+ * call_logs-insert/entitlement-gate/runtime-routing pipeline in the
+ * background, without re-implementing any of it — see that file's own
+ * comment for why the XML response and this side-effect must be decoupled.
+ * Every other provider keeps using this only via handleTelephonyWebhook.
+ */
+export async function processTelephonyEvent(
   providerId: string,
   event: NormalizedCallEvent,
   waitUntil: WaitUntil | undefined,

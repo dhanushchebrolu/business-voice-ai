@@ -3,11 +3,13 @@ import "./lib/error-capture";
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
 import { handleExotelMediaUpgrade } from "./lib/telephony/exotel-media-route.server";
+import { handleVobizMediaUpgrade } from "./lib/telephony/vobiz-media-route.server";
 import {
   CALL_SESSION_COORDINATOR_NAME,
   type CloudflareEnv,
 } from "./lib/telephony/cloudflare-env.server";
 import { EXOTEL_MEDIA_STREAM_PATH as MEDIA_STREAM_PATH } from "./lib/telephony/exotel-media-stream-path";
+import { VOBIZ_MEDIA_STREAM_PATH } from "./lib/telephony/vobiz-media-stream-path";
 
 // The CallSessionDurableObject class itself is exported to the Cloudflare
 // Worker entrypoint from ../exports.cloudflare.ts (Nitro's documented
@@ -95,6 +97,23 @@ export default {
         }
         const mediaUpgrade = await handleExotelMediaUpgrade(request);
         if (mediaUpgrade) return mediaUpgrade;
+      }
+
+      // Vobiz's `<Stream>` Voice XML element is likewise a WS client
+      // connecting to us (see vobiz-provider.ts's module doc) — same
+      // interception reason as Exotel above. Not yet routed through
+      // CALL_SESSION: that Durable Object is Exotel-specific today: see
+      // vobiz-media-route.server.ts's module doc for why this
+      // development/testing integration deliberately does not generalize
+      // it, and handles Vobiz media directly in this ambient fetch handler
+      // instead (the same non-durable behavior Exotel's own fallback path
+      // has when the binding isn't configured).
+      if (
+        url.pathname === VOBIZ_MEDIA_STREAM_PATH &&
+        (request.headers.get("upgrade") ?? "").toLowerCase() === "websocket"
+      ) {
+        const vobizMediaUpgrade = await handleVobizMediaUpgrade(request);
+        if (vobizMediaUpgrade) return vobizMediaUpgrade;
       }
 
       const handler = await getServerEntry();

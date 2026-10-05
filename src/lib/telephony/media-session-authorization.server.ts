@@ -58,25 +58,37 @@ export function maskCallSid(sid: string): string {
 }
 
 /**
- * Looks up the call_logs row for `callSid`, retries briefly to absorb the
- * inherent race between Exotel's WebSocket connect and its independent
- * call-status webhook (the thing that actually writes the row), and — once
- * found — re-runs the exact same entitlement gate (checkTelephonyAccess)
- * every other telephony code path uses. Never accepts a call this cannot
- * positively verify: every rejection path returns `{ ok: false, reason }`
- * and the caller is responsible for closing the socket, never proceeding.
+ * Looks up the call_logs row for `callSid` under the given `provider`,
+ * retries briefly to absorb the inherent race between a provider's
+ * WebSocket connect and its independent call-status webhook (the thing
+ * that actually writes the row), and — once found — re-runs the exact same
+ * entitlement gate (checkTelephonyAccess) every other telephony code path
+ * uses. Never accepts a call this cannot positively verify: every
+ * rejection path returns `{ ok: false, reason }` and the caller is
+ * responsible for closing the socket, never proceeding.
+ *
+ * Provider-parameterized (not Exotel-only) so a second provider with the
+ * same "the provider connects to us as a WS client" media shape — Vobiz's
+ * `<Stream>` Voice XML element works identically to Exotel's Voicebot
+ * Applet in this respect — reuses this exact logic rather than carrying its
+ * own copy (the module doc above explains why a second copy is specifically
+ * the class of bug this file exists to prevent).
+ * `authorizeExotelMediaSession` below is an unchanged, behavior-identical
+ * wrapper kept for Exotel's existing call sites/tests.
  */
-export async function authorizeExotelMediaSession(
+export async function authorizeMediaSession(
+  provider: string,
   callSid: string,
   optionalToken: string | undefined,
 ): Promise<AuthorizedMediaSession | RejectedMediaSession> {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const logPrefix = `${provider}_media_session`;
 
   async function lookupCall() {
     const { data } = await supabaseAdmin
       .from("call_logs")
       .select("id, organization_id, phone_number_id, status")
-      .eq("provider", "exotel")
+      .eq("provider", provider)
       .eq("provider_call_id", callSid)
       .maybeSingle();
     return data;
@@ -112,7 +124,7 @@ export async function authorizeExotelMediaSession(
     } catch {
       supabaseHost = "unparseable";
     }
-    console.error("exotel_media_session:call_log_lookup", {
+    console.error(`${logPrefix}:call_log_lookup`, {
       callSid: maskedSid,
       attempts: attemptsMade,
       found: false,
@@ -121,7 +133,7 @@ export async function authorizeExotelMediaSession(
     return { ok: false, reason: `No known call for CallSid ${maskedSid}` };
   }
 
-  console.info("exotel_media_session:call_log_lookup", {
+  console.info(`${logPrefix}:call_log_lookup`, {
     callSid: maskedSid,
     attempts: attemptsMade,
     found: true,
@@ -172,7 +184,7 @@ export async function authorizeExotelMediaSession(
   // Reuse Phase D's entitlement gate exactly — never a parallel check.
   const gate = await checkTelephonyAccess(call.organization_id, phoneNumber.id, "inbound");
   if (!gate.allowed) {
-    console.error("exotel_media_session:rejected_by_gate", {
+    console.error(`${logPrefix}:rejected_by_gate`, {
       callSid: maskedSid,
       organizationId: call.organization_id,
       calledNumber: maskPhoneNumber(phoneNumber.e164),
@@ -190,4 +202,18 @@ export async function authorizeExotelMediaSession(
     organizationId: call.organization_id,
     phoneNumberId: phoneNumber.id,
   };
+}
+
+/**
+ * Exotel's original entry point — an unchanged, behavior-identical wrapper
+ * around `authorizeMediaSession("exotel", ...)`. Kept so every existing
+ * call site and regression test (exotel-media-route.server.ts,
+ * call-session-durable-object.server.ts, and both files' tests asserting
+ * this exact import/call shape) needs no change at all.
+ */
+export async function authorizeExotelMediaSession(
+  callSid: string,
+  optionalToken: string | undefined,
+): Promise<AuthorizedMediaSession | RejectedMediaSession> {
+  return authorizeMediaSession("exotel", callSid, optionalToken);
 }

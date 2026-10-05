@@ -3,6 +3,9 @@ import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { assertPlatformAdmin, writeAudit } from "@/lib/platform-admin.server";
 import { getTelephonyAdapter, providerStatus, TELEPHONY_PROVIDERS } from "@/lib/telephony.server";
 import { provisionOrganizationAfterPayment } from "@/lib/provisioning-orchestrator.server";
+import { TelephonyAdapterError } from "@/lib/telephony/adapter";
+import { VobizTelephonyAdapter } from "@/lib/telephony/vobiz-provider";
+import type { Json } from "@/integrations/supabase/types";
 
 /**
  * Admin telephony control plane: phone-number lifecycle and the
@@ -557,4 +560,68 @@ export const listAllCalls = createServerFn({ method: "GET" })
       startedAt: c.started_at,
       endedAt: c.ended_at,
     }));
+  });
+
+/* ------------------------------------------------------------------ */
+/* Vobiz connection test (development/testing provider)                */
+/* ------------------------------------------------------------------ */
+
+export interface VobizConnectivityTestResult {
+  credentialsConfigured: boolean;
+  probe: { attempted: boolean; ok: boolean; status: number | null; message: string | null };
+}
+
+/**
+ * Read-only "are these Vobiz credentials actually valid" check — Step 10's
+ * "safe development-only connection test". Never places a call and never
+ * purchases a number: the only network request it makes is
+ * `listInventoryNumbers("IN")`, a real, already-implemented GET request
+ * (VobizTelephonyAdapter.listInventoryNumbers, also used by
+ * `provisionNumber`) that is inherently read-only. A 401/403 from that
+ * call means the credentials are wrong; any other successful response
+ * (even an empty inventory list) means auth succeeded. Never displays the
+ * configured Auth Token — only whether it's present and whether the probe
+ * succeeded, mirroring testSarvamConnectivity's established pattern.
+ */
+export const testVobizConnectivity = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }): Promise<VobizConnectivityTestResult> => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "customers.read");
+
+    const status = providerStatus().find((p) => p.id === "vobiz");
+    const result: VobizConnectivityTestResult = {
+      credentialsConfigured: Boolean(status?.configured),
+      probe: { attempted: false, ok: false, status: null, message: null },
+    };
+
+    if (result.credentialsConfigured) {
+      result.probe.attempted = true;
+      const adapter = getTelephonyAdapter("vobiz");
+      try {
+        if (!adapter || !(adapter instanceof VobizTelephonyAdapter))
+          throw new Error("Vobiz adapter is not available.");
+        const numbers = await adapter.listInventoryNumbers("IN");
+        result.probe.ok = true;
+        result.probe.status = 200;
+        result.probe.message = `Authenticated — ${numbers.length} number(s) visible in India inventory.`;
+      } catch (err) {
+        // TelephonyAdapterError messages never include the auth header
+        // values (see VobizTelephonyAdapter's fetch error handling) — safe
+        // to surface as-is to an admin.
+        result.probe.ok = false;
+        result.probe.status = err instanceof TelephonyAdapterError ? err.status : null;
+        result.probe.message = (err as Error).message;
+      }
+    }
+
+    await writeAudit(admin, {
+      action: "VOBIZ_CONNECTIVITY_TEST",
+      entityType: "platform",
+      entityId: null,
+      organizationId: null,
+      newValue: result as unknown as Json,
+      reason: "Provider connectivity test",
+    });
+
+    return result;
   });

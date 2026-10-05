@@ -12,6 +12,7 @@ import { GenericTelephonyAdapter } from "./telephony/generic-provider.ts";
 import { MockTelephonyAdapter } from "./telephony/mock-provider.ts";
 import { ExotelTelephonyAdapter } from "./telephony/exotel-provider.ts";
 import { SarvamTelephonyAdapter } from "./telephony/sarvam-provider.server.ts";
+import { VobizTelephonyAdapter } from "./telephony/vobiz-provider.ts";
 import type { TelephonyProviderAdapter } from "./telephony/adapter.ts";
 
 export interface TelephonyProviderDef {
@@ -67,7 +68,20 @@ export const TELEPHONY_PROVIDERS: TelephonyProviderDef[] = [
     requiredSecrets: ["SMARTFLO_TOKEN"],
     supportsPurchase: false,
   },
-  { id: "vobiz", label: "Vobiz", requiredSecrets: ["VOBIZ_API_KEY"], supportsPurchase: false },
+  // Development/testing provider (migration-in-progress alongside Exotel —
+  // see VobizTelephonyAdapter's module doc). Real auth shape is X-Auth-ID +
+  // X-Auth-Token + a Klyro-generated webhook verify token, not a single
+  // generic API key — corrected from the placeholder VOBIZ_API_KEY this
+  // entry previously listed (which never had a real construction branch and
+  // silently fell through to GenericTelephonyAdapter's invented REST/HMAC
+  // shape). supportsPurchase is true: Vobiz has a confirmed self-service
+  // numbers API (GET /inventory/numbers, POST /numbers/purchase-from-inventory).
+  {
+    id: "vobiz",
+    label: "Vobiz",
+    requiredSecrets: ["VOBIZ_AUTH_ID", "VOBIZ_AUTH_TOKEN", "VOBIZ_WEBHOOK_VERIFY_TOKEN"],
+    supportsPurchase: true,
+  },
   { id: "pulse", label: "Pulse", requiredSecrets: ["PULSE_API_KEY"], supportsPurchase: false },
   { id: "intalk", label: "Intalk", requiredSecrets: ["INTALK_API_KEY"], supportsPurchase: false },
 ];
@@ -262,6 +276,26 @@ export function getTelephonyAdapter(providerId: string): TelephonyProviderAdapte
       apiKey,
       apiToken,
       subdomain,
+      webhookVerifyToken,
+    });
+  }
+
+  // Vobiz's real auth (X-Auth-ID/X-Auth-Token headers) and webhook
+  // authentication (a Klyro-generated verify_token query parameter, plus an
+  // optional Vobiz-signed defense-in-depth check — see
+  // VobizTelephonyAdapter.verifyWebhookSignature's doc) don't fit
+  // GenericTelephonyAdapter's single-apiKey/HMAC-over-body assumption, same
+  // reasoning as Exotel's dedicated branch above.
+  if (providerId === "vobiz") {
+    const authId = process.env["VOBIZ_AUTH_ID"];
+    const authToken = process.env["VOBIZ_AUTH_TOKEN"];
+    const webhookVerifyToken = process.env["VOBIZ_WEBHOOK_VERIFY_TOKEN"];
+    if (!authId || !authToken || !webhookVerifyToken) return null;
+    return new VobizTelephonyAdapter({
+      authId,
+      authToken,
+      baseUrl: process.env["VOBIZ_BASE_URL"] || undefined,
+      phoneNumber: process.env["VOBIZ_PHONE_NUMBER"] || undefined,
       webhookVerifyToken,
     });
   }

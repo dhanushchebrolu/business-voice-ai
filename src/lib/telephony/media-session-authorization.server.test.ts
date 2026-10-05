@@ -1,6 +1,14 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { maskCallSid } from "./media-session-authorization.server.ts";
+
+const src = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "media-session-authorization.server.ts"),
+  "utf8",
+);
 
 /**
  * Regression coverage for a real production failure: a live Exotel test
@@ -40,5 +48,46 @@ describe("maskCallSid", () => {
 
   test("never throws on an empty string", () => {
     assert.equal(maskCallSid(""), "");
+  });
+});
+
+/**
+ * Vobiz migration: this module's core lookup/retry/authorization logic was
+ * generalized to take a `provider` parameter (authorizeMediaSession) so
+ * Vobiz's own media route (vobiz-media-route.server.ts) could reuse it
+ * rather than carrying a second, independently-drifting copy — exactly the
+ * class of bug this module's own doc comment says it exists to prevent.
+ * `authorizeExotelMediaSession` is kept as an unchanged, behavior-identical
+ * wrapper so Exotel's existing call sites and regression tests (asserting
+ * the exact literal `authorizeExotelMediaSession(callSid, optionalToken)`
+ * shape) need no change at all — these tests confirm that wrapper still
+ * exists with its original signature, and that the new shared function is
+ * genuinely parameterized rather than still hardcoding "exotel" somewhere.
+ */
+describe("authorizeMediaSession generalization (Vobiz migration) does not disturb Exotel's existing entry point", () => {
+  test("authorizeExotelMediaSession(callSid, optionalToken) — the exact original signature — still exists", () => {
+    assert.match(
+      src,
+      /export async function authorizeExotelMediaSession\(\s*callSid: string,\s*optionalToken: string \| undefined,\s*\)/,
+    );
+  });
+
+  test('the Exotel wrapper delegates to the shared function with provider fixed to "exotel" — not a second inline copy', () => {
+    assert.match(src, /return authorizeMediaSession\("exotel", callSid, optionalToken\);/);
+  });
+
+  test("the shared authorizeMediaSession function is provider-parameterized, not hardcoded to one provider's call_logs rows", () => {
+    assert.match(
+      src,
+      /export async function authorizeMediaSession\(\s*provider: string,\s*callSid: string,/,
+    );
+    assert.match(src, /\.eq\("provider", provider\)/);
+    assert.doesNotMatch(src, /\.eq\("provider", "exotel"\)/);
+  });
+
+  test("log lines are provider-prefixed dynamically (exotel_media_session:* for Exotel, vobiz_media_session:* for Vobiz) rather than a literal hardcoded prefix", () => {
+    assert.match(src, /const logPrefix = `\$\{provider\}_media_session`;/);
+    assert.match(src, /`\$\{logPrefix\}:call_log_lookup`/);
+    assert.match(src, /`\$\{logPrefix\}:rejected_by_gate`/);
   });
 });

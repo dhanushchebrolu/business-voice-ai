@@ -70,6 +70,7 @@ import { Route as ApiPublicWebhooksInstagramRouteImport } from './routes/api/pub
 import { Route as ApiPublicWebhooksRazorpayRouteImport } from './routes/api/public/webhooks/razorpay'
 import { Route as ApiPublicWebhooksRazorpayPaymentsRouteImport } from './routes/api/public/webhooks/razorpay-payments'
 import { Route as ApiPublicWebhooksTelephonyRouteImport } from './routes/api/public/webhooks/telephony'
+import { Route as ApiPublicWebhooksVobizAnswerRouteImport } from './routes/api/public/webhooks/vobiz-answer'
 import { Route as ApiPublicWebhooksWhatsappRouteImport } from './routes/api/public/webhooks/whatsapp'
 import { Route as ApiPublicIntegrationsGoogleCalendarCallbackRouteImport } from './routes/api/public/integrations/google-calendar/callback'
 import { Route as ApiPublicIntegrationsInstagramCallbackRouteImport } from './routes/api/public/integrations/instagram/callback'
@@ -389,6 +390,12 @@ const ApiPublicWebhooksTelephonyRoute =
     path: '/api/public/webhooks/telephony',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicWebhooksVobizAnswerRoute =
+  ApiPublicWebhooksVobizAnswerRouteImport.update({
+    id: '/api/public/webhooks/vobiz-answer',
+    path: '/api/public/webhooks/vobiz-answer',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicWebhooksWhatsappRoute =
   ApiPublicWebhooksWhatsappRouteImport.update({
     id: '/api/public/webhooks/whatsapp',
@@ -482,6 +489,7 @@ export interface FileRoutesByFullPath {
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/razorpay-payments': typeof ApiPublicWebhooksRazorpayPaymentsRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
+  '/api/public/webhooks/vobiz-answer': typeof ApiPublicWebhooksVobizAnswerRoute
   '/api/public/webhooks/whatsapp': typeof ApiPublicWebhooksWhatsappRoute
   '/api/public/integrations/google-calendar/callback': typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
   '/api/public/integrations/instagram/callback': typeof ApiPublicIntegrationsInstagramCallbackRoute
@@ -546,6 +554,7 @@ export interface FileRoutesByTo {
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/razorpay-payments': typeof ApiPublicWebhooksRazorpayPaymentsRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
+  '/api/public/webhooks/vobiz-answer': typeof ApiPublicWebhooksVobizAnswerRoute
   '/api/public/webhooks/whatsapp': typeof ApiPublicWebhooksWhatsappRoute
   '/api/public/integrations/google-calendar/callback': typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
   '/api/public/integrations/instagram/callback': typeof ApiPublicIntegrationsInstagramCallbackRoute
@@ -615,6 +624,7 @@ export interface FileRoutesById {
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/razorpay-payments': typeof ApiPublicWebhooksRazorpayPaymentsRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
+  '/api/public/webhooks/vobiz-answer': typeof ApiPublicWebhooksVobizAnswerRoute
   '/api/public/webhooks/whatsapp': typeof ApiPublicWebhooksWhatsappRoute
   '/api/public/integrations/google-calendar/callback': typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
   '/api/public/integrations/instagram/callback': typeof ApiPublicIntegrationsInstagramCallbackRoute
@@ -685,6 +695,7 @@ export interface FileRouteTypes {
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/razorpay-payments'
     | '/api/public/webhooks/telephony'
+    | '/api/public/webhooks/vobiz-answer'
     | '/api/public/webhooks/whatsapp'
     | '/api/public/integrations/google-calendar/callback'
     | '/api/public/integrations/instagram/callback'
@@ -749,6 +760,7 @@ export interface FileRouteTypes {
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/razorpay-payments'
     | '/api/public/webhooks/telephony'
+    | '/api/public/webhooks/vobiz-answer'
     | '/api/public/webhooks/whatsapp'
     | '/api/public/integrations/google-calendar/callback'
     | '/api/public/integrations/instagram/callback'
@@ -817,6 +829,7 @@ export interface FileRouteTypes {
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/razorpay-payments'
     | '/api/public/webhooks/telephony'
+    | '/api/public/webhooks/vobiz-answer'
     | '/api/public/webhooks/whatsapp'
     | '/api/public/integrations/google-calendar/callback'
     | '/api/public/integrations/instagram/callback'
@@ -848,6 +861,7 @@ export interface RootRouteChildren {
   ApiPublicWebhooksRazorpayRoute: typeof ApiPublicWebhooksRazorpayRoute
   ApiPublicWebhooksRazorpayPaymentsRoute: typeof ApiPublicWebhooksRazorpayPaymentsRoute
   ApiPublicWebhooksTelephonyRoute: typeof ApiPublicWebhooksTelephonyRoute
+  ApiPublicWebhooksVobizAnswerRoute: typeof ApiPublicWebhooksVobizAnswerRoute
   ApiPublicWebhooksWhatsappRoute: typeof ApiPublicWebhooksWhatsappRoute
   ApiPublicIntegrationsGoogleCalendarCallbackRoute: typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
   ApiPublicIntegrationsInstagramCallbackRoute: typeof ApiPublicIntegrationsInstagramCallbackRoute
@@ -1284,6 +1298,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicWebhooksTelephonyRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/webhooks/vobiz-answer': {
+      id: '/api/public/webhooks/vobiz-answer'
+      path: '/api/public/webhooks/vobiz-answer'
+      fullPath: '/api/public/webhooks/vobiz-answer'
+      preLoaderRoute: typeof ApiPublicWebhooksVobizAnswerRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/webhooks/whatsapp': {
       id: '/api/public/webhooks/whatsapp'
       path: '/api/public/webhooks/whatsapp'
@@ -1476,6 +1497,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicWebhooksRazorpayPaymentsRoute:
     ApiPublicWebhooksRazorpayPaymentsRoute,
   ApiPublicWebhooksTelephonyRoute: ApiPublicWebhooksTelephonyRoute,
+  ApiPublicWebhooksVobizAnswerRoute: ApiPublicWebhooksVobizAnswerRoute,
   ApiPublicWebhooksWhatsappRoute: ApiPublicWebhooksWhatsappRoute,
   ApiPublicIntegrationsGoogleCalendarCallbackRoute:
     ApiPublicIntegrationsGoogleCalendarCallbackRoute,
