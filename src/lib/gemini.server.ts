@@ -75,8 +75,26 @@ const REQUEST_TIMEOUT_MS = 15_000;
  */
 const DEFAULT_MODEL = "gemini-3.8-flash";
 
+/**
+ * Tried exactly once, only after the primary model's own 503 retries are
+ * exhausted (production incident: Google returned 503 "This model is
+ * currently experiencing high demand..." on BOTH of the primary's two
+ * attempts). gemini-3.7-flash is the immediate predecessor in the same
+ * model family, confirmed request/response-compatible with the exact
+ * shape already used here (no generationConfig/tool/parsing change
+ * needed — see gemini.server's own 503-retry history above for why
+ * temperature/top_p/top_k/thinking_budget/candidate_count are already
+ * absent). Overridable via GEMINI_FALLBACK_MODEL, but no new env var is
+ * required for normal operation — the default is sufficient.
+ */
+const DEFAULT_FALLBACK_MODEL = "gemini-3.7-flash";
+
 function model(): string {
   return process.env["GEMINI_MODEL"] || DEFAULT_MODEL;
+}
+
+function fallbackModel(): string {
+  return process.env["GEMINI_FALLBACK_MODEL"] || DEFAULT_FALLBACK_MODEL;
 }
 
 // Reused from sarvam.server.ts rather than re-declared here: voice-runtime.
@@ -148,53 +166,108 @@ function toGeminiRequest(messages: ChatMessage[]): {
 const MAX_503_ATTEMPTS = 2;
 const RETRY_DELAY_MS = 400;
 
-async function call(body: Record<string, unknown>): Promise<GeminiResponse> {
-  for (let attempt = 1; attempt <= MAX_503_ATTEMPTS; attempt++) {
-    let res: Response;
-    try {
-      res = await fetch(`${BASE_URL}/v1beta/models/${model()}:generateContent?key=${apiKey()}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
-    } catch (err) {
-      if (err instanceof Error && err.name === "TimeoutError") {
-        throw new ProviderError("The AI voice provider timed out. Please retry.", 504);
-      }
-      throw new ProviderError("Could not reach the AI voice provider. Please retry.", 503);
-    }
+/**
+ * Bounds the ENTIRE primary-retry + fallback sequence to a latency a live
+ * caller can tolerate. Without this, three independent fetches each
+ * carrying their own full REQUEST_TIMEOUT_MS (15s) could stack into
+ * 30-45s of dead air if every attempt genuinely hung rather than fast-
+ * failing with a 503 (production incident: both of the primary's 503
+ * attempts came back quickly, but nothing bounded the worst case). Each
+ * attempt's own AbortSignal.timeout is capped to whatever's left of this
+ * shared budget via `remainingAttemptTimeoutMs`, never to more than
+ * REQUEST_TIMEOUT_MS itself — that per-request ceiling is preserved, not
+ * weakened, it's just no longer the only one.
+ */
+export const TOTAL_RECOVERY_BUDGET_MS = 7_000;
 
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      if (res.status === 401 || res.status === 403)
-        throw new ProviderError(
-          "The AI voice provider rejected the platform credentials.",
-          res.status,
-        );
-      if (res.status === 429)
-        throw new ProviderError(
-          "The AI voice provider is rate limiting requests. Try again shortly.",
-          429,
-        );
-      if (res.status === 503 && attempt < MAX_503_ATTEMPTS) {
-        // Safe to log: attempt count and delay only, never the request body,
-        // the response body, or the API key.
-        console.info("gemini:retrying_after_503", { attempt, delayMs: RETRY_DELAY_MS });
-        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
-        continue;
-      }
-      throw new ProviderError(
-        `AI voice provider error (${res.status}). ${text.slice(0, 180)}`,
-        res.status,
-      );
+/** Exported as a pure function so the budget arithmetic is directly unit-testable without timer mocking. */
+export function remainingAttemptTimeoutMs(startedAt: number, now: number): number {
+  return Math.max(0, Math.min(REQUEST_TIMEOUT_MS, TOTAL_RECOVERY_BUDGET_MS - (now - startedAt)));
+}
+
+function errorForStatus(status: number, text: string): ProviderError {
+  if (status === 401 || status === 403)
+    return new ProviderError("The AI voice provider rejected the platform credentials.", status);
+  if (status === 429)
+    return new ProviderError(
+      "The AI voice provider is rate limiting requests. Try again shortly.",
+      429,
+    );
+  return new ProviderError(`AI voice provider error (${status}). ${text.slice(0, 180)}`, status);
+}
+
+/** One HTTP attempt against a given model id. Never retries, never falls back — call() owns that. */
+async function requestOnce(
+  modelId: string,
+  body: Record<string, unknown>,
+  timeoutMs: number,
+): Promise<{ status: number; text: string; data?: GeminiResponse }> {
+  let res: Response;
+  try {
+    res = await fetch(`${BASE_URL}/v1beta/models/${modelId}:generateContent?key=${apiKey()}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === "TimeoutError") {
+      throw new ProviderError("The AI voice provider timed out. Please retry.", 504);
     }
-    return (await res.json()) as GeminiResponse;
+    throw new ProviderError("Could not reach the AI voice provider. Please retry.", 503);
   }
-  // Unreachable: the loop above always returns or throws by its final
-  // iteration (attempt === MAX_503_ATTEMPTS never satisfies the retry
-  // condition) — satisfies TypeScript's control-flow analysis only.
-  throw new ProviderError("AI voice provider error (503).", 503);
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    return { status: res.status, text };
+  }
+  return { status: res.status, text: "", data: (await res.json()) as GeminiResponse };
+}
+
+async function call(body: Record<string, unknown>): Promise<GeminiResponse> {
+  const startedAt = Date.now();
+  let lastErrorText = "";
+
+  for (let attempt = 1; attempt <= MAX_503_ATTEMPTS; attempt++) {
+    const timeoutMs = remainingAttemptTimeoutMs(startedAt, Date.now());
+    if (timeoutMs <= 0) break; // recovery budget already exhausted before this attempt could start
+
+    const result = await requestOnce(model(), body, timeoutMs);
+    if (result.data) return result.data;
+    if (result.status !== 503) throw errorForStatus(result.status, result.text);
+
+    lastErrorText = result.text;
+    if (attempt < MAX_503_ATTEMPTS) {
+      // Safe to log: attempt count and delay only, never the request body,
+      // the response body, or the API key.
+      console.info("gemini:retrying_after_503", { attempt, delayMs: RETRY_DELAY_MS });
+      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+    }
+  }
+
+  // Primary model's 503 retries are exhausted — try the fallback model
+  // exactly once (never its own retry loop), using only whatever's left of
+  // the shared recovery budget. Reaching here means every prior attempt
+  // was specifically a 503; any other status already threw above and
+  // never reaches this point (429/401/403/timeout/network errors do not
+  // trigger the fallback, matching their existing, unchanged behavior).
+  const fallbackTimeoutMs = remainingAttemptTimeoutMs(startedAt, Date.now());
+  if (fallbackTimeoutMs > 0) {
+    console.info("gemini:falling_back_to_secondary_model", {
+      primaryModel: model(),
+      fallbackModel: fallbackModel(),
+      reason: "primary_503_exhausted",
+      elapsedMs: Date.now() - startedAt,
+      remainingBudgetMs: fallbackTimeoutMs,
+    });
+    const fallbackResult = await requestOnce(fallbackModel(), body, fallbackTimeoutMs);
+    if (fallbackResult.data) return fallbackResult.data;
+    throw errorForStatus(fallbackResult.status, fallbackResult.text);
+  }
+
+  // Recovery budget exhausted before the fallback could even be attempted —
+  // preserve the exact existing final-failure shape (a 503 ProviderError)
+  // rather than inventing a new error path for this edge case.
+  throw new ProviderError(`AI voice provider error (503). ${lastErrorText.slice(0, 180)}`, 503);
 }
 
 export interface GeminiTool {
