@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { sarvam } from "./sarvam.server.ts";
 import { claude } from "./claude.server.ts";
-import { gemini } from "./gemini.server.ts";
 import { resolveVoiceLlmProvider, resolveGenerateReply } from "./llm-provider.server.ts";
 
 async function withEnv<T>(
@@ -27,7 +26,7 @@ async function withEnv<T>(
 }
 
 describe("resolveVoiceLlmProvider — defaults to Sarvam, never silently changes live behavior", () => {
-  test("defaults to 'sarvam' when VOICE_LLM_PROVIDER is unset — this production system runs on Sarvam today, and adding Claude/Gemini must not flip that on its own", async () => {
+  test("defaults to 'sarvam' when VOICE_LLM_PROVIDER is unset — this production system runs on Sarvam today, and adding Claude as an alternative must not flip that on its own", async () => {
     await withEnv({ VOICE_LLM_PROVIDER: undefined }, () => {
       assert.equal(resolveVoiceLlmProvider(), "sarvam");
       return Promise.resolve();
@@ -43,20 +42,24 @@ describe("resolveVoiceLlmProvider — defaults to Sarvam, never silently changes
     }
   });
 
-  test("VOICE_LLM_PROVIDER=gemini (any casing/whitespace) selects Gemini", async () => {
-    for (const raw of ["gemini", "Gemini", "GEMINI", " gemini "]) {
-      await withEnv({ VOICE_LLM_PROVIDER: raw }, () => {
-        assert.equal(resolveVoiceLlmProvider(), "gemini", `expected "${raw}" to select gemini`);
-        return Promise.resolve();
-      });
-    }
-  });
-
   test("an unrecognized value fails closed to 'sarvam', never throws, never silently no-ops the call", async () => {
     await withEnv({ VOICE_LLM_PROVIDER: "gpt-5" }, () => {
       assert.equal(resolveVoiceLlmProvider(), "sarvam");
       return Promise.resolve();
     });
+  });
+
+  test("VOICE_LLM_PROVIDER=gemini (any casing/whitespace) no longer selects anything — Gemini was removed, so this now falls back to 'sarvam' exactly like any other unrecognized value, never throws, never resolves to a deleted module", async () => {
+    for (const raw of ["gemini", "Gemini", "GEMINI", " gemini "]) {
+      await withEnv({ VOICE_LLM_PROVIDER: raw }, () => {
+        assert.equal(
+          resolveVoiceLlmProvider(),
+          "sarvam",
+          `expected "${raw}" to fall back to sarvam`,
+        );
+        return Promise.resolve();
+      });
+    }
   });
 });
 
@@ -75,9 +78,9 @@ describe("resolveGenerateReply — returns the exact function reference for the 
     });
   });
 
-  test("resolves to gemini.runConversation when selected", async () => {
+  test("resolves to sarvam.runConversation when VOICE_LLM_PROVIDER=gemini — Gemini was removed, so this falls back to Sarvam rather than resolving to a deleted module", async () => {
     await withEnv({ VOICE_LLM_PROVIDER: "gemini" }, () => {
-      assert.equal(resolveGenerateReply(), gemini.runConversation);
+      assert.equal(resolveGenerateReply(), sarvam.runConversation);
       return Promise.resolve();
     });
   });
