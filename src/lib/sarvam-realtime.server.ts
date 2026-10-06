@@ -153,6 +153,25 @@
  * logs could not distinguish. Still purely diagnostic: nothing here retries,
  * reconnects, or changes how onSttEvent/normalizeSttMessage/Gemini behave.
  *
+ * RAW INBOUND FRAME LOGGING (round 7, temporary diagnostic, no behavior
+ * change): a call showed stt_connected and repeated stt:audio_sent but zero
+ * stt:event_received, zero transcript, zero stt:audio_flow_heartbeat, and
+ * zero stt_disconnected/stt_error — and the deployed code producing those
+ * logs could not be confirmed to be this file's current version (see the
+ * git history investigation this round). `connectSarvamStt`'s "message"
+ * listener now logs `stt:raw_message_received` for every inbound WS frame,
+ * text or binary, BEFORE the existing JSON.parse — including a binary
+ * frame, which the pre-existing `if (typeof ev.data !== "string") return;`
+ * check has always silently dropped with no log at all, and a
+ * non-JSON text frame, which previously returned before any of this file's
+ * other diagnostics could log it. `stt:first_inbound_message` fires once,
+ * the first time any frame arrives. `stt:ws_closed`/`stt:ws_error` log the
+ * raw WS close code/reason and error event directly in this file,
+ * independent of whether `opts.onEvent`'s downstream dispatch runs. Purely
+ * additive: does not touch the STT connection URL, query parameters,
+ * authentication, audio transport/format, or normalizeSttMessage/parsing
+ * behavior in any way.
+ *
  * VERIFICATION NOTE (re-checked, still unresolved for everything below this
  * line — see docs/voice-pipeline-testing.md): this sandbox's network egress
  * cannot reach docs.sarvam.ai or any other documentation host directly
@@ -447,6 +466,12 @@ export async function connectSarvamStt(opts: ConnectSttOptions): Promise<SttSess
   let lastAudioSentAt: number | null = null;
   let framesSentAtLastHeartbeat = 0;
 
+  // TEMPORARY DIAGNOSTIC state (round 7, raw-frame visibility — see the
+  // "message"/"close"/"error" listeners below): tracks only whether the
+  // very first inbound frame of any kind has been logged yet, so
+  // stt:first_inbound_message fires at most once per connection.
+  let firstInboundMessageLogged = false;
+
   // unref() where available (Node) so these recurring timers never by
   // themselves keep a process alive — Cloudflare Workers' setInterval
   // return value has no unref() at all, hence the feature check rather
@@ -496,6 +521,70 @@ export async function connectSarvamStt(opts: ConnectSttOptions): Promise<SttSess
   }
 
   socket.addEventListener("message", (ev) => {
+    // TEMPORARY DIAGNOSTIC (round 7, read-only investigation into calls that
+    // show stt_connected and repeated stt:audio_sent but zero
+    // stt:event_received, zero transcript, zero stt:audio_flow_heartbeat, and
+    // zero error/close — logs every raw inbound WS frame, text or binary,
+    // BEFORE any parsing, so a binary frame is visible at all (the existing
+    // check right below has always silently dropped one with no log
+    // whatsoever) and so a message that fails JSON.parse is visible too
+    // (that path returns before this file's other diagnostics ever log).
+    // Safe fields only: kind/length/a 200-char-or-200-byte-capped preview of
+    // Sarvam's own inbound payload — never our outgoing API key (sent only
+    // as a WS auth subprotocol, never read from here) and never anything
+    // this file sends out itself. Purely additive: does not change parsing,
+    // the JSON.parse try/catch below, or anything normalizeSttMessage/
+    // onEvent does with the result.
+    //
+    // REDACTION: a text frame carrying a `text`/`transcript` field is the
+    // caller's actual spoken words — every other diagnostic in this file
+    // has always deliberately kept that out of logs (see stt:event_received
+    // below: textPresent/textLength only, never the text itself). This
+    // preview's diagnostic value is in showing malformed/unexpected
+    // payloads (a proxy error page, truncated JSON, control bytes) — not in
+    // re-exposing caller speech — so a frame that looks like a transcript
+    // event gets a fixed redaction marker instead of its literal content.
+    const isText = typeof ev.data === "string";
+    const rawLength = isText
+      ? (ev.data as string).length
+      : ev.data instanceof ArrayBuffer
+        ? ev.data.byteLength
+        : null;
+    let rawPreview: string | null = null;
+    if (isText) {
+      const text = ev.data as string;
+      let looksLikeTranscript = false;
+      try {
+        const probe = JSON.parse(text) as unknown;
+        const probeObj =
+          typeof probe === "object" && probe !== null ? (probe as Record<string, unknown>) : {};
+        const probeData = (probeObj["data"] as Record<string, unknown> | undefined) ?? probeObj;
+        looksLikeTranscript =
+          typeof probeData["text"] === "string" || typeof probeData["transcript"] === "string";
+      } catch {
+        looksLikeTranscript = false; // unparseable — exactly the case this preview exists to surface
+      }
+      rawPreview = looksLikeTranscript
+        ? "<redacted: transcript field present>"
+        : text.slice(0, 200);
+    } else if (ev.data instanceof ArrayBuffer) {
+      rawPreview = Buffer.from(new Uint8Array(ev.data).slice(0, 200)).toString("base64");
+    }
+    console.info("stt:raw_message_received", {
+      kind: isText ? "text" : "binary",
+      length: rawLength,
+      preview: rawPreview,
+      socketReadyState: socket.readyState,
+    });
+    if (!firstInboundMessageLogged) {
+      firstInboundMessageLogged = true;
+      console.info("stt:first_inbound_message", {
+        atMs: Date.now(),
+        elapsedSinceConnectMs: Date.now() - connectedAt,
+        kind: isText ? "text" : "binary",
+      });
+    }
+
     if (typeof ev.data !== "string") return; // binary frames from this endpoint are not expected inbound
     let parsed: unknown;
     try {
@@ -552,10 +641,31 @@ export async function connectSarvamStt(opts: ConnectSttOptions): Promise<SttSess
     opts.onEvent(normalized);
   });
   socket.addEventListener("close", (ev) => {
+    // TEMPORARY DIAGNOSTIC (round 7) — raw WS close, logged directly here
+    // regardless of how onEvent's "closed" dispatch is handled downstream
+    // (voice-runtime.server.ts's own stt_disconnected log depends on that
+    // dispatch actually running; this does not).
+    console.info("stt:ws_closed", {
+      code: ev.code,
+      reason: ev.reason,
+      atMs: Date.now(),
+      connectionAgeMs: Date.now() - connectedAt,
+    });
     clearDiagnosticTimers();
     opts.onEvent({ type: "closed", code: ev.code, reason: ev.reason });
   });
-  socket.addEventListener("error", () => {
+  socket.addEventListener("error", (ev) => {
+    // TEMPORARY DIAGNOSTIC (round 7) — raw WS error, logged directly here.
+    // The standard WebSocket "error" event carries no message/code of its
+    // own (why the existing onEvent dispatch below uses a fixed string) —
+    // this logs whatever is safely observable: the event's own type and
+    // connection state at the moment it fired.
+    console.info("stt:ws_error", {
+      eventType: (ev as { type?: string } | undefined)?.type ?? "error",
+      socketReadyState: socket.readyState,
+      atMs: Date.now(),
+      connectionAgeMs: Date.now() - connectedAt,
+    });
     clearDiagnosticTimers();
     opts.onEvent({ type: "error", message: "Speech recognition connection error" });
   });
