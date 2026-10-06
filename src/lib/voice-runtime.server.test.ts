@@ -8,10 +8,52 @@ import {
   startRuntimeSession,
   getActiveSession,
   isValidRuntimeTransition,
+  isSupportedVoiceLanguage,
+  resolveResponseLanguage,
   type RuntimeState,
 } from "./voice-runtime.server.ts";
 import type { AudioMediaBridge, AudioFrame } from "./telephony/audio-bridge";
 import type { AgentSnapshot } from "./agent-instructions";
+
+describe("isSupportedVoiceLanguage / resolveResponseLanguage — the TTS/LLM common supported set, not Saaras STT's larger recognition set", () => {
+  test("every one of the 11 documented common-supported languages is accepted", () => {
+    for (const code of [
+      "en-IN",
+      "hi-IN",
+      "bn-IN",
+      "ta-IN",
+      "te-IN",
+      "gu-IN",
+      "kn-IN",
+      "ml-IN",
+      "mr-IN",
+      "pa-IN",
+      "od-IN",
+    ]) {
+      assert.equal(isSupportedVoiceLanguage(code), true, `expected ${code} to be supported`);
+    }
+  });
+
+  test("a language Saaras STT can detect but Bulbul/the LLM pair cannot (outside the 11-language common set) is rejected", () => {
+    for (const code of ["ur-IN", "as-IN", "fr-FR", "unknown"]) {
+      assert.equal(isSupportedVoiceLanguage(code), false, `expected ${code} to be unsupported`);
+    }
+  });
+
+  test("resolveResponseLanguage returns the detected language when it's in the supported set", () => {
+    assert.equal(resolveResponseLanguage("hi-IN", "en-IN"), "hi-IN");
+    assert.equal(resolveResponseLanguage("ta-IN", "en-IN"), "ta-IN");
+  });
+
+  test("resolveResponseLanguage falls back to the agent's primary_language when the detected language is unsupported", () => {
+    assert.equal(resolveResponseLanguage("ur-IN", "en-IN"), "en-IN");
+    assert.equal(resolveResponseLanguage("fr-FR", "hi-IN"), "hi-IN");
+  });
+
+  test("resolveResponseLanguage falls back to primary_language when nothing has been detected yet", () => {
+    assert.equal(resolveResponseLanguage(null, "te-IN"), "te-IN");
+  });
+});
 
 const ALL_STATES: RuntimeState[] = [
   "created",
@@ -235,10 +277,9 @@ describe("silence/timeout handling — wiring", () => {
 
   test("speech_start unconditionally cancels the pending timer and resets the prompt flag, before the barge-in branch", () => {
     const caseStart = src.indexOf('case "speech_start": {');
-    const bargeInIdx = src.indexOf(
-      'if (state === "greeting" || state === "speaking" || state === "thinking")',
-      caseStart,
-    );
+    // Found via the condition's last disjunct rather than the whole literal
+    // if-statement text, which Prettier is free to reflow across lines.
+    const bargeInIdx = src.indexOf("audioStillPlaying", caseStart);
     const clearIdx = src.indexOf("clearSilenceTimer(session);", caseStart);
     const resetIdx = src.indexOf("session.silencePromptSent = false;", caseStart);
     assert.ok(caseStart > -1 && bargeInIdx > -1 && clearIdx > -1 && resetIdx > -1);
@@ -337,10 +378,10 @@ describe("stt:transcript_final_forwarded — verifies a final transcript actuall
     assert.doesNotMatch(emptySection, /handleUserUtterance/);
   });
 
-  test("a valid, non-duplicate, non-empty transcript logs forwarded:true with reason ok and then calls handleUserUtterance with that same text", () => {
+  test("a valid, non-duplicate, non-empty transcript logs forwarded:true with reason ok and then enqueues the utterance (serialized, never a direct concurrent call)", () => {
     const body = finalTranscriptCaseBody();
     const okLogIdx = body.lastIndexOf('log("stt:transcript_final_forwarded", session, {');
-    const callIdx = body.indexOf("void handleUserUtterance(session, event.text);", okLogIdx);
+    const callIdx = body.indexOf("enqueueUserUtterance(session, event.text);", okLogIdx);
     assert.ok(callIdx > okLogIdx, "the forwarded:true log must precede the actual call");
     const okSection = body.slice(okLogIdx, callIdx);
     assert.match(okSection, /forwarded: true/);

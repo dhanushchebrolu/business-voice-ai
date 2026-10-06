@@ -58,6 +58,26 @@ async function drain(hops = 8) {
   for (let i = 0; i < hops; i++) await Promise.resolve();
 }
 
+/**
+ * Simulates Sarvam acknowledging ("flushed") every TTS chunk sent so far
+ * that this helper hasn't already caught up on — see voice-runtime.
+ * server.ts's ttsAudioInFlight: a real Sarvam connection eventually sends
+ * one "flushed" per chunk once its audio is fully delivered, which is what
+ * lets a LATER speech_start be correctly treated as "the agent has finished
+ * talking" rather than "audio from the last reply might still be playing".
+ * Tracks how many it has already emitted so it can be called more than
+ * once in the same test without double-counting.
+ */
+function makeTtsFlushCatchUp(tts: { sentTexts: string[]; emit: (e: { type: "flushed" }) => void }) {
+  let emitted = 0;
+  return () => {
+    while (emitted < tts.sentTexts.length) {
+      tts.emit({ type: "flushed" });
+      emitted++;
+    }
+  };
+}
+
 function newCallId(): string {
   return `harness-payment-events-call-${crypto.randomUUID()}`;
 }
@@ -99,10 +119,17 @@ describe("waiting_on_payment state", () => {
     const callId = newCallId();
     const deps = withPaymentToolDeps(h.deps);
     const handle = await startRuntimeSession(baseInput(callId, h.bridge), deps);
+    const flushCatchUp = makeTtsFlushCatchUp(h.tts);
 
     h.stt.speakUtterance("Can I pay now?");
     await drain();
     assert.equal(handle.state, "waiting_on_payment");
+    // The payment-link reply has finished playing (Sarvam has acknowledged
+    // every chunk) by the time the caller speaks next — see
+    // ttsAudioInFlight's own doc comment for why this now matters: without
+    // it, this speech_start would be indistinguishable from one arriving
+    // while that reply's audio is still actually in flight.
+    flushCatchUp();
 
     h.stt.emit({ type: "speech_start" });
     assert.equal(handle.state, "transcribing");

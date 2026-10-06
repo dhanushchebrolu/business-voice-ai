@@ -64,6 +64,26 @@ async function drain(hops = 8) {
   for (let i = 0; i < hops; i++) await Promise.resolve();
 }
 
+/**
+ * Simulates Sarvam acknowledging ("flushed") every TTS chunk sent so far
+ * that this helper hasn't already caught up on — see voice-runtime.
+ * server.ts's ttsAudioInFlight: a real Sarvam connection eventually sends
+ * one "flushed" per chunk once its audio is fully delivered, which is what
+ * lets a LATER speech_start be correctly told apart from one arriving
+ * while the last reply's (or the greeting's) audio might still be
+ * playing. Tracks how many it has already emitted so it can be called
+ * more than once in the same test without double-counting.
+ */
+function makeTtsFlushCatchUp(tts: { sentTexts: string[]; emit: (e: { type: "flushed" }) => void }) {
+  let emitted = 0;
+  return () => {
+    while (emitted < tts.sentTexts.length) {
+      tts.emit({ type: "flushed" });
+      emitted++;
+    }
+  };
+}
+
 function newCallId(): string {
   return `harness-call-${crypto.randomUUID()}`;
 }
@@ -187,6 +207,12 @@ describe("9. Barge-in", () => {
     const h = createHarness();
     const callId = newCallId();
     const handle = await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    // The greeting has finished playing (Sarvam has acknowledged every
+    // chunk) before the caller's first question — otherwise the greeting's
+    // own still-unflushed audio would make this test's "First question"
+    // speech_start look identical to a genuine mid-speech interruption
+    // (see ttsAudioInFlight).
+    makeTtsFlushCatchUp(h.tts)();
     // The greeting itself already flushed once — capture a baseline instead
     // of assuming barge-in is the first flush of the call.
     const clearedBefore = h.bridge.clearedCount;
@@ -255,6 +281,197 @@ describe("9. Barge-in", () => {
     // branch used above — this note exists so that guarantee isn't
     // silently unlisted from this file's table of contents.
     assert.ok(true);
+  });
+
+  test("interrupting the agent WHILE IT IS ACTIVELY SPEAKING (TTS audio already in flight) stops that audio from reaching the caller — audio arriving after the barge-in is dropped, not forwarded", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    const handle = await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+
+    h.llm.setNextReply("This is a long reply the caller will cut off partway through.");
+    h.stt.speakUtterance("First question");
+    await drain();
+    assert.equal(handle.state, "listening");
+
+    // The reply is now being spoken — simulate Sarvam streaming back the
+    // first chunk of audio for it, same as a real call.
+    const framesBefore = h.bridge.sentFrames.length;
+    h.tts.emitAudio(new Uint8Array([1, 2, 3]));
+    assert.equal(
+      h.bridge.sentFrames.length,
+      framesBefore + 1,
+      "audio belonging to the current reply must reach the caller normally",
+    );
+
+    // The caller barges in WHILE the agent is still speaking that reply.
+    h.stt.emit({ type: "speech_start" });
+    assert.equal(handle.state, "interrupted");
+
+    // Sarvam keeps streaming more audio for the now-abandoned reply —
+    // this is exactly the production bug: a real Sarvam TTS connection has
+    // no "cancel this request" message, so chunks already in flight keep
+    // arriving after the interruption. None of them must reach the caller.
+    const framesAtInterruption = h.bridge.sentFrames.length;
+    h.tts.emitAudio(new Uint8Array([4, 5, 6]));
+    h.tts.emitAudio(new Uint8Array([7, 8, 9]));
+    assert.equal(
+      h.bridge.sentFrames.length,
+      framesAtInterruption,
+      "audio for the interrupted reply must never reach the caller after the barge-in",
+    );
+
+    // Once a fresh reply is actually spoken for the caller's new turn, its
+    // audio must flow normally again — the suppression must not be sticky.
+    h.llm.setNextReply("Sure, here's the answer to your new question.");
+    h.stt.emit({ type: "final_transcript", text: "A different question", language: "en-IN" });
+    await drain();
+    const framesBeforeNewReply = h.bridge.sentFrames.length;
+    h.tts.emitAudio(new Uint8Array([10, 11, 12]));
+    assert.equal(
+      h.bridge.sentFrames.length,
+      framesBeforeNewReply + 1,
+      "audio for the new reply, spoken after the interruption, must reach the caller normally",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+describe("Utterance serialization — concurrent/overlapping final_transcript delivery", () => {
+  test("a second final_transcript arriving while the first is still being processed never races it: no competing concurrent LLM calls, turns stay correctly interleaved", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+
+    h.llm.setDelay(30);
+    h.llm.setNextReply("Answer to the first question.");
+    h.stt.emit({ type: "final_transcript", text: "First question", language: "en-IN" });
+    // A second, genuinely different utterance arrives almost immediately —
+    // before the first call's (slow) LLM request has resolved. Without
+    // serialization this would push a second "user" turn and fire a
+    // second, concurrent LLM request while the first is still in flight.
+    h.stt.emit({ type: "final_transcript", text: "Second question", language: "en-IN" });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(
+      h.llm.calls.length,
+      1,
+      "the second utterance must wait for the first's entire turn to finish, never run concurrently with it",
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await drain();
+
+    assert.equal(h.llm.calls.length, 2, "both utterances are eventually answered, in order");
+
+    await terminateRuntimeSession(callId, "test cleanup");
+    const record = h.persistence.records[0]!;
+    assert.deepEqual(
+      record.turns.map((t) => t.role),
+      ["assistant", "user", "assistant", "user", "assistant"],
+      "turns must strictly alternate user/assistant with no two consecutive user turns, even under overlapping delivery",
+    );
+    assert.equal(record.turns[1]?.text, "First question");
+    assert.equal(record.turns[2]?.text, "Answer to the first question.");
+    assert.equal(record.turns[3]?.text, "Second question");
+  });
+});
+
+describe("Conversation history window", () => {
+  test("history sent to the LLM retains at least 40 of the most recent turns, not just 20 — enough for a real multi-topic booking call to still recall early details", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+
+    // Drive 15 full exchanges (30 turns + the greeting = 31 total) — past
+    // the old 20-turn cap (which would already have pushed the caller's
+    // name out: slice(-20) on 31 turns drops everything before index 11,
+    // including the name at index 1), but comfortably within the new
+    // 40-turn one.
+    h.stt.emit({
+      type: "final_transcript",
+      text: "My name is Priya, number 98765",
+      language: "en-IN",
+    });
+    await drain();
+    for (let i = 0; i < 14; i++) {
+      h.llm.setNextReply(`Reply number ${i}`);
+      h.stt.emit({ type: "final_transcript", text: `Follow-up question ${i}`, language: "en-IN" });
+      await drain();
+    }
+
+    const lastCallMessages = h.llm.calls.at(-1)!;
+    const userContents = lastCallMessages.filter((m) => m.role === "user").map((m) => m.content);
+    assert.ok(
+      userContents.some((c) => c.includes("Priya")),
+      "the caller's name, given 24 exchanges ago, must still be in the history sent to the LLM",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+describe("STT always requests language auto-detection, never pinned to a single language", () => {
+  test("connectStt is called with language 'unknown' regardless of the agent's multilingual setting", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    const input = baseInput(callId, h.bridge);
+    input.snapshotAgent = { ...minimalAgent, multilingual: false, primary_language: "en-IN" };
+    await startRuntimeSession(input, h.deps);
+
+    assert.equal(h.stt.connectCalls.length, 1);
+    assert.equal(
+      h.stt.connectCalls[0]?.language,
+      "unknown",
+      "STT must always auto-detect — a non-multilingual agent must not have recognition pinned to one language",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+describe("LLM request/error diagnostics", () => {
+  test("llm_request logs message count and roles only — never any message's actual content", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    const logs = await captureLogs(async () => {
+      await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+      h.llm.setNextReply("some reply");
+      h.stt.speakUtterance("a caller question nobody should see logged verbatim");
+      await drain();
+      await terminateRuntimeSession(callId, "test cleanup");
+    });
+
+    const line = logs.find((l) => l["event"] === "voice_runtime:llm_request");
+    assert.ok(line, "expected an llm_request diagnostic");
+    assert.equal(typeof line["messageCount"], "number");
+    assert.ok((line["messageCount"] as number) >= 2);
+    assert.deepEqual(line["roles"], ["system", "assistant", "user"]);
+
+    const serialized = JSON.stringify(logs);
+    assert.doesNotMatch(serialized, /caller question nobody should see/);
+  });
+
+  test("llm_error carries a status and errorCategory distinguishing timeout/rate-limit/auth/generic, and fallback_spoken names the trigger", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    const logs = await captureLogs(async () => {
+      await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+      h.llm.setNextError(new ProviderError("The AI voice provider timed out. Please retry.", 504));
+      h.stt.speakUtterance("Are you open today?");
+      await drain();
+      await terminateRuntimeSession(callId, "test cleanup");
+    });
+
+    const errorLine = logs.find((l) => l["event"] === "voice_runtime:llm_error");
+    assert.ok(errorLine, "expected an llm_error diagnostic");
+    assert.equal(errorLine["status"], 504);
+    assert.equal(errorLine["errorCategory"], "llm_timeout");
+
+    const fallbackLine = logs.find((l) => l["event"] === "voice_runtime:fallback_spoken");
+    assert.ok(fallbackLine, "expected a fallback_spoken diagnostic");
+    assert.equal(fallbackLine["trigger"], "llm_error");
+    assert.equal(fallbackLine["status"], 504);
   });
 });
 

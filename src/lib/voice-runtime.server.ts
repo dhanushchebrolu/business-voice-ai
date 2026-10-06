@@ -81,8 +81,31 @@ import {
 import { ProviderError, type ChatMessage } from "./sarvam.server.ts";
 import { resolveGenerateReply } from "./llm-provider.server.ts";
 import { resolveGenerateReplyWithTools } from "./llm-provider.server.ts";
-import type { AgentSnapshot } from "./agent-instructions.ts";
+import { SUPPORTED_VOICE_LANGUAGES, type AgentSnapshot } from "./agent-instructions.ts";
 import type { ClaudeTool } from "./claude.server.ts";
+
+/**
+ * Whether `code` is in the TTS/LLM common supported set (SUPPORTED_VOICE_LANGUAGES
+ * in agent-instructions.ts) — NOT Sarvam STT's own larger recognition set, which
+ * can detect languages this pipeline cannot respond in end to end.
+ */
+export function isSupportedVoiceLanguage(code: string): boolean {
+  return (SUPPORTED_VOICE_LANGUAGES as readonly { code: string }[]).some((l) => l.code === code);
+}
+
+/**
+ * Resolves which language to treat a turn as being in: the detected
+ * language if it's one the LLM/TTS pair actually supports end to end,
+ * otherwise the agent's own configured default — never an unsupported
+ * code (e.g. one of Saaras STT's languages outside the common set), and
+ * never null/undefined. Exported as a pure function so both "a detected
+ * supported language is used" and "an unsupported one falls back" are
+ * directly unit-testable without driving a whole session.
+ */
+export function resolveResponseLanguage(detected: string | null, primaryLanguage: string): string {
+  if (detected && isSupportedVoiceLanguage(detected)) return detected;
+  return primaryLanguage;
+}
 
 /**
  * Explicit runtime states. `created` -> `connecting` -> `greeting` ->
@@ -354,11 +377,45 @@ interface Session {
   firstInboundFrameLogged: boolean;
   /** Bytes of synthesized audio received for the current utterance, reset per speak() call, logged (and reset) on Sarvam's "flushed" event — see onTtsEvent. */
   ttsBytesInFlight: number;
+  /**
+   * Monotonic counts of TTS chunks sent (speak()) vs. acknowledged as fully
+   * delivered by Sarvam (onTtsEvent's "flushed" case) — see ttsAudioInFlight.
+   * Deliberately NOT reset per speak() call (unlike ttsBytesInFlight, which
+   * is a per-utterance byte total for logging): these only ever need to
+   * answer "is there still audio Sarvam owes us, from any speak() call",
+   * which a difference of two ever-increasing counters tells you without
+   * caring which specific call a given chunk belonged to.
+   */
+  ttsChunksSent: number;
+  ttsChunksFlushed: number;
   /** The output codec/sample rate this session told Sarvam to synthesize into (from connectTts's options) — compared against Sarvam's actual first audio chunk in onTtsEvent's first_outbound_audio_frame diagnostic, so a provider that silently ignores the declared format is visible rather than assumed. */
   declaredTtsOutputCodec: "mulaw" | "linear16" | "wav" | null;
   declaredTtsOutputSampleRateHz: number | null;
   /** Logged once, the first synthesized audio frame actually forwarded to the telephony bridge — see onTtsEvent. */
   firstOutboundAudioFrameLogged: boolean;
+  /**
+   * The generation `speak()` was called under for whatever TTS audio is
+   * currently valid to forward to the caller — see speak() and onTtsEvent's
+   * "audio" case. Sarvam's realtime TTS protocol has no per-request
+   * correlation id, so this is how a barge-in's `session.generation++`
+   * (onSttEvent's "speech_start" case) actually stops audio for the
+   * interrupted reply from reaching the caller: once generation has moved
+   * on, any audio chunk whose speech is still tagged with the OLD
+   * generation is dropped instead of forwarded, no matter how many more
+   * chunks Sarvam streams back for that abandoned request.
+   */
+  activeSpeechGeneration: number;
+  /** One stale-audio-dropped log per interruption, not one per dropped chunk — see onTtsEvent. */
+  staleAudioDropLogged: boolean;
+  /**
+   * Serializes handleUserUtterance calls so two final_transcript events
+   * arriving close together (a provider redelivery, or a new utterance
+   * landing while the previous one's LLM call is still in flight) can
+   * never push competing "user" turns or fire concurrent LLM requests —
+   * see enqueueUserUtterance. Each call's whole body (turn push, LLM call,
+   * reply push-or-discard) fully completes before the next one starts.
+   */
+  utteranceQueue: Promise<void>;
 }
 
 const activeSessions = new Map<string, Session>();
@@ -368,6 +425,18 @@ const MAX_PENDING_INBOUND_FRAMES = 250;
 
 /** A provider (or the network) redelivering the identical final_transcript within this window is treated as a duplicate event, not a second utterance — see onSttEvent's "final_transcript" case. */
 const DUPLICATE_TRANSCRIPT_WINDOW_MS = 2_000;
+
+/**
+ * How many of the most recent turns (user + assistant combined) are sent
+ * to the LLM as conversation history — see handleUserUtterance. Previously
+ * 20 (only 10 full exchanges), which could push a caller's early-given
+ * details (name, phone number) out of the window well before a real
+ * receptionist call is done, making the agent appear to "forget" and
+ * re-ask for information it already received. 40 is still a bounded,
+ * deliberately-chosen cap (not unbounded history) — just one generous
+ * enough for a real multi-topic booking conversation.
+ */
+const CONVERSATION_HISTORY_TURNS = 40;
 
 /**
  * Silence handling: while waiting on the caller (listening, transcribing,
@@ -393,6 +462,22 @@ const SILENCE_HANGUP_MS = 10_000;
  * SILENCE_HANGUP_MS for the existing precedent this follows).
  */
 const PAYMENT_WAIT_TIMEOUT_MS = 90_000;
+
+/**
+ * Whether Sarvam still owes this session audio for something already sent
+ * to TTS (speak()'s sendText/flush) that hasn't been acknowledged as fully
+ * delivered yet (onTtsEvent's "flushed" case). This is NOT the same
+ * question as `stateOf(session) === "speaking"`: speak() returns — and the
+ * state machine moves on to "listening" — as soon as the reply TEXT has
+ * been sent, which can be well before the synthesized AUDIO has actually
+ * finished streaming/playing for a long reply. onSttEvent's barge-in
+ * branch uses this to recognize caller speech that starts during that
+ * still-playing tail as a genuine interruption, even though the state has
+ * already nominally moved past "speaking".
+ */
+function ttsAudioInFlight(session: Session): boolean {
+  return session.ttsChunksSent > session.ttsChunksFlushed;
+}
 
 function isAwaitingCaller(state: RuntimeState): boolean {
   return (
@@ -574,7 +659,10 @@ async function persistTranscript(session: Session) {
       callId: session.input.callId,
       turns: session.turns,
       summary,
-      language: session.detectedLanguage ?? session.input.snapshotAgent.primary_language,
+      language: resolveResponseLanguage(
+        session.detectedLanguage,
+        session.input.snapshotAgent.primary_language,
+      ),
       agentVersion: session.input.agentVersion,
     });
     log("persist_transcript_succeeded", session, { turn_count: session.turns.length });
@@ -590,9 +678,21 @@ async function speak(
 ): Promise<void> {
   if (!session.tts) return;
   setState(session, asState);
+  // Tags whatever audio Sarvam streams back for this text as belonging to
+  // the CURRENT generation — see onTtsEvent's "audio" case and the
+  // activeSpeechGeneration field's own doc comment. If a barge-in bumps
+  // session.generation before all of this text's audio has arrived, those
+  // later chunks stop matching and get dropped instead of reaching the
+  // caller.
+  session.activeSpeechGeneration = session.generation;
+  session.staleAudioDropLogged = false;
   for (const chunk of chunkIntoSentences(text)) {
     session.tts.sendText(chunk);
     session.tts.flush();
+    // See ttsAudioInFlight — paired with onTtsEvent's "flushed" case
+    // incrementing ttsChunksFlushed once Sarvam confirms this chunk's
+    // audio was fully delivered.
+    session.ttsChunksSent += 1;
   }
 }
 
@@ -641,6 +741,24 @@ async function getReply(
   return { reply, enteredPaymentWait: false };
 }
 
+/**
+ * Serializes handleUserUtterance calls onto session.utteranceQueue — see
+ * that field's own doc comment for why. onSttEvent's "final_transcript"
+ * case calls this instead of invoking handleUserUtterance directly, so two
+ * final_transcript events landing close together (a provider redelivery,
+ * or a new utterance arriving while the previous one's LLM call is still
+ * in flight) can never race: the first call's entire body — its own "user"
+ * turn push, its LLM call, and its reply push-or-discard — always finishes
+ * before the next one's "user" turn is pushed.
+ */
+function enqueueUserUtterance(session: Session, text: string) {
+  session.utteranceQueue = session.utteranceQueue.then(() =>
+    handleUserUtterance(session, text).catch((err: unknown) => {
+      log("utterance_queue_error", session, { message: (err as Error).message });
+    }),
+  );
+}
+
 async function handleUserUtterance(session: Session, text: string) {
   session.turns.push({ role: "user", text, at: new Date().toISOString() });
   // Whatever payment wait was pending no longer applies — the caller is
@@ -654,8 +772,17 @@ async function handleUserUtterance(session: Session, text: string) {
 
   const messages: ChatMessage[] = [
     { role: "system", content: session.input.instructions },
-    ...session.turns.slice(-20).map((t) => ({ role: t.role, content: t.text }) as ChatMessage),
+    ...session.turns
+      .slice(-CONVERSATION_HISTORY_TURNS)
+      .map((t) => ({ role: t.role, content: t.text }) as ChatMessage),
   ];
+  // Safe metadata only — message count and roles, never any message's
+  // actual content (the caller's words or the agent's own reply text).
+  log("llm_request", session, {
+    generation,
+    messageCount: messages.length,
+    roles: messages.map((m) => m.role),
+  });
 
   try {
     const { reply, enteredPaymentWait } = await getReply(session, messages);
@@ -689,20 +816,48 @@ async function handleUserUtterance(session: Session, text: string) {
       }
     }
   } catch (err) {
-    log("llm_error", session, { message: (err as Error).message });
+    // category/status turn a bare message string into something a log
+    // line alone can distinguish: a rate limit and a timeout and an
+    // outright outage all currently surface as the same caller-facing
+    // "having trouble understanding" apology (see speakFallback), but they
+    // are very different underlying conditions. errorCategory also makes
+    // "this wasn't even a ProviderError" (a genuine code bug, not a
+    // provider failure) visible rather than indistinguishable from one.
+    const status = err instanceof ProviderError ? err.status : null;
+    const errorCategory =
+      err instanceof ProviderError
+        ? status === 504
+          ? "llm_timeout"
+          : status === 429
+            ? "llm_rate_limited"
+            : status === 401 || status === 403
+              ? "llm_auth_error"
+              : "llm_provider_error"
+        : "llm_unexpected_error";
+    log("llm_error", session, {
+      message: (err as Error).message,
+      status,
+      errorCategory,
+      latency_ms: Date.now() - requestStarted,
+    });
     if (generation === session.generation) {
-      await speakFallback(session, err);
+      await speakFallback(session, err, "llm_error");
       setState(session, "listening");
       armSilenceTimer(session);
     }
   }
 }
 
-async function speakFallback(session: Session, error: unknown) {
+async function speakFallback(session: Session, error: unknown, trigger: string) {
   const message =
     error instanceof ProviderError
       ? "I'm sorry, I'm having trouble understanding right now. Please hold for a moment or call back shortly."
       : "I'm sorry, something went wrong on my end. Please try again in a moment.";
+  log("fallback_spoken", session, {
+    trigger,
+    status: error instanceof ProviderError ? error.status : null,
+    isProviderError: error instanceof ProviderError,
+  });
   try {
     await speak(session, message);
   } catch (err) {
@@ -722,14 +877,29 @@ function onSttEvent(session: Session, event: SttEvent) {
       clearPaymentWaitTimer(session);
       session.silencePromptSent = false;
       const state = stateOf(session);
-      if (state === "greeting" || state === "speaking" || state === "thinking") {
+      // Also treated as a barge-in while nominally "listening"/
+      // "waiting_on_payment" if TTS audio is still actually playing out —
+      // see ttsAudioInFlight's own doc comment: the state machine moves
+      // past "speaking" as soon as the reply TEXT has been sent, which for
+      // a long reply can be well before its audio has finished streaming.
+      // Without this, caller speech during that still-playing tail took
+      // the plain "start transcribing" branch below and nothing stopped
+      // the old audio from continuing to reach the caller.
+      const audioStillPlaying =
+        (state === "listening" || state === "waiting_on_payment") && ttsAudioInFlight(session);
+      if (
+        state === "greeting" ||
+        state === "speaking" ||
+        state === "thinking" ||
+        audioStillPlaying
+      ) {
         // Barge-in: stop talking immediately, discard the audio already
         // queued for the caller, and soft-cancel any in-flight LLM turn.
         session.generation++;
         session.input.bridge.clearOutboundBuffer();
         session.tts?.flush();
         setState(session, "interrupted");
-        log("interruption", session);
+        log("interruption", session, { audioStillPlaying });
       } else if (state === "listening" || state === "waiting_on_payment") {
         setState(session, "transcribing");
       }
@@ -793,7 +963,7 @@ function onSttEvent(session: Session, event: SttEvent) {
         forwarded: true,
         reason: "ok",
       });
-      void handleUserUtterance(session, event.text);
+      enqueueUserUtterance(session, event.text);
       break;
     }
     case "language_detected":
@@ -818,6 +988,25 @@ function onSttEvent(session: Session, event: SttEvent) {
 function onTtsEvent(session: Session, event: TtsEvent) {
   switch (event.type) {
     case "audio": {
+      // Drop audio belonging to a reply that's since been barged in on —
+      // see activeSpeechGeneration's own doc comment. Sarvam's realtime TTS
+      // connection is a single, long-lived stream with no per-request
+      // correlation id, so once generation has moved on, any chunk still
+      // tagged with the OLD generation must never reach the caller, no
+      // matter how many more Sarvam streams back for that abandoned reply.
+      // Dropped BEFORE any of the existing bookkeeping below — a stale
+      // chunk must not count toward ttsBytesInFlight or the first-frame
+      // format diagnostic either.
+      if (session.activeSpeechGeneration !== session.generation) {
+        if (!session.staleAudioDropLogged) {
+          session.staleAudioDropLogged = true;
+          log("tts_audio_dropped_stale", session, {
+            staleGeneration: session.activeSpeechGeneration,
+            currentGeneration: session.generation,
+          });
+        }
+        break;
+      }
       if (!session.firstOutboundAudioFrameLogged) {
         session.firstOutboundAudioFrameLogged = true;
         // VERIFICATION ONLY — this log does not itself guarantee the audio
@@ -865,6 +1054,10 @@ function onTtsEvent(session: Session, event: TtsEvent) {
       // the reply/prompt text was decided).
       log("tts_output", session, { bytes: session.ttsBytesInFlight });
       session.ttsBytesInFlight = 0;
+      // See ttsAudioInFlight — this is what lets onSttEvent's barge-in
+      // check recognize caller speech during a still-playing reply's tail
+      // even after the state machine has already moved on to "listening".
+      session.ttsChunksFlushed += 1;
       break;
     case "unknown":
       break;
@@ -921,9 +1114,14 @@ export async function startRuntimeSession(
     lastFinalTranscript: null,
     firstInboundFrameLogged: false,
     ttsBytesInFlight: 0,
+    ttsChunksSent: 0,
+    ttsChunksFlushed: 0,
     declaredTtsOutputCodec: null,
     declaredTtsOutputSampleRateHz: null,
     firstOutboundAudioFrameLogged: false,
+    activeSpeechGeneration: 0,
+    staleAudioDropLogged: false,
+    utteranceQueue: Promise.resolve(),
   };
   activeSessions.set(input.callId, session);
   log("runtime_started", session);
@@ -989,7 +1187,17 @@ export async function startRuntimeSession(
     const sttSampleRateHz = input.bridge.inboundFormat.sampleRateHz;
     const sttEncoding = input.bridge.inboundFormat.encoding === "mulaw" ? "mulaw" : "linear16";
     session.stt = await deps.connectStt({
-      language: input.snapshotAgent.multilingual ? "unknown" : input.snapshotAgent.primary_language,
+      // Always auto-detect (Sarvam's "unknown" language code — already
+      // proven in production for multilingual agents) rather than pinning
+      // recognition to the agent's single primary_language. Previously
+      // gated behind the agent's own `multilingual` toggle, which meant a
+      // caller speaking anything other than the configured primary
+      // language on a non-multilingual agent was never even given a
+      // chance to be recognized correctly in the first place — see
+      // resolveResponseLanguage for how the LLM/TTS side falls back to
+      // primary_language if STT detects something outside the common
+      // supported set.
+      language: "unknown",
       sampleRateHz: sttSampleRateHz,
       encoding: sttEncoding,
       onEvent: (e) => onSttEvent(session, e),
@@ -1009,7 +1217,7 @@ export async function startRuntimeSession(
     session.pendingInboundFrames = [];
   } catch (err) {
     log("stt_connect_failed", session, { message: (err as Error).message });
-    await speakFallback(session, err);
+    await speakFallback(session, err, "stt_connect_failed");
     setState(session, "failed");
     await terminateRuntimeSession(input.callId, "stt_connect_failed");
     return handle;
