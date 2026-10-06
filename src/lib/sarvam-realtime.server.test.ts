@@ -581,6 +581,30 @@ describe('normalizeSttMessage transcript extraction — production incident roun
   });
 });
 
+describe('normalizeSttMessage session lifecycle — production incident round 5: runtime_session_id f77b2529-58a5-4060-8479-017ab3e94169 showed stt_connected and repeated stt:audio_sent with ZERO inbound messages of any kind, including session.begin. session.begin/session.end are now recognized kinds instead of falling through to unknown, so the next occurrence is directly observable rather than indistinguishable from "nothing arrived at all".', () => {
+  test("recognizes session.begin as its own event type", () => {
+    const event = normalizeSttMessage({ event: "session.begin" });
+    assert.deepEqual(event, { type: "session_begin" });
+  });
+
+  test("recognizes session.end as its own event type", () => {
+    const event = normalizeSttMessage({ event: "session.end" });
+    assert.deepEqual(event, { type: "session_end" });
+  });
+
+  test("session.begin is recognized via the `type` field too, not only `event`", () => {
+    const event = normalizeSttMessage({ type: "session.begin" });
+    assert.deepEqual(event, { type: "session_begin" });
+  });
+
+  test("an unrelated event kind is not mistaken for a session lifecycle event", () => {
+    const event = normalizeSttMessage({ event: "vad.speech_start" });
+    assert.notEqual(event.type, "session_begin");
+    assert.notEqual(event.type, "session_end");
+    assert.equal(event.type, "speech_start");
+  });
+});
+
 function captureInfoLogs() {
   const calls: { event: string; data: unknown }[] = [];
   const original = console.info;
@@ -970,5 +994,185 @@ describe("stt:audio_sent / stt:event_received — temporary per-send/per-receive
     assert.equal(data["isError"], true);
     assert.equal(data["errorCode"], 422);
     assert.equal(data["errorMessage"], "bad request");
+  });
+});
+
+describe("STT receive-path watchdog + session lifecycle diagnostics — production incident round 5: runtime_session_id f77b2529-58a5-4060-8479-017ab3e94169 showed stt_connected and repeated stt:audio_sent with ZERO inbound messages, including session.begin. Diagnostic only: never retries, never reconnects, never changes existing message handling.", () => {
+  const originalKey = process.env["SARVAM_API_KEY"];
+  afterEach(() => {
+    if (originalKey === undefined) delete process.env["SARVAM_API_KEY"];
+    else process.env["SARVAM_API_KEY"] = originalKey;
+  });
+
+  // Matches connectSarvamStt's own STT_RECEIVE_WATCHDOG_MS — not exported,
+  // so duplicated here (same convention as this file's other tests, e.g.
+  // the hardcoded 160-bytes-at-8kHz-mulaw = 20ms frame-size assumption).
+  const WATCHDOG_MS = 5_000;
+
+  async function connectWithMockTimers() {
+    const { connectSarvamStt } = await import("./sarvam-realtime.server.ts");
+    const connectPromise = connectSarvamStt({
+      language: "hi-IN",
+      sampleRateHz: 8000,
+      encoding: "mulaw",
+      onEvent: () => {},
+    });
+    const socket = FakeWebSocket.instances[0]!;
+    socket.simulateOpen();
+    const session = await connectPromise;
+    return { socket, session };
+  }
+
+  test("fires stt:no_inbound_message_received after the watchdog window when nothing ever arrives", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    const logs = captureSttInfoLogs();
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    try {
+      await withFakeWebSocket(async () => {
+        const { session } = await connectWithMockTimers();
+        session.sendAudioFrame(new Uint8Array(160));
+        t.mock.timers.tick(WATCHDOG_MS);
+      });
+    } finally {
+      logs.restore();
+    }
+
+    const entry = logs.calls.find((c) => c.event === "stt:no_inbound_message_received");
+    assert.ok(entry, "expected the watchdog to fire when nothing ever arrived");
+    const data = entry!.data as Record<string, unknown>;
+    assert.equal(data["audioWasSent"], true);
+    assert.equal(typeof data["elapsedMs"], "number");
+    assert.ok((data["elapsedMs"] as number) >= WATCHDOG_MS);
+  });
+
+  test("reports audioWasSent:false when the watchdog fires before any audio was sent", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    const logs = captureSttInfoLogs();
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    try {
+      await withFakeWebSocket(async () => {
+        await connectWithMockTimers();
+        t.mock.timers.tick(WATCHDOG_MS);
+      });
+    } finally {
+      logs.restore();
+    }
+
+    const entry = logs.calls.find((c) => c.event === "stt:no_inbound_message_received");
+    assert.ok(entry);
+    assert.equal((entry!.data as Record<string, unknown>)["audioWasSent"], false);
+  });
+
+  test("clears the watchdog as soon as any inbound message arrives, even an unparseable one — it never fires afterward", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    const logs = captureSttInfoLogs();
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    try {
+      await withFakeWebSocket(async () => {
+        const { socket } = await connectWithMockTimers();
+        socket.simulateMessage("not valid json {{{");
+        t.mock.timers.tick(WATCHDOG_MS);
+      });
+    } finally {
+      logs.restore();
+    }
+
+    const entry = logs.calls.find((c) => c.event === "stt:no_inbound_message_received");
+    assert.equal(entry, undefined, "the watchdog must not fire once any message has arrived");
+  });
+
+  test("clears the watchdog on a well-formed inbound message too, at most once per session", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    const logs = captureSttInfoLogs();
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    try {
+      await withFakeWebSocket(async () => {
+        const { socket } = await connectWithMockTimers();
+        socket.simulateMessage(JSON.stringify({ event: "vad.speech_start" }));
+        socket.simulateMessage(JSON.stringify({ event: "vad.speech_end" }));
+        t.mock.timers.tick(WATCHDOG_MS);
+      });
+    } finally {
+      logs.restore();
+    }
+
+    assert.equal(logs.calls.filter((c) => c.event === "stt:no_inbound_message_received").length, 0);
+  });
+
+  test("stt:session_begin_received fires when Sarvam sends session.begin", async () => {
+    const logs = captureSttInfoLogs();
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    try {
+      await withFakeWebSocket(async () => {
+        const { connectSarvamStt } = await import("./sarvam-realtime.server.ts");
+        const connectPromise = connectSarvamStt({
+          language: "hi-IN",
+          sampleRateHz: 8000,
+          encoding: "mulaw",
+          onEvent: () => {},
+        });
+        const socket = FakeWebSocket.instances[0]!;
+        socket.simulateOpen();
+        await connectPromise;
+        socket.simulateMessage(JSON.stringify({ event: "session.begin" }));
+      });
+    } finally {
+      logs.restore();
+    }
+
+    const entry = logs.calls.find((c) => c.event === "stt:session_begin_received");
+    assert.ok(entry, "expected stt:session_begin_received to fire");
+    assert.equal(typeof (entry!.data as Record<string, unknown>)["elapsedMs"], "number");
+  });
+
+  test("stt:session_end_received fires when Sarvam sends session.end", async () => {
+    const logs = captureSttInfoLogs();
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    try {
+      await withFakeWebSocket(async () => {
+        const { connectSarvamStt } = await import("./sarvam-realtime.server.ts");
+        const connectPromise = connectSarvamStt({
+          language: "hi-IN",
+          sampleRateHz: 8000,
+          encoding: "mulaw",
+          onEvent: () => {},
+        });
+        const socket = FakeWebSocket.instances[0]!;
+        socket.simulateOpen();
+        await connectPromise;
+        socket.simulateMessage(JSON.stringify({ event: "session.end" }));
+      });
+    } finally {
+      logs.restore();
+    }
+
+    const entry = logs.calls.find((c) => c.event === "stt:session_end_received");
+    assert.ok(entry, "expected stt:session_end_received to fire");
+  });
+
+  test("ordinary transcript/VAD traffic never triggers a session lifecycle diagnostic", async () => {
+    const logs = captureSttInfoLogs();
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    try {
+      await withFakeWebSocket(async () => {
+        const { connectSarvamStt } = await import("./sarvam-realtime.server.ts");
+        const connectPromise = connectSarvamStt({
+          language: "hi-IN",
+          sampleRateHz: 8000,
+          encoding: "mulaw",
+          onEvent: () => {},
+        });
+        const socket = FakeWebSocket.instances[0]!;
+        socket.simulateOpen();
+        await connectPromise;
+        socket.simulateMessage(JSON.stringify({ event: "vad.speech_start" }));
+        socket.simulateMessage(JSON.stringify({ event: "transcript.final", text: "hello" }));
+      });
+    } finally {
+      logs.restore();
+    }
+
+    assert.equal(logs.calls.filter((c) => c.event === "stt:session_begin_received").length, 0);
+    assert.equal(logs.calls.filter((c) => c.event === "stt:session_end_received").length, 0);
   });
 });

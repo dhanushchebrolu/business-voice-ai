@@ -123,6 +123,21 @@
  * field and keeping `transcript` only as a fallback for the legacy,
  * non-realtime shape this file no longer connects to.
  *
+ * STT RECEIVE-PATH WATCHDOG (round 5, diagnostic only, no behavior change):
+ * runtime_session_id f77b2529-58a5-4060-8479-017ab3e94169 showed
+ * `stt_connected` and many `stt:audio_sent` with ZERO inbound messages of
+ * any kind for the whole call — not session.begin, not an error, nothing.
+ * Since `socket.send()` never confirms the peer is reading, a dead receive
+ * path on an otherwise-open socket was previously indistinguishable from
+ * "the caller just hasn't said anything yet." `connectSarvamStt` now logs
+ * `stt:no_inbound_message_received` if no message arrives within
+ * `STT_RECEIVE_WATCHDOG_MS` of connecting, and `session.begin`/
+ * `session.end` are now recognized kinds (`stt:session_begin_received`/
+ * `stt:session_end_received`) instead of falling through to `unknown`.
+ * Neither changes what `onSttEvent` does with any event, retries anything,
+ * or reconnects — this is purely so the next occurrence of this failure
+ * mode is directly visible instead of inferred from an absence of logs.
+ *
  * VERIFICATION NOTE (re-checked, still unresolved for everything below this
  * line — see docs/voice-pipeline-testing.md): this sandbox's network egress
  * cannot reach docs.sarvam.ai or any other documentation host directly
@@ -155,11 +170,15 @@
  *      suggests it's wrong either (unlike `model`/`output_audio_bitrate`,
  *      now fixed — see the TTS notes above), and it's needed for the
  *      configurable speaking rate feature, so left unchanged.
- *   3. STT `session.begin`/`session.end` control messages: `normalizeSttMessage`
- *      doesn't special-case either kind today — both fall through to a
- *      logged, harmless `{type:"unknown"}` event. Not believed to be a bug
- *      (nothing in this runtime currently needs to react to either), but
- *      flagged here since it's untested against a real payload.
+ *   3. STT `session.begin`/`session.end` ordering requirements: now
+ *      recognized and diagnosably logged (see STT RECEIVE-PATH WATCHDOG
+ *      above), but still unconfirmed whether Sarvam requires session.begin
+ *      before it will accept audio_input frames — if it does, sending
+ *      audio immediately on WS "open" (this file's current behavior,
+ *      unchanged) could be the actual cause of a dead receive path on a
+ *      slow connection. Not fixed here, since that would mean withholding
+ *      audio until session.begin arrives — a behavior change, not a
+ *      diagnostic.
  * Every incoming message is parsed defensively (`normalizeSttMessage` /
  * `normalizeTtsMessage`) against multiple plausible shapes rather than
  * assuming one is correct, and an unrecognized shape is surfaced as a
@@ -235,6 +254,16 @@ function extractErrorDetail(msg: Record<string, unknown>): string | undefined {
 
 const CONNECT_TIMEOUT_MS = 8_000;
 
+/**
+ * How long to wait after the STT WebSocket connects before flagging that
+ * zero inbound messages have arrived — diagnostic only, never retries or
+ * reconnects. Chosen generously above normal session.begin latency (which
+ * production evidence shows arriving well under a second on a working
+ * session) so this never fires on ordinary jitter, only on a genuinely
+ * dead receive path.
+ */
+const STT_RECEIVE_WATCHDOG_MS = 5_000;
+
 async function openSocket(url: string, timeoutMs = CONNECT_TIMEOUT_MS): Promise<WebSocket> {
   const socket = new WebSocket(url, [authSubprotocol()]);
   socket.binaryType = "arraybuffer";
@@ -288,6 +317,8 @@ export type SttEvent =
   | { type: "final_transcript"; text: string; language?: string | undefined }
   | { type: "speech_start" }
   | { type: "speech_end" }
+  | { type: "session_begin" }
+  | { type: "session_end" }
   | { type: "language_detected"; language: string }
   | { type: "error"; message: string; raw?: unknown }
   | { type: "closed"; code: number; reason: string }
@@ -310,6 +341,18 @@ export function normalizeSttMessage(raw: unknown): SttEvent {
   if (typeof raw !== "object" || raw === null) return { type: "unknown", raw };
   const msg = raw as Record<string, unknown>;
   const kind = String(msg["type"] ?? msg["event"] ?? "");
+
+  // Session lifecycle events — diagnostic-only recognition (production
+  // incident: runtime_session_id f77b2529-58a5-4060-8479-017ab3e94169 shows
+  // stt_connected and repeated stt:audio_sent with ZERO inbound messages of
+  // any kind — no session.begin, no error, nothing. Recognizing these two
+  // kinds here, instead of letting them fall through to `unknown`, makes
+  // "did Sarvam ever consider this session started" directly observable on
+  // the next call via connectSarvamStt's dedicated session_begin/
+  // session_end diagnostics, without changing how onSttEvent reacts to
+  // them — neither is wired to any new behavior.
+  if (kind === "session.begin") return { type: "session_begin" };
+  if (kind === "session.end") return { type: "session_end" };
 
   if (kind === "vad.speech_start" || kind === "speech_start") return { type: "speech_start" };
   if (kind === "vad.speech_end" || kind === "speech_end") return { type: "speech_end" };
@@ -359,7 +402,35 @@ export async function connectSarvamStt(opts: ConnectSttOptions): Promise<SttSess
 
   const socket = await openSocket(url.toString());
 
+  // TEMPORARY DIAGNOSTIC (production incident: runtime_session_id
+  // f77b2529-58a5-4060-8479-017ab3e94169 shows stt_connected and repeated
+  // stt:audio_sent, but ZERO inbound WebSocket "message" events of any
+  // kind — no session.begin, no error, nothing. socket.send() only queues
+  // bytes locally and never confirms the peer is reading or responding, so
+  // nothing before this would have surfaced a dead receive path as
+  // anything other than silence. This is diagnostic-only: it never
+  // retries, reconnects, or changes any existing message handling — it
+  // only ever logs. Cleared the moment any message arrives (including an
+  // unparseable one), or the socket closes/errors, so it fires at most
+  // once per session and never after the receive path has proven alive.
+  const connectedAt = Date.now();
+  let firstMessageReceived = false;
+  let audioWasSent = false;
+  const receiveWatchdog = setTimeout(() => {
+    if (firstMessageReceived) return;
+    console.info("stt:no_inbound_message_received", {
+      elapsedMs: Date.now() - connectedAt,
+      audioWasSent,
+    });
+  }, STT_RECEIVE_WATCHDOG_MS);
+  function clearReceiveWatchdog() {
+    if (firstMessageReceived) return;
+    firstMessageReceived = true;
+    clearTimeout(receiveWatchdog);
+  }
+
   socket.addEventListener("message", (ev) => {
+    clearReceiveWatchdog();
     if (typeof ev.data !== "string") return; // binary frames from this endpoint are not expected inbound
     let parsed: unknown;
     try {
@@ -396,12 +467,27 @@ export async function connectSarvamStt(opts: ConnectSttOptions): Promise<SttSess
       errorCode: typeof data["code"] === "number" ? data["code"] : null,
       errorMessage: eventType === "error" ? (extractErrorDetail(msg) ?? null) : null,
     });
-    opts.onEvent(normalizeSttMessage(parsed));
+    const normalized = normalizeSttMessage(parsed);
+    // Dedicated, clearly-named diagnostics for the two session lifecycle
+    // kinds — see normalizeSttMessage's own comment for why these are
+    // recognized instead of falling through to `unknown`. Logged here
+    // (not inside normalizeSttMessage, which stays a pure function) so
+    // these are easy to grep for on their own, separately from the
+    // always-fires stt:event_received above.
+    if (normalized.type === "session_begin") {
+      console.info("stt:session_begin_received", { elapsedMs: Date.now() - connectedAt });
+    }
+    if (normalized.type === "session_end") {
+      console.info("stt:session_end_received", { elapsedMs: Date.now() - connectedAt });
+    }
+    opts.onEvent(normalized);
   });
   socket.addEventListener("close", (ev) => {
+    clearReceiveWatchdog();
     opts.onEvent({ type: "closed", code: ev.code, reason: ev.reason });
   });
   socket.addEventListener("error", () => {
+    clearReceiveWatchdog();
     opts.onEvent({ type: "error", message: "Speech recognition connection error" });
   });
 
@@ -410,6 +496,7 @@ export async function connectSarvamStt(opts: ConnectSttOptions): Promise<SttSess
   return {
     sendAudioFrame(data: Uint8Array) {
       if (socket.readyState !== WebSocket.OPEN) return;
+      audioWasSent = true;
       audioFrameSequence += 1;
       // FIX (production incident: STT connects and accepts query params
       // fine, but never produces a single transcript for audio that is
