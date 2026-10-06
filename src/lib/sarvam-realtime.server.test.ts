@@ -99,6 +99,12 @@ class FakeWebSocket {
   simulateMessage(data: string) {
     for (const cb of this.listeners.get("message") ?? []) cb({ data });
   }
+
+  /** Test helper: simulates the server closing the connection. */
+  simulateClose(code = 1000, reason = "") {
+    this.readyState = FakeWebSocket.CLOSED;
+    for (const cb of this.listeners.get("close") ?? []) cb({ code, reason });
+  }
 }
 
 function withFakeWebSocket<T>(fn: () => Promise<T>): Promise<T> {
@@ -997,17 +1003,21 @@ describe("stt:audio_sent / stt:event_received — temporary per-send/per-receive
   });
 });
 
-describe("STT receive-path watchdog + session lifecycle diagnostics — production incident round 5: runtime_session_id f77b2529-58a5-4060-8479-017ab3e94169 showed stt_connected and repeated stt:audio_sent with ZERO inbound messages, including session.begin. Diagnostic only: never retries, never reconnects, never changes existing message handling.", () => {
+describe("STT receive-path idle watchdog + audio flow heartbeat — production incident round 6: a live call logged exactly one stt:event_received (transcript.partial), then nothing else — no vad.speech_end, no transcript.final. Round 5's one-shot watchdog is disarmed by the first message and so cannot see a stream that starts fine and goes quiet later; this periodic idle check and the audio-flow heartbeat are diagnostic only — they never retry, reconnect, or change onSttEvent/normalizeSttMessage/Gemini behavior.", () => {
   const originalKey = process.env["SARVAM_API_KEY"];
   afterEach(() => {
     if (originalKey === undefined) delete process.env["SARVAM_API_KEY"];
     else process.env["SARVAM_API_KEY"] = originalKey;
   });
 
-  // Matches connectSarvamStt's own STT_RECEIVE_WATCHDOG_MS — not exported,
-  // so duplicated here (same convention as this file's other tests, e.g.
-  // the hardcoded 160-bytes-at-8kHz-mulaw = 20ms frame-size assumption).
-  const WATCHDOG_MS = 5_000;
+  // Matches connectSarvamStt's own STT_RECEIVE_IDLE_CHECK_INTERVAL_MS /
+  // STT_RECEIVE_IDLE_THRESHOLD_MS / STT_AUDIO_FLOW_HEARTBEAT_INTERVAL_MS —
+  // not exported, so duplicated here (same convention as this file's other
+  // tests, e.g. the hardcoded 160-bytes-at-8kHz-mulaw = 20ms frame-size
+  // assumption).
+  const IDLE_CHECK_INTERVAL_MS = 2_000;
+  const IDLE_THRESHOLD_MS = 7_000;
+  const HEARTBEAT_INTERVAL_MS = 1_500;
 
   async function connectWithMockTimers() {
     const { connectSarvamStt } = await import("./sarvam-realtime.server.ts");
@@ -1023,80 +1033,217 @@ describe("STT receive-path watchdog + session lifecycle diagnostics — producti
     return { socket, session };
   }
 
-  test("fires stt:no_inbound_message_received after the watchdog window when nothing ever arrives", async (t) => {
-    t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
-    const logs = captureSttInfoLogs();
-    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
-    try {
-      await withFakeWebSocket(async () => {
-        const { session } = await connectWithMockTimers();
-        session.sendAudioFrame(new Uint8Array(160));
-        t.mock.timers.tick(WATCHDOG_MS);
-      });
-    } finally {
-      logs.restore();
-    }
-
-    const entry = logs.calls.find((c) => c.event === "stt:no_inbound_message_received");
-    assert.ok(entry, "expected the watchdog to fire when nothing ever arrived");
-    const data = entry!.data as Record<string, unknown>;
-    assert.equal(data["audioWasSent"], true);
-    assert.equal(typeof data["elapsedMs"], "number");
-    assert.ok((data["elapsedMs"] as number) >= WATCHDOG_MS);
-  });
-
-  test("reports audioWasSent:false when the watchdog fires before any audio was sent", async (t) => {
-    t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  test("the idle watchdog does not fire merely because the connection is quiet right after connecting — no event has arrived yet", async (t) => {
+    t.mock.timers.enable({ apis: ["setInterval", "Date"] });
     const logs = captureSttInfoLogs();
     process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
     try {
       await withFakeWebSocket(async () => {
         await connectWithMockTimers();
-        t.mock.timers.tick(WATCHDOG_MS);
+        t.mock.timers.tick(IDLE_THRESHOLD_MS + IDLE_CHECK_INTERVAL_MS * 2);
       });
     } finally {
       logs.restore();
     }
 
-    const entry = logs.calls.find((c) => c.event === "stt:no_inbound_message_received");
-    assert.ok(entry);
-    assert.equal((entry!.data as Record<string, unknown>)["audioWasSent"], false);
+    assert.equal(
+      logs.calls.filter((c) => c.event === "stt:receive_path_idle").length,
+      0,
+      "must never fire before at least one Sarvam event has arrived",
+    );
   });
 
-  test("clears the watchdog as soon as any inbound message arrives, even an unparseable one — it never fires afterward", async (t) => {
-    t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  test("the idle watchdog fires stt:receive_path_idle once a previously-received event has gone quiet for the threshold", async (t) => {
+    t.mock.timers.enable({ apis: ["setInterval", "Date"] });
     const logs = captureSttInfoLogs();
     process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
     try {
       await withFakeWebSocket(async () => {
-        const { socket } = await connectWithMockTimers();
-        socket.simulateMessage("not valid json {{{");
-        t.mock.timers.tick(WATCHDOG_MS);
+        const { socket, session } = await connectWithMockTimers();
+        session.sendAudioFrame(new Uint8Array(160));
+        socket.simulateMessage(JSON.stringify({ event: "transcript.partial", text: "book a" }));
+        t.mock.timers.tick(IDLE_THRESHOLD_MS + IDLE_CHECK_INTERVAL_MS);
       });
     } finally {
       logs.restore();
     }
 
-    const entry = logs.calls.find((c) => c.event === "stt:no_inbound_message_received");
-    assert.equal(entry, undefined, "the watchdog must not fire once any message has arrived");
+    const entry = logs.calls.find((c) => c.event === "stt:receive_path_idle");
+    assert.ok(
+      entry,
+      "expected the idle watchdog to fire after a previously-received event went quiet",
+    );
+    const data = entry!.data as Record<string, unknown>;
+    assert.ok((data["elapsedSinceLastSttEventMs"] as number) >= IDLE_THRESHOLD_MS);
+    assert.equal(data["sttEventsReceived"], 1);
+    assert.equal(data["audioFramesSent"], 1);
+    assert.equal(data["lastEventType"], "transcript.partial");
+    assert.equal(typeof data["connectionAgeMs"], "number");
+    assert.equal(typeof data["socketReadyState"], "number");
+    assert.equal(typeof data["lastSttEventAt"], "number");
+    assert.equal(typeof data["lastAudioSentAt"], "number");
+
+    const serialized = JSON.stringify(logs.calls);
+    assert.doesNotMatch(serialized, /book a/, "must never log the transcript text itself");
   });
 
-  test("clears the watchdog on a well-formed inbound message too, at most once per session", async (t) => {
-    t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  test("a new Sarvam event resets the idle clock — a gap shorter than the threshold never fires the watchdog", async (t) => {
+    t.mock.timers.enable({ apis: ["setInterval", "Date"] });
     const logs = captureSttInfoLogs();
     process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
     try {
       await withFakeWebSocket(async () => {
         const { socket } = await connectWithMockTimers();
         socket.simulateMessage(JSON.stringify({ event: "vad.speech_start" }));
-        socket.simulateMessage(JSON.stringify({ event: "vad.speech_end" }));
-        t.mock.timers.tick(WATCHDOG_MS);
+        t.mock.timers.tick(IDLE_THRESHOLD_MS - IDLE_CHECK_INTERVAL_MS);
+        socket.simulateMessage(JSON.stringify({ event: "transcript.partial", text: "hi" }));
+        t.mock.timers.tick(IDLE_THRESHOLD_MS - IDLE_CHECK_INTERVAL_MS);
       });
     } finally {
       logs.restore();
     }
 
-    assert.equal(logs.calls.filter((c) => c.event === "stt:no_inbound_message_received").length, 0);
+    assert.equal(
+      logs.calls.filter((c) => c.event === "stt:receive_path_idle").length,
+      0,
+      "each new event must restart the idle window instead of accumulating toward the threshold",
+    );
+  });
+
+  test("the idle watchdog reports only once per idle episode, not on every check interval", async (t) => {
+    t.mock.timers.enable({ apis: ["setInterval", "Date"] });
+    const logs = captureSttInfoLogs();
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    try {
+      await withFakeWebSocket(async () => {
+        const { socket } = await connectWithMockTimers();
+        socket.simulateMessage(JSON.stringify({ event: "transcript.partial", text: "hi" }));
+        t.mock.timers.tick(IDLE_THRESHOLD_MS + IDLE_CHECK_INTERVAL_MS * 4);
+      });
+    } finally {
+      logs.restore();
+    }
+
+    assert.equal(logs.calls.filter((c) => c.event === "stt:receive_path_idle").length, 1);
+  });
+
+  test("stt:audio_flow_heartbeat reports frame counts without ever logging audio payloads", async (t) => {
+    t.mock.timers.enable({ apis: ["setInterval", "Date"] });
+    const logs = captureSttInfoLogs();
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    try {
+      await withFakeWebSocket(async () => {
+        const { session } = await connectWithMockTimers();
+        session.sendAudioFrame(new Uint8Array(160));
+        session.sendAudioFrame(new Uint8Array(160));
+        session.sendAudioFrame(new Uint8Array(160));
+        t.mock.timers.tick(HEARTBEAT_INTERVAL_MS);
+      });
+    } finally {
+      logs.restore();
+    }
+
+    const entry = logs.calls.find((c) => c.event === "stt:audio_flow_heartbeat");
+    assert.ok(entry, "expected the heartbeat to fire");
+    const data = entry!.data as Record<string, unknown>;
+    assert.equal(data["framesSentSinceLastHeartbeat"], 3);
+    assert.equal(data["totalFramesSent"], 3);
+    assert.equal(typeof data["elapsedSinceLastAudioSentMs"], "number");
+    assert.equal(typeof data["socketReadyState"], "number");
+
+    const serialized = JSON.stringify(logs.calls);
+    assert.doesNotMatch(
+      serialized,
+      /audio["\s:]*[A-Za-z0-9+/]{20,}/,
+      "must never include base64 audio",
+    );
+  });
+
+  test("stt:audio_flow_heartbeat reports zero frames since the last tick when audio has stopped flowing", async (t) => {
+    t.mock.timers.enable({ apis: ["setInterval", "Date"] });
+    const logs = captureSttInfoLogs();
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    try {
+      await withFakeWebSocket(async () => {
+        const { session } = await connectWithMockTimers();
+        session.sendAudioFrame(new Uint8Array(160));
+        t.mock.timers.tick(HEARTBEAT_INTERVAL_MS); // first heartbeat sees the one frame
+        t.mock.timers.tick(HEARTBEAT_INTERVAL_MS); // nothing sent since — audio has stopped
+      });
+    } finally {
+      logs.restore();
+    }
+
+    const heartbeats = logs.calls.filter((c) => c.event === "stt:audio_flow_heartbeat");
+    assert.equal(heartbeats.length, 2);
+    assert.equal(
+      (heartbeats[0]!.data as Record<string, unknown>)["framesSentSinceLastHeartbeat"],
+      1,
+    );
+    assert.equal(
+      (heartbeats[1]!.data as Record<string, unknown>)["framesSentSinceLastHeartbeat"],
+      0,
+    );
+    assert.equal((heartbeats[1]!.data as Record<string, unknown>)["totalFramesSent"], 1);
+  });
+
+  test("session.close() cancels both the idle watchdog and the heartbeat — neither fires afterward", async (t) => {
+    t.mock.timers.enable({ apis: ["setInterval", "Date"] });
+    const logs = captureSttInfoLogs();
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    try {
+      await withFakeWebSocket(async () => {
+        const { socket, session } = await connectWithMockTimers();
+        socket.simulateMessage(JSON.stringify({ event: "transcript.partial", text: "hi" }));
+        session.sendAudioFrame(new Uint8Array(160));
+        session.close();
+        logs.calls.length = 0; // discard anything logged up to and including close()
+        t.mock.timers.tick(IDLE_THRESHOLD_MS + HEARTBEAT_INTERVAL_MS * 10);
+      });
+    } finally {
+      logs.restore();
+    }
+
+    assert.equal(
+      logs.calls.filter(
+        (c) => c.event === "stt:receive_path_idle" || c.event === "stt:audio_flow_heartbeat",
+      ).length,
+      0,
+      "no diagnostic timer may fire after the session is closed",
+    );
+  });
+
+  test("a server-initiated close cancels both timers too — no diagnostic fires after the socket closes", async (t) => {
+    t.mock.timers.enable({ apis: ["setInterval", "Date"] });
+    const logs = captureSttInfoLogs();
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    try {
+      await withFakeWebSocket(async () => {
+        const { socket } = await connectWithMockTimers();
+        socket.simulateMessage(JSON.stringify({ event: "transcript.partial", text: "hi" }));
+        socket.simulateClose(1000, "done");
+        logs.calls.length = 0;
+        t.mock.timers.tick(IDLE_THRESHOLD_MS + HEARTBEAT_INTERVAL_MS * 10);
+      });
+    } finally {
+      logs.restore();
+    }
+
+    assert.equal(
+      logs.calls.filter(
+        (c) => c.event === "stt:receive_path_idle" || c.event === "stt:audio_flow_heartbeat",
+      ).length,
+      0,
+      "no diagnostic timer may fire after the socket's close event has been handled",
+    );
+  });
+});
+
+describe("STT session lifecycle diagnostics — production incident round 5: runtime_session_id f77b2529-58a5-4060-8479-017ab3e94169 showed stt_connected and repeated stt:audio_sent with ZERO inbound messages, including session.begin. Diagnostic only: never retries, never reconnects, never changes existing message handling.", () => {
+  const originalKey = process.env["SARVAM_API_KEY"];
+  afterEach(() => {
+    if (originalKey === undefined) delete process.env["SARVAM_API_KEY"];
+    else process.env["SARVAM_API_KEY"] = originalKey;
   });
 
   test("stt:session_begin_received fires when Sarvam sends session.begin", async () => {

@@ -138,6 +138,21 @@
  * or reconnects — this is purely so the next occurrence of this failure
  * mode is directly visible instead of inferred from an absence of logs.
  *
+ * STT RECEIVE-PATH IDLE WATCHDOG + AUDIO FLOW HEARTBEAT (round 6, diagnostic
+ * only, no behavior change): a live call after round 5 showed exactly one
+ * stt:event_received (transcript.partial), then nothing — no vad.speech_end,
+ * no transcript.final. Round 5's watchdog cannot see this: it is permanently
+ * disarmed by the first inbound message, so it only ever proves "nothing
+ * arrived at all," not "the stream started, then went quiet." Replaced with
+ * a periodic idle check (stt:receive_path_idle) that only considers firing
+ * once at least one Sarvam event has arrived, and a periodic low-volume
+ * audio-flow aggregate (stt:audio_flow_heartbeat, replacing nothing —
+ * stt:audio_sent still logs every frame). Together these let a future
+ * occurrence be read as "audio kept flowing but Sarvam's events stopped" vs.
+ * "audio itself stopped reaching Sarvam," which is the one thing round 5's
+ * logs could not distinguish. Still purely diagnostic: nothing here retries,
+ * reconnects, or changes how onSttEvent/normalizeSttMessage/Gemini behave.
+ *
  * VERIFICATION NOTE (re-checked, still unresolved for everything below this
  * line — see docs/voice-pipeline-testing.md): this sandbox's network egress
  * cannot reach docs.sarvam.ai or any other documentation host directly
@@ -255,14 +270,30 @@ function extractErrorDetail(msg: Record<string, unknown>): string | undefined {
 const CONNECT_TIMEOUT_MS = 8_000;
 
 /**
- * How long to wait after the STT WebSocket connects before flagging that
- * zero inbound messages have arrived — diagnostic only, never retries or
- * reconnects. Chosen generously above normal session.begin latency (which
- * production evidence shows arriving well under a second on a working
- * session) so this never fires on ordinary jitter, only on a genuinely
- * dead receive path.
+ * STT RECEIVE-PATH IDLE WATCHDOG (round 6, diagnostic only, no behavior
+ * change): round 5's one-shot watchdog only detects "zero messages ever
+ * arrived" — it is permanently disarmed by the first inbound message, so it
+ * cannot see a receive path that starts fine and then goes silent partway
+ * through (production evidence: a call that logged exactly one
+ * transcript.partial, then nothing else — no vad.speech_end, no
+ * transcript.final). This checks periodically how long it's been since the
+ * last Sarvam event, but only once at least one event has arrived — it must
+ * never fire merely because the caller hasn't spoken yet. The threshold is
+ * well above the gap between ordinary partials during continuous speech,
+ * but well below voice-runtime's own SILENCE_HANGUP_MS (10s), so a dead
+ * receive path is visible before the caller-silence timeout reacts to the
+ * same underlying symptom.
  */
-const STT_RECEIVE_WATCHDOG_MS = 5_000;
+const STT_RECEIVE_IDLE_CHECK_INTERVAL_MS = 2_000;
+const STT_RECEIVE_IDLE_THRESHOLD_MS = 7_000;
+
+/**
+ * Low-volume aggregate of outbound audio flow — NOT per-frame (stt:audio_sent
+ * already logs every frame). Lets a drop in audio reaching Sarvam be told
+ * apart, from the logs alone, from Sarvam's event stream going quiet while
+ * audio keeps flowing.
+ */
+const STT_AUDIO_FLOW_HEARTBEAT_INTERVAL_MS = 1_500;
 
 async function openSocket(url: string, timeoutMs = CONNECT_TIMEOUT_MS): Promise<WebSocket> {
   const socket = new WebSocket(url, [authSubprotocol()]);
@@ -402,35 +433,69 @@ export async function connectSarvamStt(opts: ConnectSttOptions): Promise<SttSess
 
   const socket = await openSocket(url.toString());
 
-  // TEMPORARY DIAGNOSTIC (production incident: runtime_session_id
-  // f77b2529-58a5-4060-8479-017ab3e94169 shows stt_connected and repeated
-  // stt:audio_sent, but ZERO inbound WebSocket "message" events of any
-  // kind — no session.begin, no error, nothing. socket.send() only queues
-  // bytes locally and never confirms the peer is reading or responding, so
-  // nothing before this would have surfaced a dead receive path as
-  // anything other than silence. This is diagnostic-only: it never
-  // retries, reconnects, or changes any existing message handling — it
-  // only ever logs. Cleared the moment any message arrives (including an
-  // unparseable one), or the socket closes/errors, so it fires at most
-  // once per session and never after the receive path has proven alive.
   const connectedAt = Date.now();
-  let firstMessageReceived = false;
-  let audioWasSent = false;
-  const receiveWatchdog = setTimeout(() => {
-    if (firstMessageReceived) return;
-    console.info("stt:no_inbound_message_received", {
-      elapsedMs: Date.now() - connectedAt,
-      audioWasSent,
+
+  // Per-connection diagnostic state (see STT RECEIVE-PATH IDLE WATCHDOG
+  // above this function) — intentionally local to this call, never global,
+  // so concurrent calls never share or clobber each other's counters.
+  let sttEventsReceived = 0;
+  let lastSttEventAt: number | null = null;
+  let lastEventType: string | null = null;
+  let idleReported = false; // one stt:receive_path_idle log per idle episode; a new event clears this
+
+  let audioFramesSent = 0;
+  let lastAudioSentAt: number | null = null;
+  let framesSentAtLastHeartbeat = 0;
+
+  // unref() where available (Node) so these recurring timers never by
+  // themselves keep a process alive — Cloudflare Workers' setInterval
+  // return value has no unref() at all, hence the feature check rather
+  // than a direct call.
+  function unref(timer: unknown) {
+    if (typeof (timer as { unref?: unknown })?.unref === "function") {
+      (timer as { unref: () => void }).unref();
+    }
+  }
+
+  const idleCheckTimer = setInterval(() => {
+    if (socket.readyState !== WebSocket.OPEN) return; // connection not expected active
+    if (sttEventsReceived === 0) return; // never fire merely because the caller hasn't spoken yet
+    if (idleReported) return;
+    const idleMs = Date.now() - (lastSttEventAt as number);
+    if (idleMs < STT_RECEIVE_IDLE_THRESHOLD_MS) return;
+    idleReported = true;
+    console.info("stt:receive_path_idle", {
+      elapsedSinceLastSttEventMs: idleMs,
+      elapsedSinceLastAudioSentMs: lastAudioSentAt !== null ? Date.now() - lastAudioSentAt : null,
+      audioFramesSent,
+      sttEventsReceived,
+      socketReadyState: socket.readyState,
+      connectionAgeMs: Date.now() - connectedAt,
+      lastEventType,
+      lastAudioSentAt,
+      lastSttEventAt,
     });
-  }, STT_RECEIVE_WATCHDOG_MS);
-  function clearReceiveWatchdog() {
-    if (firstMessageReceived) return;
-    firstMessageReceived = true;
-    clearTimeout(receiveWatchdog);
+  }, STT_RECEIVE_IDLE_CHECK_INTERVAL_MS);
+  unref(idleCheckTimer);
+
+  const audioFlowHeartbeatTimer = setInterval(() => {
+    const framesSentSinceLastHeartbeat = audioFramesSent - framesSentAtLastHeartbeat;
+    framesSentAtLastHeartbeat = audioFramesSent;
+    console.info("stt:audio_flow_heartbeat", {
+      framesSentSinceLastHeartbeat,
+      totalFramesSent: audioFramesSent,
+      elapsedSinceLastAudioSentMs: lastAudioSentAt !== null ? Date.now() - lastAudioSentAt : null,
+      socketReadyState: socket.readyState,
+    });
+  }, STT_AUDIO_FLOW_HEARTBEAT_INTERVAL_MS);
+  unref(audioFlowHeartbeatTimer);
+
+  function clearDiagnosticTimers() {
+    clearInterval(idleCheckTimer);
+    clearInterval(audioFlowHeartbeatTimer);
   }
 
   socket.addEventListener("message", (ev) => {
-    clearReceiveWatchdog();
     if (typeof ev.data !== "string") return; // binary frames from this endpoint are not expected inbound
     let parsed: unknown;
     try {
@@ -467,6 +532,10 @@ export async function connectSarvamStt(opts: ConnectSttOptions): Promise<SttSess
       errorCode: typeof data["code"] === "number" ? data["code"] : null,
       errorMessage: eventType === "error" ? (extractErrorDetail(msg) ?? null) : null,
     });
+    sttEventsReceived += 1;
+    lastSttEventAt = Date.now();
+    lastEventType = eventType;
+    idleReported = false;
     const normalized = normalizeSttMessage(parsed);
     // Dedicated, clearly-named diagnostics for the two session lifecycle
     // kinds — see normalizeSttMessage's own comment for why these are
@@ -483,11 +552,11 @@ export async function connectSarvamStt(opts: ConnectSttOptions): Promise<SttSess
     opts.onEvent(normalized);
   });
   socket.addEventListener("close", (ev) => {
-    clearReceiveWatchdog();
+    clearDiagnosticTimers();
     opts.onEvent({ type: "closed", code: ev.code, reason: ev.reason });
   });
   socket.addEventListener("error", () => {
-    clearReceiveWatchdog();
+    clearDiagnosticTimers();
     opts.onEvent({ type: "error", message: "Speech recognition connection error" });
   });
 
@@ -496,7 +565,8 @@ export async function connectSarvamStt(opts: ConnectSttOptions): Promise<SttSess
   return {
     sendAudioFrame(data: Uint8Array) {
       if (socket.readyState !== WebSocket.OPEN) return;
-      audioWasSent = true;
+      audioFramesSent += 1;
+      lastAudioSentAt = Date.now();
       audioFrameSequence += 1;
       // FIX (production incident: STT connects and accepts query params
       // fine, but never produces a single transcript for audio that is
@@ -526,6 +596,7 @@ export async function connectSarvamStt(opts: ConnectSttOptions): Promise<SttSess
       socket.send(JSON.stringify(payload));
     },
     close() {
+      clearDiagnosticTimers();
       if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)
         socket.close(1000, "done");
     },
