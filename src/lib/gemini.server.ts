@@ -45,6 +45,18 @@
  * also implements the dispatch loop and re-prompts on a function-call
  * response would just leave a call hanging on an unanswered tool request —
  * that loop is explicitly out of scope for this change.
+ *
+ * 503 RETRY (production incident, after the 404 gemini-2.5-flash migration
+ * above was already resolved): Google returned 503 "This model is
+ * currently experiencing high demand... Please try again later." — a
+ * standard transient-overload response, not a model/auth/quota/request-
+ * shape problem. `call()` previously made exactly one attempt and threw
+ * immediately on any non-2xx, so a single momentary spike always reached
+ * the caller as the generic fallback speech. Now retries once more on a
+ * 503 specifically (not 429, which already has its own distinct handling
+ * and a real rate limit shouldn't be hammered again immediately) after a
+ * short fixed delay — short because this blocks a live phone call, not a
+ * background job.
  */
 
 const BASE_URL = "https://generativelanguage.googleapis.com";
@@ -125,40 +137,64 @@ function toGeminiRequest(messages: ChatMessage[]): {
   };
 }
 
-async function call(body: Record<string, unknown>): Promise<GeminiResponse> {
-  let res: Response;
-  try {
-    res = await fetch(`${BASE_URL}/v1beta/models/${model()}:generateContent?key=${apiKey()}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
-  } catch (err) {
-    if (err instanceof Error && err.name === "TimeoutError") {
-      throw new ProviderError("The AI voice provider timed out. Please retry.", 504);
-    }
-    throw new ProviderError("Could not reach the AI voice provider. Please retry.", 503);
-  }
+// A 503 from generateContent is Google's standard transient-overload
+// response ("This model is currently experiencing high demand...") — not a
+// malformed request, not an auth/quota issue, not a model-id problem (those
+// are 400/401/403/429/404 respectively, each already handled distinctly
+// below). One short, bounded retry gives a momentary spike a real chance to
+// clear before the caller hears a fallback; the delay is kept small because
+// this blocks a live phone call, not a background job — a long backoff
+// would make the caller wait longer than just speaking the fallback would.
+const MAX_503_ATTEMPTS = 2;
+const RETRY_DELAY_MS = 400;
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    if (res.status === 401 || res.status === 403)
+async function call(body: Record<string, unknown>): Promise<GeminiResponse> {
+  for (let attempt = 1; attempt <= MAX_503_ATTEMPTS; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(`${BASE_URL}/v1beta/models/${model()}:generateContent?key=${apiKey()}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch (err) {
+      if (err instanceof Error && err.name === "TimeoutError") {
+        throw new ProviderError("The AI voice provider timed out. Please retry.", 504);
+      }
+      throw new ProviderError("Could not reach the AI voice provider. Please retry.", 503);
+    }
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      if (res.status === 401 || res.status === 403)
+        throw new ProviderError(
+          "The AI voice provider rejected the platform credentials.",
+          res.status,
+        );
+      if (res.status === 429)
+        throw new ProviderError(
+          "The AI voice provider is rate limiting requests. Try again shortly.",
+          429,
+        );
+      if (res.status === 503 && attempt < MAX_503_ATTEMPTS) {
+        // Safe to log: attempt count and delay only, never the request body,
+        // the response body, or the API key.
+        console.info("gemini:retrying_after_503", { attempt, delayMs: RETRY_DELAY_MS });
+        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+        continue;
+      }
       throw new ProviderError(
-        "The AI voice provider rejected the platform credentials.",
+        `AI voice provider error (${res.status}). ${text.slice(0, 180)}`,
         res.status,
       );
-    if (res.status === 429)
-      throw new ProviderError(
-        "The AI voice provider is rate limiting requests. Try again shortly.",
-        429,
-      );
-    throw new ProviderError(
-      `AI voice provider error (${res.status}). ${text.slice(0, 180)}`,
-      res.status,
-    );
+    }
+    return (await res.json()) as GeminiResponse;
   }
-  return (await res.json()) as GeminiResponse;
+  // Unreachable: the loop above always returns or throws by its final
+  // iteration (attempt === MAX_503_ATTEMPTS never satisfies the retry
+  // condition) — satisfies TypeScript's control-flow analysis only.
+  throw new ProviderError("AI voice provider error (503).", 503);
 }
 
 export interface GeminiTool {

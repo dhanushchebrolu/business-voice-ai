@@ -486,6 +486,95 @@ describe("gemini.runConversation — error handling never leaks the API key", ()
   });
 });
 
+describe('gemini 503 retry — production incident: Google returned 503 "This model is currently experiencing high demand... Please try again later." and the previous single-attempt call() turned every momentary spike into the caller-facing fallback', () => {
+  test("a 503 followed by a 200 succeeds — the transient spike is retried, not surfaced to the caller", async () => {
+    await withEnv({ GEMINI_API_KEY: "k" }, async () => {
+      let callCount = 0;
+      await withFetch(
+        (async () => {
+          callCount += 1;
+          if (callCount === 1) {
+            return new Response("This model is currently experiencing high demand.", {
+              status: 503,
+            });
+          }
+          return new Response(
+            JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] } }] }),
+            { status: 200 },
+          );
+        }) as typeof fetch,
+        async () => {
+          const result = await gemini.runConversation([{ role: "user", content: "hi" }]);
+          assert.equal(result.reply, "ok");
+        },
+      );
+      assert.equal(callCount, 2, "expected exactly one retry after the first 503");
+    });
+  });
+
+  test("gives up and throws after exhausting retries if every attempt returns 503 — never retries forever", async () => {
+    await withEnv({ GEMINI_API_KEY: "leak-me-not-5" }, async () => {
+      let callCount = 0;
+      await withFetch(
+        (async () => {
+          callCount += 1;
+          return new Response("This model is currently experiencing high demand.", {
+            status: 503,
+          });
+        }) as typeof fetch,
+        async () => {
+          await assert.rejects(
+            () => gemini.runConversation([{ role: "user", content: "hi" }]),
+            (err: unknown) => {
+              assert.ok(err instanceof ProviderError);
+              assert.equal(err.status, 503);
+              assert.doesNotMatch(err.message, /leak-me-not-5/);
+              return true;
+            },
+          );
+        },
+      );
+      assert.equal(
+        callCount,
+        2,
+        "expected a bounded number of attempts, not an unbounded retry loop",
+      );
+    });
+  });
+
+  test("a 429 is never retried — fails on the first attempt, unlike a 503", async () => {
+    await withEnv({ GEMINI_API_KEY: "k" }, async () => {
+      let callCount = 0;
+      await withFetch(
+        (async () => {
+          callCount += 1;
+          return new Response("slow down", { status: 429 });
+        }) as typeof fetch,
+        async () => {
+          await assert.rejects(() => gemini.runConversation([{ role: "user", content: "hi" }]));
+        },
+      );
+      assert.equal(callCount, 1, "a 429 must not trigger the 503 retry path");
+    });
+  });
+
+  test("a 401 is never retried either", async () => {
+    await withEnv({ GEMINI_API_KEY: "k" }, async () => {
+      let callCount = 0;
+      await withFetch(
+        (async () => {
+          callCount += 1;
+          return new Response("unauthorized", { status: 401 });
+        }) as typeof fetch,
+        async () => {
+          await assert.rejects(() => gemini.runConversation([{ role: "user", content: "hi" }]));
+        },
+      );
+      assert.equal(callCount, 1);
+    });
+  });
+});
+
 describe("gemini.server.ts reuses sarvam.server.ts's ProviderError, not a parallel class", () => {
   test("voice-runtime.server.ts's `error instanceof ProviderError` check (speakFallback) works identically regardless of which LLM provider raised the error", async () => {
     const { ProviderError: SarvamProviderError } = await import("./sarvam.server.ts");
