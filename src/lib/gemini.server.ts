@@ -53,10 +53,29 @@
  * shape problem. `call()` previously made exactly one attempt and threw
  * immediately on any non-2xx, so a single momentary spike always reached
  * the caller as the generic fallback speech. Now retries once more on a
- * 503 specifically (not 429, which already has its own distinct handling
- * and a real rate limit shouldn't be hammered again immediately) after a
- * short fixed delay — short because this blocks a live phone call, not a
- * background job.
+ * 503 specifically after a short fixed delay — short because this blocks a
+ * live phone call, not a background job.
+ *
+ * 429 RETRY + FALLBACK (production incident, after the 503 fix above):
+ * Google returned 429 "RESOURCE_EXHAUSTED" on a live call, and — unlike
+ * 503 — `call()` treated it as an immediate, non-retried, non-fallback
+ * failure (an earlier revision of this comment justified that choice as
+ * "a real rate limit shouldn't be hammered again immediately"). Google's
+ * own guidance recommends exponential-backoff retry for 429 the same as
+ * for 503, so `call()` now gives 429 the same shape as 503 — one short
+ * backoff-delayed retry of the primary model, then fall back once to the
+ * secondary model if the retry also comes back 429 — reusing the exact
+ * same MAX_PRIMARY_ATTEMPTS loop and recovery budget as 503, not a
+ * parallel mechanism. The one real difference from 503 is the delay
+ * itself: 429's retry waits `RETRY_429_BASE_DELAY_MS` (not 503's
+ * `RETRY_DELAY_MS`), honoring Google's own suggested retryDelay from the
+ * error body when present, but hard-capped by `MAX_429_RETRY_DELAY_MS` and
+ * by whatever's left of `TOTAL_RECOVERY_BUDGET_MS` — Google's suggested
+ * delay is sized for a background retry loop, not a caller holding the
+ * line, so it is a hint here, never something this code sleeps out in
+ * full. Diagnostic detail from Google's 429 body (code/status/message/
+ * details/retryDelay) is logged via `gemini:429_received` — safe fields
+ * only, never the API key or request body (see `parseGoogleErrorBody`).
  */
 
 const BASE_URL = "https://generativelanguage.googleapis.com";
@@ -155,16 +174,41 @@ function toGeminiRequest(messages: ChatMessage[]): {
   };
 }
 
-// A 503 from generateContent is Google's standard transient-overload
-// response ("This model is currently experiencing high demand...") — not a
-// malformed request, not an auth/quota issue, not a model-id problem (those
-// are 400/401/403/429/404 respectively, each already handled distinctly
-// below). One short, bounded retry gives a momentary spike a real chance to
-// clear before the caller hears a fallback; the delay is kept small because
-// this blocks a live phone call, not a background job — a long backoff
-// would make the caller wait longer than just speaking the fallback would.
-const MAX_503_ATTEMPTS = 2;
+// A 503 or 429 from generateContent are both standard transient conditions
+// Google's own guidance recommends retrying with backoff — neither is a
+// malformed request, an auth/quota-exhaustion, or a model-id problem (those
+// are 400/401/403/404 respectively, each handled distinctly below, and
+// never retried). One short, bounded retry per status gives a momentary
+// spike or rate-limit window a real chance to clear before the caller
+// hears a fallback; delays are kept short because this blocks a live phone
+// call, not a background job — a long backoff would make the caller wait
+// longer than just speaking the fallback would. Both statuses share the
+// same MAX_PRIMARY_ATTEMPTS loop (see call()) — a 503 retries at a fixed
+// RETRY_DELAY_MS, a 429 retries at its own, separately-capped delay (see
+// RETRY_429_BASE_DELAY_MS/MAX_429_RETRY_DELAY_MS below).
+const MAX_PRIMARY_ATTEMPTS = 2;
 const RETRY_DELAY_MS = 400;
+
+/**
+ * 429's own retry delay — deliberately separate from 503's RETRY_DELAY_MS
+ * rather than reusing it, since a rate limit and a capacity spike are
+ * different conditions that may clear on different timescales. Used as the
+ * default when Google's error body carries no retryDelay hint (see
+ * parseGoogleErrorBody); when it does, the hint is preferred but still
+ * capped by MAX_429_RETRY_DELAY_MS and by whatever's left of
+ * TOTAL_RECOVERY_BUDGET_MS — see backoff429DelayMs.
+ */
+const RETRY_429_BASE_DELAY_MS = 500;
+
+/**
+ * Hard ceiling on the 429 retry delay regardless of what Google's own
+ * retryDelay suggests. Google's suggested delay is sized for a background
+ * retry loop; a live caller holding the line cannot wait out a multi-second
+ * (or longer) suggestion, and the whole point of retrying within
+ * TOTAL_RECOVERY_BUDGET_MS is to stay well inside a tolerable live-call
+ * latency, not to honor Google's hint at full length.
+ */
+const MAX_429_RETRY_DELAY_MS = 1_500;
 
 /**
  * Bounds the ENTIRE primary-retry + fallback sequence to a latency a live
@@ -194,6 +238,106 @@ function errorForStatus(status: number, text: string): ProviderError {
       429,
     );
   return new ProviderError(`AI voice provider error (${status}). ${text.slice(0, 180)}`, status);
+}
+
+/**
+ * Best-effort parse of Google's standard JSON error body
+ * ({"error":{code,message,status,details}}) — never throws, used only for
+ * diagnostics. `details` may include a google.rpc.RetryInfo entry
+ * ({"@type":"...RetryInfo","retryDelay":"13s"}), which retryDelayMs
+ * extracts when present. This is the standard shape documented across
+ * Google APIs generally, not independently re-verified against live
+ * Gemini docs from this sandbox (ai.google.dev is unreachable here, same
+ * caveat as this file's other Gemini-specific claims) — if a real 429
+ * body doesn't match this shape, every field below simply comes back
+ * undefined rather than throwing, so this never breaks the error path.
+ */
+function parseGoogleErrorBody(text: string): {
+  code?: number;
+  status?: string;
+  message?: string;
+  details?: unknown;
+  retryDelayMs?: number;
+} {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return {};
+  }
+  if (typeof parsed !== "object" || parsed === null) return {};
+  const error = (parsed as Record<string, unknown>)["error"];
+  if (typeof error !== "object" || error === null) return {};
+  const errorObj = error as Record<string, unknown>;
+  const details = errorObj["details"];
+
+  let retryDelayMs: number | undefined;
+  if (Array.isArray(details)) {
+    for (const detail of details) {
+      if (typeof detail !== "object" || detail === null) continue;
+      const retryDelay = (detail as Record<string, unknown>)["retryDelay"];
+      if (typeof retryDelay !== "string") continue;
+      const match = /^(\d+(?:\.\d+)?)s$/.exec(retryDelay);
+      const seconds = match?.[1];
+      if (seconds !== undefined) retryDelayMs = Math.round(parseFloat(seconds) * 1000);
+    }
+  }
+
+  const code = typeof errorObj["code"] === "number" ? (errorObj["code"] as number) : undefined;
+  const status =
+    typeof errorObj["status"] === "string" ? (errorObj["status"] as string) : undefined;
+  const message =
+    typeof errorObj["message"] === "string" ? (errorObj["message"] as string) : undefined;
+
+  // Built via conditional spreads, never an explicit `key: undefined` —
+  // this file's tsconfig has exactOptionalPropertyTypes on, which treats
+  // those as distinct from an absent key.
+  return {
+    ...(code !== undefined ? { code } : {}),
+    ...(status !== undefined ? { status } : {}),
+    ...(message !== undefined ? { message } : {}),
+    ...(details !== undefined ? { details } : {}),
+    ...(retryDelayMs !== undefined ? { retryDelayMs } : {}),
+  };
+}
+
+/**
+ * Logs whatever useful, non-secret detail Google's 429 body carries — the
+ * one thing the pre-this-change code fetched over the network and then
+ * discarded unused (errorForStatus's 429 branch never read its `text`
+ * argument). Safe fields only: a length-capped raw-body preview and a few
+ * shallow, independently-truncated structured fields — never the API key
+ * (never present in Google's own response body in the first place; this
+ * function only ever reads `text`, never the request or the key) and never
+ * the full response body unbounded.
+ */
+function logGoogle429(text: string): void {
+  const { code, status, message, details, retryDelayMs } = parseGoogleErrorBody(text);
+  console.info("gemini:429_received", {
+    bodyPreview: text.slice(0, 300),
+    errorCode: code ?? null,
+    errorStatus: status ?? null,
+    errorMessage: message ? message.slice(0, 200) : null,
+    errorDetailsPreview: details ? JSON.stringify(details).slice(0, 300) : null,
+    retryDelayMs: retryDelayMs ?? null,
+  });
+}
+
+/**
+ * The one 429 retry's delay — see RETRY_429_BASE_DELAY_MS/
+ * MAX_429_RETRY_DELAY_MS above for why this is separate from 503's fixed
+ * RETRY_DELAY_MS. Google's own suggested retryDelay (when present) is
+ * preferred over the fixed default, but both are capped by
+ * MAX_429_RETRY_DELAY_MS and by remainingBudgetMs — never longer than
+ * what's actually left of TOTAL_RECOVERY_BUDGET_MS, and never negative.
+ * Exported as a pure function so the capping logic is directly
+ * unit-testable without timer mocking — same reasoning as
+ * remainingAttemptTimeoutMs above.
+ */
+export function backoff429DelayMs(bodyText: string, remainingBudgetMs: number): number {
+  const { retryDelayMs } = parseGoogleErrorBody(bodyText);
+  const suggested = retryDelayMs ?? RETRY_429_BASE_DELAY_MS;
+  return Math.max(0, Math.min(suggested, MAX_429_RETRY_DELAY_MS, remainingBudgetMs));
 }
 
 /** One HTTP attempt against a given model id. Never retries, never falls back — call() owns that. */
@@ -226,48 +370,85 @@ async function requestOnce(
 async function call(body: Record<string, unknown>): Promise<GeminiResponse> {
   const startedAt = Date.now();
   let lastErrorText = "";
+  // Which retryable status the primary model last failed with — decides
+  // the fallback log's `reason` and, in the near-impossible case the
+  // budget runs out before the fallback can even be attempted, the final
+  // thrown error's status. Defaults to 503 to preserve the exact prior
+  // behavior for that edge case when the loop somehow never runs (budget
+  // already exhausted before attempt 1 — not reachable in practice since
+  // attempt 1 starts at ~0ms elapsed).
+  let lastErrorStatus: 429 | 503 = 503;
 
-  for (let attempt = 1; attempt <= MAX_503_ATTEMPTS; attempt++) {
+  for (let attempt = 1; attempt <= MAX_PRIMARY_ATTEMPTS; attempt++) {
     const timeoutMs = remainingAttemptTimeoutMs(startedAt, Date.now());
     if (timeoutMs <= 0) break; // recovery budget already exhausted before this attempt could start
 
     const result = await requestOnce(model(), body, timeoutMs);
     if (result.data) return result.data;
-    if (result.status !== 503) throw errorForStatus(result.status, result.text);
 
-    lastErrorText = result.text;
-    if (attempt < MAX_503_ATTEMPTS) {
-      // Safe to log: attempt count and delay only, never the request body,
-      // the response body, or the API key.
-      console.info("gemini:retrying_after_503", { attempt, delayMs: RETRY_DELAY_MS });
-      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+    if (result.status === 429) {
+      logGoogle429(result.text);
+      lastErrorStatus = 429;
+      lastErrorText = result.text;
+      if (attempt < MAX_PRIMARY_ATTEMPTS) {
+        const remainingMs = remainingAttemptTimeoutMs(startedAt, Date.now());
+        const delayMs = backoff429DelayMs(result.text, remainingMs);
+        // Safe to log: attempt count and delay only, never the request
+        // body, the response body, or the API key.
+        console.info("gemini:retrying_after_429", { attempt, delayMs });
+        if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+      continue;
     }
+
+    if (result.status === 503) {
+      lastErrorStatus = 503;
+      lastErrorText = result.text;
+      if (attempt < MAX_PRIMARY_ATTEMPTS) {
+        // Safe to log: attempt count and delay only, never the request
+        // body, the response body, or the API key.
+        console.info("gemini:retrying_after_503", { attempt, delayMs: RETRY_DELAY_MS });
+        await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+      }
+      continue;
+    }
+
+    // Any other status (400/401/403/404/500/502/...) is not retried —
+    // matches the existing, unchanged behavior for every status besides
+    // 503/429.
+    throw errorForStatus(result.status, result.text);
   }
 
-  // Primary model's 503 retries are exhausted — try the fallback model
-  // exactly once (never its own retry loop), using only whatever's left of
-  // the shared recovery budget. Reaching here means every prior attempt
-  // was specifically a 503; any other status already threw above and
-  // never reaches this point (429/401/403/timeout/network errors do not
-  // trigger the fallback, matching their existing, unchanged behavior).
+  // Primary model's retries are exhausted — try the fallback model exactly
+  // once (never its own retry loop), using only whatever's left of the
+  // shared recovery budget. Reaching here means every prior attempt was
+  // specifically a 503 and/or a 429 (possibly a mix of both); any other
+  // status already threw above and never reaches this point
+  // (401/403/400/404/timeout/network errors do not trigger the fallback,
+  // matching their existing, unchanged behavior).
   const fallbackTimeoutMs = remainingAttemptTimeoutMs(startedAt, Date.now());
   if (fallbackTimeoutMs > 0) {
     console.info("gemini:falling_back_to_secondary_model", {
       primaryModel: model(),
       fallbackModel: fallbackModel(),
-      reason: "primary_503_exhausted",
+      reason: lastErrorStatus === 429 ? "primary_429_exhausted" : "primary_503_exhausted",
       elapsedMs: Date.now() - startedAt,
       remainingBudgetMs: fallbackTimeoutMs,
     });
     const fallbackResult = await requestOnce(fallbackModel(), body, fallbackTimeoutMs);
     if (fallbackResult.data) return fallbackResult.data;
+    if (fallbackResult.status === 429) logGoogle429(fallbackResult.text);
     throw errorForStatus(fallbackResult.status, fallbackResult.text);
   }
 
   // Recovery budget exhausted before the fallback could even be attempted —
-  // preserve the exact existing final-failure shape (a 503 ProviderError)
-  // rather than inventing a new error path for this edge case.
-  throw new ProviderError(`AI voice provider error (503). ${lastErrorText.slice(0, 180)}`, 503);
+  // preserve the exact existing final-failure shape (a ProviderError
+  // carrying whichever retryable status was last seen) rather than
+  // inventing a new error path for this edge case.
+  throw new ProviderError(
+    `AI voice provider error (${lastErrorStatus}). ${lastErrorText.slice(0, 180)}`,
+    lastErrorStatus,
+  );
 }
 
 export interface GeminiTool {

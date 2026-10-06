@@ -5,6 +5,7 @@ import {
   ProviderError,
   TOTAL_RECOVERY_BUDGET_MS,
   remainingAttemptTimeoutMs,
+  backoff429DelayMs,
 } from "./gemini.server.ts";
 
 /**
@@ -547,22 +548,6 @@ describe('gemini 503 retry — production incident: Google returned 503 "This mo
     });
   });
 
-  test("a 429 is never retried — fails on the first attempt, unlike a 503", async () => {
-    await withEnv({ GEMINI_API_KEY: "k" }, async () => {
-      let callCount = 0;
-      await withFetch(
-        (async () => {
-          callCount += 1;
-          return new Response("slow down", { status: 429 });
-        }) as typeof fetch,
-        async () => {
-          await assert.rejects(() => gemini.runConversation([{ role: "user", content: "hi" }]));
-        },
-      );
-      assert.equal(callCount, 1, "a 429 must not trigger the 503 retry path");
-    });
-  });
-
   test("a 401 is never retried either", async () => {
     await withEnv({ GEMINI_API_KEY: "k" }, async () => {
       let callCount = 0;
@@ -688,23 +673,6 @@ describe('gemini 3.7 fallback on exhausted 3.8 overload — production incident:
     });
   });
 
-  test("a 429 on the first attempt never reaches the fallback model", async () => {
-    await withEnv({ GEMINI_API_KEY: "k" }, async () => {
-      const seenUrls: string[] = [];
-      await withFetch(
-        (async (url: string | URL) => {
-          seenUrls.push(String(url));
-          return new Response("slow down", { status: 429 });
-        }) as typeof fetch,
-        async () => {
-          await assert.rejects(() => gemini.runConversation([{ role: "user", content: "hi" }]));
-        },
-      );
-      assert.equal(seenUrls.length, 1);
-      assert.doesNotMatch(seenUrls[0]!, /gemini-3\.7-flash/);
-    });
-  });
-
   test("401/403 never reach the fallback model", async () => {
     await withEnv({ GEMINI_API_KEY: "k" }, async () => {
       const seenUrls: string[] = [];
@@ -784,6 +752,309 @@ describe('gemini 3.7 fallback on exhausted 3.8 overload — production incident:
     const serialized = JSON.stringify(logs);
     assert.doesNotMatch(serialized, /test-key-not-a-real-secret/);
     assert.doesNotMatch(serialized, /api-subscription-key/);
+  });
+});
+
+describe('gemini 429 retry + fallback — production incident: Google returned 429 "RESOURCE_EXHAUSTED" on a live call and the previous implementation treated it as an immediate, non-retried, non-fallback failure, converting straight to the caller-facing apology. Google\'s own guidance recommends exponential-backoff retry for 429 same as 503, so 429 now gets the same retry-then-fallback shape as 503 — never 401/403/400/404, which keep their existing immediate-throw behavior unchanged.', () => {
+  test("429 -> retry 3.8 -> success: two calls to gemini-3.8-flash, no gemini-3.7-flash call, successful response", async () => {
+    await withEnv({ GEMINI_API_KEY: "k" }, async () => {
+      let callCount = 0;
+      const seenUrls: string[] = [];
+      await withFetch(
+        (async (url: string | URL) => {
+          callCount += 1;
+          seenUrls.push(String(url));
+          if (callCount === 1) return new Response("slow down", { status: 429 });
+          return new Response(
+            JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] } }] }),
+            { status: 200 },
+          );
+        }) as typeof fetch,
+        async () => {
+          const result = await gemini.runConversation([{ role: "user", content: "hi" }]);
+          assert.equal(result.reply, "ok");
+        },
+      );
+      assert.equal(callCount, 2, "a 429 must trigger exactly one retry, not an immediate failure");
+      for (const url of seenUrls) {
+        assert.match(url, /\/models\/gemini-3\.8-flash:generateContent\?/);
+      }
+      assert.ok(
+        seenUrls.every((url) => !/gemini-3\.7-flash/.test(url)),
+        "the fallback model must never be requested when the retry succeeds",
+      );
+    });
+  });
+
+  test("429 -> retry 3.8 -> second 429 -> 3.7 succeeds: two 3.8 calls, one 3.7 call, successful response", async () => {
+    await withEnv({ GEMINI_API_KEY: "k" }, async () => {
+      const seenUrls: string[] = [];
+      await withFetch(
+        (async (url: string | URL) => {
+          seenUrls.push(String(url));
+          if (seenUrls.length <= 2) return new Response("slow down", { status: 429 });
+          return new Response(
+            JSON.stringify({ candidates: [{ content: { parts: [{ text: "fallback reply" }] } }] }),
+            { status: 200 },
+          );
+        }) as typeof fetch,
+        async () => {
+          const result = await gemini.runConversation([{ role: "user", content: "hi" }]);
+          assert.equal(result.reply, "fallback reply");
+        },
+      );
+      assert.equal(seenUrls.length, 3, "two primary 3.8 attempts + exactly one fallback attempt");
+      assert.match(seenUrls[0]!, /\/models\/gemini-3\.8-flash:generateContent\?/);
+      assert.match(seenUrls[1]!, /\/models\/gemini-3\.8-flash:generateContent\?/);
+      assert.match(
+        seenUrls[2]!,
+        /\/models\/gemini-3\.7-flash:generateContent\?/,
+        "the third request must target gemini-3.7-flash",
+      );
+    });
+  });
+
+  test("503 behavior remains unchanged: 503 -> retry 3.8 -> success", async () => {
+    await withEnv({ GEMINI_API_KEY: "k" }, async () => {
+      let callCount = 0;
+      await withFetch(
+        (async () => {
+          callCount += 1;
+          if (callCount === 1) return new Response("high demand", { status: 503 });
+          return new Response(
+            JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] } }] }),
+            { status: 200 },
+          );
+        }) as typeof fetch,
+        async () => {
+          const result = await gemini.runConversation([{ role: "user", content: "hi" }]);
+          assert.equal(result.reply, "ok");
+        },
+      );
+      assert.equal(callCount, 2, "503 retry behavior must be unchanged by adding 429 handling");
+    });
+  });
+
+  test("503 -> second 503 -> 3.7 fallback succeeds (unchanged)", async () => {
+    await withEnv({ GEMINI_API_KEY: "k" }, async () => {
+      let callCount = 0;
+      await withFetch(
+        (async () => {
+          callCount += 1;
+          if (callCount <= 2) return new Response("high demand", { status: 503 });
+          return new Response(
+            JSON.stringify({ candidates: [{ content: { parts: [{ text: "fallback reply" }] } }] }),
+            { status: 200 },
+          );
+        }) as typeof fetch,
+        async () => {
+          const result = await gemini.runConversation([{ role: "user", content: "hi" }]);
+          assert.equal(result.reply, "fallback reply");
+        },
+      );
+      assert.equal(callCount, 3, "503 fallback behavior must be unchanged by adding 429 handling");
+    });
+  });
+
+  test("401 and 403 both remain non-retryable — exactly one request each, no retry, no fallback", async () => {
+    for (const status of [401, 403]) {
+      await withEnv({ GEMINI_API_KEY: "k" }, async () => {
+        let callCount = 0;
+        await withFetch(
+          (async () => {
+            callCount += 1;
+            return new Response("unauthorized", { status });
+          }) as typeof fetch,
+          async () => {
+            await assert.rejects(
+              () => gemini.runConversation([{ role: "user", content: "hi" }]),
+              (err: unknown) => {
+                assert.ok(err instanceof ProviderError);
+                assert.equal(err.status, status);
+                return true;
+              },
+            );
+          },
+        );
+        assert.equal(callCount, 1, `a ${status} must never be retried`);
+      });
+    }
+  });
+
+  test("400 and 404 both remain non-retryable — exactly one request each, no retry, no fallback", async () => {
+    for (const status of [400, 404]) {
+      await withEnv({ GEMINI_API_KEY: "k" }, async () => {
+        let callCount = 0;
+        await withFetch(
+          (async () => {
+            callCount += 1;
+            return new Response("bad request", { status });
+          }) as typeof fetch,
+          async () => {
+            await assert.rejects(
+              () => gemini.runConversation([{ role: "user", content: "hi" }]),
+              (err: unknown) => {
+                assert.ok(err instanceof ProviderError);
+                assert.equal(err.status, status);
+                return true;
+              },
+            );
+          },
+        );
+        assert.equal(callCount, 1, `a ${status} must never be retried or trigger a fallback`);
+      });
+    }
+  });
+
+  test("the recovery budget is respected on the 429 path exactly as it is on the 503 path — bounded attempt timeouts, never exceeding the shared budget", async () => {
+    const originalTimeout = AbortSignal.timeout;
+    const seenTimeouts: number[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (AbortSignal as any).timeout = (ms: number) => {
+      seenTimeouts.push(ms);
+      return originalTimeout(ms);
+    };
+    try {
+      await withEnv({ GEMINI_API_KEY: "k" }, async () => {
+        await withFetch(
+          (async () => new Response("slow down", { status: 429 })) as typeof fetch,
+          async () => {
+            await assert.rejects(() => gemini.runConversation([{ role: "user", content: "hi" }]));
+          },
+        );
+      });
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (AbortSignal as any).timeout = originalTimeout;
+    }
+
+    assert.equal(seenTimeouts.length, 3, "2 primary 429 attempts + 1 fallback attempt");
+    for (const ms of seenTimeouts) {
+      assert.ok(ms > 0);
+      assert.ok(
+        ms <= TOTAL_RECOVERY_BUDGET_MS,
+        "a 429 retry/fallback sequence must never exceed the shared recovery budget either",
+      );
+    }
+  });
+
+  test("429 diagnostic logging (gemini:429_received) safely truncates Google's response body and never exposes the API key", async () => {
+    const originalInfo = console.info;
+    const logs: { event: string; data: unknown }[] = [];
+    console.info = (event: unknown, data?: unknown) => {
+      logs.push({ event: String(event), data });
+    };
+    const longDetailBlob = "x".repeat(2_000);
+    try {
+      await withEnv({ GEMINI_API_KEY: "leak-me-not-429-test" }, async () => {
+        await withFetch(
+          (async () =>
+            new Response(
+              JSON.stringify({
+                error: {
+                  code: 429,
+                  status: "RESOURCE_EXHAUSTED",
+                  message: `Quota exceeded. ${longDetailBlob}`,
+                  details: [
+                    {
+                      "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                      violations: [{ subject: "projects/test", description: longDetailBlob }],
+                    },
+                  ],
+                },
+              }),
+              { status: 429 },
+            )) as typeof fetch,
+          async () => {
+            await assert.rejects(() => gemini.runConversation([{ role: "user", content: "hi" }]));
+          },
+        );
+      });
+    } finally {
+      console.info = originalInfo;
+    }
+
+    const entries = logs.filter((l) => l.event === "gemini:429_received");
+    assert.ok(entries.length > 0, "expected the 429 diagnostic to fire");
+    for (const entry of entries) {
+      const data = entry.data as Record<string, unknown>;
+      assert.equal(typeof data["bodyPreview"], "string");
+      assert.ok(
+        (data["bodyPreview"] as string).length <= 300,
+        "the raw body preview must be truncated",
+      );
+      assert.equal(data["errorCode"], 429);
+      assert.equal(data["errorStatus"], "RESOURCE_EXHAUSTED");
+      assert.equal(typeof data["errorMessage"], "string");
+      assert.ok(
+        (data["errorMessage"] as string).length <= 200,
+        "the extracted error message must be truncated",
+      );
+      assert.equal(typeof data["errorDetailsPreview"], "string");
+      assert.ok(
+        (data["errorDetailsPreview"] as string).length <= 300,
+        "the error details preview must be truncated",
+      );
+    }
+
+    const serialized = JSON.stringify(logs);
+    assert.doesNotMatch(serialized, /leak-me-not-429-test/);
+    assert.doesNotMatch(serialized, /api-subscription-key/);
+  });
+
+  test("backoff429DelayMs honors Google's suggested retryDelay but never exceeds the remaining recovery budget", () => {
+    // A generous remaining budget (plenty of room) — Google's suggested 13s
+    // must still be capped well below that; a live caller cannot wait 13s.
+    const bodyWithLongRetryDelay = JSON.stringify({
+      error: {
+        code: 429,
+        status: "RESOURCE_EXHAUSTED",
+        details: [{ "@type": "type.googleapis.com/google.rpc.RetryInfo", retryDelay: "13s" }],
+      },
+    });
+    const delayWithRoomToSpare = backoff429DelayMs(bodyWithLongRetryDelay, 7_000);
+    assert.ok(
+      delayWithRoomToSpare < 13_000,
+      "Google's suggested retryDelay must never be honored at full length on a live call",
+    );
+    assert.ok(delayWithRoomToSpare <= 2_000, "the 429 retry delay must stay short");
+
+    // A nearly-exhausted budget — the delay must shrink to fit, never
+    // exceeding what is actually left.
+    const delayWithTightBudget = backoff429DelayMs(bodyWithLongRetryDelay, 150);
+    assert.ok(
+      delayWithTightBudget <= 150,
+      "the 429 retry delay must never exceed the remaining recovery budget",
+    );
+
+    // No retryDelay in the body at all — falls back to a short default,
+    // still capped by the remaining budget.
+    const delayWithNoHint = backoff429DelayMs(JSON.stringify({ error: { code: 429 } }), 7_000);
+    assert.ok(delayWithNoHint > 0);
+    assert.ok(delayWithNoHint <= 2_000);
+  });
+
+  test("fallback is never attempted when the first 3.8 retry succeeds (no 3.7 request of any kind)", async () => {
+    await withEnv({ GEMINI_API_KEY: "k" }, async () => {
+      let callCount = 0;
+      const seenUrls: string[] = [];
+      await withFetch(
+        (async (url: string | URL) => {
+          callCount += 1;
+          seenUrls.push(String(url));
+          if (callCount === 1) return new Response("slow down", { status: 429 });
+          return new Response(
+            JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] } }] }),
+            { status: 200 },
+          );
+        }) as typeof fetch,
+        async () => {
+          await gemini.runConversation([{ role: "user", content: "hi" }]);
+        },
+      );
+      assert.equal(callCount, 2, "exactly the retry, nothing more");
+      assert.ok(seenUrls.every((url) => !url.includes("gemini-3.7-flash")));
+    });
   });
 });
 
