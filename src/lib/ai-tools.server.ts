@@ -25,7 +25,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import type { ClaudeTool } from "./claude.server.ts";
-import { check_calendar_availability } from "./calendar/calendar-tools.server.ts";
+import {
+  check_calendar_availability,
+  create_calendar_event,
+} from "./calendar/calendar-tools.server.ts";
 import {
   create_payment_required_booking,
   request_payment,
@@ -113,6 +116,56 @@ const TOOL_REGISTRY: Record<string, ToolDefinition> = {
         dateIso,
         durationMinutes,
         ...(bufferMinutes !== undefined ? { bufferMinutes } : {}),
+      });
+      return asToolOutput(result);
+    },
+  },
+
+  book_appointment: {
+    capability: "calendar_book",
+    schema: {
+      name: "book_appointment",
+      description:
+        "Actually create a confirmed appointment booking (a real Google Calendar event) — not a payment-required hold. Only call this once you have checked availability and have the caller's name, phone number, and a confirmed start/end time. Returns the real booking result; never tell the caller it's booked before this succeeds.",
+      input_schema: {
+        type: "object",
+        properties: {
+          customerName: { type: "string" },
+          customerPhone: { type: "string" },
+          customerEmail: { type: "string" },
+          startIso: { type: "string", description: "Appointment start time, ISO 8601." },
+          endIso: { type: "string", description: "Appointment end time, ISO 8601." },
+          serviceId: { type: "string", description: "Optional service id, if known." },
+          notes: {
+            type: "string",
+            description: "Free-text notes, e.g. the service the caller asked for by name.",
+          },
+        },
+        required: ["startIso", "endIso"],
+      },
+    },
+    async execute(supabaseAdmin, ctx, input) {
+      const startIso = str(input, "startIso");
+      const endIso = str(input, "endIso");
+      if (!startIso || !endIso) return invalidInput("startIso and endIso are required.");
+
+      const idempotencyKey = ctx.callId
+        ? `voice:${ctx.callId}:${startIso}:${endIso}`
+        : `${ctx.source}:${crypto.randomUUID()}`;
+
+      const result = await create_calendar_event(supabaseAdmin, {
+        organizationId: ctx.organizationId,
+        businessId: ctx.businessId,
+        agentConfigId: ctx.agentConfigId ?? undefined,
+        serviceId: str(input, "serviceId"),
+        customerName: str(input, "customerName"),
+        customerPhone: str(input, "customerPhone"),
+        customerEmail: str(input, "customerEmail"),
+        startIso,
+        endIso,
+        source: ctx.source,
+        idempotencyKey,
+        notes: str(input, "notes"),
       });
       return asToolOutput(result);
     },

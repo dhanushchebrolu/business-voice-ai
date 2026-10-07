@@ -487,6 +487,13 @@ describe("10. Silence timeout", () => {
     const callId = newCallId();
     const handle = await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
     assert.equal(handle.state, "listening");
+    // The greeting's audio has fully played out (Sarvam acknowledged every
+    // chunk) — otherwise armSilenceTimer correctly defers (see
+    // ttsAudioInFlight) and this test would be timing a scenario that
+    // never happens on a real call: the caller can't be "silent" while
+    // still being greeted.
+    const flushCatchUp = makeTtsFlushCatchUp(h.tts);
+    flushCatchUp();
     const spokenBeforeSilence = h.tts.sentTexts.length;
 
     t.mock.timers.tick(12_000); // SILENCE_PROMPT_MS
@@ -499,6 +506,7 @@ describe("10. Silence timeout", () => {
     assert.match(promptChunks.join(" "), /still there/i);
     assert.equal(handle.state, "listening", "still waiting on the caller after the prompt");
 
+    flushCatchUp(); // the prompt's own audio has now fully played out too
     t.mock.timers.tick(10_000); // SILENCE_HANGUP_MS
     await drain();
 
@@ -843,5 +851,359 @@ describe("Structured, redacted logs — stage coverage and no sensitive content"
     assert.ok(line);
     assert.ok(typeof line["bytes"] === "number" && (line["bytes"] as number) > 0);
     assert.ok(!("data" in line) && !("audio" in line));
+  });
+});
+
+describe("12. Latency diagnostics (test A: fast response path)", () => {
+  test("transcript_final_at, llm_request_at, llm_completed_at, response_start/total_response latency are all logged, in order, with no artificial delay", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    const logs = await captureLogs(async () => {
+      await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+      makeTtsFlushCatchUp(h.tts)();
+      h.llm.setNextReply("We're open until 6 PM.");
+      h.stt.speakUtterance("What time do you close?");
+      await drain();
+      h.tts.emitAudio(new Uint8Array([1, 2, 3]));
+      h.tts.emit({ type: "flushed" });
+      await drain();
+      await terminateRuntimeSession(callId, "test cleanup");
+    });
+
+    const forwarded = logs.find(
+      (l) =>
+        l["event"] === "voice_runtime:stt:transcript_final_forwarded" && l["forwarded"] === true,
+    );
+    const llmRequest = logs.find((l) => l["event"] === "voice_runtime:llm_request");
+    const llmCompleted = logs.find((l) => l["event"] === "voice_runtime:llm_completed");
+    const responseLatency = logs.find((l) => l["event"] === "voice_runtime:response_latency");
+    const responseLatencyComplete = logs.find(
+      (l) => l["event"] === "voice_runtime:response_latency_complete",
+    );
+    assert.ok(
+      forwarded && llmRequest && llmCompleted && responseLatency && responseLatencyComplete,
+    );
+
+    const transcriptFinalAt = forwarded["transcript_final_at"] as number;
+    const llmRequestAt = llmRequest["llm_request_at"] as number;
+    const llmCompletedAt = llmCompleted["llm_completed_at"] as number;
+    assert.equal(typeof transcriptFinalAt, "number");
+    assert.ok(llmRequestAt >= transcriptFinalAt);
+    assert.ok(llmCompletedAt >= llmRequestAt);
+    assert.equal(typeof responseLatency["response_start_latency_ms"], "number");
+    assert.ok((responseLatency["response_start_latency_ms"] as number) >= 0);
+    assert.equal(typeof responseLatencyComplete["total_response_latency_ms"], "number");
+    // No artificial delay anywhere in this turn: it only ever ran through
+    // microtask drains, never a real setTimeout — if a debounce or a
+    // fixed wait had crept in, this would be seconds, not milliseconds.
+    assert.ok((responseLatency["response_start_latency_ms"] as number) < 1000);
+  });
+});
+
+describe("13. Silence timer defense in depth", () => {
+  test("transcript.partial also cancels a pending silence timer, not just speech_start", async (t) => {
+    t.mock.timers.enable();
+    const h = createHarness();
+    const callId = newCallId();
+    const handle = await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    const spokenBeforeSilence = h.tts.sentTexts.length;
+
+    h.stt.emit({ type: "speech_start" }); // listening -> transcribing
+    t.mock.timers.tick(6_000);
+    h.stt.emit({ type: "partial_transcript", text: "what time" }); // still mid-utterance
+    t.mock.timers.tick(10_000); // would have fired the prompt by now if partials didn't count
+    await drain();
+
+    assert.equal(
+      h.tts.sentTexts.length,
+      spokenBeforeSilence,
+      "a partial transcript must count as active caller interaction, same as speech_start",
+    );
+    assert.notEqual(handle.state, "ended");
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("no silence prompt fires while the agent is THINKING (LLM in flight), even once SILENCE_PROMPT_MS elapses", async (t) => {
+    t.mock.timers.enable();
+    const h = createHarness();
+    const callId = newCallId();
+    const handle = await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+    const spokenBeforeSilence = h.tts.sentTexts.length;
+
+    h.llm.setDelay(20_000); // slower than SILENCE_PROMPT_MS
+    h.llm.setNextReply("Here you go.");
+    h.stt.speakUtterance("What services do you offer?");
+    await drain();
+    assert.equal(handle.state, "thinking");
+
+    t.mock.timers.tick(12_000); // SILENCE_PROMPT_MS — must NOT fire while thinking
+    await drain();
+    assert.equal(
+      h.tts.sentTexts.length,
+      spokenBeforeSilence,
+      "no silence prompt may interrupt an in-flight LLM request",
+    );
+    assert.equal(handle.state, "thinking");
+
+    t.mock.timers.tick(8_000); // let the slow LLM call resolve (20s total)
+    await drain();
+    assert.ok(h.tts.sentTexts.some((txt) => txt.includes("Here you go")));
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("no silence prompt fires while the agent is SPEAKING a long reply's still-playing audio", async (t) => {
+    t.mock.timers.enable();
+    const h = createHarness();
+    const callId = newCallId();
+    const handle = await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+    const spokenBeforeSilence = h.tts.sentTexts.length;
+
+    h.llm.setNextReply("Here is a long answer about our services today.");
+    h.stt.speakUtterance("What services do you offer?");
+    await drain();
+    // Reply text has been sent to TTS, but Sarvam hasn't acknowledged
+    // ("flushed") it yet — audio is still "playing" from the runtime's
+    // perspective (ttsAudioInFlight).
+    assert.equal(handle.state, "listening");
+
+    t.mock.timers.tick(12_000); // SILENCE_PROMPT_MS
+    await drain();
+    assert.equal(
+      h.tts.sentTexts.length,
+      spokenBeforeSilence + 1,
+      "no silence prompt may be spoken while the previous reply's audio is still in flight",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+function bookingReadyToBookReply(overrides: Partial<Record<string, unknown>> = {}): string {
+  const state = {
+    service: "teeth cleaning",
+    customer_name: "Dhanush",
+    phone: "9999999999",
+    preferred_date: "2026-10-08",
+    preferred_time: "15:00",
+    ready_to_book: true,
+    ...overrides,
+  };
+  // Deliberately claims success in the model's own spoken sentence — this
+  // is exactly what a real model might prematurely say before the actual
+  // tool result is known. Test J relies on this wording to prove the
+  // runtime's honest composeHonestBookingReply text is what's actually
+  // spoken on failure, not this original (wrong) claim leaking through.
+  return `Great, I've got everything — your appointment is booked!\n<<<APPT_STATE:${JSON.stringify(state)}>>>`;
+}
+
+const BOOKING_START_ISO = "2026-10-08T15:00:00.000Z"; // resolveBusinessTimezone falls back to UTC with no real DB in this harness
+
+describe("14. Appointment state persistence (test G)", () => {
+  test("a field confirmed in an earlier turn is re-injected into the next turn's system prompt, and never re-asked for", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.llm.setNextReply(
+      'Got it — teeth cleaning. What\'s your name?\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":null,"phone":null,"preferred_date":null,"preferred_time":null,"ready_to_book":false}>>>',
+    );
+    h.stt.speakUtterance("I'd like to book a teeth cleaning");
+    await drain();
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.llm.setNextReply("Thanks! And your phone number?");
+    h.stt.emit({ type: "final_transcript", text: "My name is Dhanush", language: "en-IN" });
+    await drain();
+
+    const secondTurnMessages = h.llm.calls[1] ?? [];
+    const knownStateMessage = secondTurnMessages.find(
+      (m) => m.role === "system" && m.content.includes("CURRENT APPOINTMENT STATE"),
+    );
+    assert.ok(knownStateMessage, "expected a system message carrying the already-known fields");
+    assert.match(knownStateMessage.content, /teeth cleaning/i);
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+describe("15. Deterministic appointment booking (tests H, I, J)", () => {
+  test("H: slot available — calls check_calendar_availability then book_appointment directly, and speaks a real confirmation only after both succeed", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: { slots: [{ start: BOOKING_START_ISO, end: "2026-10-08T15:30:00.000Z" }] },
+      }),
+    });
+    h.tools.setNextResult("book_appointment", {
+      content: JSON.stringify({ success: true, data: { id: "booking-1", status: "CONFIRMED" } }),
+    });
+    h.llm.setNextReply(bookingReadyToBookReply());
+    // The second generateReply call (composeHonestBookingReply) uses the
+    // fake LLM's defaultReply, since setNextReply is consumed by the first call.
+    h.llm.setDelay(0);
+
+    h.stt.speakUtterance("Book an appointment tomorrow at 3pm for teeth cleaning");
+    await drain(16);
+
+    const availabilityCall = h.tools.calls.find((c) => c.name === "check_calendar_availability");
+    const bookingCall = h.tools.calls.find((c) => c.name === "book_appointment");
+    assert.ok(availabilityCall, "must check availability before booking");
+    assert.ok(bookingCall, "must actually call the real booking tool");
+    assert.equal(bookingCall?.input["customerName"], "Dhanush");
+    assert.equal(bookingCall?.input["startIso"], BOOKING_START_ISO);
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("I: slot unavailable — never books, and honestly declines instead", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({ success: true, data: { slots: [] } }), // nothing available at the requested time
+    });
+    h.llm.setNextReply(bookingReadyToBookReply());
+
+    h.stt.speakUtterance("Book an appointment tomorrow at 3pm for teeth cleaning");
+    await drain(16);
+
+    const bookingCall = h.tools.calls.find((c) => c.name === "book_appointment");
+    assert.equal(bookingCall, undefined, "must never attempt to book an unavailable slot");
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("J: book_appointment itself fails — never claims success", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: { slots: [{ start: BOOKING_START_ISO, end: "2026-10-08T15:30:00.000Z" }] },
+      }),
+    });
+    h.tools.setNextResult("book_appointment", {
+      content: JSON.stringify({
+        success: false,
+        error: { code: "SLOT_NO_LONGER_AVAILABLE", message: "Someone else just booked this slot." },
+      }),
+      isError: true,
+    });
+    h.llm.setNextReply(bookingReadyToBookReply());
+    h.llm.setDelay(0);
+
+    const spokenBefore = h.tts.sentTexts.length;
+    h.stt.speakUtterance("Book an appointment tomorrow at 3pm for teeth cleaning");
+    await drain(16);
+
+    const spokenSinceBooking = h.tts.sentTexts.slice(spokenBefore).join(" ");
+    assert.ok(
+      !/\b(booked|confirmed)\b/i.test(spokenSinceBooking),
+      `must never claim success after a failed booking attempt; got: ${spokenSinceBooking}`,
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+describe("16. Multilingual TTS (tests K, L, M)", () => {
+  test("K: caller's STT-detected language switches TTS to that language on the next reply", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+    const connectCallsBefore = h.tts.connectCalls.length;
+
+    h.llm.setNextReply("Sure, switching to Telugu now.");
+    h.stt.emit({ type: "final_transcript", text: "Can you speak Telugu?", language: "te-IN" });
+    await drain();
+
+    assert.ok(
+      h.tts.connectCalls.length > connectCallsBefore,
+      "expected a TTS reconnect for the new language",
+    );
+    assert.equal(h.tts.connectCalls.at(-1)?.language, "te-IN");
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("L: Hindi works the same way as Telugu", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.llm.setNextReply("Theek hai, Hindi mein baat karte hain.");
+    h.stt.emit({ type: "final_transcript", text: "Hindi mein baat karo", language: "hi-IN" });
+    await drain();
+
+    assert.equal(h.tts.connectCalls.at(-1)?.language, "hi-IN");
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("M: switching language mid-call reconnects again, and switching back to English reconnects once more", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.llm.setNextReply("Switching to Hindi.");
+    h.stt.emit({ type: "final_transcript", text: "Hindi mein baat karo", language: "hi-IN" });
+    await drain();
+    makeTtsFlushCatchUp(h.tts)();
+    assert.equal(h.tts.connectCalls.at(-1)?.language, "hi-IN");
+
+    h.llm.setNextReply("Sure, back to English.");
+    h.stt.emit({
+      type: "final_transcript",
+      text: "Switch back to English please",
+      language: "en-IN",
+    });
+    await drain();
+
+    assert.equal(h.tts.connectCalls.at(-1)?.language, "en-IN");
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("a reply in the caller's already-active language does not reconnect TTS again", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.llm.setNextReply("Switching to Hindi.");
+    h.stt.emit({ type: "final_transcript", text: "Hindi mein baat karo", language: "hi-IN" });
+    await drain();
+    makeTtsFlushCatchUp(h.tts)();
+    const connectCallsAfterSwitch = h.tts.connectCalls.length;
+
+    h.llm.setNextReply("Haan, bilkul.");
+    h.stt.emit({ type: "final_transcript", text: "Aap sun sakte hain?", language: "hi-IN" });
+    await drain();
+
+    assert.equal(
+      h.tts.connectCalls.length,
+      connectCallsAfterSwitch,
+      "no reconnect needed when the language hasn't actually changed",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
   });
 });

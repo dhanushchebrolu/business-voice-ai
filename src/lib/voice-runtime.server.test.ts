@@ -10,6 +10,7 @@ import {
   isValidRuntimeTransition,
   isSupportedVoiceLanguage,
   resolveResponseLanguage,
+  parseApptStateMarker,
   type RuntimeState,
 } from "./voice-runtime.server.ts";
 import type { AudioMediaBridge, AudioFrame } from "./telephony/audio-bridge";
@@ -52,6 +53,49 @@ describe("isSupportedVoiceLanguage / resolveResponseLanguage — the TTS/LLM com
 
   test("resolveResponseLanguage falls back to primary_language when nothing has been detected yet", () => {
     assert.equal(resolveResponseLanguage(null, "te-IN"), "te-IN");
+  });
+});
+
+describe("parseApptStateMarker — the hidden structured-state tail the model appends to every reply", () => {
+  test("a reply with no marker is spoken in full, with no state proposed", () => {
+    const result = parseApptStateMarker("We're open until 6 PM today.");
+    assert.equal(result.spokenText, "We're open until 6 PM today.");
+    assert.equal(result.state, null);
+  });
+
+  test("strips the marker from the spoken text and parses its fields", () => {
+    const reply =
+      'Sure, teeth cleaning tomorrow at 3 PM for Dhanush.\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":"9999999999","preferred_date":"2026-10-08","preferred_time":"15:00","ready_to_book":true}>>>';
+    const result = parseApptStateMarker(reply);
+    assert.equal(result.spokenText, "Sure, teeth cleaning tomorrow at 3 PM for Dhanush.");
+    assert.deepEqual(result.state, {
+      service: "teeth cleaning",
+      customerName: "Dhanush",
+      phone: "9999999999",
+      preferredDate: "2026-10-08",
+      preferredTime: "15:00",
+      bookingStatus: "ready_to_book",
+    });
+  });
+
+  test("ready_to_book false or absent never sets bookingStatus", () => {
+    const result = parseApptStateMarker(
+      'Got it.\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":null,"phone":null,"preferred_date":null,"preferred_time":null,"ready_to_book":false}>>>',
+    );
+    assert.equal(result.state?.bookingStatus, undefined);
+    assert.equal(result.state?.service, "teeth cleaning");
+  });
+
+  test("a malformed/truncated marker is still fully stripped from the spoken text, never partially spoken", () => {
+    const result = parseApptStateMarker("One moment please.\n<<<APPT_STATE:{not valid json at all");
+    assert.equal(result.spokenText, "One moment please.");
+    assert.equal(result.state, null);
+  });
+
+  test("a marker with no closing >>> is stripped from speech but yields no state", () => {
+    const result = parseApptStateMarker('Okay.\n<<<APPT_STATE:{"service":"haircut"');
+    assert.equal(result.spokenText, "Okay.");
+    assert.equal(result.state, null);
   });
 });
 
@@ -253,7 +297,7 @@ describe("silence/timeout handling — wiring", () => {
   test("armSilenceTimer only ever arms while waiting on the caller (listening/transcribing/interrupted)", () => {
     const fnStart = src.indexOf("function armSilenceTimer(session: Session) {");
     const fnBody = src.slice(fnStart, src.indexOf("\n}\n", fnStart));
-    assert.match(fnBody, /if \(!isAwaitingCaller\(session\.handle\.state\)\) return;/);
+    assert.match(fnBody, /if \(!isAwaitingCaller\(state\)\) return;/);
     const isAwaitingCallerBody = src.slice(
       src.indexOf("function isAwaitingCaller(state: RuntimeState): boolean {"),
       src.indexOf(
@@ -308,11 +352,11 @@ describe("silence/timeout handling — wiring", () => {
     assert.match(src, /case "speech_end":[\s\S]{0,400}armSilenceTimer\(session\);/);
   });
 
-  test("all three handleUserUtterance exit paths (reply spoken, empty reply, LLM error) re-arm before returning to LISTENING", () => {
+  test("all four handleUserUtterance exit paths (empty raw reply, empty after marker/booking, reply spoken, LLM error) re-arm before returning to LISTENING", () => {
     const fnStart = src.indexOf("async function handleUserUtterance(");
     const fnBody = src.slice(fnStart, src.indexOf("\n}\n", fnStart));
     const armOccurrences = [...fnBody.matchAll(/armSilenceTimer\(session\);/g)];
-    assert.equal(armOccurrences.length, 3);
+    assert.equal(armOccurrences.length, 4);
   });
 
   /**

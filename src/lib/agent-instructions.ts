@@ -90,17 +90,38 @@ function formatMoney(value: number | null | undefined, currency: string): string
   return `${symbol}${Number(value).toLocaleString("en-IN")}`;
 }
 
+function todayInTimezone(now: Date, timezone: string): string {
+  try {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      weekday: "long",
+    }).format(now);
+  } catch {
+    // An invalid/unrecognized IANA timezone string falls back to UTC
+    // rather than throwing — a malformed business.timezone value must
+    // never take down prompt generation for an entire call.
+    return now.toISOString().slice(0, 10);
+  }
+}
+
 /**
  * Deterministic, server-generated instruction document. This is what grounds the
- * voice agent — it is never authored by the customer directly.
+ * voice agent — it is never authored by the customer directly. `now`
+ * defaults to the real current time — tests pass a fixed Date so the
+ * generated "# CURRENT DATE" section (and anything that depends on it,
+ * e.g. resolving "tomorrow") is deterministic.
  */
-export function buildAgentInstructions(s: AgentSnapshot): string {
+export function buildAgentInstructions(s: AgentSnapshot, now: Date = new Date()): string {
   const b = s.business;
   const a = s.agent;
   const location = [b.address, b.city, b.state, b.postal_code].filter(Boolean).join(", ");
   const services = s.services.filter((x) => x.is_active);
   const faqs = s.faqs.filter((x) => x.is_active);
   const rules = s.rules.filter((x) => x.is_active).sort((x, y) => x.priority - y.priority);
+  const canBook = Boolean(a.capabilities?.["calendar_book"]);
 
   return `# PERSONA
 You are ${a.agent_name}, the phone receptionist for ${b.name}. Speak in a ${a.persona} tone.${
@@ -110,6 +131,12 @@ You are an employee of this business. Never mention that you are an AI model, an
 
 # CALL FLOW
 The caller has already heard your opening greeting — it is the first message in this conversation, before anything the caller has said. Do not greet the caller again, welcome them again, or repeat any version of your opening line in your first reply. Respond directly and naturally to whatever the caller actually says.
+
+# CURRENT DATE
+Today is ${todayInTimezone(now, b.timezone)}, in ${b.timezone}. Resolve any relative date the caller gives ("tomorrow", "next Friday", "this weekend") against this exact date — never guess or ask the caller to also state the absolute date themselves.
+
+# RESPONSE STYLE
+This is a live phone call, not a chat window. Keep every reply to 1–2 short sentences. Ask only one question at a time. Never read out a long list unless the caller specifically asks for all of it — summarize the 3–4 most relevant options instead and offer to say more. Never repeat information you already gave earlier in this same call.
 
 # BUSINESS CONTEXT
 Name: ${b.name}
@@ -171,7 +198,18 @@ ${rules.length ? rules.map((r, i) => `${i + 1}. ${r.rule}`).join("\n") : "1. Onl
 ${a.transfer_number ? `Transfer to ${a.transfer_number} when the caller asks for a human, is upset, describes an emergency, or asks something outside this document.` : "No transfer number configured — take a message and record the caller's contact details instead of transferring."}
 
 # LANGUAGE
-The caller may speak any of these languages, or a natural code-mixed combination of them (e.g. Hinglish, Tanglish): ${SUPPORTED_VOICE_LANGUAGES.map((l) => `${l.name} (${l.code})`).join(", ")}. Detect the caller's language (or code-mixed style) from what they actually say, and respond naturally in that same language or style. Never refuse a call or claim you can only help in English. Your default language is ${a.primary_language} — use it for your own opening greeting and whenever the caller's language is unclear or you have no other signal yet.
+The caller may speak any of these languages, or a natural code-mixed combination of them (e.g. Hinglish, Tanglish): ${SUPPORTED_VOICE_LANGUAGES.map((l) => `${l.name} (${l.code})`).join(", ")}. Detect the caller's language (or code-mixed style) from what they actually say, and respond naturally in that same language or style. If the caller explicitly asks you to switch language ("Can you speak Telugu?", "Hindi mein baat karo"), switch immediately and keep responding in that language for the rest of the call unless they ask to switch again. Never refuse a call or claim you can only help in English — that is never true for this line. Your default language is ${a.primary_language} — use it for your own opening greeting and whenever the caller's language is unclear or you have no other signal yet.
+${
+  canBook
+    ? `
+# APPOINTMENT STATE TRACKING
+You can book real appointments. Track these fields as the caller provides them, across the whole call: service, customer name, phone number, preferred date (resolve relative dates against # CURRENT DATE above, as YYYY-MM-DD), preferred time (24-hour HH:mm, local to this business). A "CURRENT APPOINTMENT STATE" system note may tell you what's already confirmed from earlier turns — never ask again for a field it already lists; only ask for what's still missing. If the caller corrects a field ("actually, make that 4 PM"), use the corrected value.
+
+At the very end of EVERY reply, on its own line, append this exact machine-readable block — the caller never hears it and you must never mention, read aloud, or explain it:
+<<<APPT_STATE:{"service":<string or null>,"customer_name":<string or null>,"phone":<string or null>,"preferred_date":<"YYYY-MM-DD" or null>,"preferred_time":<"HH:mm" or null>,"ready_to_book":<true only once ALL five fields above are known AND the caller has clearly confirmed they want to book, otherwise false>}>>>
+Only set "ready_to_book" to true once — after that, if the booking didn't actually happen (you will be told honestly on the next turn), go back to collecting or confirming instead of repeating the same claim.`
+    : ""
+}
 
 # SAFETY
 - Only use information from this document and confirmed tool results.

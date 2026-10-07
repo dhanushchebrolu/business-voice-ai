@@ -133,4 +133,68 @@ describe("buildAgentInstructions — language support (no English-only restricti
     const prompt = buildAgentInstructions(minimalSnapshot);
     assert.match(prompt, /your default language is en-IN/i);
   });
+
+  test("explicitly instructs switching language the moment the caller asks, by name, in both directions", () => {
+    const prompt = buildAgentInstructions(minimalSnapshot);
+    assert.match(prompt, /switch immediately/i);
+    assert.match(prompt, /telugu/i);
+  });
+});
+
+describe("buildAgentInstructions — # CURRENT DATE (test for resolving relative dates like 'tomorrow')", () => {
+  test("states today's date and the business's own timezone, computed from the business timezone not the server's", () => {
+    // A fixed instant deliberately on a day boundary in UTC vs IST (UTC+5:30)
+    // so a timezone-naive implementation (e.g. just `now.toISOString()`)
+    // would show the WRONG calendar date here.
+    const now = new Date("2026-10-07T20:30:00.000Z"); // 2026-10-08 02:00 IST
+    const prompt = buildAgentInstructions(minimalSnapshot, now);
+    assert.match(prompt, /# CURRENT DATE/);
+    assert.match(prompt, /2026-10-08/);
+    assert.match(prompt, /Asia\/Kolkata/);
+  });
+
+  test("defaults to the real current time when no `now` is passed, so every existing caller keeps working unchanged", () => {
+    const prompt = buildAgentInstructions(minimalSnapshot);
+    assert.match(prompt, /# CURRENT DATE/);
+    assert.match(prompt, new RegExp(String(new Date().getUTCFullYear())));
+  });
+
+  test("falls back gracefully instead of throwing for an unrecognized timezone string", () => {
+    const badTimezoneSnapshot: AgentSnapshot = {
+      ...minimalSnapshot,
+      business: { ...minimalSnapshot.business, timezone: "Not/ARealTimezone" },
+    };
+    assert.doesNotThrow(() => buildAgentInstructions(badTimezoneSnapshot));
+  });
+});
+
+describe("buildAgentInstructions — # RESPONSE STYLE (test P: concise phone responses)", () => {
+  test("instructs short replies, one question at a time, and no repeated information", () => {
+    const prompt = buildAgentInstructions(minimalSnapshot);
+    assert.match(prompt, /# RESPONSE STYLE/);
+    assert.match(prompt, /1–2 short sentences|1-2 short sentences/);
+    assert.match(prompt, /one question at a time/i);
+    assert.match(prompt, /never repeat information/i);
+  });
+});
+
+describe("buildAgentInstructions — # APPOINTMENT STATE TRACKING (test Q: no repeated questions for known fields)", () => {
+  const bookingAgent: AgentSnapshot = {
+    ...minimalSnapshot,
+    agent: { ...minimalSnapshot.agent, capabilities: { calendar_book: true } },
+  };
+
+  test("is included, with the exact marker protocol, only for an agent permitted to book", () => {
+    const prompt = buildAgentInstructions(bookingAgent);
+    assert.match(prompt, /# APPOINTMENT STATE TRACKING/);
+    assert.match(prompt, /<<<APPT_STATE:/);
+    assert.match(prompt, /ready_to_book/);
+    assert.match(prompt, /never ask again for a field it already lists/i);
+  });
+
+  test("is omitted entirely for an agent without calendar_book — never asked to track or emit the marker", () => {
+    const prompt = buildAgentInstructions(minimalSnapshot); // capabilities: {}
+    assert.doesNotMatch(prompt, /# APPOINTMENT STATE TRACKING/);
+    assert.doesNotMatch(prompt, /APPT_STATE/);
+  });
 });

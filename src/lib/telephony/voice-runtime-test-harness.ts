@@ -44,7 +44,7 @@ import type {
   TtsSession,
 } from "../sarvam-realtime.server.ts";
 import type { ChatMessage } from "../sarvam.server.ts";
-import type { RuntimeDeps, TranscriptRecord } from "../voice-runtime.server.ts";
+import type { RuntimeDeps, TranscriptRecord, ToolExecContext } from "../voice-runtime.server.ts";
 
 /* ------------------------------------------------------------------ */
 /* Fake audio bridge                                                   */
@@ -322,6 +322,57 @@ export function createFakeLlm(defaultReply = "Okay, how can I help?"): {
 }
 
 /* ------------------------------------------------------------------ */
+/* Fake tool executor — drives voice-runtime.server.ts's deterministic   */
+/* booking flow (attemptBooking) without a real database/calendar        */
+/* ------------------------------------------------------------------ */
+
+export interface FakeToolExecutorController {
+  readonly calls: { name: string; input: Record<string, unknown>; ctx: ToolExecContext }[];
+  /** Sets the result the NEXT call to this tool name resolves with (consumed once, then falls back to the default "not configured" result every other tool name gets). */
+  setNextResult(name: string, result: { content: string; isError?: boolean }): void;
+}
+
+export function createFakeToolExecutor(): {
+  executeTool: (
+    name: string,
+    input: Record<string, unknown>,
+    ctx: ToolExecContext,
+  ) => Promise<{ content: string; isError?: boolean }>;
+  controller: FakeToolExecutorController;
+} {
+  const calls: { name: string; input: Record<string, unknown>; ctx: ToolExecContext }[] = [];
+  const nextResults = new Map<string, { content: string; isError?: boolean }>();
+
+  const executeTool: RuntimeDeps["executeTool"] = async (name, input, ctx) => {
+    calls.push({ name, input, ctx });
+    const next = nextResults.get(name);
+    if (next) {
+      nextResults.delete(name);
+      return next;
+    }
+    return {
+      content: JSON.stringify({
+        success: false,
+        error: { code: "NOT_CONFIGURED", message: `No fake result configured for ${name}` },
+      }),
+      isError: true,
+    };
+  };
+
+  return {
+    executeTool,
+    controller: {
+      get calls() {
+        return calls;
+      },
+      setNextResult(name, result) {
+        nextResults.set(name, result);
+      },
+    },
+  };
+}
+
+/* ------------------------------------------------------------------ */
 /* Fake persistence                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -369,6 +420,7 @@ export interface Harness {
   tts: FakeTtsController;
   llm: FakeLlmController;
   persistence: FakePersistenceController;
+  tools: FakeToolExecutorController;
   deps: RuntimeDeps;
 }
 
@@ -380,6 +432,11 @@ export function createHarness(
   const { connectTts, controller: tts } = createFakeTts(opts.tts);
   const { generateReply, controller: llm } = createFakeLlm(opts.defaultReply);
   const { persistTranscript, controller: persistence } = createFakePersistence();
+  // Always wired, matching defaultRuntimeDeps in production (see
+  // voice-runtime.server.ts): executeTool is present regardless of LLM
+  // provider, since the deterministic booking flow calls it directly
+  // rather than through an LLM-initiated tool_use round trip.
+  const { executeTool, controller: tools } = createFakeToolExecutor();
 
   return {
     bridge,
@@ -387,6 +444,7 @@ export function createHarness(
     tts,
     llm,
     persistence,
-    deps: { connectStt, connectTts, generateReply, persistTranscript },
+    tools,
+    deps: { connectStt, connectTts, generateReply, persistTranscript, executeTool },
   };
 }

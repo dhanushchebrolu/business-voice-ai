@@ -83,6 +83,7 @@ import { resolveGenerateReply } from "./llm-provider.server.ts";
 import { resolveGenerateReplyWithTools } from "./llm-provider.server.ts";
 import { SUPPORTED_VOICE_LANGUAGES, type AgentSnapshot } from "./agent-instructions.ts";
 import type { ClaudeTool } from "./claude.server.ts";
+import { zonedWallTimeToUtc } from "./calendar/timezone.ts";
 
 /**
  * Whether `code` is in the TTS/LLM common supported set (SUPPORTED_VOICE_LANGUAGES
@@ -207,6 +208,40 @@ interface ConversationTurn {
   role: "user" | "assistant";
   text: string;
   at: string;
+}
+
+/**
+ * Structured appointment fields the runtime owns and persists across turns
+ * — NOT the LLM's own free-text conversational memory (which
+ * CONVERSATION_HISTORY_TURNS already bounds, and which can still push early
+ * details out of the window on a long call). The LLM proposes updates to
+ * this every turn (see APPT_STATE_MARKER), but the runtime is the single
+ * source of truth: a turn that doesn't mention a field leaves it
+ * untouched, so information already given is never silently forgotten, and
+ * a turn that DOES restate a field overwrites it, so a correction
+ * ("actually, make that 4 PM") takes effect the same way a first-time
+ * answer does.
+ */
+export interface AppointmentState {
+  service: string | null;
+  customerName: string | null;
+  phone: string | null;
+  /** YYYY-MM-DD, resolved by the LLM from whatever the caller said ("tomorrow", "next Friday") against the CURRENT DATE the agent's own instructions are built with — see agent-instructions.ts. */
+  preferredDate: string | null;
+  /** 24-hour HH:mm, local to the business's own timezone. */
+  preferredTime: string | null;
+  bookingStatus: "collecting" | "ready_to_book" | "booked" | "unavailable";
+}
+
+function emptyAppointmentState(): AppointmentState {
+  return {
+    service: null,
+    customerName: null,
+    phone: null,
+    preferredDate: null,
+    preferredTime: null,
+    bookingStatus: "collecting",
+  };
 }
 
 export interface StartRuntimeSessionInput {
@@ -341,15 +376,21 @@ export const defaultRuntimeDeps: RuntimeDeps = {
   // text-in/text-out reasoning step changes.
   generateReply: resolveGenerateReply(),
   persistTranscript: persistTranscriptToCallLogs,
-  // Tool-calling deps are all-or-nothing (see getReply): populated only
-  // when the selected provider actually implements it (Claude today).
-  // generateReplyWithTools is undefined for Sarvam, which correctly
-  // disables the whole tool-calling path for it rather than half-wiring it.
+  // Always present, regardless of LLM provider — handleUserUtterance's
+  // deterministic booking flow (attemptBooking) calls this directly, not
+  // through an LLM-initiated tool_use round trip, so it works identically
+  // whether the turn's reply came from Sarvam or Claude. executeToolViaRegistry
+  // itself has no dependency on which LLM is selected; it's a plain
+  // tenant-validated calendar/payment dispatcher.
+  executeTool: executeToolViaRegistry,
+  // generateReplyWithTools/resolveAvailableTools remain all-or-nothing and
+  // Claude-only (see getReply): an agent running on Sarvam never gets the
+  // LLM-initiated tool-use path half-wired, only the separate deterministic
+  // booking path above, which needs no LLM-side tool-calling support at all.
   ...(generateReplyWithTools
     ? {
         generateReplyWithTools,
         resolveAvailableTools: resolveAvailableToolsFromDb,
-        executeTool: executeToolViaRegistry,
       }
     : {}),
 };
@@ -416,6 +457,22 @@ interface Session {
    * reply push-or-discard) fully completes before the next one starts.
    */
   utteranceQueue: Promise<void>;
+  /** Runtime-owned appointment fields, persisted across turns independent of the LLM's own conversational memory — see AppointmentState's own doc comment. */
+  appointmentState: AppointmentState;
+  /** The language_code the current TTS connection was opened with — see maybeSwitchTtsLanguage. Starts at the agent's primary_language (what startRuntimeSession connects with). */
+  ttsLanguage: string;
+  /**
+   * Latency diagnostics (response_start_latency_ms / total_response_latency_ms):
+   * set the moment a final_transcript is actually forwarded to
+   * handleUserUtterance (onSttEvent), read back in onTtsEvent once this
+   * turn's first/last audio arrives. Null between turns (and while the
+   * agent itself is speaking unprompted, e.g. the greeting or a silence
+   * prompt) so those calls to speak() never get attributed a misleading
+   * "response latency" that was never measuring a reply to caller speech.
+   */
+  currentTurnTranscriptFinalAt: number | null;
+  /** One response_start_latency_ms log per turn, not one per audio chunk — see onTtsEvent. */
+  currentTurnFirstAudioLogged: boolean;
 }
 
 const activeSessions = new Map<string, Session>();
@@ -513,9 +570,37 @@ function clearSilenceTimer(session: Session) {
 
 function armSilenceTimer(session: Session) {
   clearSilenceTimer(session);
-  if (!isAwaitingCaller(session.handle.state)) return;
+  const state = session.handle.state;
+  if (!isAwaitingCaller(state)) return;
+  // The previous reply's audio can still be trickling out even after the
+  // state machine has already moved on to "listening"/"waiting_on_payment"
+  // (see ttsAudioInFlight's own doc comment) — the caller cannot be
+  // "silent" while still being spoken to. Deliberately not armed here;
+  // onTtsEvent's "flushed" case re-calls armSilenceTimer once the audio
+  // actually catches up, which is the only thing that can turn this back
+  // into a real wait-on-the-caller window.
+  if ((state === "listening" || state === "waiting_on_payment") && ttsAudioInFlight(session)) {
+    return;
+  }
   const delay = session.silencePromptSent ? SILENCE_HANGUP_MS : SILENCE_PROMPT_MS;
+  // Bound to the generation active right now, at arm time — belt-and-
+  // suspenders alongside clearSilenceTimer: every call site that starts
+  // caller/assistant activity (speech_start, handleUserUtterance,
+  // terminateRuntimeSession, injectPaymentEvent) already clears the
+  // pending timer outright, so in today's code this check should never
+  // actually trip. It exists so a FUTURE code path that bumps
+  // session.generation without remembering to also clear the silence
+  // timer degrades to "this fired callback silently does nothing" rather
+  // than a stale prompt/hangup reaching a caller mid-turn.
+  const armedGeneration = session.generation;
   session.silenceTimer = setTimeout(() => {
+    if (session.generation !== armedGeneration) {
+      log("silence_timer_stale_generation_ignored", session, {
+        armedGeneration,
+        currentGeneration: session.generation,
+      });
+      return;
+    }
     if (session.silencePromptSent) void endDueToSilence(session);
     else void speakSilencePrompt(session);
   }, delay);
@@ -623,6 +708,94 @@ export function chunkIntoSentences(text: string): string[] {
   return chunks;
 }
 
+/**
+ * The delimiter the agent's own instructions (agent-instructions.ts's
+ * "APPOINTMENT STATE TRACKING" section) tell the model to end every reply
+ * with — a machine-readable summary of appointment fields known so far,
+ * never spoken aloud. Chosen to be extremely unlikely to occur in natural
+ * conversational text, so a plain substring search is enough; no need for
+ * the model to escape anything inside ordinary sentences.
+ */
+const APPT_STATE_MARKER = "<<<APPT_STATE:";
+
+/**
+ * Splits a raw LLM reply into the text that should actually be spoken and
+ * the trailing structured appointment-state block, if present — see
+ * APPT_STATE_MARKER. Defensive by design: the split point is a plain
+ * `indexOf`, so even a malformed or truncated marker is still fully
+ * removed from `spokenText` (never partially spoken, never reaches TTS) —
+ * only a well-formed JSON payload between the marker and its closing
+ * `>>>` is parsed into `state`; anything else yields `state: null` and
+ * the caller simply keeps whatever appointment state it already had.
+ */
+export function parseApptStateMarker(reply: string): {
+  spokenText: string;
+  state: Partial<AppointmentState> | null;
+} {
+  const markerIdx = reply.indexOf(APPT_STATE_MARKER);
+  if (markerIdx === -1) return { spokenText: reply.trim(), state: null };
+
+  const spokenText = reply.slice(0, markerIdx).trim();
+  const tail = reply.slice(markerIdx + APPT_STATE_MARKER.length);
+  const closeIdx = tail.indexOf(">>>");
+  if (closeIdx === -1) return { spokenText, state: null };
+
+  try {
+    const parsed = JSON.parse(tail.slice(0, closeIdx)) as Record<string, unknown>;
+    const state: Partial<AppointmentState> = {};
+    if (typeof parsed["service"] === "string") state.service = parsed["service"];
+    if (typeof parsed["customer_name"] === "string") state.customerName = parsed["customer_name"];
+    if (typeof parsed["phone"] === "string") state.phone = parsed["phone"];
+    if (typeof parsed["preferred_date"] === "string")
+      state.preferredDate = parsed["preferred_date"];
+    if (typeof parsed["preferred_time"] === "string")
+      state.preferredTime = parsed["preferred_time"];
+    if (parsed["ready_to_book"] === true) state.bookingStatus = "ready_to_book";
+    return { spokenText, state };
+  } catch {
+    return { spokenText, state: null };
+  }
+}
+
+/** Merges a turn's proposed appointment-state fields into the session's persistent state — only fields the model actually provided this turn are overwritten; everything else (including a field the current turn didn't mention) is left exactly as it was. */
+function mergeAppointmentState(
+  current: AppointmentState,
+  proposed: Partial<AppointmentState> | null,
+): AppointmentState {
+  if (!proposed) return current;
+  return {
+    service: proposed.service ?? current.service,
+    customerName: proposed.customerName ?? current.customerName,
+    phone: proposed.phone ?? current.phone,
+    preferredDate: proposed.preferredDate ?? current.preferredDate,
+    preferredTime: proposed.preferredTime ?? current.preferredTime,
+    // bookingStatus is deliberately NOT sticky across turns the way the
+    // other fields are: "ready_to_book" is only a proposal for THIS turn's
+    // attempt (handleUserUtterance resolves it immediately, to "booked" or
+    // back to "collecting"/"unavailable") — carrying a stale
+    // "ready_to_book" forward would re-trigger a booking attempt on a
+    // later, unrelated turn.
+    bookingStatus: proposed.bookingStatus ?? "collecting",
+  };
+}
+
+/** Required to attempt a real booking — see attemptBooking. */
+function appointmentStateIsComplete(s: AppointmentState): boolean {
+  return Boolean(s.service && s.customerName && s.phone && s.preferredDate && s.preferredTime);
+}
+
+/** Renders the runtime-owned appointment state into a system message the LLM can read as ground truth, instead of relying on it re-deriving the same facts from (possibly truncated) conversation history. Returns null when nothing is known yet, so a fresh call's messages array isn't padded with an all-null block. */
+function describeKnownAppointmentState(s: AppointmentState): string | null {
+  const known: string[] = [];
+  if (s.service) known.push(`service: ${s.service}`);
+  if (s.customerName) known.push(`customer name: ${s.customerName}`);
+  if (s.phone) known.push(`phone: ${s.phone}`);
+  if (s.preferredDate) known.push(`preferred date: ${s.preferredDate}`);
+  if (s.preferredTime) known.push(`preferred time: ${s.preferredTime}`);
+  if (!known.length) return null;
+  return `CURRENT APPOINTMENT STATE (already confirmed by the caller — do not ask for these again):\n${known.join("\n")}`;
+}
+
 function pickGreeting(agent: AgentSnapshot["agent"], businessName: string): string {
   const language = agent.primary_language;
   return (
@@ -671,11 +844,62 @@ async function persistTranscript(session: Session) {
   }
 }
 
+/**
+ * Reconnects TTS with a different language_code when the turn about to be
+ * spoken needs one the current connection wasn't opened with — see
+ * ttsLanguage's own doc comment. Sarvam's realtime TTS protocol has no
+ * documented way to change language_code on an already-open connection
+ * (it is sent once, in the connect-time config message — see
+ * sarvam-realtime.server.ts's connectSarvamTts); guessing an undocumented
+ * per-message field is exactly what this codebase's own standing
+ * convention refuses to do (see sarvam.server.ts's and sarvam-realtime.
+ * server.ts's module docs), so this reuses the one confirmed-working
+ * mechanism — connect, with a config message — a second time instead.
+ * Same voice_id/pace/codec/sample rate; only language_code changes. A
+ * no-op (no await, no reconnect) whenever the target language already
+ * matches, which is every turn in a monolingual call.
+ */
+async function maybeSwitchTtsLanguage(session: Session): Promise<void> {
+  const targetLanguage = resolveResponseLanguage(
+    session.detectedLanguage,
+    session.input.snapshotAgent.primary_language,
+  );
+  if (targetLanguage === session.ttsLanguage || !session.tts) return;
+  log("tts_language_switch_started", session, { from: session.ttsLanguage, to: targetLanguage });
+  try {
+    const oldTts = session.tts;
+    const newTts = await session.deps.connectTts({
+      voiceId: session.input.snapshotAgent.voice_id,
+      language: targetLanguage,
+      pace: session.input.snapshotAgent.speaking_pace,
+      outputCodec: session.declaredTtsOutputCodec ?? "mulaw",
+      outputSampleRateHz: session.declaredTtsOutputSampleRateHz ?? 8000,
+      onEvent: (e) => onTtsEvent(session, e),
+    });
+    session.tts = newTts;
+    session.ttsLanguage = targetLanguage;
+    try {
+      oldTts.close();
+    } catch {
+      /* best-effort */
+    }
+    log("tts_language_switch_succeeded", session, { language: targetLanguage });
+  } catch (err) {
+    // Keep speaking in whatever language TTS is still connected with
+    // rather than leaving the caller with no audio at all.
+    log("tts_language_switch_failed", session, {
+      message: (err as Error).message,
+      attempted: targetLanguage,
+    });
+  }
+}
+
 async function speak(
   session: Session,
   text: string,
   asState: "greeting" | "speaking" = "speaking",
 ): Promise<void> {
+  if (asState !== "greeting") await maybeSwitchTtsLanguage(session);
   if (!session.tts) return;
   setState(session, asState);
   // Tags whatever audio Sarvam streams back for this text as belonging to
@@ -686,6 +910,8 @@ async function speak(
   // caller.
   session.activeSpeechGeneration = session.generation;
   session.staleAudioDropLogged = false;
+  const ttsTextSentAt = Date.now();
+  let chunkCount = 0;
   for (const chunk of chunkIntoSentences(text)) {
     session.tts.sendText(chunk);
     session.tts.flush();
@@ -693,6 +919,10 @@ async function speak(
     // incrementing ttsChunksFlushed once Sarvam confirms this chunk's
     // audio was fully delivered.
     session.ttsChunksSent += 1;
+    chunkCount += 1;
+  }
+  if (chunkCount > 0) {
+    log("tts_text_sent", session, { tts_text_sent_at: ttsTextSentAt, chunkCount });
   }
 }
 
@@ -741,6 +971,189 @@ async function getReply(
   return { reply, enteredPaymentWait: false };
 }
 
+/** Appointment length assumed when the caller's requested service has no known duration — this flow doesn't attempt to match the free-text service name the caller used against the business's configured services list, so a per-service duration isn't available here. */
+const DEFAULT_APPOINTMENT_DURATION_MINUTES = 30;
+
+function safeJsonParse(text: string): Record<string, unknown> | null {
+  try {
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+/** Looked up fresh for each booking attempt rather than threaded through StartRuntimeSessionInput — see attemptBooking's own doc comment for why. */
+async function resolveBusinessTimezone(businessId: string): Promise<string> {
+  try {
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { data } = await supabaseAdmin
+      .from("businesses")
+      .select("timezone")
+      .eq("id", businessId)
+      .maybeSingle();
+    return data?.timezone ?? "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
+/**
+ * Phrases a short, honest, caller-language-appropriate reply describing
+ * the REAL outcome of a booking attempt — a second, separate, narrowly-
+ * scoped LLM call (not the main conversational one) so the wording always
+ * reflects `facts` (which states plainly whether the booking actually
+ * succeeded) rather than whatever the model's own main-conversation reply
+ * speculatively claimed before the real tool result was known. This is
+ * the mechanism behind "never claim booked unless it actually succeeded"
+ * — see attemptBooking. Only invoked once per call at most (the one turn
+ * that actually finalizes a booking attempt), so the extra round trip
+ * this costs is a deliberate, bounded exception to the "no extra LLM
+ * calls per turn" latency goal — not a regression of it.
+ */
+async function composeHonestBookingReply(session: Session, facts: string): Promise<string> {
+  const language = resolveResponseLanguage(
+    session.detectedLanguage,
+    session.input.snapshotAgent.primary_language,
+  );
+  try {
+    const { reply } = await session.deps.generateReply([
+      {
+        role: "system",
+        content: `You are ${session.input.snapshotAgent.agent_name}, a phone receptionist. Respond in language code ${language}. One or two short sentences, phone-conversation style. State only what the facts below say — never claim a booking succeeded unless the facts say it did. Do not add any JSON, markers, or notes.`,
+      },
+      { role: "user", content: facts },
+    ]);
+    return reply.trim();
+  } catch (err) {
+    log("booking_reply_composition_failed", session, { message: (err as Error).message });
+    return facts.toLowerCase().includes("succeeded")
+      ? "Your appointment is confirmed."
+      : "I'm sorry, I couldn't confirm that booking. Someone from our team will follow up with you shortly.";
+  }
+}
+
+/**
+ * Attempts to actually book the appointment once AppointmentState reports
+ * every required field and the model has proposed "ready_to_book" (see
+ * parseApptStateMarker) — the fix for "the agent kept talking instead of
+ * actually completing the booking". Calls the exact same real, already-
+ * tenant-validated, already-tested calendar tools the Claude tool-calling
+ * path would use (check_calendar_availability / book_appointment — see
+ * ai-tools.server.ts), but DIRECTLY from the runtime rather than via an
+ * LLM-initiated tool_use round trip: Sarvam's function-calling request/
+ * response wire format is not documented anywhere this sandbox can reach
+ * (see llm-provider.server.ts's own doc comment on why
+ * resolveGenerateReplyWithTools only implements Claude today), and
+ * guessing it is exactly what this codebase's standing convention refuses
+ * to do for any provider wire format (see sarvam.server.ts's and
+ * sarvam-realtime.server.ts's own module docs). This deterministic path
+ * works identically regardless of which LLM provider is selected.
+ *
+ * Never returns a success message unless book_appointment itself reports
+ * success — an unavailable slot, a missing calendar connection, or any
+ * other tool failure all resolve to an honest decline
+ * (composeHonestBookingReply), never a fabricated confirmation.
+ */
+async function attemptBooking(
+  session: Session,
+): Promise<{ spoken: string; state: AppointmentState }> {
+  const state = session.appointmentState;
+  const executeTool = session.deps.executeTool;
+  if (!executeTool || !state.preferredDate || !state.preferredTime) {
+    log("booking_attempt_skipped_no_tool_executor", session);
+    return {
+      spoken: await composeHonestBookingReply(
+        session,
+        "The booking could not be attempted because this line isn't configured for live booking. Tell the caller you'll have someone confirm the appointment and call them back.",
+      ),
+      state: { ...state, bookingStatus: "unavailable" },
+    };
+  }
+
+  const ctx: ToolExecContext = {
+    organizationId: session.input.organizationId,
+    businessId: session.input.businessId,
+    agentConfigId: session.input.agentConfigId,
+    callId: session.input.callId,
+  };
+  const timezone = await resolveBusinessTimezone(session.input.businessId);
+  const startIso = zonedWallTimeToUtc(
+    state.preferredDate,
+    state.preferredTime,
+    timezone,
+  ).toISOString();
+  const endIso = new Date(
+    zonedWallTimeToUtc(state.preferredDate, state.preferredTime, timezone).getTime() +
+      DEFAULT_APPOINTMENT_DURATION_MINUTES * 60_000,
+  ).toISOString();
+
+  log("booking_attempt_started", session, {
+    preferredDate: state.preferredDate,
+    preferredTime: state.preferredTime,
+  });
+
+  const availability = await executeTool(
+    "check_calendar_availability",
+    { dateIso: state.preferredDate, durationMinutes: DEFAULT_APPOINTMENT_DURATION_MINUTES },
+    ctx,
+  );
+  const availabilityResult = safeJsonParse(availability.content);
+  const slots = Array.isArray((availabilityResult?.["data"] as { slots?: unknown })?.["slots"])
+    ? ((availabilityResult?.["data"] as { slots: { start?: string }[] }).slots ?? [])
+    : [];
+  // AvailabilitySlot's own fields are `start`/`end` (calendar-service.server.ts),
+  // not startIso/endIso — those names belong to create_calendar_event's input.
+  const slotAvailable = !availability.isError && slots.some((slot) => slot.start === startIso);
+
+  if (!slotAvailable) {
+    log("booking_attempt_unavailable", session, {
+      toolSucceeded: !availability.isError,
+      errorCode: (availabilityResult?.["error"] as { code?: string } | undefined)?.code ?? null,
+    });
+    return {
+      spoken: await composeHonestBookingReply(
+        session,
+        `The requested slot (${state.preferredDate} at ${state.preferredTime}) is NOT available. Say so honestly and briefly, and offer to find another time. Do not say it was booked.`,
+      ),
+      state: { ...state, bookingStatus: "unavailable" },
+    };
+  }
+
+  const booking = await executeTool(
+    "book_appointment",
+    {
+      customerName: state.customerName,
+      customerPhone: state.phone,
+      startIso,
+      endIso,
+      notes: state.service,
+    },
+    ctx,
+  );
+  const bookingResult = safeJsonParse(booking.content);
+  if (booking.isError || bookingResult?.["success"] !== true) {
+    log("booking_attempt_failed", session, {
+      errorCode: (bookingResult?.["error"] as { code?: string } | undefined)?.code ?? null,
+    });
+    return {
+      spoken: await composeHonestBookingReply(
+        session,
+        "The booking attempt failed on our end. Apologize briefly and say someone will follow up to confirm. Do not say it was booked.",
+      ),
+      state: { ...state, bookingStatus: "unavailable" },
+    };
+  }
+
+  log("booking_attempt_succeeded", session);
+  return {
+    spoken: await composeHonestBookingReply(
+      session,
+      `The booking succeeded: ${state.service ?? "the appointment"} for ${state.customerName ?? "the caller"} on ${state.preferredDate} at ${state.preferredTime}. Confirm this briefly.`,
+    ),
+    state: { ...state, bookingStatus: "booked" },
+  };
+}
+
 /**
  * Serializes handleUserUtterance calls onto session.utteranceQueue — see
  * that field's own doc comment for why. onSttEvent's "final_transcript"
@@ -778,9 +1191,19 @@ async function handleUserUtterance(session: Session, text: string) {
   setState(session, "thinking");
   const generation = ++session.generation;
   const requestStarted = Date.now();
+  const llmRequestAt = requestStarted;
 
+  // The runtime's own ground truth for what the caller has already
+  // confirmed — see AppointmentState's own doc comment. Built from state
+  // BEFORE this turn, so the model is told what's already known without
+  // depending on it still being visible in the (bounded)
+  // CONVERSATION_HISTORY_TURNS window.
+  const knownAppointmentState = describeKnownAppointmentState(session.appointmentState);
   const messages: ChatMessage[] = [
     { role: "system", content: session.input.instructions },
+    ...(knownAppointmentState
+      ? [{ role: "system", content: knownAppointmentState } as ChatMessage]
+      : []),
     ...session.turns
       .slice(-CONVERSATION_HISTORY_TURNS)
       .map((t) => ({ role: t.role, content: t.text }) as ChatMessage),
@@ -791,11 +1214,16 @@ async function handleUserUtterance(session: Session, text: string) {
     generation,
     messageCount: messages.length,
     roles: messages.map((m) => m.role),
+    llm_request_at: llmRequestAt,
   });
 
   try {
-    const { reply, enteredPaymentWait } = await getReply(session, messages);
-    log("llm_completed", session, { latency_ms: Date.now() - requestStarted });
+    const { reply: rawReply, enteredPaymentWait } = await getReply(session, messages);
+    const llmCompletedAt = Date.now();
+    log("llm_completed", session, {
+      latency_ms: llmCompletedAt - requestStarted,
+      llm_completed_at: llmCompletedAt,
+    });
 
     // Soft cancellation: if the caller interrupted (or spoke again) while
     // this request was in flight, `generation` has already advanced — the
@@ -806,6 +1234,39 @@ async function handleUserUtterance(session: Session, text: string) {
       log("llm_response_discarded_stale", session);
       return;
     }
+    if (!rawReply) {
+      log("llm_empty_reply", session);
+      setState(session, "listening");
+      armSilenceTimer(session);
+      return;
+    }
+
+    // Strip and parse the trailing structured appointment-state block
+    // (see parseApptStateMarker/APPT_STATE_MARKER) — spokenText is what
+    // the caller actually hears; the marker itself never reaches TTS or
+    // the persisted transcript.
+    const { spokenText, state: proposedAppointmentState } = parseApptStateMarker(rawReply);
+    session.appointmentState = mergeAppointmentState(
+      session.appointmentState,
+      proposedAppointmentState,
+    );
+
+    let reply = spokenText;
+    // Once every required field is known AND this turn's model proposed
+    // moving to booking, the RUNTIME — not the model — performs the real
+    // booking attempt and decides what's actually said. See attemptBooking
+    // for why this is deterministic rather than an LLM tool-use round
+    // trip, and for why it's the fix for "never claim booked unless it
+    // actually succeeded".
+    if (
+      session.appointmentState.bookingStatus === "ready_to_book" &&
+      appointmentStateIsComplete(session.appointmentState)
+    ) {
+      const outcome = await attemptBooking(session);
+      reply = outcome.spoken;
+      session.appointmentState = outcome.state;
+    }
+
     if (!reply) {
       log("llm_empty_reply", session);
       setState(session, "listening");
@@ -923,6 +1384,13 @@ function onSttEvent(session: Session, event: SttEvent) {
       armSilenceTimer(session);
       break;
     case "partial_transcript":
+      // A partial means the caller is still actively mid-utterance — just
+      // as much "caller interaction" as speech_start, even if a provider
+      // ever redelivers partials without a clean speech_start of its own.
+      // Only cleared here, not re-armed: speech_end is what starts the
+      // real "waiting on the caller" countdown once they've actually
+      // stopped, not every partial along the way.
+      clearSilenceTimer(session);
       session.accumulatingUserText = event.text;
       break;
     case "final_transcript": {
@@ -967,10 +1435,18 @@ function onSttEvent(session: Session, event: SttEvent) {
         break;
       }
 
+      // Latency diagnostics: the moment this turn's trigger actually
+      // reached handleUserUtterance, so onTtsEvent can later compute how
+      // long the caller waited to hear anything — see
+      // currentTurnTranscriptFinalAt's own doc comment.
+      const transcriptFinalAt = Date.now();
+      session.currentTurnTranscriptFinalAt = transcriptFinalAt;
+      session.currentTurnFirstAudioLogged = false;
       log("stt:transcript_final_forwarded", session, {
         textLength: event.text.length,
         forwarded: true,
         reason: "ok",
+        transcript_final_at: transcriptFinalAt,
       });
       enqueueUserUtterance(session, event.text);
       break;
@@ -1042,6 +1518,21 @@ function onTtsEvent(session: Session, event: TtsEvent) {
           sarvamMeta: event.meta,
         });
       }
+      // Latency diagnostics: the first audio byte of THIS turn's reply is
+      // the moment the caller actually starts hearing a response — the
+      // perceived delay that matters, not when the LLM call resolved or
+      // speak() returned (both can be well before any audio exists). Only
+      // meaningful when currentTurnTranscriptFinalAt is set (a real reply
+      // to caller speech, not the greeting/a silence prompt/etc. — see its
+      // own doc comment) and only logged once per turn.
+      if (session.currentTurnTranscriptFinalAt !== null && !session.currentTurnFirstAudioLogged) {
+        session.currentTurnFirstAudioLogged = true;
+        const firstTtsAudioAt = Date.now();
+        log("response_latency", session, {
+          first_tts_audio_at: firstTtsAudioAt,
+          response_start_latency_ms: firstTtsAudioAt - session.currentTurnTranscriptFinalAt,
+        });
+      }
       session.ttsBytesInFlight += event.data.length;
       const frame: AudioFrame = { data: event.data, timestampMs: Date.now() - session.startedAt };
       session.input.bridge.sendOutboundFrame(frame);
@@ -1067,6 +1558,30 @@ function onTtsEvent(session: Session, event: TtsEvent) {
       // check recognize caller speech during a still-playing reply's tail
       // even after the state machine has already moved on to "listening".
       session.ttsChunksFlushed += 1;
+      // Latency diagnostics: once every chunk sent so far has been fully
+      // delivered, this turn's reply audio is completely done — the
+      // caller has now heard all of it. Logged once per turn, then the
+      // basis timestamp is cleared so an unrelated later speak() call
+      // (a silence prompt, a fallback for the NEXT turn) never reuses it.
+      if (
+        session.currentTurnTranscriptFinalAt !== null &&
+        session.currentTurnFirstAudioLogged &&
+        !ttsAudioInFlight(session)
+      ) {
+        const totalResponseLatencyMs = Date.now() - session.currentTurnTranscriptFinalAt;
+        log("response_latency_complete", session, {
+          total_response_latency_ms: totalResponseLatencyMs,
+        });
+        session.currentTurnTranscriptFinalAt = null;
+      }
+      // The audio that armSilenceTimer deferred on (still in flight at the
+      // time) may have just finished — if so, and nothing else has moved
+      // the state on since, this is the actual moment the caller starts
+      // being genuinely silent, so the wait-on-the-caller window starts
+      // counting down now rather than never.
+      if (!ttsAudioInFlight(session) && isAwaitingCaller(stateOf(session))) {
+        armSilenceTimer(session);
+      }
       break;
     case "unknown":
       break;
@@ -1131,6 +1646,10 @@ export async function startRuntimeSession(
     activeSpeechGeneration: 0,
     staleAudioDropLogged: false,
     utteranceQueue: Promise.resolve(),
+    appointmentState: emptyAppointmentState(),
+    ttsLanguage: input.snapshotAgent.primary_language,
+    currentTurnTranscriptFinalAt: null,
+    currentTurnFirstAudioLogged: false,
   };
   activeSessions.set(input.callId, session);
   log("runtime_started", session);
