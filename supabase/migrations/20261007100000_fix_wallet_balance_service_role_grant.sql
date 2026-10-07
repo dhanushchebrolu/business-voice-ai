@@ -1,0 +1,45 @@
+-- Production incident: Vobiz background call-finalization processing
+-- failed with `vobiz_answer:background_processing_failed permission denied
+-- for function wallet_balance`.
+--
+-- Root cause: `debit_wallet_for_call` and `wallet_can_afford` (Phase D
+-- migration 20260904120000_phase_d_telephony_infrastructure.sql) are plain
+-- `LANGUAGE plpgsql` functions with no `SECURITY DEFINER` — they run as
+-- `SECURITY INVOKER` (the Postgres default), i.e. under the CALLING role's
+-- own privileges for their entire body, including every nested function
+-- call they make. Both are granted `EXECUTE` to `service_role` only — the
+-- exact role telephony-guard.server.ts's `finalizeCallBilling` /
+-- `walletCanAffordOutbound` call them as, via the service-role
+-- `supabaseAdmin` client — and each internally calls
+-- `public.wallet_balance(_org)` to read the resulting/current balance.
+--
+-- But `wallet_balance`'s own grant (migration
+-- 20260901051419_61b91201-6016-476c-88a1-59440b4c6265.sql) only ever
+-- granted `EXECUTE` to `authenticated` (for the dashboard's own balance
+-- display), after first revoking the PUBLIC-wide default `EXECUTE` every
+-- function has unless explicitly revoked:
+--   REVOKE ALL ON FUNCTION public.wallet_balance(uuid) FROM PUBLIC, anon;
+--   GRANT EXECUTE ON FUNCTION public.wallet_balance(uuid) TO authenticated;
+-- `service_role` was never included in that GRANT, and — because
+-- `debit_wallet_for_call`/`wallet_can_afford` are SECURITY INVOKER, not
+-- SECURITY DEFINER — their own (correct) `service_role` grant does not
+-- carry through to the `wallet_balance` call they make internally.
+-- `service_role` has therefore never been able to call `wallet_balance`,
+-- directly or via either of these two functions.
+--
+-- Fix: grant `service_role` EXECUTE on `wallet_balance` directly, closing
+-- exactly this gap — the minimal change, not a SECURITY DEFINER rewrite of
+-- debit_wallet_for_call/wallet_can_afford. This is NOT a security
+-- regression:
+--   - `service_role` already has unrestricted table-level access to
+--     `wallet_transactions` (`GRANT ALL ... TO service_role`, migration
+--     20260901051419) and could already compute the identical balance with
+--     a raw SELECT — this grant adds no new capability, it only lets
+--     service_role call the existing read-only helper that already
+--     performs exactly that SELECT.
+--   - `anon`/`authenticated` are completely untouched by this migration:
+--     still no grant whatsoever on `debit_wallet_for_call`/
+--     `wallet_can_afford` (financial mutation/affordability functions
+--     remain service-role-only), and `authenticated`'s existing, intended
+--     EXECUTE on `wallet_balance` is unchanged.
+GRANT EXECUTE ON FUNCTION public.wallet_balance(uuid) TO service_role;

@@ -748,6 +748,30 @@ async function captureLogs(fn: () => Promise<void>): Promise<Record<string, unkn
   return captured;
 }
 
+/** Same as captureLogs, but also captures the bare-named diagnostic namespaces (calendar_tool:*, voice:*, tts:*) voice-runtime.server.ts emits directly via namedLog — those are NOT prefixed with "voice_runtime:", so captureLogs alone would miss them. */
+async function captureAllLogs(fn: () => Promise<void>): Promise<Record<string, unknown>[]> {
+  const original = console.info;
+  const captured: Record<string, unknown>[] = [];
+  console.info = (event: unknown, fields?: unknown) => {
+    if (
+      typeof event === "string" &&
+      fields &&
+      (event.startsWith("voice_runtime:") ||
+        event.startsWith("calendar_tool:") ||
+        event.startsWith("voice:") ||
+        event.startsWith("tts:"))
+    ) {
+      captured.push({ event, ...(fields as Record<string, unknown>) });
+    }
+  };
+  try {
+    await fn();
+  } finally {
+    console.info = original;
+  }
+  return captured;
+}
+
 describe("Structured, redacted logs — stage coverage and no sensitive content", () => {
   test("every log line carries call/session/org/agent correlation, and the pipeline stages required by this task are all present", async () => {
     const h = createHarness();
@@ -1528,6 +1552,365 @@ describe("26. Calendar availability check (production incident: the agent went s
     );
 
     await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+function openAvailabilityReply(overrides: Partial<Record<string, unknown>> = {}): string {
+  const state = {
+    service: "teeth cleaning",
+    customer_name: null,
+    phone: null,
+    preferred_date: "2026-10-08",
+    preferred_time: null,
+    preferred_period: null,
+    wants_next_available: false,
+    checking_availability: true,
+    ready_to_book: false,
+    ...overrides,
+  };
+  return `Let me check what's open — one moment.\n<<<APPT_STATE:${JSON.stringify(state)}>>>`;
+}
+
+function nextAvailableBookingReply(overrides: Partial<Record<string, unknown>> = {}): string {
+  const state = {
+    service: "teeth cleaning",
+    customer_name: "Dhanush",
+    phone: "9999999999",
+    preferred_date: "2026-10-08",
+    preferred_time: null,
+    preferred_period: null,
+    wants_next_available: true,
+    checking_availability: false,
+    ready_to_book: true,
+    ...overrides,
+  };
+  return `Sure, I'll book the earliest available slot.\n<<<APPT_STATE:${JSON.stringify(state)}>>>`;
+}
+
+describe("27. Open and approximate-period availability requests (production incident: 'any slots today?' / 'this afternoon?' produced no tool call at all)", () => {
+  test("'any slots available today?' (no exact time) invokes check_calendar_availability and lists the real returned slots", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: {
+          slots: [
+            { start: "2026-10-08T06:00:00.000Z", end: "2026-10-08T06:30:00.000Z" },
+            { start: "2026-10-08T08:30:00.000Z", end: "2026-10-08T09:00:00.000Z" },
+            { start: "2026-10-08T11:00:00.000Z", end: "2026-10-08T11:30:00.000Z" },
+          ],
+        },
+      }),
+    });
+    h.llm.setNextReply(openAvailabilityReply());
+    h.llm.setDelay(0);
+
+    h.stt.speakUtterance("Are there any slots available today?");
+    await drain(16);
+
+    const availabilityCall = h.tools.calls.find((c) => c.name === "check_calendar_availability");
+    assert.ok(availabilityCall, "an open availability request must still invoke the real tool");
+    const factsMessage = h.llm.calls.at(-1)?.find((m) => m.role === "user");
+    const facts = factsMessage?.content ?? "";
+    assert.match(facts, /6:00\s*AM/i);
+    assert.match(facts, /8:30\s*AM/i);
+    assert.match(facts, /11:00\s*AM/i);
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("'any slots available today?' with no open slots produces an honest 'no slots' answer, never silence", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({ success: true, data: { slots: [] } }),
+    });
+    h.llm.setNextReply(openAvailabilityReply());
+    h.llm.setDelay(0);
+
+    const spokenBefore = h.tts.sentTexts.length;
+    h.stt.speakUtterance("Do you have anything available today?");
+    await drain(16);
+
+    assert.ok(h.tts.sentTexts.length > spokenBefore, "must speak something — never go silent");
+    const factsMessage = h.llm.calls.at(-1)?.find((m) => m.role === "user");
+    assert.match(factsMessage?.content ?? "", /no open slots/i);
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("'any slots this afternoon?' filters the real returned slots to the afternoon window (12:00-17:00 local) only", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: {
+          slots: [
+            { start: "2026-10-08T04:00:00.000Z", end: "2026-10-08T04:30:00.000Z" }, // morning (UTC == local in this harness)
+            { start: "2026-10-08T13:00:00.000Z", end: "2026-10-08T13:30:00.000Z" }, // afternoon
+            { start: "2026-10-08T19:00:00.000Z", end: "2026-10-08T19:30:00.000Z" }, // evening
+          ],
+        },
+      }),
+    });
+    h.llm.setNextReply(openAvailabilityReply({ preferred_period: "afternoon" }));
+    h.llm.setDelay(0);
+
+    h.stt.speakUtterance("Do you have any slots this afternoon?");
+    await drain(16);
+
+    const factsMessage = h.llm.calls.at(-1)?.find((m) => m.role === "user");
+    const facts = factsMessage?.content ?? "";
+    assert.match(facts, /1:00\s*PM/i, "the afternoon slot must be listed");
+    assert.doesNotMatch(facts, /4:00\s*AM/i, "the morning slot must be filtered out");
+    assert.doesNotMatch(facts, /7:00\s*PM/i, "the evening slot must be filtered out");
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("'what times are available tomorrow?' passes the resolved date through, with no exact time required to trigger the tool", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: { slots: [{ start: "2026-10-09T09:00:00.000Z", end: "2026-10-09T09:30:00.000Z" }] },
+      }),
+    });
+    h.llm.setNextReply(openAvailabilityReply({ preferred_date: "2026-10-09" }));
+    h.llm.setDelay(0);
+
+    h.stt.speakUtterance("What times are available tomorrow?");
+    await drain(16);
+
+    const availabilityCall = h.tools.calls.find((c) => c.name === "check_calendar_availability");
+    assert.equal(availabilityCall?.input["dateIso"], "2026-10-09");
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+describe("28. 'Book me at the next available time' (no exact time given)", () => {
+  test("resolves and books the earliest real slot the calendar returned, never an invented or rounded time", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: {
+          slots: [
+            { start: "2026-10-08T09:15:00.000Z", end: "2026-10-08T09:45:00.000Z" },
+            { start: "2026-10-08T11:00:00.000Z", end: "2026-10-08T11:30:00.000Z" },
+          ],
+        },
+      }),
+    });
+    h.tools.setNextResult("book_appointment", {
+      content: JSON.stringify({
+        success: true,
+        data: { id: "booking-next-1", status: "CONFIRMED" },
+      }),
+    });
+    h.llm.setNextReply(nextAvailableBookingReply());
+    h.llm.setDelay(0);
+
+    h.stt.speakUtterance("Book me at the next available time");
+    await drain(16);
+
+    const bookingCall = h.tools.calls.find((c) => c.name === "book_appointment");
+    assert.ok(bookingCall, "must actually book, not just check");
+    assert.equal(
+      bookingCall?.input["startIso"],
+      "2026-10-08T09:15:00.000Z",
+      "must book the EARLIEST real slot the calendar returned, not the second one or an invented time",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("confirms the REAL booked time to the caller, not a placeholder", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: { slots: [{ start: "2026-10-08T09:15:00.000Z", end: "2026-10-08T09:45:00.000Z" }] },
+      }),
+    });
+    h.tools.setNextResult("book_appointment", {
+      content: JSON.stringify({
+        success: true,
+        data: { id: "booking-next-2", status: "CONFIRMED" },
+      }),
+    });
+    h.llm.setNextReply(nextAvailableBookingReply());
+    h.llm.setDelay(0);
+
+    h.stt.speakUtterance("Book me at the next available time");
+    await drain(16);
+
+    const factsMessage = h.llm.calls.at(-1)?.find((m) => m.role === "user");
+    assert.match(factsMessage?.content ?? "", /9:15\s*AM/i);
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("no open slots that day: says so honestly, never books an invented time", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({ success: true, data: { slots: [] } }),
+    });
+    h.llm.setNextReply(nextAvailableBookingReply());
+    h.llm.setDelay(0);
+
+    h.stt.speakUtterance("Book me at the next available time");
+    await drain(16);
+
+    const bookingCall = h.tools.calls.find((c) => c.name === "book_appointment");
+    assert.equal(bookingCall, undefined, "must never book when there is nothing actually open");
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+describe("29. New diagnostic events (calendar_tool:*, voice:tool_result, voice:final_response, tts:start, tts:completed)", () => {
+  test("a full availability-check turn emits the complete diagnostic chain with the exact requested event names (not voice_runtime:-prefixed)", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    const logs = await captureAllLogs(async () => {
+      await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+      makeTtsFlushCatchUp(h.tts)();
+
+      h.tools.setNextResult("check_calendar_availability", {
+        content: JSON.stringify({
+          success: true,
+          data: { slots: [{ start: BOOKING_START_ISO, end: "2026-10-08T15:30:00.000Z" }] },
+        }),
+      });
+      h.llm.setNextReply(checkingAvailabilityReply());
+      h.llm.setDelay(0);
+
+      h.stt.speakUtterance("Is 3 PM available tomorrow?");
+      await drain(16);
+      makeTtsFlushCatchUp(h.tts)();
+      await terminateRuntimeSession(callId, "test cleanup");
+    });
+
+    const names = logs.map((l) => l["event"]);
+    for (const expected of [
+      "calendar_tool:start",
+      "calendar_tool:provider_request",
+      "calendar_tool:provider_response",
+      "calendar_tool:completed",
+      "voice:tool_result",
+      "voice:final_response",
+      "tts:start",
+      "tts:completed",
+    ]) {
+      assert.ok(
+        names.includes(expected),
+        `expected a "${expected}" log line; got: ${names.join(", ")}`,
+      );
+    }
+
+    const providerResponse = logs.find((l) => l["event"] === "calendar_tool:provider_response");
+    assert.equal(typeof providerResponse?.["latency_ms"], "number");
+    const finalResponse = logs.find((l) => l["event"] === "voice:final_response");
+    assert.equal(typeof finalResponse?.["latency_ms"], "number");
+  });
+
+  test("calendar_tool:error carries a code and latency_ms on a calendar failure", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    const logs = await captureAllLogs(async () => {
+      await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+      makeTtsFlushCatchUp(h.tts)();
+
+      h.tools.setNextResult("check_calendar_availability", {
+        content: JSON.stringify({
+          success: false,
+          error: { code: "GOOGLE_AUTH_REQUIRED", message: "not connected" },
+        }),
+        isError: true,
+      });
+      h.llm.setNextReply(checkingAvailabilityReply());
+      h.llm.setDelay(0);
+
+      h.stt.speakUtterance("Can you check if that slot is available?");
+      await drain(16);
+      await terminateRuntimeSession(callId, "test cleanup");
+    });
+
+    const errorLog = logs.find((l) => l["event"] === "calendar_tool:error");
+    assert.ok(errorLog, "expected a calendar_tool:error log");
+    assert.equal(errorLog!["code"], "GOOGLE_AUTH_REQUIRED");
+    assert.equal(typeof errorLog!["latency_ms"], "number");
+  });
+
+  test("no log line ever carries the caller's name, phone, or the spoken reply text itself", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    const logs = await captureAllLogs(async () => {
+      await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+      makeTtsFlushCatchUp(h.tts)();
+
+      h.tools.setNextResult("check_calendar_availability", {
+        content: JSON.stringify({
+          success: true,
+          data: { slots: [{ start: BOOKING_START_ISO, end: "2026-10-08T15:30:00.000Z" }] },
+        }),
+      });
+      h.tools.setNextResult("book_appointment", {
+        content: JSON.stringify({
+          success: true,
+          data: { id: "booking-diag-1", status: "CONFIRMED" },
+        }),
+      });
+      h.llm.setNextReply(bookingReadyToBookReply());
+      h.llm.setDelay(0);
+
+      h.stt.speakUtterance("Book an appointment tomorrow at 3pm for teeth cleaning");
+      await drain(16);
+      await terminateRuntimeSession(callId, "test cleanup");
+    });
+
+    for (const l of logs) {
+      const serialized = JSON.stringify(l);
+      assert.doesNotMatch(
+        serialized,
+        /Dhanush/,
+        `log line must never carry the caller's name: ${serialized}`,
+      );
+      assert.doesNotMatch(
+        serialized,
+        /9999999999/,
+        `log line must never carry the caller's phone: ${serialized}`,
+      );
+    }
   });
 });
 

@@ -228,8 +228,12 @@ export interface AppointmentState {
   phone: string | null;
   /** YYYY-MM-DD, resolved by the LLM from whatever the caller said ("tomorrow", "next Friday") against the CURRENT DATE the agent's own instructions are built with — see agent-instructions.ts. */
   preferredDate: string | null;
-  /** 24-hour HH:mm, local to the business's own timezone. */
+  /** 24-hour HH:mm, local to the business's own timezone. Null when the caller gave only an approximate period (preferredPeriod) or no time preference at all (e.g. "any slots today", "book me at the next available time"). */
   preferredTime: string | null;
+  /** An approximate time-of-day the caller gave instead of an exact time ("any slots this afternoon") — used to filter check_calendar_availability's real results; never itself a source of an invented time. Only meaningful when preferredTime is null. */
+  preferredPeriod: "morning" | "afternoon" | "evening" | null;
+  /** The caller explicitly asked for the next/earliest open slot ("book me at the next available time") rather than naming one — see attemptBooking/attemptAvailabilityCheck. Only meaningful when preferredTime is null. */
+  wantsNextAvailable: boolean;
   /**
    * "checking_availability" (new): the caller asked whether a specific
    * date/time is free, but hasn't confirmed they want to book it yet — see
@@ -270,6 +274,8 @@ function emptyAppointmentState(): AppointmentState {
     phone: null,
     preferredDate: null,
     preferredTime: null,
+    preferredPeriod: null,
+    wantsNextAvailable: false,
     bookingStatus: "collecting",
     availabilityStatus: "unknown",
     selectedSlot: null,
@@ -768,6 +774,28 @@ function log(
 }
 
 /**
+ * Same correlation fields as log() above, but the event name is emitted
+ * bare — no "voice_runtime:" prefix — for the small set of diagnostics
+ * meant to be grepped/dashboarded under their own namespace (calendar_tool:*,
+ * matching the tts:/stt: namespaced events in sarvam-realtime.server.ts and
+ * tts:connection_replaced elsewhere in this file). Same redaction discipline as log(): never an API
+ * key, token, or the caller's actual words — only counts/lengths/codes.
+ */
+function namedLog(
+  event: string,
+  session: Pick<Session, "input"> & { handle: { runtimeSessionId: string } },
+  extra?: Record<string, unknown>,
+) {
+  console.info(event, {
+    call_id: session.input.callId,
+    runtime_session_id: session.handle.runtimeSessionId,
+    organization_id: session.input.organizationId,
+    agent_config_id: session.input.agentConfigId,
+    ...extra,
+  });
+}
+
+/**
  * Task 1 (production incident: a real call showed ~20.4s between
  * runtime_started/first_inbound_audio_frame and tts_connected, with
  * stt_connected arriving only ~183ms after that): wraps one awaited
@@ -935,6 +963,14 @@ export function parseApptStateMarker(reply: string): {
       state.preferredDate = parsed["preferred_date"];
     if (typeof parsed["preferred_time"] === "string")
       state.preferredTime = parsed["preferred_time"];
+    if (
+      parsed["preferred_period"] === "morning" ||
+      parsed["preferred_period"] === "afternoon" ||
+      parsed["preferred_period"] === "evening"
+    ) {
+      state.preferredPeriod = parsed["preferred_period"];
+    }
+    if (parsed["wants_next_available"] === true) state.wantsNextAvailable = true;
     // Deliberately never parses an "availability_status"/"selected_slot"
     // field from the model, even if one were ever present in `parsed` —
     // see AppointmentState's own doc comment: those two fields are
@@ -962,20 +998,36 @@ function mergeAppointmentState(
 ): AppointmentState {
   if (!proposed) return current;
   const preferredDate = proposed.preferredDate ?? current.preferredDate;
+  // preferredTime and preferredPeriod are each independently sticky (a
+  // given value persists until the caller gives a new one) — see
+  // attemptAvailabilityCheck/attemptBooking for why an exact preferredTime
+  // always takes priority over preferredPeriod when, unusually, both end
+  // up set at once, rather than this merge trying to clear one in favor of
+  // the other.
   const preferredTime = proposed.preferredTime ?? current.preferredTime;
-  // The requested slot itself changed this turn (a new date/time, or a
-  // correction to one already given) — any availabilityStatus/selectedSlot
+  const preferredPeriod = proposed.preferredPeriod ?? current.preferredPeriod;
+  // The requested slot itself changed this turn (a new date/time/period, or
+  // a correction to one already given) — any availabilityStatus/selectedSlot
   // carried over from a PREVIOUS check now describes a slot the caller is
   // no longer asking about, so it must not keep being treated as current
   // (e.g. silently booking the OLD time as "already confirmed available").
   const slotChanged =
-    preferredDate !== current.preferredDate || preferredTime !== current.preferredTime;
+    preferredDate !== current.preferredDate ||
+    preferredTime !== current.preferredTime ||
+    preferredPeriod !== current.preferredPeriod;
   return {
     service: proposed.service ?? current.service,
     customerName: proposed.customerName ?? current.customerName,
     phone: proposed.phone ?? current.phone,
     preferredDate,
     preferredTime,
+    preferredPeriod,
+    // Deliberately NOT sticky, same reasoning as bookingStatus below: "the
+    // caller wants the next/earliest open slot" is a proposal for THIS
+    // turn's attempt, not a durable fact — carrying it forward would risk
+    // silently resolving a LATER, unrelated booking request (with its own
+    // explicit time) as "next available" instead.
+    wantsNextAvailable: proposed.wantsNextAvailable === true,
     // bookingStatus is deliberately NOT sticky across turns the way the
     // other fields are: "ready_to_book"/"checking_availability" are only a
     // proposal for THIS turn's attempt (handleUserUtterance resolves it
@@ -989,14 +1041,20 @@ function mergeAppointmentState(
   };
 }
 
-/** Required to attempt a real booking — see attemptBooking. */
+/** Required to attempt a real booking — see attemptBooking. An exact time is required UNLESS the caller explicitly asked for the next/earliest available slot (wantsNextAvailable), in which case attemptBooking resolves the actual time itself from the real calendar. */
 function appointmentStateIsComplete(s: AppointmentState): boolean {
-  return Boolean(s.service && s.customerName && s.phone && s.preferredDate && s.preferredTime);
+  return Boolean(
+    s.service &&
+    s.customerName &&
+    s.phone &&
+    s.preferredDate &&
+    (s.preferredTime || s.wantsNextAvailable),
+  );
 }
 
-/** Required to check availability — unlike a booking attempt, the caller's name/phone are not needed merely to ask "is this slot free". */
+/** Required to check availability — unlike a booking attempt, the caller's name/phone are not needed merely to ask "is this slot free" or "what's available". A specific time is NOT required either — an open "any slots today"/"this afternoon" query is checked and listed by attemptAvailabilityCheck just as validly as an exact-time check. */
 function appointmentSlotIsKnown(s: AppointmentState): boolean {
-  return Boolean(s.preferredDate && s.preferredTime);
+  return Boolean(s.preferredDate);
 }
 
 /** Renders the runtime-owned appointment state into a system message the LLM can read as ground truth, instead of relying on it re-deriving the same facts from (possibly truncated) conversation history. Returns null when nothing is known yet, so a fresh call's messages array isn't padded with an all-null block. */
@@ -1007,6 +1065,7 @@ function describeKnownAppointmentState(s: AppointmentState): string | null {
   if (s.phone) known.push(`phone: ${s.phone}`);
   if (s.preferredDate) known.push(`preferred date: ${s.preferredDate}`);
   if (s.preferredTime) known.push(`preferred time: ${s.preferredTime}`);
+  else if (s.preferredPeriod) known.push(`preferred time of day: ${s.preferredPeriod}`);
   // Task 9 ("that slot" resolution): surfaces the REAL outcome of the most
   // recent availability check, if any, so a later "check that slot" or
   // "book that slot" has enough context to resolve without re-asking —
@@ -1175,6 +1234,13 @@ async function speak(
   }
   if (chunkCount > 0) {
     log("tts_text_sent", session, { tts_text_sent_at: ttsTextSentAt, chunkCount });
+    // Requested diagnostic naming (distinct from the voice_runtime:* namespace
+    // above) — the moment the final spoken reply for this turn is actually
+    // handed to TTS, paired with tts:completed once its audio has fully
+    // played out (onTtsEvent's "flushed" case) — so latency from "tool
+    // result ready" (voice:final_response) to "caller can hear something"
+    // is directly measurable from logs alone.
+    namedLog("tts:start", session, { at: ttsTextSentAt, chunkCount });
   }
 }
 
@@ -1267,6 +1333,16 @@ async function composeHonestBookingReply(session: Session, facts: string): Promi
     session.detectedLanguage,
     session.input.snapshotAgent.primary_language,
   );
+  // Requested diagnostic naming: every call into this function follows a
+  // real calendar tool result (or the "no tool executor configured"
+  // degenerate case) — this is the "tool result -> final LLM response"
+  // hop Task 11 requires be provably present, not just "tool invocation ->
+  // tool result -> return -> silence". Never logs `facts` itself (it can
+  // embed the caller's name/phone — see attemptBooking's own facts
+  // strings), only that a result arrived and how long composing the final
+  // spoken reply from it took.
+  const startedAt = Date.now();
+  namedLog("voice:tool_result", session, { at: startedAt });
   try {
     const { reply } = await session.deps.generateReply([
       {
@@ -1275,12 +1351,23 @@ async function composeHonestBookingReply(session: Session, facts: string): Promi
       },
       { role: "user", content: facts },
     ]);
-    return reply.trim();
+    const spoken = reply.trim();
+    namedLog("voice:final_response", session, {
+      latency_ms: Date.now() - startedAt,
+      replyLength: spoken.length,
+    });
+    return spoken;
   } catch (err) {
     log("booking_reply_composition_failed", session, { message: (err as Error).message });
-    return facts.toLowerCase().includes("succeeded")
+    const fallback = facts.toLowerCase().includes("succeeded")
       ? "Your appointment is confirmed."
       : "I'm sorry, I couldn't confirm that booking. Someone from our team will follow up with you shortly.";
+    namedLog("voice:final_response", session, {
+      latency_ms: Date.now() - startedAt,
+      replyLength: fallback.length,
+      fellBackToCannedReply: true,
+    });
+    return fallback;
   }
 }
 
@@ -1368,17 +1455,77 @@ function formatSlotTimeLocal(isoUtc: string, timeZone: string): string {
   }
 }
 
+/** Same conversion as formatSlotTimeLocal, but in the 24-hour "HH:mm" shape AppointmentState.preferredTime is documented to hold (what zonedWallTimeToUtc expects back) — used when WRITING a real resolved slot time into state (e.g. after booking "the next available" slot), never for what's actually spoken to the caller. */
+function formatSlotTime24h(isoUtc: string, timeZone: string): string {
+  try {
+    return new Intl.DateTimeFormat("en-GB", {
+      timeZone,
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).format(new Date(isoUtc));
+  } catch {
+    return isoUtc;
+  }
+}
+
+type AvailabilityPeriod = "morning" | "afternoon" | "evening";
+
+/** The local hour-of-day (0-23) a UTC instant falls on in the business's timezone — used only to filter real returned slots by an approximate period the caller gave ("this afternoon"), never to compute or invent a time itself. */
+function localHourOf(isoUtc: string, timeZone: string): number {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hour: "numeric",
+      hour12: false,
+    }).formatToParts(new Date(isoUtc));
+    const raw = parts.find((p) => p.type === "hour")?.value;
+    const hour = raw ? Number(raw) : NaN;
+    return hour === 24 ? 0 : hour;
+  } catch {
+    return NaN;
+  }
+}
+
+/** Half-open [start, end) local-hour ranges for each approximate period — a plain, documented convention (not a calendar/business-hours concept), used only to narrow which of the REAL slots check_calendar_availability returned get read out for an approximate request like "this afternoon". */
+const PERIOD_HOUR_RANGES: Record<AvailabilityPeriod, readonly [number, number]> = {
+  morning: [0, 12],
+  afternoon: [12, 17],
+  evening: [17, 24],
+};
+
+function filterSlotsByPeriod<T extends { start: string }>(
+  slots: T[],
+  period: AvailabilityPeriod | null,
+  timeZone: string,
+): T[] {
+  if (!period) return slots;
+  const [lo, hi] = PERIOD_HOUR_RANGES[period];
+  return slots.filter((slot) => {
+    const hour = localHourOf(slot.start, timeZone);
+    return hour >= lo && hour < hi;
+  });
+}
+
 /**
- * Attempts to check (never book) whether the caller's requested date/time
- * is free, when the model has proposed "checking_availability" (see
- * parseApptStateMarker) and the slot itself (date + time) is known — unlike
- * attemptBooking, the caller's name/phone are not required merely to check.
+ * Attempts to check (never book) whether the caller's requested date is
+ * free, when the model has proposed "checking_availability" (see
+ * parseApptStateMarker) and at least a date is known — unlike attemptBooking,
+ * the caller's name/phone are not required merely to check. Handles three
+ * shapes of request against the exact same real check_calendar_availability
+ * call:
+ *   - an exact time ("is 3pm available?") — reports yes/no for that exact
+ *     instant, with real alternatives on no;
+ *   - an approximate period ("any slots this afternoon?") — lists the real
+ *     returned slots filtered to that period;
+ *   - fully open ("any slots available today?") — lists the real returned
+ *     slots for the day, unfiltered.
  * Calls the real check_calendar_availability tool directly, same
  * deterministic-dispatch rationale as attemptBooking's own doc comment
  * (Sarvam has no native tool-calling to dispatch through). Never reports a
- * slot as available/unavailable, and never offers an alternative time,
- * except exactly what this real tool call returned — the mechanism behind
- * "never invent availability".
+ * slot as available/unavailable, and never offers a time, except exactly
+ * what this real tool call returned — the mechanism behind "never invent
+ * availability".
  */
 async function attemptAvailabilityCheck(
   session: Session,
@@ -1388,8 +1535,8 @@ async function attemptAvailabilityCheck(
   const callId = session.input.callId;
   const businessId = session.input.businessId;
 
-  if (!executeTool || !state.preferredDate || !state.preferredTime) {
-    log("calendar_tool:error", session, {
+  if (!executeTool || !state.preferredDate) {
+    namedLog("calendar_tool:error", session, {
       tool: "check_calendar_availability",
       code: "NOT_CONFIGURED",
     });
@@ -1409,21 +1556,19 @@ async function attemptAvailabilityCheck(
     callId,
   };
   const timezone = await resolveBusinessTimezone(businessId);
-  const startIso = zonedWallTimeToUtc(
-    state.preferredDate,
-    state.preferredTime,
-    timezone,
-  ).toISOString();
+  const exactStartIso = state.preferredTime
+    ? zonedWallTimeToUtc(state.preferredDate, state.preferredTime, timezone).toISOString()
+    : null;
 
-  log("calendar_tool:start", session, {
+  namedLog("calendar_tool:start", session, {
     tool: "check_calendar_availability",
     call_id: callId,
     business_id: businessId,
     date: state.preferredDate,
-    requested_time: state.preferredTime,
+    requested_time: state.preferredTime ?? state.preferredPeriod ?? "any",
   });
   const startedAt = Date.now();
-  log("calendar_tool:provider_request", session, { tool: "check_calendar_availability" });
+  namedLog("calendar_tool:provider_request", session, { tool: "check_calendar_availability" });
 
   const availability = await withToolDeadline(
     CALENDAR_TOOL_TIMEOUT_MS,
@@ -1439,7 +1584,7 @@ async function attemptAvailabilityCheck(
   const slots = Array.isArray((availabilityResult?.["data"] as { slots?: unknown })?.["slots"])
     ? ((availabilityResult?.["data"] as { slots: { start: string; end: string }[] }).slots ?? [])
     : [];
-  log("calendar_tool:provider_response", session, {
+  namedLog("calendar_tool:provider_response", session, {
     latency_ms: latencyMs,
     success: !availability.isError,
     available_count: slots.length,
@@ -1448,7 +1593,7 @@ async function attemptAvailabilityCheck(
   if (availability.isError) {
     const errorCode =
       (availabilityResult?.["error"] as { code?: string } | undefined)?.code ?? "UNKNOWN";
-    log("calendar_tool:error", session, {
+    namedLog("calendar_tool:error", session, {
       tool: "check_calendar_availability",
       code: errorCode,
       latency_ms: latencyMs,
@@ -1459,39 +1604,83 @@ async function attemptAvailabilityCheck(
     };
   }
 
-  log("calendar_tool:completed", session, { tool: "check_calendar_availability" });
-  const requestedSlot = slots.find((slot) => slot.start === startIso);
+  namedLog("calendar_tool:completed", session, { tool: "check_calendar_availability" });
 
-  if (requestedSlot) {
+  // Exact-time request: report yes/no for that one instant specifically.
+  if (exactStartIso) {
+    const requestedSlot = slots.find((slot) => slot.start === exactStartIso);
+    if (requestedSlot) {
+      return {
+        spoken: await composeHonestBookingReply(
+          session,
+          `The requested slot (${state.preferredTime} on ${state.preferredDate}) IS available, confirmed by the calendar. Tell the caller it's available and ask if they'd like you to book it now.`,
+        ),
+        state: {
+          ...state,
+          bookingStatus: "collecting",
+          availabilityStatus: "available",
+          selectedSlot: requestedSlot,
+        },
+      };
+    }
+    // Never invents alternatives — exactly the next real slots the
+    // calendar itself returned for that day, nothing else.
+    const alternatives = slots.slice(0, 2).map((slot) => formatSlotTimeLocal(slot.start, timezone));
     return {
       spoken: await composeHonestBookingReply(
         session,
-        `The requested slot (${state.preferredTime} on ${state.preferredDate}) IS available, confirmed by the calendar. Tell the caller it's available and ask if they'd like you to book it now.`,
+        alternatives.length
+          ? `The requested slot (${state.preferredTime} on ${state.preferredDate}) is NOT available. The only real alternative times open that day are: ${alternatives.join(" and ")}. Offer exactly these, nothing else, and ask which they'd prefer. Never invent a time not in this list.`
+          : `The requested slot (${state.preferredTime} on ${state.preferredDate}) is NOT available, and there are no other open slots that day. Say so honestly and offer to check a different day.`,
       ),
       state: {
         ...state,
         bookingStatus: "collecting",
-        availabilityStatus: "available",
-        selectedSlot: requestedSlot,
+        availabilityStatus: "unavailable",
+        selectedSlot: alternatives.length ? (slots[0] ?? null) : null,
       },
     };
   }
 
-  // Never invents alternatives — exactly the next real slots the calendar
-  // itself returned for that day, nothing else.
-  const alternatives = slots.slice(0, 2).map((slot) => formatSlotTimeLocal(slot.start, timezone));
+  // Open ("any slots today?") or approximate-period ("this afternoon?")
+  // request: list the real returned slots, filtered to the period if one
+  // was given — never a single yes/no, and never a time outside this list.
+  const filtered = filterSlotsByPeriod(slots, state.preferredPeriod, timezone);
+  const periodLabel = state.preferredPeriod ? ` in the ${state.preferredPeriod}` : "";
+
+  if (filtered.length === 0) {
+    return {
+      spoken: await composeHonestBookingReply(
+        session,
+        `There are no open slots on ${state.preferredDate}${periodLabel}. Say so honestly in one short sentence${
+          state.preferredPeriod
+            ? ", and offer to check a different time of day or a different day"
+            : ", and offer to check a different day"
+        }. Never say a time is available.`,
+      ),
+      state: {
+        ...state,
+        bookingStatus: "collecting",
+        availabilityStatus: "unavailable",
+        selectedSlot: null,
+      },
+    };
+  }
+
+  const listed = filtered.slice(0, 4).map((slot) => formatSlotTimeLocal(slot.start, timezone));
   return {
     spoken: await composeHonestBookingReply(
       session,
-      alternatives.length
-        ? `The requested slot (${state.preferredTime} on ${state.preferredDate}) is NOT available. The only real alternative times open that day are: ${alternatives.join(" and ")}. Offer exactly these, nothing else, and ask which they'd prefer. Never invent a time not in this list.`
-        : `The requested slot (${state.preferredTime} on ${state.preferredDate}) is NOT available, and there are no other open slots that day. Say so honestly and offer to check a different day.`,
+      `These real times are open on ${state.preferredDate}${periodLabel}: ${listed.join(", ")}. List exactly these times, nothing else, and ask if they'd like to book one. Never invent a time not in this list.`,
     ),
     state: {
       ...state,
       bookingStatus: "collecting",
-      availabilityStatus: "unavailable",
-      selectedSlot: alternatives.length ? (slots[0] ?? null) : null,
+      availabilityStatus: "available",
+      // Only unambiguous when exactly one real slot came back — with
+      // several, "that slot" cannot resolve to any one of them until the
+      // caller actually picks.
+      selectedSlot: filtered.length === 1 ? (filtered[0] ?? null) : null,
     },
   };
 }
@@ -1523,7 +1712,11 @@ async function attemptBooking(
 ): Promise<{ spoken: string; state: AppointmentState }> {
   const state = session.appointmentState;
   const executeTool = session.deps.executeTool;
-  if (!executeTool || !state.preferredDate || !state.preferredTime) {
+  // An exact time is not required when the caller explicitly asked for the
+  // next/earliest open slot (wantsNextAvailable) — see
+  // appointmentStateIsComplete's own doc comment. The actual target slot is
+  // resolved below, once the real availability list is in hand.
+  if (!executeTool || !state.preferredDate || !(state.preferredTime || state.wantsNextAvailable)) {
     log("booking_attempt_skipped_no_tool_executor", session);
     return {
       spoken: await composeHonestBookingReply(
@@ -1541,21 +1734,19 @@ async function attemptBooking(
     callId: session.input.callId,
   };
   const timezone = await resolveBusinessTimezone(session.input.businessId);
-  const startIso = zonedWallTimeToUtc(
-    state.preferredDate,
-    state.preferredTime,
-    timezone,
-  ).toISOString();
-  const endIso = new Date(
-    zonedWallTimeToUtc(state.preferredDate, state.preferredTime, timezone).getTime() +
-      DEFAULT_APPOINTMENT_DURATION_MINUTES * 60_000,
-  ).toISOString();
+  // Only computable when the caller gave an exact time — when they asked
+  // for "the next available slot" instead, the target start/end is
+  // resolved from the real slots list below (slots[0]), never guessed.
+  const requestedStartIso = state.preferredTime
+    ? zonedWallTimeToUtc(state.preferredDate, state.preferredTime, timezone).toISOString()
+    : null;
 
   log("booking_attempt_started", session, {
     preferredDate: state.preferredDate,
     preferredTime: state.preferredTime,
+    wantsNextAvailable: state.wantsNextAvailable,
   });
-  log("calendar_tool:start", session, {
+  namedLog("calendar_tool:start", session, {
     tool: "check_calendar_availability",
     call_id: session.input.callId,
     business_id: session.input.businessId,
@@ -1563,7 +1754,7 @@ async function attemptBooking(
     requested_time: state.preferredTime,
   });
   const availabilityStartedAt = Date.now();
-  log("calendar_tool:provider_request", session, { tool: "check_calendar_availability" });
+  namedLog("calendar_tool:provider_request", session, { tool: "check_calendar_availability" });
 
   const availability = await withToolDeadline(
     CALENDAR_TOOL_TIMEOUT_MS,
@@ -1578,7 +1769,7 @@ async function attemptBooking(
   const slots = Array.isArray((availabilityResult?.["data"] as { slots?: unknown })?.["slots"])
     ? ((availabilityResult?.["data"] as { slots: { start: string; end: string }[] }).slots ?? [])
     : [];
-  log("calendar_tool:provider_response", session, {
+  namedLog("calendar_tool:provider_response", session, {
     latency_ms: availabilityLatencyMs,
     success: !availability.isError,
     available_count: slots.length,
@@ -1593,7 +1784,7 @@ async function attemptBooking(
   if (availability.isError) {
     const errorCode =
       (availabilityResult?.["error"] as { code?: string } | undefined)?.code ?? "UNKNOWN";
-    log("calendar_tool:error", session, {
+    namedLog("calendar_tool:error", session, {
       tool: "check_calendar_availability",
       code: errorCode,
       latency_ms: availabilityLatencyMs,
@@ -1603,24 +1794,34 @@ async function attemptBooking(
       state: { ...state, bookingStatus: "collecting" },
     };
   }
-  log("calendar_tool:completed", session, { tool: "check_calendar_availability" });
+  namedLog("calendar_tool:completed", session, { tool: "check_calendar_availability" });
 
-  // AvailabilitySlot's own fields are `start`/`end` (calendar-service.server.ts),
-  // not startIso/endIso — those names belong to create_calendar_event's input.
-  const slotAvailable = slots.some((slot) => slot.start === startIso);
+  // Target slot resolution: an exact caller-given time must match one of
+  // the real returned slots precisely (AvailabilitySlot's own fields are
+  // `start`/`end` — calendar-service.server.ts — not startIso/endIso,
+  // those names belong to create_calendar_event's input); "next available"
+  // takes the earliest real slot the calendar itself returned (computeAvailability
+  // already generates slots in chronological order) — never a guessed or
+  // rounded time.
+  const targetSlot = requestedStartIso
+    ? (slots.find((slot) => slot.start === requestedStartIso) ?? null)
+    : (slots[0] ?? null);
 
-  if (!slotAvailable) {
+  if (!targetSlot) {
     log("booking_attempt_unavailable", session, { toolSucceeded: true });
     // Never invents alternatives — exactly the next real slots the
     // calendar itself returned for that day, same discipline as
     // attemptAvailabilityCheck.
     const alternatives = slots.slice(0, 2).map((slot) => formatSlotTimeLocal(slot.start, timezone));
+    const requestedLabel = state.preferredTime
+      ? `${state.preferredTime} on ${state.preferredDate}`
+      : `${state.preferredDate}`;
     return {
       spoken: await composeHonestBookingReply(
         session,
         alternatives.length
-          ? `The requested slot (${state.preferredTime} on ${state.preferredDate}) is NOT available. The only real alternative times open that day are: ${alternatives.join(" and ")}. Offer exactly these, nothing else, and ask which they'd prefer. Do not say it was booked.`
-          : `The requested slot (${state.preferredDate} at ${state.preferredTime}) is NOT available, and there are no other open slots that day. Say so honestly and offer to check a different day. Do not say it was booked.`,
+          ? `The requested slot (${requestedLabel}) is NOT available. The only real alternative times open that day are: ${alternatives.join(" and ")}. Offer exactly these, nothing else, and ask which they'd prefer. Do not say it was booked.`
+          : `There are no open slots available for ${requestedLabel}${state.preferredTime ? "" : " at all"}. Say so honestly and offer to check a different day. Do not say it was booked.`,
       ),
       state: {
         ...state,
@@ -1630,16 +1831,28 @@ async function attemptBooking(
       },
     };
   }
+  const startIso = targetSlot.start;
+  const endIso = targetSlot.end;
+  // The REAL time being booked — for an exact-time request this equals
+  // what the caller already said; for "next available" it's the actual
+  // resolved slot. bookedLocalTime (human-readable, spoken to the caller)
+  // and bookedTime24h (24-hour "HH:mm", the shape preferredTime is
+  // documented to hold and zonedWallTimeToUtc expects back) are kept
+  // separate so a later "that slot" reference can still be re-resolved
+  // correctly — storing the 12-hour spoken form in preferredTime would
+  // silently break that.
+  const bookedLocalTime = formatSlotTimeLocal(startIso, timezone);
+  const bookedTime24h = formatSlotTime24h(startIso, timezone);
 
-  log("calendar_tool:start", session, {
+  namedLog("calendar_tool:start", session, {
     tool: "book_appointment",
     call_id: session.input.callId,
     business_id: session.input.businessId,
     date: state.preferredDate,
-    requested_time: state.preferredTime,
+    requested_time: state.preferredTime ?? "next_available",
   });
   const bookingStartedAt = Date.now();
-  log("calendar_tool:provider_request", session, { tool: "book_appointment" });
+  namedLog("calendar_tool:provider_request", session, { tool: "book_appointment" });
 
   const booking = await withToolDeadline(
     CALENDAR_TOOL_TIMEOUT_MS,
@@ -1657,7 +1870,7 @@ async function attemptBooking(
   ).catch(timeoutToolResult);
   const bookingLatencyMs = Date.now() - bookingStartedAt;
   const bookingResult = safeJsonParse(booking.content);
-  log("calendar_tool:provider_response", session, {
+  namedLog("calendar_tool:provider_response", session, {
     latency_ms: bookingLatencyMs,
     success: !booking.isError && bookingResult?.["success"] === true,
     available_count: null,
@@ -1666,7 +1879,7 @@ async function attemptBooking(
   if (booking.isError || bookingResult?.["success"] !== true) {
     const errorCode = (bookingResult?.["error"] as { code?: string } | undefined)?.code ?? null;
     log("booking_attempt_failed", session, { errorCode });
-    log("calendar_tool:error", session, {
+    namedLog("calendar_tool:error", session, {
       tool: "book_appointment",
       code: errorCode ?? "UNKNOWN",
       latency_ms: bookingLatencyMs,
@@ -1683,13 +1896,22 @@ async function attemptBooking(
   }
 
   log("booking_attempt_succeeded", session);
-  log("calendar_tool:completed", session, { tool: "book_appointment" });
+  namedLog("calendar_tool:completed", session, { tool: "book_appointment" });
   return {
     spoken: await composeHonestBookingReply(
       session,
-      `The booking succeeded: ${state.service ?? "the appointment"} for ${state.customerName ?? "the caller"} on ${state.preferredDate} at ${state.preferredTime}. Confirm this briefly.`,
+      `The booking succeeded: ${state.service ?? "the appointment"} for ${state.customerName ?? "the caller"} on ${state.preferredDate} at ${bookedLocalTime}. Confirm this briefly.`,
     ),
-    state: { ...state, bookingStatus: "booked", availabilityStatus: "unknown", selectedSlot: null },
+    state: {
+      ...state,
+      // The REAL booked time, even for a "next available" request where
+      // preferredTime started out null — see bookedTime24h's own comment.
+      preferredTime: bookedTime24h,
+      wantsNextAvailable: false,
+      bookingStatus: "booked",
+      availabilityStatus: "unknown",
+      selectedSlot: null,
+    },
   };
 }
 
@@ -2173,6 +2395,14 @@ function onTtsEvent(session: Session, event: TtsEvent, connectionId: number) {
       // check recognize caller speech during a still-playing reply's tail
       // even after the state machine has already moved on to "listening".
       session.ttsChunksFlushed += 1;
+      // Requested diagnostic naming (distinct from the voice_runtime:*
+      // namespace) — pairs with tts:start above: fires once THIS speak()
+      // call's audio has fully played out (ttsAudioInFlight false again),
+      // not per-chunk, so a single log line per utterance (not per flush
+      // event) actually answers "how long did synthesis+delivery take".
+      if (!ttsAudioInFlight(session)) {
+        namedLog("tts:completed", session, { at: Date.now() });
+      }
       // Latency diagnostics: once every chunk sent so far has been fully
       // delivered, this turn's reply audio is completely done — the
       // caller has now heard all of it. Logged once per turn, then the
