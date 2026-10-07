@@ -197,6 +197,20 @@ describe("buildAgentInstructions — # APPOINTMENT STATE TRACKING (test Q: no re
     assert.doesNotMatch(prompt, /# APPOINTMENT STATE TRACKING/);
     assert.doesNotMatch(prompt, /APPT_STATE/);
   });
+
+  // Production incident: the agent went silent when a caller asked "can
+  // you check if that slot is available?" — the model had no instructed
+  // way to signal "just check, don't book yet" separately from
+  // "ready_to_book", and no instruction against claiming availability
+  // itself. Fixed by adding a distinct "checking_availability" marker
+  // field and an explicit instruction never to answer availability/
+  // booking questions itself.
+  test("instructs a distinct checking_availability signal, separate from ready_to_book, and forbids answering availability/booking itself", () => {
+    const prompt = buildAgentInstructions(bookingAgent);
+    assert.match(prompt, /checking_availability/);
+    assert.match(prompt, /never tell the caller a slot is or isn't available/i);
+    assert.match(prompt, /no way to actually know whether a time is free/i);
+  });
 });
 
 /**

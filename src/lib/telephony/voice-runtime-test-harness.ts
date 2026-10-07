@@ -330,6 +330,8 @@ export interface FakeToolExecutorController {
   readonly calls: { name: string; input: Record<string, unknown>; ctx: ToolExecContext }[];
   /** Sets the result the NEXT call to this tool name resolves with (consumed once, then falls back to the default "not configured" result every other tool name gets). */
   setNextResult(name: string, result: { content: string; isError?: boolean }): void;
+  /** Delays the NEXT call to this tool name by this many ms before it resolves (consumed once) — for testing voice-runtime.server.ts's CALENDAR_TOOL_TIMEOUT_MS (Task 6: a calendar call must never hang the call indefinitely). */
+  setNextDelay(name: string, ms: number): void;
 }
 
 export function createFakeToolExecutor(): {
@@ -342,9 +344,15 @@ export function createFakeToolExecutor(): {
 } {
   const calls: { name: string; input: Record<string, unknown>; ctx: ToolExecContext }[] = [];
   const nextResults = new Map<string, { content: string; isError?: boolean }>();
+  const nextDelays = new Map<string, number>();
 
   const executeTool: RuntimeDeps["executeTool"] = async (name, input, ctx) => {
     calls.push({ name, input, ctx });
+    const delay = nextDelays.get(name);
+    if (delay !== undefined) {
+      nextDelays.delete(name);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
     const next = nextResults.get(name);
     if (next) {
       nextResults.delete(name);
@@ -367,6 +375,9 @@ export function createFakeToolExecutor(): {
       },
       setNextResult(name, result) {
         nextResults.set(name, result);
+      },
+      setNextDelay(name, ms) {
+        nextDelays.set(name, ms);
       },
     },
   };

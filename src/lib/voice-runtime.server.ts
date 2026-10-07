@@ -230,7 +230,37 @@ export interface AppointmentState {
   preferredDate: string | null;
   /** 24-hour HH:mm, local to the business's own timezone. */
   preferredTime: string | null;
-  bookingStatus: "collecting" | "ready_to_book" | "booked" | "unavailable";
+  /**
+   * "checking_availability" (new): the caller asked whether a specific
+   * date/time is free, but hasn't confirmed they want to book it yet — see
+   * attemptAvailabilityCheck. Distinct from "ready_to_book" (an explicit
+   * confirmation to actually book) so the two deterministic tool paths
+   * never fire for the same turn.
+   */
+  bookingStatus:
+    "collecting" | "checking_availability" | "ready_to_book" | "booked" | "unavailable";
+  /**
+   * The REAL outcome of the most recently run check_calendar_availability
+   * call for preferredDate/preferredTime — set ONLY by
+   * attemptAvailabilityCheck/attemptBooking from an actual tool result,
+   * never proposed by the model (see parseApptStateMarker: this field is
+   * deliberately not part of what the LLM's marker can set) — the
+   * mechanism behind "never invent availability". Invalidated back to
+   * "unknown" by mergeAppointmentState whenever preferredDate/preferredTime
+   * changes, since a stale result would otherwise describe a slot the
+   * caller is no longer asking about.
+   */
+  availabilityStatus: "unknown" | "available" | "unavailable";
+  /**
+   * The exact real slot (ISO 8601 UTC start/end, as returned by
+   * check_calendar_availability) that availabilityStatus describes — "that
+   * slot" (the caller referring back to a time the agent just offered,
+   * including an ALTERNATIVE the caller didn't originally ask for) resolves
+   * against this, not by re-deriving it from preferredDate/preferredTime.
+   * Same provenance rule as availabilityStatus: only ever set from a real
+   * tool result, never model-proposed.
+   */
+  selectedSlot: { start: string; end: string } | null;
 }
 
 function emptyAppointmentState(): AppointmentState {
@@ -241,6 +271,8 @@ function emptyAppointmentState(): AppointmentState {
     preferredDate: null,
     preferredTime: null,
     bookingStatus: "collecting",
+    availabilityStatus: "unknown",
+    selectedSlot: null,
   };
 }
 
@@ -903,7 +935,20 @@ export function parseApptStateMarker(reply: string): {
       state.preferredDate = parsed["preferred_date"];
     if (typeof parsed["preferred_time"] === "string")
       state.preferredTime = parsed["preferred_time"];
+    // Deliberately never parses an "availability_status"/"selected_slot"
+    // field from the model, even if one were ever present in `parsed` —
+    // see AppointmentState's own doc comment: those two fields are
+    // runtime-owned, set only from a real check_calendar_availability
+    // result (attemptAvailabilityCheck/attemptBooking), never proposed by
+    // the LLM. This is the mechanism behind "never invent availability".
+    //
+    // "ready_to_book" (an explicit confirmation to actually book) takes
+    // priority over "checking_availability" (the caller merely asking
+    // whether a time is free) if a reply somehow proposes both — an
+    // explicit booking confirmation is the stronger signal.
     if (parsed["ready_to_book"] === true) state.bookingStatus = "ready_to_book";
+    else if (parsed["checking_availability"] === true)
+      state.bookingStatus = "checking_availability";
     return { spokenText, state };
   } catch {
     return { spokenText, state: null };
@@ -916,25 +961,42 @@ function mergeAppointmentState(
   proposed: Partial<AppointmentState> | null,
 ): AppointmentState {
   if (!proposed) return current;
+  const preferredDate = proposed.preferredDate ?? current.preferredDate;
+  const preferredTime = proposed.preferredTime ?? current.preferredTime;
+  // The requested slot itself changed this turn (a new date/time, or a
+  // correction to one already given) — any availabilityStatus/selectedSlot
+  // carried over from a PREVIOUS check now describes a slot the caller is
+  // no longer asking about, so it must not keep being treated as current
+  // (e.g. silently booking the OLD time as "already confirmed available").
+  const slotChanged =
+    preferredDate !== current.preferredDate || preferredTime !== current.preferredTime;
   return {
     service: proposed.service ?? current.service,
     customerName: proposed.customerName ?? current.customerName,
     phone: proposed.phone ?? current.phone,
-    preferredDate: proposed.preferredDate ?? current.preferredDate,
-    preferredTime: proposed.preferredTime ?? current.preferredTime,
+    preferredDate,
+    preferredTime,
     // bookingStatus is deliberately NOT sticky across turns the way the
-    // other fields are: "ready_to_book" is only a proposal for THIS turn's
-    // attempt (handleUserUtterance resolves it immediately, to "booked" or
-    // back to "collecting"/"unavailable") — carrying a stale
-    // "ready_to_book" forward would re-trigger a booking attempt on a
-    // later, unrelated turn.
+    // other fields are: "ready_to_book"/"checking_availability" are only a
+    // proposal for THIS turn's attempt (handleUserUtterance resolves it
+    // immediately — to "booked"/"unavailable" for a booking attempt, or
+    // back to "collecting"/"unavailable" for an availability check) —
+    // carrying either forward would re-trigger a tool call on a later,
+    // unrelated turn.
     bookingStatus: proposed.bookingStatus ?? "collecting",
+    availabilityStatus: slotChanged ? "unknown" : current.availabilityStatus,
+    selectedSlot: slotChanged ? null : current.selectedSlot,
   };
 }
 
 /** Required to attempt a real booking — see attemptBooking. */
 function appointmentStateIsComplete(s: AppointmentState): boolean {
   return Boolean(s.service && s.customerName && s.phone && s.preferredDate && s.preferredTime);
+}
+
+/** Required to check availability — unlike a booking attempt, the caller's name/phone are not needed merely to ask "is this slot free". */
+function appointmentSlotIsKnown(s: AppointmentState): boolean {
+  return Boolean(s.preferredDate && s.preferredTime);
 }
 
 /** Renders the runtime-owned appointment state into a system message the LLM can read as ground truth, instead of relying on it re-deriving the same facts from (possibly truncated) conversation history. Returns null when nothing is known yet, so a fresh call's messages array isn't padded with an all-null block. */
@@ -945,6 +1007,20 @@ function describeKnownAppointmentState(s: AppointmentState): string | null {
   if (s.phone) known.push(`phone: ${s.phone}`);
   if (s.preferredDate) known.push(`preferred date: ${s.preferredDate}`);
   if (s.preferredTime) known.push(`preferred time: ${s.preferredTime}`);
+  // Task 9 ("that slot" resolution): surfaces the REAL outcome of the most
+  // recent availability check, if any, so a later "check that slot" or
+  // "book that slot" has enough context to resolve without re-asking —
+  // and so the model never contradicts a result the runtime already gave
+  // the caller out loud.
+  if (s.availabilityStatus === "available" && s.selectedSlot) {
+    known.push(
+      `availability: the requested time IS available (confirmed by the calendar) — "that slot" refers to this time`,
+    );
+  } else if (s.availabilityStatus === "unavailable") {
+    known.push(
+      `availability: the requested time is NOT available — if the caller accepts an alternative you offered, update preferred_time to match it`,
+    );
+  }
   if (!known.length) return null;
   return `CURRENT APPOINTMENT STATE (already confirmed by the caller — do not ask for these again):\n${known.join("\n")}`;
 }
@@ -1209,6 +1285,218 @@ async function composeHonestBookingReply(session: Session, facts: string): Promi
 }
 
 /**
+ * Production incident: callers asking "can you check if that slot is
+ * available?" or "book me tomorrow at 3pm" got total silence. Root cause
+ * (see this file's and llm-provider.server.ts's own module docs): Sarvam —
+ * the default/production LLM provider — has no native function/tool-
+ * calling wired at all (resolveGenerateReplyWithTools returns undefined
+ * for it), so a calendar operation here is never bounded by the provider's
+ * own request timeout the way an LLM call is (REQUEST_TIMEOUT_MS in
+ * sarvam.server.ts/claude.server.ts). The underlying Google Calendar
+ * provider does have its own retry/timeout (DEFAULT_TIMEOUT_MS=15s,
+ * up to MAX_RETRIES=2 — google-calendar-provider.server.ts), but that can
+ * still take up to ~45s in the worst case — comfortably longer than is
+ * acceptable for a live phone call. CALENDAR_TOOL_TIMEOUT_MS bounds each
+ * individual calendar tool call (availability check, booking) from the
+ * voice runtime's side specifically, so a slow/hung Google Calendar call
+ * degrades to a spoken "I'm having trouble reaching the calendar" apology
+ * instead of silence — on top of (not instead of) the whole-turn
+ * TURN_DEADLINE_MS safety net above, which still protects every other
+ * stage of the turn.
+ */
+const CALENDAR_TOOL_TIMEOUT_MS = 10_000;
+
+class ToolTimeoutError extends Error {
+  constructor(ms: number) {
+    super(`Calendar tool call exceeded ${ms}ms`);
+  }
+}
+
+function withToolDeadline<T>(ms: number, promise: Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new ToolTimeoutError(ms)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
+/** Converts a ToolTimeoutError into the exact same `{content, isError}` shape a real tool result has (see ai-tools.server.ts's ToolDefinition['execute']), so downstream code (safeJsonParse, error-code branching, calendar_tool:error logging) handles a timeout identically to any other structured tool failure — never a special case. Anything that is NOT a ToolTimeoutError is rethrown unchanged: this must never mask a genuine bug as a timeout. */
+function timeoutToolResult(err: unknown): { content: string; isError: boolean } {
+  if (!(err instanceof ToolTimeoutError)) throw err;
+  return {
+    content: JSON.stringify({
+      success: false,
+      error: { code: "CALENDAR_TIMEOUT", message: "Google Calendar did not respond in time." },
+    }),
+    isError: true,
+  };
+}
+
+/** Phrases a calendar tool failure's structured error code into plain facts for composeHonestBookingReply — same "state only what really happened" discipline as the booking-outcome facts strings below, just for the availability/connection-failure branch specifically (Task 3/6: the caller must hear something useful, never silence, when the calendar itself is the problem rather than the requested time being taken). */
+function calendarErrorFacts(errorCode: string): string {
+  switch (errorCode) {
+    case "GOOGLE_AUTH_REQUIRED":
+    case "NEEDS_REAUTH":
+    case "NOT_CONFIGURED":
+      return "The calendar is not connected for this business right now, so availability cannot be checked or confirmed. Apologize briefly, say you're unable to access the calendar right now so you can't confirm that slot yet, and offer to have someone call back.";
+    case "CALENDAR_TIMEOUT":
+      return "The calendar did not respond in time. Apologize briefly and say you're having trouble reaching the calendar right now, so you couldn't confirm that slot.";
+    default:
+      return "The calendar could not be reached right now, so availability cannot be confirmed. Apologize briefly and offer a callback.";
+  }
+}
+
+/** Formats a UTC ISO instant as a plain local HH:mm-style time in the business's own timezone, for phrasing real alternative slots naturally — never a manual UTC-offset calculation (see this file's and calendar/timezone.ts's own convention of using Intl.DateTimeFormat for IANA-timezone-aware formatting, which is DST-safe). */
+function formatSlotTimeLocal(isoUtc: string, timeZone: string): string {
+  try {
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+    }).format(new Date(isoUtc));
+  } catch {
+    return isoUtc;
+  }
+}
+
+/**
+ * Attempts to check (never book) whether the caller's requested date/time
+ * is free, when the model has proposed "checking_availability" (see
+ * parseApptStateMarker) and the slot itself (date + time) is known — unlike
+ * attemptBooking, the caller's name/phone are not required merely to check.
+ * Calls the real check_calendar_availability tool directly, same
+ * deterministic-dispatch rationale as attemptBooking's own doc comment
+ * (Sarvam has no native tool-calling to dispatch through). Never reports a
+ * slot as available/unavailable, and never offers an alternative time,
+ * except exactly what this real tool call returned — the mechanism behind
+ * "never invent availability".
+ */
+async function attemptAvailabilityCheck(
+  session: Session,
+): Promise<{ spoken: string; state: AppointmentState }> {
+  const state = session.appointmentState;
+  const executeTool = session.deps.executeTool;
+  const callId = session.input.callId;
+  const businessId = session.input.businessId;
+
+  if (!executeTool || !state.preferredDate || !state.preferredTime) {
+    log("calendar_tool:error", session, {
+      tool: "check_calendar_availability",
+      code: "NOT_CONFIGURED",
+    });
+    return {
+      spoken: await composeHonestBookingReply(
+        session,
+        "Availability could not be checked because this line isn't configured for live calendar access. Tell the caller you'll have someone confirm and call them back.",
+      ),
+      state: { ...state, bookingStatus: "collecting", availabilityStatus: "unknown" },
+    };
+  }
+
+  const ctx: ToolExecContext = {
+    organizationId: session.input.organizationId,
+    businessId,
+    agentConfigId: session.input.agentConfigId,
+    callId,
+  };
+  const timezone = await resolveBusinessTimezone(businessId);
+  const startIso = zonedWallTimeToUtc(
+    state.preferredDate,
+    state.preferredTime,
+    timezone,
+  ).toISOString();
+
+  log("calendar_tool:start", session, {
+    tool: "check_calendar_availability",
+    call_id: callId,
+    business_id: businessId,
+    date: state.preferredDate,
+    requested_time: state.preferredTime,
+  });
+  const startedAt = Date.now();
+  log("calendar_tool:provider_request", session, { tool: "check_calendar_availability" });
+
+  const availability = await withToolDeadline(
+    CALENDAR_TOOL_TIMEOUT_MS,
+    executeTool(
+      "check_calendar_availability",
+      { dateIso: state.preferredDate, durationMinutes: DEFAULT_APPOINTMENT_DURATION_MINUTES },
+      ctx,
+    ),
+  ).catch(timeoutToolResult);
+
+  const latencyMs = Date.now() - startedAt;
+  const availabilityResult = safeJsonParse(availability.content);
+  const slots = Array.isArray((availabilityResult?.["data"] as { slots?: unknown })?.["slots"])
+    ? ((availabilityResult?.["data"] as { slots: { start: string; end: string }[] }).slots ?? [])
+    : [];
+  log("calendar_tool:provider_response", session, {
+    latency_ms: latencyMs,
+    success: !availability.isError,
+    available_count: slots.length,
+  });
+
+  if (availability.isError) {
+    const errorCode =
+      (availabilityResult?.["error"] as { code?: string } | undefined)?.code ?? "UNKNOWN";
+    log("calendar_tool:error", session, {
+      tool: "check_calendar_availability",
+      code: errorCode,
+      latency_ms: latencyMs,
+    });
+    return {
+      spoken: await composeHonestBookingReply(session, calendarErrorFacts(errorCode)),
+      state: { ...state, bookingStatus: "collecting", availabilityStatus: "unknown" },
+    };
+  }
+
+  log("calendar_tool:completed", session, { tool: "check_calendar_availability" });
+  const requestedSlot = slots.find((slot) => slot.start === startIso);
+
+  if (requestedSlot) {
+    return {
+      spoken: await composeHonestBookingReply(
+        session,
+        `The requested slot (${state.preferredTime} on ${state.preferredDate}) IS available, confirmed by the calendar. Tell the caller it's available and ask if they'd like you to book it now.`,
+      ),
+      state: {
+        ...state,
+        bookingStatus: "collecting",
+        availabilityStatus: "available",
+        selectedSlot: requestedSlot,
+      },
+    };
+  }
+
+  // Never invents alternatives — exactly the next real slots the calendar
+  // itself returned for that day, nothing else.
+  const alternatives = slots.slice(0, 2).map((slot) => formatSlotTimeLocal(slot.start, timezone));
+  return {
+    spoken: await composeHonestBookingReply(
+      session,
+      alternatives.length
+        ? `The requested slot (${state.preferredTime} on ${state.preferredDate}) is NOT available. The only real alternative times open that day are: ${alternatives.join(" and ")}. Offer exactly these, nothing else, and ask which they'd prefer. Never invent a time not in this list.`
+        : `The requested slot (${state.preferredTime} on ${state.preferredDate}) is NOT available, and there are no other open slots that day. Say so honestly and offer to check a different day.`,
+    ),
+    state: {
+      ...state,
+      bookingStatus: "collecting",
+      availabilityStatus: "unavailable",
+      selectedSlot: alternatives.length ? (slots[0] ?? null) : null,
+    },
+  };
+}
+
+/**
  * Attempts to actually book the appointment once AppointmentState reports
  * every required field and the model has proposed "ready_to_book" (see
  * parseApptStateMarker) — the fix for "the agent kept talking instead of
@@ -1267,66 +1555,141 @@ async function attemptBooking(
     preferredDate: state.preferredDate,
     preferredTime: state.preferredTime,
   });
+  log("calendar_tool:start", session, {
+    tool: "check_calendar_availability",
+    call_id: session.input.callId,
+    business_id: session.input.businessId,
+    date: state.preferredDate,
+    requested_time: state.preferredTime,
+  });
+  const availabilityStartedAt = Date.now();
+  log("calendar_tool:provider_request", session, { tool: "check_calendar_availability" });
 
-  const availability = await executeTool(
-    "check_calendar_availability",
-    { dateIso: state.preferredDate, durationMinutes: DEFAULT_APPOINTMENT_DURATION_MINUTES },
-    ctx,
-  );
+  const availability = await withToolDeadline(
+    CALENDAR_TOOL_TIMEOUT_MS,
+    executeTool(
+      "check_calendar_availability",
+      { dateIso: state.preferredDate, durationMinutes: DEFAULT_APPOINTMENT_DURATION_MINUTES },
+      ctx,
+    ),
+  ).catch(timeoutToolResult);
+  const availabilityLatencyMs = Date.now() - availabilityStartedAt;
   const availabilityResult = safeJsonParse(availability.content);
   const slots = Array.isArray((availabilityResult?.["data"] as { slots?: unknown })?.["slots"])
-    ? ((availabilityResult?.["data"] as { slots: { start?: string }[] }).slots ?? [])
+    ? ((availabilityResult?.["data"] as { slots: { start: string; end: string }[] }).slots ?? [])
     : [];
+  log("calendar_tool:provider_response", session, {
+    latency_ms: availabilityLatencyMs,
+    success: !availability.isError,
+    available_count: slots.length,
+  });
+
+  // Genuine tool/calendar FAILURE (no connection, timeout, Google error) is
+  // a DIFFERENT outcome from "the tool worked fine but this specific time
+  // is taken" — conflating the two (the previous behavior) told the caller
+  // their requested time was unavailable even when the real reason was the
+  // calendar being unreachable, which is both misleading and exactly the
+  // kind of silent-failure-dressed-as-an-answer this fix targets.
+  if (availability.isError) {
+    const errorCode =
+      (availabilityResult?.["error"] as { code?: string } | undefined)?.code ?? "UNKNOWN";
+    log("calendar_tool:error", session, {
+      tool: "check_calendar_availability",
+      code: errorCode,
+      latency_ms: availabilityLatencyMs,
+    });
+    return {
+      spoken: await composeHonestBookingReply(session, calendarErrorFacts(errorCode)),
+      state: { ...state, bookingStatus: "collecting" },
+    };
+  }
+  log("calendar_tool:completed", session, { tool: "check_calendar_availability" });
+
   // AvailabilitySlot's own fields are `start`/`end` (calendar-service.server.ts),
   // not startIso/endIso — those names belong to create_calendar_event's input.
-  const slotAvailable = !availability.isError && slots.some((slot) => slot.start === startIso);
+  const slotAvailable = slots.some((slot) => slot.start === startIso);
 
   if (!slotAvailable) {
-    log("booking_attempt_unavailable", session, {
-      toolSucceeded: !availability.isError,
-      errorCode: (availabilityResult?.["error"] as { code?: string } | undefined)?.code ?? null,
-    });
+    log("booking_attempt_unavailable", session, { toolSucceeded: true });
+    // Never invents alternatives — exactly the next real slots the
+    // calendar itself returned for that day, same discipline as
+    // attemptAvailabilityCheck.
+    const alternatives = slots.slice(0, 2).map((slot) => formatSlotTimeLocal(slot.start, timezone));
     return {
       spoken: await composeHonestBookingReply(
         session,
-        `The requested slot (${state.preferredDate} at ${state.preferredTime}) is NOT available. Say so honestly and briefly, and offer to find another time. Do not say it was booked.`,
+        alternatives.length
+          ? `The requested slot (${state.preferredTime} on ${state.preferredDate}) is NOT available. The only real alternative times open that day are: ${alternatives.join(" and ")}. Offer exactly these, nothing else, and ask which they'd prefer. Do not say it was booked.`
+          : `The requested slot (${state.preferredDate} at ${state.preferredTime}) is NOT available, and there are no other open slots that day. Say so honestly and offer to check a different day. Do not say it was booked.`,
       ),
-      state: { ...state, bookingStatus: "unavailable" },
+      state: {
+        ...state,
+        bookingStatus: "unavailable",
+        availabilityStatus: "unavailable",
+        selectedSlot: alternatives.length ? (slots[0] ?? null) : null,
+      },
     };
   }
 
-  const booking = await executeTool(
-    "book_appointment",
-    {
-      customerName: state.customerName,
-      customerPhone: state.phone,
-      startIso,
-      endIso,
-      notes: state.service,
-    },
-    ctx,
-  );
+  log("calendar_tool:start", session, {
+    tool: "book_appointment",
+    call_id: session.input.callId,
+    business_id: session.input.businessId,
+    date: state.preferredDate,
+    requested_time: state.preferredTime,
+  });
+  const bookingStartedAt = Date.now();
+  log("calendar_tool:provider_request", session, { tool: "book_appointment" });
+
+  const booking = await withToolDeadline(
+    CALENDAR_TOOL_TIMEOUT_MS,
+    executeTool(
+      "book_appointment",
+      {
+        customerName: state.customerName,
+        customerPhone: state.phone,
+        startIso,
+        endIso,
+        notes: state.service,
+      },
+      ctx,
+    ),
+  ).catch(timeoutToolResult);
+  const bookingLatencyMs = Date.now() - bookingStartedAt;
   const bookingResult = safeJsonParse(booking.content);
+  log("calendar_tool:provider_response", session, {
+    latency_ms: bookingLatencyMs,
+    success: !booking.isError && bookingResult?.["success"] === true,
+    available_count: null,
+  });
+
   if (booking.isError || bookingResult?.["success"] !== true) {
-    log("booking_attempt_failed", session, {
-      errorCode: (bookingResult?.["error"] as { code?: string } | undefined)?.code ?? null,
+    const errorCode = (bookingResult?.["error"] as { code?: string } | undefined)?.code ?? null;
+    log("booking_attempt_failed", session, { errorCode });
+    log("calendar_tool:error", session, {
+      tool: "book_appointment",
+      code: errorCode ?? "UNKNOWN",
+      latency_ms: bookingLatencyMs,
     });
     return {
       spoken: await composeHonestBookingReply(
         session,
-        "The booking attempt failed on our end. Apologize briefly and say someone will follow up to confirm. Do not say it was booked.",
+        errorCode === "CALENDAR_TIMEOUT"
+          ? calendarErrorFacts("CALENDAR_TIMEOUT")
+          : "The booking attempt failed on our end. Apologize briefly and say someone will follow up to confirm. Do not say it was booked.",
       ),
       state: { ...state, bookingStatus: "unavailable" },
     };
   }
 
   log("booking_attempt_succeeded", session);
+  log("calendar_tool:completed", session, { tool: "book_appointment" });
   return {
     spoken: await composeHonestBookingReply(
       session,
       `The booking succeeded: ${state.service ?? "the appointment"} for ${state.customerName ?? "the caller"} on ${state.preferredDate} at ${state.preferredTime}. Confirm this briefly.`,
     ),
-    state: { ...state, bookingStatus: "booked" },
+    state: { ...state, bookingStatus: "booked", availabilityStatus: "unknown", selectedSlot: null },
   };
 }
 
@@ -1436,12 +1799,27 @@ async function handleUserUtterance(session: Session, text: string) {
       // booking attempt and decides what's actually said. See attemptBooking
       // for why this is deterministic rather than an LLM tool-use round
       // trip, and for why it's the fix for "never claim booked unless it
-      // actually succeeded".
+      // actually succeeded". Exactly one of these two deterministic tool
+      // paths can fire per turn (ready_to_book takes priority — see
+      // parseApptStateMarker) — never both, and never neither when the
+      // caller has asked a calendar question the model can't honestly
+      // answer on its own: that gap (a caller asking "is that slot free?"
+      // with no deterministic hook to answer it) is what previously left
+      // the model's own plain-text reply — sometimes empty — as the ONLY
+      // response, which is the direct cause of the reported "goes silent
+      // when checking availability" production incident.
       if (
         session.appointmentState.bookingStatus === "ready_to_book" &&
         appointmentStateIsComplete(session.appointmentState)
       ) {
         const outcome = await attemptBooking(session);
+        reply = outcome.spoken;
+        session.appointmentState = outcome.state;
+      } else if (
+        session.appointmentState.bookingStatus === "checking_availability" &&
+        appointmentSlotIsKnown(session.appointmentState)
+      ) {
+        const outcome = await attemptAvailabilityCheck(session);
         reply = outcome.spoken;
         session.appointmentState = outcome.state;
       }
