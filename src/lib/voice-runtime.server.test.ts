@@ -349,7 +349,7 @@ describe("silence/timeout handling — wiring", () => {
   });
 
   test("speech_end re-arms rather than speech_start, so the window doesn't start while the caller is still mid-utterance", () => {
-    assert.match(src, /case "speech_end":[\s\S]{0,400}armSilenceTimer\(session\);/);
+    assert.match(src, /case "speech_end":[\s\S]{0,600}armSilenceTimer\(session\);/);
   });
 
   test("all four handleUserUtterance exit paths (empty raw reply, empty after marker/booking, reply spoken, LLM error) re-arm before returning to LISTENING", () => {
@@ -387,7 +387,7 @@ describe("silence/timeout handling — wiring", () => {
   test("the greeting arms the timer once the caller is being listened to", () => {
     assert.match(
       src,
-      /setState\(session, "listening"\);\s*\n\s*armSilenceTimer\(session\);\s*\n\s*log\("greeting_played"/,
+      /setState\(session, "listening"\);\s*\n\s*armSilenceTimer\(session\);[\s\S]{0,300}log\("greeting_played"/,
     );
   });
 
@@ -421,8 +421,11 @@ describe("silence/timeout handling — wiring", () => {
 describe('STT connect call site uses Sarvam\'s real "auto" language code, not the rejected "unknown"', () => {
   test('connectStt is called with language: "auto"', () => {
     const fnStart = src.indexOf("export async function startRuntimeSession(");
-    const connectStart = src.indexOf("session.stt = await deps.connectStt({", fnStart);
-    const connectEnd = src.indexOf("});", connectStart);
+    const connectStart = src.indexOf(
+      'session.stt = await timedStep(session, "stt_connect"',
+      fnStart,
+    );
+    const connectEnd = src.indexOf("}),\n    );", connectStart);
     assert.ok(connectStart > -1 && connectEnd > -1);
     const connectBody = src.slice(connectStart, connectEnd);
     assert.match(connectBody, /language:\s*"auto",/);

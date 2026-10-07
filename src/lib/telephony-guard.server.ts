@@ -142,9 +142,39 @@ export async function checkTelephonyAccess(
 /* Call state machine (spec §7)                                        */
 /* ------------------------------------------------------------------ */
 
+/**
+ * Task 10 (production incident): a real call reached "answered"/
+ * "in_progress" in reality (the transcript shows a full, if broken,
+ * conversation) and ended normally, but the provider's "completed"
+ * status webhook arrived while call_logs still showed "ringing" — most
+ * plausibly an out-of-order or dropped "answered"/"in_progress" webhook
+ * delivery (a separate REST callback channel from the media WebSocket
+ * that actually runs the call; see voice-runtime.server.ts's own module
+ * doc for why these are two independent event streams). Before this fix,
+ * `ringing -> completed` was illegal, so the webhook handler
+ * (src/routes/api/public/webhooks/telephony.ts) logged
+ * `telephony:illegal_transition` and returned without updating the row
+ * at all — leaving it stuck at "ringing" forever, with the call's actual
+ * duration/billing never recorded. "completed" is added to both
+ * "initiated" and "ringing" here, bringing it in line with the OTHER
+ * terminal statuses (failed/busy/no_answer/cancelled), which this table
+ * already allowed directly from both of those states — this closes an
+ * existing asymmetry rather than introducing new leniency. This is NOT a
+ * blanket "allow anything" change: every other illegal transition (e.g.
+ * completed -> in_progress) is still rejected exactly as before.
+ */
 const ALLOWED_TRANSITIONS: Record<NormalizedCallStatus, NormalizedCallStatus[]> = {
-  initiated: ["ringing", "answered", "in_progress", "failed", "busy", "no_answer", "cancelled"],
-  ringing: ["answered", "in_progress", "failed", "busy", "no_answer", "cancelled"],
+  initiated: [
+    "ringing",
+    "answered",
+    "in_progress",
+    "completed",
+    "failed",
+    "busy",
+    "no_answer",
+    "cancelled",
+  ],
+  ringing: ["answered", "in_progress", "completed", "failed", "busy", "no_answer", "cancelled"],
   answered: ["in_progress", "completed", "failed"],
   in_progress: ["completed", "failed"],
   completed: [],

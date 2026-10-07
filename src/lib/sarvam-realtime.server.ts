@@ -314,11 +314,54 @@ const STT_RECEIVE_IDLE_THRESHOLD_MS = 7_000;
  */
 const STT_AUDIO_FLOW_HEARTBEAT_INTERVAL_MS = 1_500;
 
-async function openSocket(url: string, timeoutMs = CONNECT_TIMEOUT_MS): Promise<WebSocket> {
+/**
+ * Production incident: a real call showed a ~20.4s gap between
+ * `voice_runtime:runtime_started` and `voice_runtime:tts_connected`, with
+ * `stt_connected` arriving only ~183ms after that — i.e. the entire delay
+ * sat somewhere between starting the TTS connection and its "open" event,
+ * since STT's own connect (going through this exact same function, right
+ * after) was fast. Split into two separately-timed phases so the next
+ * occurrence shows WHICH one actually took the time, instead of inferring
+ * it from the gap between two call sites' own logs:
+ *   - `${label}_socket_constructed`: `new WebSocket(...)` itself — pure JS
+ *     object construction, expected to be ~0ms always. If this is ever
+ *     large, something before the network layer (isolate scheduling, GC,
+ *     a blocked event loop) is the real cause, not the network.
+ *   - `${label}_socket_handshake`: construction to the "open" (or
+ *     "error"/"close"/timeout) event — the actual DNS/TCP/TLS/WS-upgrade
+ *     network round trip. This is where a slow connect would show up.
+ */
+async function openSocket(
+  url: string,
+  label: "tts" | "stt",
+  timeoutMs = CONNECT_TIMEOUT_MS,
+): Promise<WebSocket> {
+  const constructStartedAt = Date.now();
   const socket = new WebSocket(url, [authSubprotocol()]);
   socket.binaryType = "arraybuffer";
+  const constructedAt = Date.now();
+  console.info("voice_runtime:startup_step", {
+    step: `${label}_socket_constructed`,
+    started_at: constructStartedAt,
+    completed_at: constructedAt,
+    duration_ms: constructedAt - constructStartedAt,
+  });
+
+  const handshakeStartedAt = constructedAt;
+  function logHandshakeStep(outcome: string) {
+    const completedAt = Date.now();
+    console.info("voice_runtime:startup_step", {
+      step: `${label}_socket_handshake`,
+      started_at: handshakeStartedAt,
+      completed_at: completedAt,
+      duration_ms: completedAt - handshakeStartedAt,
+      outcome,
+    });
+  }
+
   return await new Promise<WebSocket>((resolve, reject) => {
     const timer = setTimeout(() => {
+      logHandshakeStep("timeout");
       socket.close();
       reject(new SarvamRealtimeError("timeout", "Timed out connecting to the AI voice provider."));
     }, timeoutMs);
@@ -326,6 +369,7 @@ async function openSocket(url: string, timeoutMs = CONNECT_TIMEOUT_MS): Promise<
       "open",
       () => {
         clearTimeout(timer);
+        logHandshakeStep("open");
         resolve(socket);
       },
       { once: true },
@@ -334,6 +378,7 @@ async function openSocket(url: string, timeoutMs = CONNECT_TIMEOUT_MS): Promise<
       "error",
       () => {
         clearTimeout(timer);
+        logHandshakeStep("error");
         reject(
           new SarvamRealtimeError("connect_failed", "Could not connect to the AI voice provider."),
         );
@@ -345,12 +390,15 @@ async function openSocket(url: string, timeoutMs = CONNECT_TIMEOUT_MS): Promise<
       (ev) => {
         clearTimeout(timer);
         if (ev.code === 1008 || ev.code === 4001 || ev.code === 4003) {
+          logHandshakeStep("auth_failed");
           reject(
             new SarvamRealtimeError(
               "auth_failed",
               "The AI voice provider rejected the platform credentials.",
             ),
           );
+        } else {
+          logHandshakeStep("closed_before_open");
         }
       },
       { once: true },
@@ -450,7 +498,7 @@ export async function connectSarvamStt(opts: ConnectSttOptions): Promise<SttSess
   // Server-driven VAD (the documented default) — no manual speech_start/end framing needed.
   url.searchParams.set("vad-signals", "true");
 
-  const socket = await openSocket(url.toString());
+  const socket = await openSocket(url.toString(), "stt");
 
   const connectedAt = Date.now();
 
@@ -465,6 +513,14 @@ export async function connectSarvamStt(opts: ConnectSttOptions): Promise<SttSess
   let audioFramesSent = 0;
   let lastAudioSentAt: number | null = null;
   let framesSentAtLastHeartbeat = 0;
+
+  // Task 3 diagnostics: when the current speech segment started (per
+  // Sarvam's own VAD), and whether any transcript (partial or final) has
+  // been produced since — logged on speech_end so "did this utterance
+  // ever produce a transcript at all" is answerable directly from the
+  // logs, without having to manually correlate timestamps across lines.
+  let lastSpeechStartAt: number | null = null;
+  let transcriptProducedSinceSpeechStart = false;
 
   // TEMPORARY DIAGNOSTIC state (round 7, raw-frame visibility — see the
   // "message"/"close"/"error" listeners below): tracks only whether the
@@ -609,6 +665,21 @@ export async function connectSarvamStt(opts: ConnectSttOptions): Promise<SttSess
     const eventType = String(msg["type"] ?? msg["event"] ?? "unknown");
     const data = (msg["data"] as Record<string, unknown> | undefined) ?? msg;
     const extractedText = data["text"] ?? data["transcript"];
+    const now = Date.now();
+    // Task 3 (production incident: `stt:audio_sent` fires repeatedly but
+    // the expected transcript.partial/transcript.final chain doesn't
+    // reliably follow): confidence/timestamp/time-since-audio/time-since-
+    // speech_start, specifically so a transcript event's own latency
+    // relative to the audio that produced it — and relative to Sarvam's
+    // own speech_start — is visible without manual log correlation.
+    // `generation` isn't known at this layer (a voice-runtime.server.ts
+    // concept) — see onSttEvent's own per-event logging for that field.
+    const confidence =
+      typeof data["confidence"] === "number"
+        ? data["confidence"]
+        : typeof msg["confidence"] === "number"
+          ? (msg["confidence"] as number)
+          : null;
     console.info("stt:event_received", {
       eventType,
       topLevelKeys: Object.keys(msg),
@@ -617,12 +688,17 @@ export async function connectSarvamStt(opts: ConnectSttOptions): Promise<SttSess
       dataKeys: Object.keys(data),
       transcriptFieldPresent: typeof data["transcript"] === "string",
       extractedTextPresent: typeof extractedText === "string",
+      language: typeof data["language_code"] === "string" ? data["language_code"] : null,
+      confidence,
+      timestamp: now,
+      timeSinceLastAudioFrameMs: lastAudioSentAt !== null ? now - lastAudioSentAt : null,
+      timeSinceSpeechStartMs: lastSpeechStartAt !== null ? now - lastSpeechStartAt : null,
       isError: eventType === "error",
       errorCode: typeof data["code"] === "number" ? data["code"] : null,
       errorMessage: eventType === "error" ? (extractErrorDetail(msg) ?? null) : null,
     });
     sttEventsReceived += 1;
-    lastSttEventAt = Date.now();
+    lastSttEventAt = now;
     lastEventType = eventType;
     idleReported = false;
     const normalized = normalizeSttMessage(parsed);
@@ -633,10 +709,26 @@ export async function connectSarvamStt(opts: ConnectSttOptions): Promise<SttSess
     // these are easy to grep for on their own, separately from the
     // always-fires stt:event_received above.
     if (normalized.type === "session_begin") {
-      console.info("stt:session_begin_received", { elapsedMs: Date.now() - connectedAt });
+      console.info("stt:session_begin_received", { elapsedMs: now - connectedAt });
     }
     if (normalized.type === "session_end") {
-      console.info("stt:session_end_received", { elapsedMs: Date.now() - connectedAt });
+      console.info("stt:session_end_received", { elapsedMs: now - connectedAt });
+    }
+    if (normalized.type === "speech_start") {
+      lastSpeechStartAt = now;
+      transcriptProducedSinceSpeechStart = false;
+      console.info("stt:speech_start", { speechStartAt: now });
+    }
+    if (normalized.type === "speech_end") {
+      console.info("stt:speech_end", {
+        speechEndAt: now,
+        speechStartAt: lastSpeechStartAt,
+        durationMs: lastSpeechStartAt !== null ? now - lastSpeechStartAt : null,
+        transcriptProducedSinceSpeechStart,
+      });
+    }
+    if (normalized.type === "partial_transcript" || normalized.type === "final_transcript") {
+      transcriptProducedSinceSpeechStart = true;
     }
     opts.onEvent(normalized);
   });
@@ -789,12 +881,35 @@ export async function connectSarvamTts(opts: ConnectTtsOptions): Promise<TtsSess
   const url = new URL(TTS_WS_URL);
   url.searchParams.set("model", SARVAM_REALTIME_MODELS.tts);
 
-  const socket = await openSocket(url.toString());
+  const socket = await openSocket(url.toString(), "tts");
 
+  // Task 5 (TTS audio quality investigation): per-connection chunk index
+  // and first-chunk flag — knowable at this layer regardless of which
+  // caller utterance a chunk belongs to (Sarvam's realtime TTS protocol
+  // has no per-request correlation id; see voice-runtime.server.ts's own
+  // activeSpeechGeneration doc comment). voice-runtime.server.ts's
+  // onTtsEvent logs the utterance/generation-level correlation on top of
+  // this. Never logs raw audio or base64 — only the already-decoded
+  // byte length and whatever safe format metadata Sarvam's own message
+  // included alongside the payload.
+  let ttsChunkIndex = 0;
   socket.addEventListener("message", (ev) => {
     if (typeof ev.data !== "string") return;
     try {
-      opts.onEvent(normalizeTtsMessage(JSON.parse(ev.data)));
+      const normalized = normalizeTtsMessage(JSON.parse(ev.data));
+      if (normalized.type === "audio") {
+        const chunkIndex = ttsChunkIndex++;
+        console.info("tts:audio_chunk", {
+          chunkIndex,
+          firstChunk: chunkIndex === 0,
+          bytes: normalized.data.length,
+          declaredCodec: opts.outputCodec,
+          declaredSampleRateHz: opts.outputSampleRateHz,
+          sarvamMeta: normalized.meta ?? null,
+          timestamp: Date.now(),
+        });
+      }
+      opts.onEvent(normalized);
     } catch {
       opts.onEvent({ type: "unknown", raw: ev.data });
     }

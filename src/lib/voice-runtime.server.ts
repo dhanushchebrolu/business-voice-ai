@@ -473,6 +473,54 @@ interface Session {
   currentTurnTranscriptFinalAt: number | null;
   /** One response_start_latency_ms log per turn, not one per audio chunk — see onTtsEvent. */
   currentTurnFirstAudioLogged: boolean;
+  /** Task 4: the full correlated per-turn timing record, built up as each stage completes and emitted once as voice_runtime:response_timing — see onTtsEvent's "flushed" case. Null between turns, same lifetime rule as currentTurnTranscriptFinalAt. */
+  currentTurn: CurrentTurnTiming | null;
+  /** Most recent Sarvam VAD timestamps — read into currentTurn when a final_transcript is forwarded, since they describe the utterance that produced it. Not reset between utterances; always "most recent so far". */
+  lastSpeechStartAt: number | null;
+  lastSpeechEndAt: number | null;
+  lastPartialTranscriptAt: number | null;
+  /** When the CURRENT TTS connection (initial or after maybeSwitchTtsLanguage) finished connecting — see ttsConnectedAt's own use in currentTurn. */
+  ttsConnectedAt: number | null;
+  /**
+   * Task 2/7: a fresh id minted at the start of every speak() call —
+   * greeting, replies, silence prompts, fallbacks — so diagnostics (the
+   * greeting_attempt/greeting_sent trio, barge_in's cancelled_utterance_id)
+   * can show definitively whether the SAME utterance was ever sent more
+   * than once, rather than inferring it from log order alone.
+   */
+  currentUtteranceId: string | null;
+  /** Task 2: set exactly once, the first time the initial greeting is actually spoken — guards every greeting call site (today just one) against ever re-sending it, including across a TTS reconnect (maybeSwitchTtsLanguage never re-calls speak() for the greeting text at all — this flag is defense in depth, not the only thing preventing a replay). */
+  initialGreetingSent: boolean;
+  /**
+   * Task 6: identifies which TTS connection is CURRENTLY authoritative for
+   * writing audio to the telephony bridge — see onTtsEvent's "audio" case.
+   * `ttsConnectionIdSeq` is a separate, ever-incrementing counter (never
+   * decremented, never reused) that mints a new id for every connectTts
+   * call (initial connect and every maybeSwitchTtsLanguage reconnect);
+   * `activeTtsConnectionId` is updated to that new id only once the new
+   * connection is actually live. A chunk tagged with any OTHER id — e.g.
+   * one still in flight from a socket that's since been replaced — is
+   * dropped, so at most one TTS connection can ever write audio to Vobiz
+   * at a time, even if the old socket's underlying network connection
+   * hasn't finished closing yet.
+   */
+  ttsConnectionIdSeq: number;
+  activeTtsConnectionId: number;
+}
+
+/** Task 4: one correlated timing record per caller turn — see Session.currentTurn's own doc comment. */
+interface CurrentTurnTiming {
+  audioFirstSeenAt: number | null;
+  speechStartAt: number | null;
+  speechEndAt: number | null;
+  transcriptPartialAt: number | null;
+  transcriptFinalAt: number;
+  llmRequestAt: number | null;
+  llmCompletedAt: number | null;
+  ttsTextSentAt: number | null;
+  ttsConnectedAt: number | null;
+  firstTtsAudioAt: number | null;
+  responseAudioEndAt: number | null;
 }
 
 const activeSessions = new Map<string, Session>();
@@ -687,6 +735,49 @@ function log(
   });
 }
 
+/**
+ * Task 1 (production incident: a real call showed ~20.4s between
+ * runtime_started/first_inbound_audio_frame and tts_connected, with
+ * stt_connected arriving only ~183ms after that): wraps one awaited
+ * startup operation with a single voice_runtime:startup_step log —
+ * step/started_at/completed_at/duration_ms, plus outcome/message on
+ * failure — so the NEXT occurrence of a startup delay shows definitively
+ * which specific operation (DO/runtime init, TTS connect, STT connect,
+ * greeting) actually took the time, rather than being inferred from gaps
+ * between unrelated log lines. Rethrows on failure unchanged — this is
+ * purely an observability wrapper, never a retry or a behavior change.
+ */
+async function timedStep<T>(
+  session: Pick<Session, "input"> & { handle: { runtimeSessionId: string } },
+  step: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const startedAt = Date.now();
+  try {
+    const result = await fn();
+    const completedAt = Date.now();
+    log("startup_step", session, {
+      step,
+      started_at: startedAt,
+      completed_at: completedAt,
+      duration_ms: completedAt - startedAt,
+      outcome: "success",
+    });
+    return result;
+  } catch (err) {
+    const completedAt = Date.now();
+    log("startup_step", session, {
+      step,
+      started_at: startedAt,
+      completed_at: completedAt,
+      duration_ms: completedAt - startedAt,
+      outcome: "error",
+      message: (err as Error).message,
+    });
+    throw err;
+  }
+}
+
 /** Splits accumulated assistant text into TTS-safe chunks at sentence boundaries. */
 export function chunkIntoSentences(text: string): string[] {
   const trimmed = text.trim();
@@ -868,16 +959,33 @@ async function maybeSwitchTtsLanguage(session: Session): Promise<void> {
   log("tts_language_switch_started", session, { from: session.ttsLanguage, to: targetLanguage });
   try {
     const oldTts = session.tts;
+    const oldConnectionId = session.activeTtsConnectionId;
+    // Task 6: mint this new connection's id BEFORE connecting, and
+    // deliberately do NOT make it the active one until the connection has
+    // actually succeeded — if connectTts throws, the OLD connection (and
+    // its id) stays authoritative, exactly as the catch block below
+    // expects. onTtsEvent's "audio" case checks this id on every chunk,
+    // so a chunk still in flight from `oldTts` at the moment of the swap
+    // is dropped rather than forwarded twice.
+    const newConnectionId = ++session.ttsConnectionIdSeq;
     const newTts = await session.deps.connectTts({
       voiceId: session.input.snapshotAgent.voice_id,
       language: targetLanguage,
       pace: session.input.snapshotAgent.speaking_pace,
       outputCodec: session.declaredTtsOutputCodec ?? "mulaw",
       outputSampleRateHz: session.declaredTtsOutputSampleRateHz ?? 8000,
-      onEvent: (e) => onTtsEvent(session, e),
+      onEvent: (e) => onTtsEvent(session, e, newConnectionId),
     });
     session.tts = newTts;
     session.ttsLanguage = targetLanguage;
+    session.ttsConnectedAt = Date.now();
+    session.activeTtsConnectionId = newConnectionId;
+    console.info("tts:connection_replaced", {
+      call_id: session.input.callId,
+      old_connection_id: oldConnectionId,
+      new_connection_id: newConnectionId,
+      reason: "language_switch",
+    });
     try {
       oldTts.close();
     } catch {
@@ -902,6 +1010,11 @@ async function speak(
   if (asState !== "greeting") await maybeSwitchTtsLanguage(session);
   if (!session.tts) return;
   setState(session, asState);
+  // Task 2/7: a fresh id for THIS specific utterance, so diagnostics can
+  // prove whether the same one was ever sent twice (greeting_sent /
+  // greeting_skipped_duplicate) or show exactly which one barge-in
+  // cancelled (barge_in's cancelled_utterance_id).
+  session.currentUtteranceId = crypto.randomUUID();
   // Tags whatever audio Sarvam streams back for this text as belonging to
   // the CURRENT generation — see onTtsEvent's "audio" case and the
   // activeSpeechGeneration field's own doc comment. If a barge-in bumps
@@ -911,6 +1024,7 @@ async function speak(
   session.activeSpeechGeneration = session.generation;
   session.staleAudioDropLogged = false;
   const ttsTextSentAt = Date.now();
+  if (session.currentTurn) session.currentTurn.ttsTextSentAt = ttsTextSentAt;
   let chunkCount = 0;
   for (const chunk of chunkIntoSentences(text)) {
     session.tts.sendText(chunk);
@@ -1210,6 +1324,7 @@ async function handleUserUtterance(session: Session, text: string) {
   ];
   // Safe metadata only — message count and roles, never any message's
   // actual content (the caller's words or the agent's own reply text).
+  if (session.currentTurn) session.currentTurn.llmRequestAt = llmRequestAt;
   log("llm_request", session, {
     generation,
     messageCount: messages.length,
@@ -1220,6 +1335,7 @@ async function handleUserUtterance(session: Session, text: string) {
   try {
     const { reply: rawReply, enteredPaymentWait } = await getReply(session, messages);
     const llmCompletedAt = Date.now();
+    if (session.currentTurn) session.currentTurn.llmCompletedAt = llmCompletedAt;
     log("llm_completed", session, {
       latency_ms: llmCompletedAt - requestStarted,
       llm_completed_at: llmCompletedAt,
@@ -1355,6 +1471,7 @@ function onSttEvent(session: Session, event: SttEvent) {
       // Without this, caller speech during that still-playing tail took
       // the plain "start transcribing" branch below and nothing stopped
       // the old audio from continuing to reach the caller.
+      session.lastSpeechStartAt = Date.now();
       const audioStillPlaying =
         (state === "listening" || state === "waiting_on_payment") && ttsAudioInFlight(session);
       if (
@@ -1365,17 +1482,28 @@ function onSttEvent(session: Session, event: SttEvent) {
       ) {
         // Barge-in: stop talking immediately, discard the audio already
         // queued for the caller, and soft-cancel any in-flight LLM turn.
+        const oldGeneration = session.generation;
         session.generation++;
         session.input.bridge.clearOutboundBuffer();
         session.tts?.flush();
         setState(session, "interrupted");
         log("interruption", session, { audioStillPlaying });
+        // Task 7: explicit, dedicated barge-in diagnostic — old/new
+        // generation and which utterance was cancelled, so a live call can
+        // be checked for "did the caller's next turn actually proceed"
+        // without having to cross-reference the generic interruption log.
+        log("barge_in", session, {
+          old_generation: oldGeneration,
+          new_generation: session.generation,
+          cancelled_utterance_id: session.currentUtteranceId,
+        });
       } else if (state === "listening" || state === "waiting_on_payment") {
         setState(session, "transcribing");
       }
       break;
     }
     case "speech_end":
+      session.lastSpeechEndAt = Date.now();
       // The caller just stopped talking. Re-arm from here rather than from
       // speech_start, so the silence window doesn't start counting down
       // while they're still mid-utterance — a no-op unless the state is
@@ -1391,6 +1519,7 @@ function onSttEvent(session: Session, event: SttEvent) {
       // real "waiting on the caller" countdown once they've actually
       // stopped, not every partial along the way.
       clearSilenceTimer(session);
+      session.lastPartialTranscriptAt = Date.now();
       session.accumulatingUserText = event.text;
       break;
     case "final_transcript": {
@@ -1442,6 +1571,23 @@ function onSttEvent(session: Session, event: SttEvent) {
       const transcriptFinalAt = Date.now();
       session.currentTurnTranscriptFinalAt = transcriptFinalAt;
       session.currentTurnFirstAudioLogged = false;
+      // Task 4: seed the correlated per-turn timing record from the most
+      // recent VAD timestamps — see CurrentTurnTiming's own doc comment.
+      // handleUserUtterance/speak()/onTtsEvent fill in the remaining
+      // fields as the turn actually progresses.
+      session.currentTurn = {
+        audioFirstSeenAt: session.lastSpeechStartAt,
+        speechStartAt: session.lastSpeechStartAt,
+        speechEndAt: session.lastSpeechEndAt,
+        transcriptPartialAt: session.lastPartialTranscriptAt,
+        transcriptFinalAt,
+        llmRequestAt: null,
+        llmCompletedAt: null,
+        ttsTextSentAt: null,
+        ttsConnectedAt: session.ttsConnectedAt,
+        firstTtsAudioAt: null,
+        responseAudioEndAt: null,
+      };
       log("stt:transcript_final_forwarded", session, {
         textLength: event.text.length,
         forwarded: true,
@@ -1470,9 +1616,22 @@ function onSttEvent(session: Session, event: SttEvent) {
   }
 }
 
-function onTtsEvent(session: Session, event: TtsEvent) {
+function onTtsEvent(session: Session, event: TtsEvent, connectionId: number) {
   switch (event.type) {
     case "audio": {
+      // Task 6: only the connection currently in charge may write audio to
+      // the telephony bridge — see activeTtsConnectionId's own doc
+      // comment. A chunk arriving from a connection maybeSwitchTtsLanguage
+      // has since replaced (including one still in flight from the OLD
+      // socket at the moment of replacement) is dropped here, before any
+      // other bookkeeping, same discipline as the generation check below.
+      if (connectionId !== session.activeTtsConnectionId) {
+        log("tts_audio_dropped_stale_connection", session, {
+          eventConnectionId: connectionId,
+          activeConnectionId: session.activeTtsConnectionId,
+        });
+        break;
+      }
       // Drop audio belonging to a reply that's since been barged in on —
       // see activeSpeechGeneration's own doc comment. Sarvam's realtime TTS
       // connection is a single, long-lived stream with no per-request
@@ -1528,6 +1687,7 @@ function onTtsEvent(session: Session, event: TtsEvent) {
       if (session.currentTurnTranscriptFinalAt !== null && !session.currentTurnFirstAudioLogged) {
         session.currentTurnFirstAudioLogged = true;
         const firstTtsAudioAt = Date.now();
+        if (session.currentTurn) session.currentTurn.firstTtsAudioAt = firstTtsAudioAt;
         log("response_latency", session, {
           first_tts_audio_at: firstTtsAudioAt,
           response_start_latency_ms: firstTtsAudioAt - session.currentTurnTranscriptFinalAt,
@@ -1568,10 +1728,44 @@ function onTtsEvent(session: Session, event: TtsEvent) {
         session.currentTurnFirstAudioLogged &&
         !ttsAudioInFlight(session)
       ) {
-        const totalResponseLatencyMs = Date.now() - session.currentTurnTranscriptFinalAt;
+        const responseAudioEndAt = Date.now();
+        const totalResponseLatencyMs = responseAudioEndAt - session.currentTurnTranscriptFinalAt;
         log("response_latency_complete", session, {
           total_response_latency_ms: totalResponseLatencyMs,
         });
+        // Task 4: the full correlated per-turn timing record, emitted once
+        // this turn's reply audio is completely done — the last point at
+        // which every field in CurrentTurnTiming can possibly be known.
+        // Each delta is null whenever either of its two timestamps is
+        // null (e.g. no speech_start was ever recorded for this turn),
+        // rather than a misleading number computed against a missing
+        // value.
+        if (session.currentTurn) {
+          const t = session.currentTurn;
+          t.responseAudioEndAt = responseAudioEndAt;
+          const delta = (a: number | null, b: number | null) =>
+            a !== null && b !== null ? b - a : null;
+          log("response_timing", session, {
+            audio_first_seen_at: t.audioFirstSeenAt,
+            speech_start_at: t.speechStartAt,
+            speech_end_at: t.speechEndAt,
+            transcript_partial_at: t.transcriptPartialAt,
+            transcript_final_at: t.transcriptFinalAt,
+            llm_request_at: t.llmRequestAt,
+            llm_completed_at: t.llmCompletedAt,
+            tts_text_sent_at: t.ttsTextSentAt,
+            tts_connected_at: t.ttsConnectedAt,
+            first_tts_audio_at: t.firstTtsAudioAt,
+            response_audio_end_at: t.responseAudioEndAt,
+            speech_to_final_ms: delta(t.speechStartAt, t.transcriptFinalAt),
+            final_to_llm_start_ms: delta(t.transcriptFinalAt, t.llmRequestAt),
+            llm_latency_ms: delta(t.llmRequestAt, t.llmCompletedAt),
+            llm_to_tts_ms: delta(t.llmCompletedAt, t.ttsTextSentAt),
+            tts_first_audio_ms: delta(t.ttsTextSentAt, t.firstTtsAudioAt),
+            total_response_latency_ms: delta(t.transcriptFinalAt, t.responseAudioEndAt),
+          });
+          session.currentTurn = null;
+        }
         session.currentTurnTranscriptFinalAt = null;
       }
       // The audio that armSilenceTimer deferred on (still in flight at the
@@ -1650,6 +1844,15 @@ export async function startRuntimeSession(
     ttsLanguage: input.snapshotAgent.primary_language,
     currentTurnTranscriptFinalAt: null,
     currentTurnFirstAudioLogged: false,
+    currentTurn: null,
+    lastSpeechStartAt: null,
+    lastSpeechEndAt: null,
+    lastPartialTranscriptAt: null,
+    ttsConnectedAt: null,
+    currentUtteranceId: null,
+    initialGreetingSent: false,
+    ttsConnectionIdSeq: 0,
+    activeTtsConnectionId: 0,
   };
   activeSessions.set(input.callId, session);
   log("runtime_started", session);
@@ -1686,14 +1889,19 @@ export async function startRuntimeSession(
     const outputSampleRateHz = input.bridge.outboundFormat.sampleRateHz;
     session.declaredTtsOutputCodec = outputCodec;
     session.declaredTtsOutputSampleRateHz = outputSampleRateHz;
-    session.tts = await deps.connectTts({
-      voiceId: input.snapshotAgent.voice_id,
-      language: input.snapshotAgent.primary_language,
-      pace: input.snapshotAgent.speaking_pace,
-      outputCodec,
-      outputSampleRateHz,
-      onEvent: (e) => onTtsEvent(session, e),
-    });
+    const connectionId = ++session.ttsConnectionIdSeq;
+    session.tts = await timedStep(session, "tts_connect", () =>
+      deps.connectTts({
+        voiceId: input.snapshotAgent.voice_id,
+        language: input.snapshotAgent.primary_language,
+        pace: input.snapshotAgent.speaking_pace,
+        outputCodec,
+        outputSampleRateHz,
+        onEvent: (e) => onTtsEvent(session, e, connectionId),
+      }),
+    );
+    session.activeTtsConnectionId = connectionId;
+    session.ttsConnectedAt = Date.now();
     /**
      * Diagnostic (audio format tracing): the exact codec/sample rate this
      * session told the AI voice provider to synthesize into, derived
@@ -1714,29 +1922,31 @@ export async function startRuntimeSession(
   try {
     const sttSampleRateHz = input.bridge.inboundFormat.sampleRateHz;
     const sttEncoding = input.bridge.inboundFormat.encoding === "mulaw" ? "mulaw" : "linear16";
-    session.stt = await deps.connectStt({
-      // Always auto-detect (Sarvam's "auto" language code — already
-      // proven in production for multilingual agents) rather than pinning
-      // recognition to the agent's single primary_language. Previously
-      // gated behind the agent's own `multilingual` toggle, which meant a
-      // caller speaking anything other than the configured primary
-      // language on a non-multilingual agent was never even given a
-      // chance to be recognized correctly in the first place — see
-      // resolveResponseLanguage for how the LLM/TTS side falls back to
-      // primary_language if STT detects something outside the common
-      // supported set.
-      //
-      // BUGFIX (production incident): "unknown" is not a value Sarvam's
-      // realtime STT recognizes — it rejected every connection with a
-      // fatal 400 ("Unsupported language_code 'unknown'. Supported
-      // values: auto, hi-IN, ...") and immediately closed the WebSocket
-      // with code 4000, so STT never connected for any call using this
-      // value. "auto" is Sarvam's actual documented auto-detect code.
-      language: "auto",
-      sampleRateHz: sttSampleRateHz,
-      encoding: sttEncoding,
-      onEvent: (e) => onSttEvent(session, e),
-    });
+    session.stt = await timedStep(session, "stt_connect", () =>
+      deps.connectStt({
+        // Always auto-detect (Sarvam's "auto" language code — already
+        // proven in production for multilingual agents) rather than pinning
+        // recognition to the agent's single primary_language. Previously
+        // gated behind the agent's own `multilingual` toggle, which meant a
+        // caller speaking anything other than the configured primary
+        // language on a non-multilingual agent was never even given a
+        // chance to be recognized correctly in the first place — see
+        // resolveResponseLanguage for how the LLM/TTS side falls back to
+        // primary_language if STT detects something outside the common
+        // supported set.
+        //
+        // BUGFIX (production incident): "unknown" is not a value Sarvam's
+        // realtime STT recognizes — it rejected every connection with a
+        // fatal 400 ("Unsupported language_code 'unknown'. Supported
+        // values: auto, hi-IN, ...") and immediately closed the WebSocket
+        // with code 4000, so STT never connected for any call using this
+        // value. "auto" is Sarvam's actual documented auto-detect code.
+        language: "auto",
+        sampleRateHz: sttSampleRateHz,
+        encoding: sttEncoding,
+        onEvent: (e) => onSttEvent(session, e),
+      }),
+    );
     /**
      * Diagnostic (audio format tracing): the exact format this session
      * told the AI voice provider inbound audio would arrive in, derived
@@ -1746,6 +1956,20 @@ export async function startRuntimeSession(
      * transcript for audio that is clearly being sent.
      */
     log("stt_connected", session, { sttSampleRateHz, sttEncoding });
+    // Task 1: the caller's audio must never be silently lost while STT is
+    // still connecting (it can take a while — see timedStep's own doc
+    // comment on the ~20.4s production incident this responds to).
+    // onInboundFrame above already buffers every frame into
+    // pendingInboundFrames (bounded by MAX_PENDING_INBOUND_FRAMES) for
+    // exactly this reason; this just makes that buffering's outcome
+    // visible — how much was buffered, and that all of it (bounded) was
+    // actually flushed into STT the moment it connected, not discarded.
+    log("startup_step", session, {
+      step: "initial_audio_buffering",
+      bufferedFrameCount: session.pendingInboundFrames.length,
+      bufferCapacity: MAX_PENDING_INBOUND_FRAMES,
+      outcome: "flushed_to_stt",
+    });
     // Flush whatever arrived on the bridge while STT was still connecting —
     // see the onInboundFrame registration above.
     for (const frame of session.pendingInboundFrames) session.stt.sendAudioFrame(frame.data);
@@ -1758,12 +1982,32 @@ export async function startRuntimeSession(
     return handle;
   }
 
+  // Task 2: the initial greeting must be spoken exactly once per call.
+  // This is the ONLY call site that ever speaks it — startRuntimeSession
+  // itself is guarded against re-entry for an existing callId (the
+  // activeSessions.get check at the very top of this function), so this
+  // flag is defense in depth, not the sole protection: even a future code
+  // path that somehow reached this point twice for the same session
+  // object would still be blocked here.
+  log("greeting_attempt", session, { generation: session.generation });
+  if (session.initialGreetingSent) {
+    log("greeting_skipped_duplicate", session, {
+      generation: session.generation,
+      utterance_id: session.currentUtteranceId,
+    });
+    return handle;
+  }
   try {
     const greeting = pickGreeting(input.snapshotAgent, input.businessName);
     session.turns.push({ role: "assistant", text: greeting, at: new Date().toISOString() });
-    await speak(session, greeting, "greeting");
+    await timedStep(session, "greeting_speak", () => speak(session, greeting, "greeting"));
+    session.initialGreetingSent = true;
     setState(session, "listening");
     armSilenceTimer(session);
+    log("greeting_sent", session, {
+      generation: session.generation,
+      utterance_id: session.currentUtteranceId,
+    });
     log("greeting_played", session);
     void markAgentLive(input.agentConfigId);
   } catch (err) {

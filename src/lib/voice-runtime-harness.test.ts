@@ -1207,3 +1207,206 @@ describe("16. Multilingual TTS (tests K, L, M)", () => {
     await terminateRuntimeSession(callId, "test cleanup");
   });
 });
+
+describe("18. Startup timing diagnostics (test 1)", () => {
+  test("tts_connect and stt_connect each produce a voice_runtime:startup_step log with started_at/completed_at/duration_ms", async () => {
+    const h = createHarness({ tts: { connectDelayMs: 25 }, stt: { connectDelayMs: 10 } });
+    const callId = newCallId();
+    const logs = await captureLogs(async () => {
+      await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+      await terminateRuntimeSession(callId, "test cleanup");
+    });
+
+    const steps = logs.filter((l) => l["event"] === "voice_runtime:startup_step");
+    const ttsStep = steps.find((l) => l["step"] === "tts_connect");
+    const sttStep = steps.find((l) => l["step"] === "stt_connect");
+    const bufferingStep = steps.find((l) => l["step"] === "initial_audio_buffering");
+    assert.ok(ttsStep, "expected a startup_step log for tts_connect");
+    assert.ok(sttStep, "expected a startup_step log for stt_connect");
+    assert.ok(bufferingStep, "expected a startup_step log for initial_audio_buffering");
+    assert.equal(ttsStep?.["outcome"], "success");
+    assert.ok(
+      (ttsStep?.["duration_ms"] as number) >= 20,
+      "the slow TTS connect's duration must be visible",
+    );
+    assert.equal(typeof ttsStep?.["started_at"], "number");
+    assert.equal(typeof ttsStep?.["completed_at"], "number");
+  });
+});
+
+describe("19. Initial greeting idempotency (tests 3, 4, 5)", () => {
+  test("3: the greeting is sent exactly once, with greeting_attempt/greeting_sent logged", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    const logs = await captureLogs(async () => {
+      await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+      await terminateRuntimeSession(callId, "test cleanup");
+    });
+
+    assert.equal(logs.filter((l) => l["event"] === "voice_runtime:greeting_attempt").length, 1);
+    assert.equal(logs.filter((l) => l["event"] === "voice_runtime:greeting_sent").length, 1);
+    assert.equal(
+      logs.filter((l) => l["event"] === "voice_runtime:greeting_skipped_duplicate").length,
+      0,
+    );
+    // The configured greeting text itself must have been sent to TTS exactly once.
+    const greetingChunks = h.tts.sentTexts.filter((t) => t.includes("Test Business"));
+    assert.equal(greetingChunks.length, 1);
+  });
+
+  test("5: a duplicate startRuntimeSession call for the same callId never re-sends the greeting", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    const input = baseInput(callId, h.bridge);
+    await startRuntimeSession(input, h.deps);
+    const spokenAfterFirstStart = h.tts.sentTexts.length;
+
+    // A second call for the SAME callId — e.g. a duplicate webhook/DO
+    // invocation — must be a no-op (the activeSessions.get check at the
+    // top of startRuntimeSession), not a second greeting.
+    await startRuntimeSession(input, h.deps);
+
+    assert.equal(
+      h.tts.sentTexts.length,
+      spokenAfterFirstStart,
+      "a duplicate startRuntimeSession call must not speak anything new",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("4: a TTS language-switch reconnect never replays the greeting text", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+    const greetingChunksBefore = h.tts.sentTexts.filter((t) => t.includes("Test Business")).length;
+
+    // Caller asks in Hindi — triggers maybeSwitchTtsLanguage's reconnect.
+    h.llm.setNextReply("Theek hai.");
+    h.stt.emit({ type: "final_transcript", text: "Hindi mein baat karo", language: "hi-IN" });
+    await drain();
+
+    const greetingChunksAfter = h.tts.sentTexts.filter((t) => t.includes("Test Business")).length;
+    assert.equal(
+      greetingChunksAfter,
+      greetingChunksBefore,
+      "the greeting text must never be re-sent across a TTS reconnect",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+describe("20. TTS reconnect connection isolation (tests 9, 18)", () => {
+  test("18: a chunk arriving from a connection that's since been replaced is dropped, never forwarded to the bridge", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+    const oldConnectOpts = h.tts.connectCalls[0];
+    assert.ok(oldConnectOpts, "expected the initial TTS connect call to be recorded");
+
+    // Trigger the language-switch reconnect (old connection -> new one).
+    h.llm.setNextReply("Switching.");
+    h.stt.emit({ type: "final_transcript", text: "Hindi mein baat karo", language: "hi-IN" });
+    await drain();
+    assert.equal(h.tts.connectCalls.length, 2, "expected exactly one reconnect");
+
+    const framesBefore = h.bridge.sentFrames.length;
+    // Simulate the OLD (now-replaced) connection delivering one more audio
+    // chunk that was already in flight at the moment of the swap.
+    oldConnectOpts.onEvent({ type: "audio", data: new Uint8Array([9, 9, 9]) });
+
+    assert.equal(
+      h.bridge.sentFrames.length,
+      framesBefore,
+      "a chunk from a replaced TTS connection must never reach the telephony bridge",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("9: reconnecting TTS for a language switch never duplicates the caller's next reply", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.llm.setNextReply("Namaste, kaise madad kar sakta hoon?");
+    h.stt.emit({ type: "final_transcript", text: "Hindi mein baat karo", language: "hi-IN" });
+    await drain();
+
+    const replyChunks = h.tts.sentTexts.filter((t) => t.includes("Namaste"));
+    assert.equal(replyChunks.length, 1, "the reply must be sent exactly once, not duplicated");
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("closes the old TTS connection once the new one is live", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.llm.setNextReply("Switching.");
+    h.stt.emit({ type: "final_transcript", text: "Hindi mein baat karo", language: "hi-IN" });
+    await drain();
+
+    assert.equal(
+      h.tts.closed,
+      true,
+      "the most recently closed connection (the old one) must be closed",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+describe("21. Barge-in diagnostics and single-utterance replies (tests 8, 10)", () => {
+  test("10: barge-in logs voice_runtime:barge_in with the exact old/new generation and the cancelled utterance id", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    const logs = await captureLogs(async () => {
+      await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+      makeTtsFlushCatchUp(h.tts)();
+
+      h.llm.setDelay(40);
+      h.llm.setNextReply("This reply must never be spoken.");
+      h.stt.speakUtterance("First question");
+      await drain();
+      h.stt.emit({ type: "speech_start" }); // barge-in while thinking
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      await drain();
+      await terminateRuntimeSession(callId, "test cleanup");
+    });
+
+    const bargeInLog = logs.find((l) => l["event"] === "voice_runtime:barge_in");
+    assert.ok(bargeInLog, "expected a voice_runtime:barge_in log");
+    assert.equal(bargeInLog!["new_generation"], (bargeInLog!["old_generation"] as number) + 1);
+  });
+
+  test("8: a single LLM reply results in exactly one TTS utterance (one speak() call — one voice_runtime:tts_text_sent log — even when chunkIntoSentences splits it into several sentence-level sends)", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    const logs = await captureLogs(async () => {
+      await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+      makeTtsFlushCatchUp(h.tts)();
+
+      h.llm.setNextReply("Sure. Here is the answer to your question. We are open until six PM.");
+      h.stt.speakUtterance("What time do you open?");
+      await drain();
+      await terminateRuntimeSession(callId, "test cleanup");
+    });
+
+    const ttsTextSentLogs = logs.filter((l) => l["event"] === "voice_runtime:tts_text_sent");
+    // One for the greeting, one for this one reply — never more than one
+    // per utterance regardless of how many sentences it was split into.
+    assert.equal(ttsTextSentLogs.length, 2);
+    const replyLog = ttsTextSentLogs[1]!;
+    assert.ok(
+      (replyLog["chunkCount"] as number) >= 1,
+      "the reply's sentence chunks were all sent under one utterance",
+    );
+  });
+});

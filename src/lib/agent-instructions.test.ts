@@ -198,3 +198,41 @@ describe("buildAgentInstructions — # APPOINTMENT STATE TRACKING (test Q: no re
     assert.doesNotMatch(prompt, /APPT_STATE/);
   });
 });
+
+/**
+ * Production incident: a caller said "I want to book an appointment to
+ * clean my teeth" and the agent replied "We do not offer appointments,
+ * but we do provide professional teeth cleanings" — a dental clinic with
+ * a "Teeth Cleaning" service refusing to book it because no service was
+ * literally named "appointment". Fix is prompt-only: "appointment" is the
+ * booking action, not a service name, and a caller's own description
+ * should be matched to the closest listed service.
+ */
+describe("buildAgentInstructions — appointment intent (test 13/14: booking requests must not be rejected merely because no service is literally named 'appointment')", () => {
+  const dentalSnapshot: AgentSnapshot = {
+    ...minimalSnapshot,
+    services: [
+      {
+        name: "Teeth Cleaning",
+        description: "Routine cleaning.",
+        category: null,
+        price: 1500,
+        currency: "INR",
+        duration_minutes: 30,
+        attributes: null,
+        is_active: true,
+      },
+    ],
+  };
+
+  test("explicitly instructs the model that 'appointment' is a booking action, not a service name", () => {
+    const prompt = buildAgentInstructions(dentalSnapshot);
+    assert.match(prompt, /"appointment" is not itself a service/i);
+    assert.match(prompt, /never tell the caller appointments aren't offered/i);
+  });
+
+  test("instructs matching a caller's own description to the closest listed service", () => {
+    const prompt = buildAgentInstructions(dentalSnapshot);
+    assert.match(prompt, /match it to the closest listed service yourself/i);
+  });
+});

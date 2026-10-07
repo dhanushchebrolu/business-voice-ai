@@ -54,6 +54,43 @@ test("checkCallTransition: every terminal status has no outgoing transitions", (
   }
 });
 
+/**
+ * Task 10 (production incident): a real call was answered and had a full
+ * conversation, but call_logs was still "ringing" when the provider's
+ * "completed" webhook arrived (most plausibly an out-of-order/dropped
+ * "answered" webhook, a separate REST channel from the media stream that
+ * actually runs the call) — `ringing -> completed` was illegal, so the
+ * webhook handler logged telephony:illegal_transition and left the row
+ * stuck at "ringing" forever, with the call's duration/billing never
+ * recorded. "completed" is now allowed directly from "initiated"/
+ * "ringing", consistent with the OTHER terminal statuses the table
+ * already allowed from both of those states.
+ */
+describe("checkCallTransition — ringing/initiated -> completed (test 10: out-of-order terminal webhook recovery)", () => {
+  test("ringing -> completed is now allowed, not an illegal transition", () => {
+    const r = checkCallTransition("ringing", "completed");
+    assert.equal(r.ok, true);
+    assert.equal(r.changed, true);
+  });
+
+  test("initiated -> completed is now allowed too", () => {
+    const r = checkCallTransition("initiated", "completed");
+    assert.equal(r.ok, true);
+    assert.equal(r.changed, true);
+  });
+
+  test("this is not a blanket allow-anything change — completed -> in_progress is still rejected", () => {
+    assert.equal(checkCallTransition("completed", "in_progress").ok, false);
+  });
+
+  test("ringing/initiated -> completed is consistent with the OTHER terminal statuses already allowed from both states", () => {
+    for (const terminal of ["failed", "busy", "no_answer", "cancelled"] as const) {
+      assert.equal(checkCallTransition("ringing", terminal).ok, true);
+      assert.equal(checkCallTransition("initiated", terminal).ok, true);
+    }
+  });
+});
+
 describe('resolveActivePhoneNumberByDestination: production incident regression — +918071580870 provisioned with provider stored as "Vobiz" (free-text admin field, no casing validation) must still resolve against this codebase\'s lowercase-literal provider id "vobiz"', () => {
   // No live Postgres instance is available in this environment (same
   // documented limitation as every supabase/migrations/*.test.ts file in

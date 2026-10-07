@@ -736,6 +736,68 @@ describe("tts:config_sent / tts:text_sent / tts:flush_sent — temporary per-sen
   });
 });
 
+describe('tts:audio_chunk — Task 5 (TTS audio quality investigation): per-connection chunk index/bytes/declared format, never raw audio or base64. "test 17: TTS audio chunks have correct framing" asserts the logged byte length always matches the decoded audio exactly.', () => {
+  const originalKey = process.env["SARVAM_API_KEY"];
+  afterEach(() => {
+    if (originalKey === undefined) delete process.env["SARVAM_API_KEY"];
+    else process.env["SARVAM_API_KEY"] = originalKey;
+  });
+
+  test("logs chunkIndex/firstChunk/bytes/declared format for every audio message, in order, never the raw audio or base64", async () => {
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    const logs = captureInfoLogs();
+    // 160 bytes = one 20ms frame of 8kHz mu-law mono — a realistic single
+    // chunk size, chosen so this test also demonstrates the byte-length
+    // math the framing documentation describes, not just an arbitrary size.
+    const chunk1 = Buffer.alloc(160, 7);
+    const chunk2 = Buffer.alloc(320, 9);
+    try {
+      await withFakeWebSocket(async () => {
+        const { connectSarvamTts } = await import("./sarvam-realtime.server.ts");
+        const events: { type: string }[] = [];
+        const connectPromise = connectSarvamTts({
+          voiceId: "ritu",
+          language: "en-IN",
+          pace: 1,
+          outputCodec: "mulaw",
+          outputSampleRateHz: 8000,
+          onEvent: (e) => events.push(e),
+        });
+        const socket = FakeWebSocket.instances[0]!;
+        socket.simulateOpen();
+        await connectPromise;
+        socket.simulateMessage(
+          JSON.stringify({ type: "audio", data: { audio: chunk1.toString("base64") } }),
+        );
+        socket.simulateMessage(
+          JSON.stringify({ type: "audio", data: { audio: chunk2.toString("base64") } }),
+        );
+      });
+    } finally {
+      logs.restore();
+    }
+
+    const chunkLogs = logs.calls.filter((c) => c.event === "tts:audio_chunk");
+    assert.equal(chunkLogs.length, 2);
+
+    const first = chunkLogs[0]!.data as Record<string, unknown>;
+    assert.equal(first["chunkIndex"], 0);
+    assert.equal(first["firstChunk"], true);
+    assert.equal(first["bytes"], 160);
+    assert.equal(first["declaredCodec"], "mulaw");
+    assert.equal(first["declaredSampleRateHz"], 8000);
+
+    const second = chunkLogs[1]!.data as Record<string, unknown>;
+    assert.equal(second["chunkIndex"], 1);
+    assert.equal(second["firstChunk"], false);
+    assert.equal(second["bytes"], 320);
+
+    const serialized = JSON.stringify(logs.calls);
+    assert.doesNotMatch(serialized, new RegExp(chunk1.toString("base64")));
+    assert.doesNotMatch(serialized, new RegExp(chunk2.toString("base64")));
+  });
+});
+
 describe('STT outbound audio wire shape — production incident round 3 (after TTS was fixed and confirmed working): STT connects and accepts query params with no error, but never produces a transcript. sendAudioFrame sent the raw Uint8Array as a BINARY WebSocket frame with no JSON envelope at all; the current realtime protocol expects a JSON text frame {"event":"audio_input","audio":"<base64>"}', () => {
   const originalKey = process.env["SARVAM_API_KEY"];
   afterEach(() => {
