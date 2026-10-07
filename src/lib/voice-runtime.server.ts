@@ -761,6 +761,15 @@ function enqueueUserUtterance(session: Session, text: string) {
 
 async function handleUserUtterance(session: Session, text: string) {
   session.turns.push({ role: "user", text, at: new Date().toISOString() });
+  // Defensive: speech_end (onSttEvent) already arms a fresh silence timer
+  // the moment the caller stops talking, before final_transcript has even
+  // arrived. That timer is only otherwise cleared by a subsequent
+  // speech_start — so a slow STT finalization + LLM + TTS round trip for
+  // THIS turn could otherwise race it and speak a false "are you still
+  // there?" over a caller who was never actually silent. Clearing it here,
+  // the moment this turn is accepted, removes that race regardless of how
+  // long the rest of this turn takes.
+  clearSilenceTimer(session);
   // Whatever payment wait was pending no longer applies — the caller is
   // actively talking again now, and this turn will address whatever they
   // said (possibly re-arming a fresh wait itself, if it results in another

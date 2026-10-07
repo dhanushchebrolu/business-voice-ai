@@ -315,6 +315,31 @@ describe("silence/timeout handling — wiring", () => {
     assert.equal(armOccurrences.length, 3);
   });
 
+  /**
+   * Production incident (silence_hangup despite the caller speaking twice):
+   * speech_end arms a fresh silence timer the moment the caller stops
+   * talking — before final_transcript has even arrived, let alone before
+   * handleUserUtterance has started processing it. That timer was
+   * previously only ever cleared by a *subsequent* speech_start or by this
+   * same turn's own completion (armSilenceTimer re-arming), never by the
+   * turn actually being accepted. Asserting clearSilenceTimer is the very
+   * first thing handleUserUtterance does — before setState("thinking"),
+   * before the LLM is even asked — so a slow STT finalization/LLM/TTS round
+   * trip for this turn can never race a timer armed before it began.
+   */
+  test("handleUserUtterance clears the silence timer immediately on accepting a turn, before entering THINKING", () => {
+    const fnStart = src.indexOf("async function handleUserUtterance(");
+    const fnBody = src.slice(fnStart, src.indexOf("\n}\n", fnStart));
+    const pushIdx = fnBody.indexOf('session.turns.push({ role: "user"');
+    const clearIdx = fnBody.indexOf("clearSilenceTimer(session);");
+    const thinkingIdx = fnBody.indexOf('setState(session, "thinking");');
+    assert.ok(pushIdx > -1 && clearIdx > -1 && thinkingIdx > -1);
+    assert.ok(
+      pushIdx < clearIdx && clearIdx < thinkingIdx,
+      "clearSilenceTimer must run after the turn is accepted but before THINKING is entered",
+    );
+  });
+
   test("the greeting arms the timer once the caller is being listened to", () => {
     assert.match(
       src,
