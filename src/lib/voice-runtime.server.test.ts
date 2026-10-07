@@ -11,6 +11,7 @@ import {
   isSupportedVoiceLanguage,
   resolveResponseLanguage,
   parseApptStateMarker,
+  parseCallerIntentFromText,
   type RuntimeState,
 } from "./voice-runtime.server.ts";
 import type { AudioMediaBridge, AudioFrame } from "./telephony/audio-bridge";
@@ -96,6 +97,180 @@ describe("parseApptStateMarker — the hidden structured-state tail the model ap
     const result = parseApptStateMarker('Okay.\n<<<APPT_STATE:{"service":"haircut"');
     assert.equal(result.spokenText, "Okay.");
     assert.equal(result.state, null);
+  });
+});
+
+/**
+ * Production incident: a real Vobiz call showed the model's own
+ * APPT_STATE_MARKER emission is not reliably followed — "Is there any slot
+ * available today?" produced no checking_availability marker, and the
+ * agent asked for an exact time instead of dispatching a real calendar
+ * check. parseCallerIntentFromText is the deterministic backstop
+ * (handleUserUtterance) that does not depend on the LLM at all — exercised
+ * here directly against the exact reported phrase plus the task's own
+ * required realistic speech variants, so a regression is caught without
+ * needing a live/faked LLM call.
+ */
+describe("parseCallerIntentFromText — deterministic backstop over the caller's raw words, independent of the LLM's own marker reliability", () => {
+  describe("availabilityRequested", () => {
+    for (const phrase of [
+      "Is there any slot available today?",
+      "Are there any slots available today?",
+      "Do you have any slots today?",
+      "What's available today?",
+      "What times are free tomorrow?",
+      "Anything available this afternoon?",
+      "What's the next available appointment?",
+      "Do you have anything available?",
+      "Can you check if that slot is available?",
+      "Is 3 PM available tomorrow?",
+    ]) {
+      test(`detects an availability request in: "${phrase}"`, () => {
+        assert.equal(
+          parseCallerIntentFromText(phrase).availabilityRequested,
+          true,
+          `expected availabilityRequested=true for "${phrase}"`,
+        );
+      });
+    }
+
+    for (const phrase of [
+      "My name is Dhanush.",
+      "My phone number is nine nine nine nine nine nine nine nine nine nine.",
+      "I'd like to book a teeth cleaning.",
+      "Yeah, please confirm.",
+      "Thank you, goodbye.",
+    ]) {
+      test(`does NOT misfire on an unrelated utterance: "${phrase}"`, () => {
+        assert.equal(
+          parseCallerIntentFromText(phrase).availabilityRequested,
+          false,
+          `expected availabilityRequested=false for "${phrase}"`,
+        );
+      });
+    }
+  });
+
+  describe("wantsNextAvailable", () => {
+    for (const phrase of [
+      "What's the next available appointment?",
+      "Book me at the next available time.",
+      "What's the earliest you have?",
+      "Can I get the soonest available slot?",
+      "Book me as soon as possible.",
+    ]) {
+      test(`detects "next available" intent in: "${phrase}"`, () => {
+        assert.equal(parseCallerIntentFromText(phrase).wantsNextAvailable, true);
+      });
+    }
+
+    test("a plain exact-time request does not set wantsNextAvailable", () => {
+      assert.equal(
+        parseCallerIntentFromText("Is 3 PM available tomorrow?").wantsNextAvailable,
+        false,
+      );
+    });
+  });
+
+  describe("preferredPeriod", () => {
+    test('"this afternoon" resolves to "afternoon"', () => {
+      assert.equal(
+        parseCallerIntentFromText("Anything available this afternoon?").preferredPeriod,
+        "afternoon",
+      );
+    });
+    test('"in the morning" resolves to "morning"', () => {
+      assert.equal(
+        parseCallerIntentFromText("Anything in the morning?").preferredPeriod,
+        "morning",
+      );
+    });
+    test('"this evening" resolves to "evening"', () => {
+      assert.equal(
+        parseCallerIntentFromText("Do you have anything this evening?").preferredPeriod,
+        "evening",
+      );
+    });
+    test("an exact-time request has no period", () => {
+      assert.equal(parseCallerIntentFromText("Is 3 PM available tomorrow?").preferredPeriod, null);
+    });
+  });
+
+  describe("relativeDate", () => {
+    test('"today" is detected', () => {
+      assert.equal(
+        parseCallerIntentFromText("Is there any slot available today?").relativeDate,
+        "today",
+      );
+    });
+    test('"tomorrow" is detected', () => {
+      assert.equal(
+        parseCallerIntentFromText("Well, tomorrow at three p.m.").relativeDate,
+        "tomorrow",
+      );
+    });
+    test("an explicit date has no relativeDate (left to the LLM's own date resolution)", () => {
+      assert.equal(
+        parseCallerIntentFromText("Can you book me for the 15th of next month?").relativeDate,
+        null,
+      );
+    });
+  });
+
+  describe("bookingConfirmed", () => {
+    for (const phrase of [
+      "Yeah, please confirm.",
+      "Yes, confirm it.",
+      "Oh, I can confirm at 3 p.m. tomorrow.",
+      "Sure, that works.",
+      "Go ahead and book it.",
+      "Sounds good.",
+      "Yep.",
+      // The exact reported incident phrase — a confirmation combined with
+      // an unrelated reminder request in the same breath — must still be
+      // recognized as a confirmation.
+      "Yeah, please confirm. Also, can you remind me at tomorrow at 1 p.m. that I have an appointment?",
+    ]) {
+      test(`detects a booking confirmation in: "${phrase}"`, () => {
+        assert.equal(
+          parseCallerIntentFromText(phrase).bookingConfirmed,
+          true,
+          `expected bookingConfirmed=true for "${phrase}"`,
+        );
+      });
+    }
+
+    for (const phrase of [
+      "No, don't confirm that.",
+      "Wait, not yet.",
+      "Actually, cancel that.",
+      "My name is Dhanush.",
+    ]) {
+      test(`does NOT treat a negation/unrelated phrase as a confirmation: "${phrase}"`, () => {
+        assert.equal(parseCallerIntentFromText(phrase).bookingConfirmed, false);
+      });
+    }
+  });
+
+  describe("reminderRequested", () => {
+    for (const phrase of [
+      "Can you remind me at tomorrow at 1 p.m. that I have an appointment?",
+      "Can you set a reminder for me?",
+      "Please remind me tomorrow.",
+      "Could you send me a reminder?",
+      "Can you alert me before the appointment?",
+    ]) {
+      test(`detects a reminder request in: "${phrase}"`, () => {
+        assert.equal(parseCallerIntentFromText(phrase).reminderRequested, true);
+      });
+    }
+
+    test("a plain booking confirmation does not set reminderRequested", () => {
+      assert.equal(
+        parseCallerIntentFromText("Oh, I can confirm at 3 p.m. tomorrow.").reminderRequested,
+        false,
+      );
+    });
   });
 });
 

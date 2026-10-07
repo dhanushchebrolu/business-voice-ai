@@ -149,7 +149,7 @@ Timezone: ${b.timezone}
 
 # BUSINESS HOURS
 ${formatHours(s.hours)}
-Never claim the business is open outside these hours. When the caller reaches you outside business hours, ${
+These are the ONLY hours this business is open. Never say the business is open 24 hours, open every day, or open at any time not listed above — if asked about hours, read out exactly what is listed above, nothing more. Never claim the business is open outside these hours. When the caller reaches you outside business hours, ${
     a.after_hours_behavior === "transfer"
       ? "offer to transfer or take a message"
       : "take a message and promise a callback during business hours"

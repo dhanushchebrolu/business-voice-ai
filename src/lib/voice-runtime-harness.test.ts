@@ -1292,7 +1292,12 @@ describe("26. Calendar availability check (production incident: the agent went s
 
     const spokenBefore = h.tts.sentTexts.length;
     h.stt.speakUtterance("Can you check if that slot is available?");
-    await drain();
+    // 16, not the default 8: the turn now also speaks a quick "let me
+    // check that for you" acknowledgement before dispatching the calendar
+    // tool call (see handleUserUtterance) — one more microtask hop than
+    // before must fully resolve so the tool call's own withToolDeadline
+    // timer is actually scheduled before the clock advances below.
+    await drain(16);
 
     t.mock.timers.tick(10_000); // CALENDAR_TOOL_TIMEOUT_MS
     await drain(16);
@@ -1911,6 +1916,154 @@ describe("29. New diagnostic events (calendar_tool:*, voice:tool_result, voice:f
         `log line must never carry the caller's phone: ${serialized}`,
       );
     }
+  });
+});
+
+describe("30. Conversation state regression — the exact real-call sequence (production incident: 'is there any slot available today?' got no tool call, and a booking confirmation combined with a reminder request was treated as reconsideration)", () => {
+  test("full sequence: book → capture name/phone/service → open availability (marker unreliable) → select tomorrow 3pm → confirm + embedded reminder request (marker unreliable again) → booking still executes correctly, reminder honestly declined, never a false ticket/reminder claim", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    // Steps 1-4: capture service, name, phone across separate turns.
+    h.llm.setNextReply(
+      'Sure, I can help with that. What\'s your name?\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":null,"phone":null,"preferred_date":null,"preferred_time":null,"preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.speakUtterance("I'd like to book a teeth cleaning.");
+    await drain();
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.llm.setNextReply(
+      'Thanks, Dhanush. And your phone number?\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":null,"preferred_date":null,"preferred_time":null,"preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.emit({ type: "final_transcript", text: "My name is Dhanush", language: "en-IN" });
+    await drain();
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.llm.setNextReply(
+      'Got it. When would you like to come in?\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":"9999999999","preferred_date":null,"preferred_time":null,"preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.emit({ type: "final_transcript", text: "My number is 9999999999", language: "en-IN" });
+    await drain();
+    makeTtsFlushCatchUp(h.tts)();
+
+    // Step 5: "Is there any slot available today?" — the EXACT reported
+    // incident phrase. The model's own marker deliberately does NOT set
+    // checking_availability here (reproducing the real, confirmed-
+    // unreliable marker emission) — only the deterministic
+    // parseCallerIntentFromText backstop in handleUserUtterance can save
+    // this turn from asking "what time works best" instead of checking.
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({ success: true, data: { slots: [] } }),
+    });
+    h.llm.setNextReply(
+      'Let me take a look.\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":"9999999999","preferred_date":null,"preferred_time":null,"preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.llm.setDelay(0);
+    h.stt.emit({
+      type: "final_transcript",
+      text: "Is there any slot available today?",
+      language: "en-IN",
+    });
+    await drain(16);
+
+    const availabilityCall = h.tools.calls.find((c) => c.name === "check_calendar_availability");
+    assert.ok(
+      availabilityCall,
+      "step 5: the open availability request must invoke the real tool even though the marker's own checking_availability was never set",
+    );
+    makeTtsFlushCatchUp(h.tts)();
+
+    // Step 6: caller selects tomorrow 3pm.
+    h.llm.setNextReply(
+      'Tomorrow at 3 PM works. Shall I confirm that?\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":"9999999999","preferred_date":"2026-10-09","preferred_time":"15:00","preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.emit({
+      type: "final_transcript",
+      text: "Well, tomorrow at three p.m.",
+      language: "en-IN",
+    });
+    await drain();
+    makeTtsFlushCatchUp(h.tts)();
+
+    // Step 7/8: caller confirms AND asks for a reminder in the SAME
+    // utterance — the exact reported incident. The model's own marker
+    // again fails to propose ready_to_book (reproducing the real bug
+    // where the embedded reminder request confused it into responding "as
+    // if the caller is reconsidering the appointment") — the deterministic
+    // bookingConfirmed backstop must still force it through, since a
+    // specific date+time is already known from step 6.
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: { slots: [{ start: "2026-10-09T15:00:00.000Z", end: "2026-10-09T15:30:00.000Z" }] },
+      }),
+    });
+    h.tools.setNextResult("book_appointment", {
+      content: JSON.stringify({
+        success: true,
+        data: { id: "booking-regression-1", status: "CONFIRMED" },
+      }),
+    });
+    h.llm.setNextReply(
+      'I understand you might want to reconsider.\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":"9999999999","preferred_date":"2026-10-09","preferred_time":"15:00","preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.emit({
+      type: "final_transcript",
+      text: "Yeah, please confirm. Also, can you remind me at tomorrow at 1 p.m. that I have an appointment?",
+      language: "en-IN",
+    });
+    // This turn's deterministic path is deeper than a plain availability
+    // check (drain(16), as step 5 above uses): attemptBooking re-verifies
+    // the slot with its own check_calendar_availability call before the
+    // real book_appointment call, plus the Fix #6 "give me a moment" ack
+    // speak() ahead of both — two sequential tool round trips, not one —
+    // so it needs more microtask hops to fully settle.
+    await drain(48);
+
+    // Step 9/11: booking confirmation was NOT lost, and really executed.
+    const bookingCall = h.tools.calls.find((c) => c.name === "book_appointment");
+    assert.ok(
+      bookingCall,
+      "steps 7-9/11: the booking confirmation must still execute despite the marker failing to propose ready_to_book and despite the embedded reminder request in the same utterance",
+    );
+    assert.equal(
+      bookingCall?.input["customerName"],
+      "Dhanush",
+      "name must have been preserved across every turn",
+    );
+    assert.equal(
+      bookingCall?.input["customerPhone"],
+      "9999999999",
+      "phone must have been preserved across every turn",
+    );
+    assert.equal(
+      bookingCall?.input["startIso"],
+      "2026-10-09T15:00:00.000Z",
+      "the exact slot selected in step 6 must be the one actually booked",
+    );
+
+    // Step 10/12: the reminder is handled separately and honestly — never
+    // silently dropped, never fabricated as a real operation.
+    const spokenSinceConfirmation = h.tts.sentTexts.slice(-3).join(" ");
+    assert.doesNotMatch(
+      spokenSinceConfirmation,
+      /\bticket\b/i,
+      "must never claim a support ticket was created",
+    );
+    assert.doesNotMatch(
+      spokenSinceConfirmation,
+      /reminder (was |is |has been )?(scheduled|set|created|sent)|you will (receive|get) a reminder/i,
+      "must never claim a reminder was actually scheduled — no such capability exists in this codebase",
+    );
+    assert.match(
+      spokenSinceConfirmation,
+      /not able to set reminders|can't set reminders|reminders? (aren't|are not|isn't|is not) available/i,
+      "must honestly tell the caller reminders are not available on this line",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
   });
 });
 

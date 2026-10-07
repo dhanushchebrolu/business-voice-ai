@@ -1084,6 +1084,118 @@ function describeKnownAppointmentState(s: AppointmentState): string | null {
   return `CURRENT APPOINTMENT STATE (already confirmed by the caller — do not ask for these again):\n${known.join("\n")}`;
 }
 
+/**
+ * Production incident: a real Vobiz call showed the model's own
+ * APPT_STATE_MARKER emission is NOT reliably followed turn to turn — "Is
+ * there any slot available today?" produced no `checking_availability`
+ * marker at all (the agent asked "what time works best" instead of
+ * dispatching a real calendar check), and a later "please confirm" that
+ * also mentioned an unrelated reminder request was treated as NOT a
+ * confirmation at all. Relying solely on the LLM to self-report caller
+ * intent via the marker is therefore not robust enough on its own.
+ *
+ * This is a plain, deterministic, directly-testable pattern match over the
+ * caller's own raw words — independent of whatever the model's marker
+ * says this turn — used in handleUserUtterance as a BACKSTOP: it only ever
+ * fills in a field the marker left unset, or forces a dispatch the marker
+ * should have proposed but didn't; it never overrides a marker value that
+ * IS present. Deliberately simple keyword/phrase matching, not an NLU
+ * model — scoped to exactly the phrasings this incident and the task's
+ * own requirements call out, and unit-tested against them directly (see
+ * voice-runtime.server.test.ts).
+ */
+export interface CallerIntentSignals {
+  /** The caller is asking what's open/free — with or without a specific time. */
+  availabilityRequested: boolean;
+  /** The caller explicitly asked for the next/earliest/soonest open slot. */
+  wantsNextAvailable: boolean;
+  /** An approximate time-of-day the caller gave, if any ("this afternoon"). */
+  preferredPeriod: "morning" | "afternoon" | "evening" | null;
+  /** "today"/"tomorrow", if the caller said either literally — resolved to an actual date by the caller (via resolveRelativeDateInTimezone), never here (no timezone available at plain-text-parsing time). */
+  relativeDate: "today" | "tomorrow" | null;
+  /** The caller affirmatively confirmed a booking ("yes", "please confirm", "that works", "go ahead", "book it") — only meaningful where the runtime already knows a specific slot is being discussed (see handleUserUtterance's own gating). */
+  bookingConfirmed: boolean;
+  /** The caller asked for a reminder/alert — a capability this codebase does not implement (see REMINDERS_NOT_IMPLEMENTED_NOTICE). */
+  reminderRequested: boolean;
+}
+
+const AVAILABILITY_KEYWORDS =
+  /\b(available|availability|availabl[ey]|slots?|openings?|free|anything open|any time|what time)\b/i;
+const AVAILABILITY_QUESTION_SHAPE =
+  /\b(any|anything|do you have|what('s| is)|is there|are there|what times?)\b/i;
+const NEXT_AVAILABLE_PATTERN =
+  /\b(next available|earliest|soonest|first available|as soon as possible|asap)\b/i;
+const PERIOD_PATTERNS: [RegExp, "morning" | "afternoon" | "evening"][] = [
+  [/\bmorning\b/i, "morning"],
+  [/\bafternoon\b/i, "afternoon"],
+  [/\b(evening|tonight)\b/i, "evening"],
+];
+const RELATIVE_DATE_PATTERNS: [RegExp, "today" | "tomorrow"][] = [
+  // "tomorrow" checked before "today" below (order of the returned array,
+  // not this regex) only matters if a sentence absurdly contained both;
+  // realistically mutually exclusive in one utterance.
+  [/\btomorrow\b/i, "tomorrow"],
+  [/\btoday\b/i, "today"],
+];
+// Deliberately requires a standalone affirmative word/phrase, not just any
+// sentence containing "confirm" — e.g. "can you confirm the address" is
+// not a booking confirmation. Still intentionally broad (matches real
+// speech variants: "yeah", "yep", "sure", "go ahead", "sounds good",
+// "that works", "please confirm", "book it", "please book it"), and
+// explicitly excludes an immediately-preceding negation ("no", "don't",
+// "not yet") so "no, don't confirm that" is never misread as a yes.
+const BOOKING_CONFIRMATION_PATTERN =
+  /\b(yes|yeah|yep|yup|sure|confirm(ed)?|go ahead|sounds good|that works|book it|please book)\b/i;
+const BOOKING_NEGATION_PATTERN = /\b(no|not|don't|do not|never ?mind|cancel|wait)\b/i;
+const REMINDER_PATTERN =
+  /\b(remind(er)?|alert) me\b|\bset (a |an )?remind(er)?\b|\bsend me a remind(er)?\b/i;
+
+export function parseCallerIntentFromText(text: string): CallerIntentSignals {
+  const availabilityRequested =
+    AVAILABILITY_KEYWORDS.test(text) &&
+    (AVAILABILITY_QUESTION_SHAPE.test(text) ||
+      /\?/.test(text) ||
+      NEXT_AVAILABLE_PATTERN.test(text));
+  const wantsNextAvailable = NEXT_AVAILABLE_PATTERN.test(text);
+  const preferredPeriod = PERIOD_PATTERNS.find(([re]) => re.test(text))?.[1] ?? null;
+  const relativeDate = RELATIVE_DATE_PATTERNS.find(([re]) => re.test(text))?.[1] ?? null;
+  const bookingConfirmed =
+    BOOKING_CONFIRMATION_PATTERN.test(text) && !BOOKING_NEGATION_PATTERN.test(text);
+  const reminderRequested = REMINDER_PATTERN.test(text);
+  return {
+    availabilityRequested,
+    wantsNextAvailable,
+    preferredPeriod,
+    relativeDate,
+    bookingConfirmed,
+    reminderRequested,
+  };
+}
+
+/** Resolves "today"/"tomorrow" to an actual YYYY-MM-DD in the business's own timezone — noon-anchored (zonedWallTimeToUtc) before adding 24h for "tomorrow", the same DST-transition-safe technique calendar/timezone.ts's own dayOfWeekInTimezone uses, rather than naive UTC day arithmetic (never the server's own local time, never UTC). */
+function resolveRelativeDateInTimezone(
+  relative: "today" | "tomorrow",
+  timeZone: string,
+  now: Date = new Date(),
+): string {
+  const ymdFormatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const todayYmd = ymdFormatter.format(now);
+  if (relative === "today") return todayYmd;
+  const tomorrowInstant = new Date(
+    zonedWallTimeToUtc(todayYmd, "12:00", timeZone).getTime() + 24 * 60 * 60 * 1000,
+  );
+  return ymdFormatter.format(tomorrowInstant);
+}
+
+/** This codebase has no reminder/alert-scheduling tool or service — see ai-tools.server.ts's TOOL_REGISTRY, which has none. Injected as grounding context for the turn the caller asks for one, so the model's own reply is honest about it instead of inventing a promise nothing will ever fulfill — see handleUserUtterance. */
+const REMINDERS_NOT_IMPLEMENTED_NOTICE =
+  "The caller just asked for a reminder, alert, or callback to be scheduled for a specific time. This system has NO reminder-scheduling capability of any kind — there is no way to actually set one. Tell the caller honestly and briefly that you can't set a reminder on this line. Do not say a reminder will be sent, scheduled, or created. This does not change anything else you were asked in the same turn (e.g. still address a booking request normally).";
+
 function pickGreeting(agent: AgentSnapshot["agent"], businessName: string): string {
   const language = agent.primary_language;
   return (
@@ -1254,7 +1366,7 @@ async function speak(
 async function getReply(
   session: Session,
   messages: ChatMessage[],
-): Promise<{ reply: string; enteredPaymentWait: boolean }> {
+): Promise<{ reply: string; enteredPaymentWait: boolean; usedToolCalling: boolean }> {
   const { generateReplyWithTools, resolveAvailableTools, executeTool } = session.deps;
   if (generateReplyWithTools && resolveAvailableTools && executeTool) {
     const tools = await resolveAvailableTools(
@@ -1282,11 +1394,11 @@ async function getReply(
       const enteredPaymentWait = result.toolCalls.some(
         (t) => t.name === "request_payment" && !t.isError,
       );
-      return { reply: result.reply, enteredPaymentWait };
+      return { reply: result.reply, enteredPaymentWait, usedToolCalling: true };
     }
   }
   const { reply } = await session.deps.generateReply(messages);
-  return { reply, enteredPaymentWait: false };
+  return { reply, enteredPaymentWait: false, usedToolCalling: false };
 }
 
 /** Appointment length assumed when the caller's requested service has no known duration — this flow doesn't attempt to match the free-text service name the caller used against the business's configured services list, so a per-service duration isn't available here. */
@@ -1347,7 +1459,7 @@ async function composeHonestBookingReply(session: Session, facts: string): Promi
     const { reply } = await session.deps.generateReply([
       {
         role: "system",
-        content: `You are ${session.input.snapshotAgent.agent_name}, a phone receptionist. Respond in language code ${language}. One or two short sentences, phone-conversation style. State only what the facts below say — never claim a booking succeeded unless the facts say it did. Do not add any JSON, markers, or notes.`,
+        content: `You are ${session.input.snapshotAgent.agent_name}, a phone receptionist. Respond in language code ${language}. One or two short sentences, phone-conversation style. State only what the facts below say — never claim a booking succeeded unless the facts say it did. Never mention a support ticket, a callback, or a reminder being created/scheduled/sent unless the facts below explicitly say one was. Do not add any JSON, markers, or notes.`,
       },
       { role: "user", content: facts },
     ]);
@@ -1935,6 +2047,14 @@ function enqueueUserUtterance(session: Session, text: string) {
 
 async function handleUserUtterance(session: Session, text: string) {
   session.turns.push({ role: "user", text, at: new Date().toISOString() });
+  // Deterministic backstop over the caller's own raw words — see
+  // parseCallerIntentFromText's own doc comment for the production
+  // incident this responds to (the model's own marker emission is not
+  // reliably followed every turn). Computed once, up front, so both the
+  // pre-reply system-message grounding below (reminders) and the
+  // post-reply state enrichment further down use the exact same read of
+  // this turn's caller text.
+  const callerIntent = parseCallerIntentFromText(text);
   // Defensive: speech_end (onSttEvent) already arms a fresh silence timer
   // the moment the caller stops talking, before final_transcript has even
   // arrived. That timer is only otherwise cleared by a subsequent
@@ -1965,6 +2085,15 @@ async function handleUserUtterance(session: Session, text: string) {
     ...(knownAppointmentState
       ? [{ role: "system", content: knownAppointmentState } as ChatMessage]
       : []),
+    // Grounds the model with the truth about reminder scheduling (not
+    // implemented — see REMINDERS_NOT_IMPLEMENTED_NOTICE) BEFORE it
+    // replies, rather than trying to catch/correct a fabricated promise
+    // after the fact — the fix for a real call where the agent promised
+    // "you will receive a reminder at 1pm tomorrow" with no such mechanism
+    // existing anywhere in this codebase.
+    ...(callerIntent.reminderRequested
+      ? [{ role: "system", content: REMINDERS_NOT_IMPLEMENTED_NOTICE } as ChatMessage]
+      : []),
     ...session.turns
       .slice(-CONVERSATION_HISTORY_TURNS)
       .map((t) => ({ role: t.role, content: t.text }) as ChatMessage),
@@ -1981,7 +2110,11 @@ async function handleUserUtterance(session: Session, text: string) {
 
   try {
     await withTurnDeadline(TURN_DEADLINE_MS, async (isCancelled) => {
-      const { reply: rawReply, enteredPaymentWait } = await getReply(session, messages);
+      const {
+        reply: rawReply,
+        enteredPaymentWait,
+        usedToolCalling,
+      } = await getReply(session, messages);
       const llmCompletedAt = Date.now();
       if (session.currentTurn) session.currentTurn.llmCompletedAt = llmCompletedAt;
       log("llm_completed", session, {
@@ -2005,45 +2138,105 @@ async function handleUserUtterance(session: Session, text: string) {
         return;
       }
 
-      // Strip and parse the trailing structured appointment-state block
-      // (see parseApptStateMarker/APPT_STATE_MARKER) — spokenText is what
-      // the caller actually hears; the marker itself never reaches TTS or
-      // the persisted transcript.
-      const { spokenText, state: proposedAppointmentState } = parseApptStateMarker(rawReply);
-      session.appointmentState = mergeAppointmentState(
-        session.appointmentState,
-        proposedAppointmentState,
-      );
+      // The marker-based deterministic backstop below exists only for the
+      // plain-conversational Sarvam path (no native tool-calling — see
+      // parseCallerIntentFromText's own doc comment). When this turn went
+      // through the real AI tool-calling path instead (getReply's
+      // usedToolCalling), the model already executed real tools via
+      // generateReplyWithTools/executeTool with server-derived context —
+      // dispatching attemptBooking/attemptAvailabilityCheck AGAIN here
+      // would silently replace that already-correct, already-honest reply
+      // with a second, redundant tool round trip the caller never asked
+      // this code path to run twice.
+      let reply = rawReply;
+      if (!usedToolCalling) {
+        // Strip and parse the trailing structured appointment-state block
+        // (see parseApptStateMarker/APPT_STATE_MARKER) — spokenText is what
+        // the caller actually hears; the marker itself never reaches TTS or
+        // the persisted transcript.
+        const { spokenText, state: proposedAppointmentState } = parseApptStateMarker(rawReply);
+        let appointmentState = mergeAppointmentState(
+          session.appointmentState,
+          proposedAppointmentState,
+        );
 
-      let reply = spokenText;
-      // Once every required field is known AND this turn's model proposed
-      // moving to booking, the RUNTIME — not the model — performs the real
-      // booking attempt and decides what's actually said. See attemptBooking
-      // for why this is deterministic rather than an LLM tool-use round
-      // trip, and for why it's the fix for "never claim booked unless it
-      // actually succeeded". Exactly one of these two deterministic tool
-      // paths can fire per turn (ready_to_book takes priority — see
-      // parseApptStateMarker) — never both, and never neither when the
-      // caller has asked a calendar question the model can't honestly
-      // answer on its own: that gap (a caller asking "is that slot free?"
-      // with no deterministic hook to answer it) is what previously left
-      // the model's own plain-text reply — sometimes empty — as the ONLY
-      // response, which is the direct cause of the reported "goes silent
-      // when checking availability" production incident.
-      if (
-        session.appointmentState.bookingStatus === "ready_to_book" &&
-        appointmentStateIsComplete(session.appointmentState)
-      ) {
-        const outcome = await attemptBooking(session);
-        reply = outcome.spoken;
-        session.appointmentState = outcome.state;
-      } else if (
-        session.appointmentState.bookingStatus === "checking_availability" &&
-        appointmentSlotIsKnown(session.appointmentState)
-      ) {
-        const outcome = await attemptAvailabilityCheck(session);
-        reply = outcome.spoken;
-        session.appointmentState = outcome.state;
+        // Deterministic backstop (production incident: the model's marker
+        // did not reliably propose checking_availability/ready_to_book every
+        // turn it should have — see parseCallerIntentFromText's own doc
+        // comment). Only ever FILLS IN what the marker left unset, or
+        // escalates bookingStatus the marker should have proposed — never
+        // overrides a value the marker DID set this turn.
+        if (
+          callerIntent.availabilityRequested &&
+          appointmentState.bookingStatus !== "ready_to_book"
+        ) {
+          let resolvedDate = appointmentState.preferredDate;
+          if (!resolvedDate && callerIntent.relativeDate) {
+            const timezone = await resolveBusinessTimezone(session.input.businessId);
+            resolvedDate = resolveRelativeDateInTimezone(callerIntent.relativeDate, timezone);
+          }
+          if (resolvedDate) {
+            appointmentState = {
+              ...appointmentState,
+              preferredDate: resolvedDate,
+              preferredPeriod: appointmentState.preferredPeriod ?? callerIntent.preferredPeriod,
+              wantsNextAvailable:
+                appointmentState.wantsNextAvailable || callerIntent.wantsNextAvailable,
+              bookingStatus: "checking_availability",
+            };
+          }
+        }
+        // Only applies once a specific slot is already clearly on the table
+        // (a date, and either a time or an explicit "next available") — never
+        // lets a stray "yes"/"sure" earlier in an unrelated exchange misfire
+        // into booking something.
+        if (
+          callerIntent.bookingConfirmed &&
+          appointmentState.bookingStatus !== "ready_to_book" &&
+          appointmentState.preferredDate &&
+          (appointmentState.preferredTime || appointmentState.wantsNextAvailable)
+        ) {
+          appointmentState = { ...appointmentState, bookingStatus: "ready_to_book" };
+        }
+        session.appointmentState = appointmentState;
+
+        reply = spokenText;
+        // Once every required field is known AND this turn's model proposed
+        // moving to booking, the RUNTIME — not the model — performs the real
+        // booking attempt and decides what's actually said. See attemptBooking
+        // for why this is deterministic rather than an LLM tool-use round
+        // trip, and for why it's the fix for "never claim booked unless it
+        // actually succeeded". Exactly one of these two deterministic tool
+        // paths can fire per turn (ready_to_book takes priority — see
+        // parseApptStateMarker) — never both, and never neither when the
+        // caller has asked a calendar question the model can't honestly
+        // answer on its own: that gap (a caller asking "is that slot free?"
+        // with no deterministic hook to answer it) is what previously left
+        // the model's own plain-text reply — sometimes empty — as the ONLY
+        // response, which is the direct cause of the reported "goes silent
+        // when checking availability" production incident.
+        if (
+          session.appointmentState.bookingStatus === "ready_to_book" &&
+          appointmentStateIsComplete(session.appointmentState)
+        ) {
+          // Production incident: real calendar+LLM round trips left the
+          // caller in dead air long enough to say "hello? are you there?".
+          // A short, immediate, honest acknowledgement — spoken BEFORE the
+          // slower real operation, never claiming an outcome yet — fills
+          // that gap with controlled sound instead of silence.
+          await speak(session, "Give me just a moment to confirm that.");
+          const outcome = await attemptBooking(session);
+          reply = outcome.spoken;
+          session.appointmentState = outcome.state;
+        } else if (
+          session.appointmentState.bookingStatus === "checking_availability" &&
+          appointmentSlotIsKnown(session.appointmentState)
+        ) {
+          await speak(session, "Let me check that for you.");
+          const outcome = await attemptAvailabilityCheck(session);
+          reply = outcome.spoken;
+          session.appointmentState = outcome.state;
+        }
       }
 
       if (!reply) {
@@ -2051,6 +2244,20 @@ async function handleUserUtterance(session: Session, text: string) {
         setState(session, "listening");
         armSilenceTimer(session);
         return;
+      }
+
+      // Deterministic, code-level — never LLM-composed — so this is never
+      // itself at risk of fabricating what it describes. Covers EVERY path
+      // `reply` can come from (the plain conversational spokenText, or
+      // either tool-outcome's composed text) — the earlier
+      // REMINDERS_NOT_IMPLEMENTED_NOTICE system message already steers the
+      // model's own spokenText honestly in the common case, but when
+      // ready_to_book/checking_availability fires in the SAME turn, `reply`
+      // is replaced entirely by attemptBooking's/attemptAvailabilityCheck's
+      // own composed text, which knows nothing about the reminder — this
+      // guarantees the topic is still addressed honestly either way.
+      if (callerIntent.reminderRequested && !/remind/i.test(reply)) {
+        reply = `${reply} By the way, I'm not able to set reminders on this line.`;
       }
 
       // Re-checked here (not just after getReply above): attemptBooking is
