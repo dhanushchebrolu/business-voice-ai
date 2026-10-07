@@ -417,15 +417,22 @@ describe("silence/timeout handling — wiring", () => {
  * isn't exported; voice-runtime-harness.test.ts's "STT always requests
  * language auto-detection" suite covers the same value via the fake STT's
  * recorded connect call.
+ *
+ * Call-site shape updated for Problem 1 (concurrent STT/TTS startup fix):
+ * `session.stt = await timedStep(...)` became
+ * `const sttConnectPromise = timedStep(...)` — connectStt is no longer
+ * awaited in place (both connect calls are started before either is
+ * awaited, via Promise.allSettled) — but the options passed to it,
+ * including this "auto" language code, are unchanged.
  */
 describe('STT connect call site uses Sarvam\'s real "auto" language code, not the rejected "unknown"', () => {
   test('connectStt is called with language: "auto"', () => {
     const fnStart = src.indexOf("export async function startRuntimeSession(");
     const connectStart = src.indexOf(
-      'session.stt = await timedStep(session, "stt_connect"',
+      'const sttConnectPromise = timedStep(session, "stt_connect"',
       fnStart,
     );
-    const connectEnd = src.indexOf("}),\n    );", connectStart);
+    const connectEnd = src.indexOf("}),\n  );", connectStart);
     assert.ok(connectStart > -1 && connectEnd > -1);
     const connectBody = src.slice(connectStart, connectEnd);
     assert.match(connectBody, /language:\s*"auto",/);

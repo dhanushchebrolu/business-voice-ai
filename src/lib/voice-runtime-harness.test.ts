@@ -1410,3 +1410,276 @@ describe("21. Barge-in diagnostics and single-utterance replies (tests 8, 10)", 
     );
   });
 });
+
+describe("22. Concurrent STT/TTS startup (Problem 1: a slow TTS connection must never block STT)", () => {
+  test("1: connectStt and connectTts are both invoked immediately — concurrently, not one after the other", async () => {
+    // Real production incident: startRuntimeSession used to `await
+    // deps.connectTts(...)` and only THEN call `deps.connectStt(...)` — a
+    // slow TTS handshake fully serialized in front of STT even though the
+    // two are independent network round trips. If that regresses, the TTS
+    // fake's own connectDelayMs (synchronously recorded into connectCalls
+    // before its internal delay) would still resolve first, and STT's
+    // connectCalls would stay empty until then. Deliberately asserted
+    // BEFORE awaiting the session at all: both connect calls happen
+    // synchronously, before any microtask even runs, so no await/drain is
+    // needed to observe this.
+    const h = createHarness({ tts: { connectDelayMs: 20 } });
+    const callId = newCallId();
+    const handlePromise = startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+
+    assert.equal(h.tts.connectCalls.length, 1, "connectTts must have been attempted immediately");
+    assert.equal(
+      h.stt.connectCalls.length,
+      1,
+      "connectStt must have been attempted immediately too — not after TTS's connect resolves",
+    );
+
+    await handlePromise;
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("2: a slow TTS connection does not delay STT connecting and becoming ready to receive caller audio", async () => {
+    const h = createHarness({ tts: { connectDelayMs: 300 } });
+    const callId = newCallId();
+    const handlePromise = startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+
+    // STT's own fake has no artificial delay — draining the microtask
+    // queue (no real timers needed) is enough for it to resolve, even
+    // though TTS's 300ms real-timer delay is still outstanding.
+    await drain();
+    assert.equal(h.stt.connectCalls.length, 1);
+
+    // The session as a whole still waits for both before the greeting
+    // (nothing to greet with until TTS is ready too) — but caller audio
+    // arriving in that window must never be lost regardless; see
+    // startRuntimeSession's pendingInboundFrames buffering.
+    h.bridge.emitInboundFrame(new Uint8Array([9, 8, 7]));
+
+    const handle = await handlePromise;
+    assert.equal(handle.state, "listening");
+    assert.deepEqual(h.stt.sentAudioFrames.at(-1), new Uint8Array([9, 8, 7]));
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("a TTS connect failure does not prevent STT from having been attempted (independent error handling)", async () => {
+    const h = createHarness({ tts: { failConnectWith: new Error("tts down") } });
+    const callId = newCallId();
+    const handle = await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+
+    assert.equal(h.stt.connectCalls.length, 1, "STT connect must still have been attempted");
+    assert.equal(handle.state, "failed", "the call cannot proceed without TTS to speak with");
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("an STT connect failure does not prevent TTS from having connected, and a spoken apology is still possible", async () => {
+    const h = createHarness({ stt: { failConnectWith: new Error("stt down") } });
+    const callId = newCallId();
+    const handle = await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+
+    assert.equal(h.tts.connectCalls.length, 1, "TTS connect must still have been attempted");
+    assert.equal(handle.state, "failed");
+    assert.ok(
+      h.tts.sentTexts.length >= 1,
+      "a working TTS connection should still speak an apology before the call ends",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+describe("23. Turn deadline — no permanent silence (Problem 3)", () => {
+  test("a final_transcript produces exactly one LLM request", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+    const callsBefore = h.llm.calls.length;
+
+    h.stt.speakUtterance("What are your hours?");
+    await drain();
+
+    assert.equal(
+      h.llm.calls.length,
+      callsBefore + 1,
+      "exactly one LLM request for one final_transcript",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("a downstream step that never resolves (e.g. a hung tool/calendar call) still produces a spoken fallback within the turn deadline, instead of permanent silence", async (t) => {
+    t.mock.timers.enable();
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+    const spokenBeforeTurn = h.tts.sentTexts.length;
+
+    // Simulates ANY downstream await that never settles (the LLM call
+    // itself here, but the same withTurnDeadline safety net covers
+    // attemptBooking's tool calls too — see voice-runtime.server.ts) —
+    // far longer than TURN_DEADLINE_MS, so it never resolves within this test.
+    h.llm.setDelay(1_000_000);
+    h.stt.speakUtterance("I want to book an appointment to clean my teeth tomorrow at 3pm");
+    await drain();
+
+    t.mock.timers.tick(25_000); // TURN_DEADLINE_MS
+    await drain();
+
+    const spokenChunks = h.tts.sentTexts.slice(spokenBeforeTurn);
+    assert.ok(
+      spokenChunks.length >= 1,
+      "a fallback must be spoken once the turn deadline elapses — the caller must never be left in permanent silence",
+    );
+    assert.match(spokenChunks.join(" "), /sorry|try again/i);
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("the silence timer is re-armed after a turn-deadline fallback, so the caller is not abandoned afterwards either", async (t) => {
+    t.mock.timers.enable();
+    const h = createHarness();
+    const callId = newCallId();
+    const handle = await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.llm.setDelay(1_000_000);
+    h.stt.speakUtterance("Hello?");
+    await drain();
+    t.mock.timers.tick(25_000); // TURN_DEADLINE_MS fires the fallback
+    await drain();
+    makeTtsFlushCatchUp(h.tts)(); // the fallback's own audio finishes playing
+    assert.equal(handle.state, "listening");
+
+    const spokenBeforeSilence = h.tts.sentTexts.length;
+    t.mock.timers.tick(12_000); // SILENCE_PROMPT_MS
+    await drain();
+
+    assert.ok(
+      h.tts.sentTexts.length > spokenBeforeSilence,
+      "the silence timer must have been re-armed after the turn-deadline fallback — not left disarmed forever",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("a turn that resolves normally (not via the deadline) does not speak twice if the hung work eventually settles after cancellation", async (t) => {
+    t.mock.timers.enable();
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    // A delay just long enough to be cancelled by the deadline, but short
+    // enough that the fake LLM's own setTimeout still fires (on the mocked
+    // clock) shortly after — simulating "the hung call was merely slow,
+    // not actually stuck forever" and proving isCancelled() stops its
+    // continuation from pushing a second, duplicate turn/reply.
+    h.llm.setDelay(25_500);
+    h.stt.speakUtterance("Testing late resolution after cancellation");
+    await drain();
+
+    t.mock.timers.tick(25_000); // deadline fires first, speaks the fallback
+    await drain();
+    const spokenAfterDeadline = h.tts.sentTexts.length;
+
+    t.mock.timers.tick(1_000); // now the orphaned LLM call resolves too
+    await drain();
+
+    assert.equal(
+      h.tts.sentTexts.length,
+      spokenAfterDeadline,
+      "the late-resolving, cancelled turn must not speak a second reply on top of the deadline's fallback",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+describe("24. TTS audio pass-through (Problem 4: exactly one conversion, no corruption, no double-encoding)", () => {
+  test("a Sarvam audio chunk reaches the bridge's outbound frame with its exact byte length and content unchanged", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    const framesBefore = h.bridge.sentFrames.length;
+
+    const chunk = new Uint8Array(160);
+    for (let i = 0; i < chunk.length; i++) chunk[i] = (i * 3) % 256;
+    h.tts.emitAudio(chunk);
+
+    const newFrames = h.bridge.sentFrames.slice(framesBefore);
+    assert.equal(newFrames.length, 1);
+    assert.deepEqual(
+      newFrames[0]!.data,
+      chunk,
+      "voice-runtime.server.ts must forward Sarvam's audio bytes unchanged — no re-encoding, truncation, or resampling at this layer",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("audio from a connection that has since been replaced is dropped, never concatenated with the active connection's audio", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    // Switch language mid-call — this closes the old TTS connection and
+    // opens a new one (maybeSwitchTtsLanguage), both using the SAME fake
+    // controller (h.tts), so emitting on it now targets the NEW connection.
+    h.stt.emit({ type: "final_transcript", text: "Hindi mein baat karo", language: "hi-IN" });
+    await drain();
+    const framesBefore = h.bridge.sentFrames.length;
+
+    const chunk = new Uint8Array([1, 2, 3, 4]);
+    h.tts.emitAudio(chunk);
+
+    const newFrames = h.bridge.sentFrames.slice(framesBefore);
+    assert.equal(
+      newFrames.length,
+      1,
+      "exactly one frame forwarded for the live connection's chunk",
+    );
+    assert.deepEqual(newFrames[0]!.data, chunk, "never concatenated with anything else");
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+describe("25. Silence timer generation isolation (test 14: a stale timer must never speak into a new generation)", () => {
+  test("a silence timer armed before a barge-in never fires a prompt into the NEW generation it interrupted", async (t) => {
+    t.mock.timers.enable();
+    const h = createHarness();
+    const callId = newCallId();
+    const handle = await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+    const spokenBeforeSilence = h.tts.sentTexts.length;
+
+    // Silence timer armed at generation G while listening. Just before it
+    // would fire, the caller speaks again — a real barge-in path that
+    // clears it and advances the generation. The ORIGINAL timer must never
+    // reach into the call after this point, no matter how long the clock
+    // keeps advancing.
+    t.mock.timers.tick(11_000); // just under SILENCE_PROMPT_MS (12s)
+    h.llm.setDelay(40);
+    h.stt.speakUtterance("Actually, I have another question");
+    await drain();
+
+    // Advance well past where the ORIGINAL silence prompt would have fired
+    // (12s) and even past the hangup threshold (another 10s) — if the old
+    // timer were still live, it would have spoken by now.
+    t.mock.timers.tick(25_000);
+    await drain();
+
+    assert.notEqual(handle.state, "ended", "the old silence timer must not have hung up the call");
+    const spokenChunks = h.tts.sentTexts.slice(spokenBeforeSilence);
+    assert.ok(
+      !spokenChunks.some((c) => /still there/i.test(c)),
+      "the stale timer must never speak a silence prompt into the new generation's turn",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});

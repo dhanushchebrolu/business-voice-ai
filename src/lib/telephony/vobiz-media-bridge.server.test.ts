@@ -212,6 +212,43 @@ test("REGRESSION (same incident): outbound playAudio sends the real nested {stre
   assert.equal(Buffer.from(media.payload, "base64").toString("utf8"), "agent-reply");
 });
 
+test("PROBLEM 4 (broken/choppy audio investigation): a known short mu-law payload survives sendOutboundFrame byte-for-byte — base64-encoded exactly once, no truncation, no re-encoding, no resampling of the byte length", () => {
+  const socket = new FakeVobizSocket();
+  const bridge = new VobizMediaBridge(socket, "st-1", "cu-1", () => {});
+
+  // One 20ms frame of 8kHz mu-law audio (160 bytes/sample, 1 byte/sample) —
+  // a realistic frame size/shape, not an arbitrary string. Values chosen to
+  // cover the full byte range (0x00-0x9F ascending), so a corrupting
+  // transformation (e.g. accidentally treating these as PCM and
+  // mu-law-encoding them a second time, or truncating/padding) would change
+  // at least one byte.
+  const frame = new Uint8Array(160);
+  for (let i = 0; i < frame.length; i++) frame[i] = i % 256;
+
+  bridge.sendOutboundFrame({ data: frame, timestampMs: 0 });
+
+  const sent = JSON.parse(socket.sent.at(-1)!) as {
+    media: { payload: string; contentType: string; sampleRate: number };
+  };
+  const decoded = Buffer.from(sent.media.payload, "base64");
+  assert.equal(
+    decoded.length,
+    frame.length,
+    "byte length must be preserved exactly — no resampling",
+  );
+  assert.deepEqual(
+    new Uint8Array(decoded),
+    frame,
+    "bytes must round-trip exactly — exactly one base64 pass, no double-encoding or corruption",
+  );
+  assert.equal(
+    sent.media.contentType,
+    "audio/x-mulaw",
+    "codec is declared, never silently changed",
+  );
+  assert.equal(sent.media.sampleRate, 8000);
+});
+
 test("DIAGNOSTIC: media_event_shape logs field NAMES/TYPES/LENGTHS only, once per bridge instance (not per frame), and never the raw audio payload", () => {
   const socket = new FakeVobizSocket();
   const bridge = new VobizMediaBridge(socket, "st-1", "cu-1");

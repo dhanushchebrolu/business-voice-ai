@@ -235,4 +235,17 @@ describe("buildAgentInstructions — appointment intent (test 13/14: booking req
     const prompt = buildAgentInstructions(dentalSnapshot);
     assert.match(prompt, /match it to the closest listed service yourself/i);
   });
+
+  // Production incident round 2: the prompt already had the three
+  // assertions above (shipped in commit 470e2c9) and the agent STILL
+  // told a real caller "we do not offer appointments" for this exact
+  // dental-cleaning request. A soft instruction wasn't enough — this adds
+  // an explicit, unambiguous negative constraint naming the literal
+  // forbidden claim, in its own prominent "# APPOINTMENTS" section rather
+  // than a trailing sentence after the services list.
+  test("has a dedicated APPOINTMENTS section with an explicit hard constraint against the exact forbidden claim", () => {
+    const prompt = buildAgentInstructions(dentalSnapshot);
+    assert.match(prompt, /# APPOINTMENTS/);
+    assert.match(prompt, /never say.*does not offer appointments/i);
+  });
 });

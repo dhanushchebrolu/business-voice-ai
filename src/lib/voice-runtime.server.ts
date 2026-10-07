@@ -778,6 +778,68 @@ async function timedStep<T>(
   }
 }
 
+/**
+ * Problem 3 (production incident: a caller's turn sometimes produced total
+ * silence — no reply, no fallback, ever, until the caller gave up — because
+ * a downstream step in handleUserUtterance's reply pipeline had no timeout
+ * of its own and simply hung): getReply's own provider call is already
+ * bounded (REQUEST_TIMEOUT_MS, 15s — see sarvam.server.ts/claude.server.ts's
+ * AbortSignal.timeout), but attemptBooking's calendar/tool round trips
+ * (check_calendar_availability/book_appointment, ultimately real Supabase
+ * queries) are NOT — a stuck query there would hang handleUserUtterance
+ * forever, past the point where EITHER its success path (speak the reply)
+ * OR its existing catch block (speak a fallback) ever runs, so the silence
+ * timer (cleared the moment this turn was accepted, at the top of
+ * handleUserUtterance) never gets re-armed either. withTurnDeadline bounds
+ * the ENTIRE per-turn pipeline — not just the LLM call — so no matter which
+ * stage is the slow/hung one, this turn always resolves one way or another
+ * within TURN_DEADLINE_MS: either a real reply, or a TurnTimeoutError that
+ * the existing catch block turns into a spoken apology + a return to
+ * "listening" + a fresh silence timer, exactly like any other turn error.
+ */
+class TurnTimeoutError extends Error {
+  constructor(ms: number) {
+    super(`Turn exceeded ${ms}ms without producing a reply`);
+  }
+}
+
+const TURN_DEADLINE_MS = 25_000;
+
+/**
+ * Races `fn()` against a deadline. `fn` receives `isCancelled()`, which
+ * flips to true the moment the deadline wins — so if `fn()`'s own hung work
+ * eventually resolves anyway (a Supabase query that was merely slow, not
+ * actually stuck forever), it can check `isCancelled()` before doing
+ * anything caller-visible (pushing a turn, speaking) and discard itself
+ * instead of racing with — or duplicating — whatever the timeout's own
+ * fallback already spoke. Deliberately does NOT touch `session.generation`
+ * (a genuine barge-in's own signal): the deadline firing must still let
+ * handleUserUtterance's catch block speak an apology for THIS turn — it
+ * doesn't own a replacement turn the way a real barge-in does.
+ */
+function withTurnDeadline<T>(
+  ms: number,
+  fn: (isCancelled: () => boolean) => Promise<T>,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      cancelled = true;
+      reject(new TurnTimeoutError(ms));
+    }, ms);
+    fn(() => cancelled).then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
 /** Splits accumulated assistant text into TTS-safe chunks at sentence boundaries. */
 export function chunkIntoSentences(text: string): string[] {
   const trimmed = text.trim();
@@ -1333,74 +1395,87 @@ async function handleUserUtterance(session: Session, text: string) {
   });
 
   try {
-    const { reply: rawReply, enteredPaymentWait } = await getReply(session, messages);
-    const llmCompletedAt = Date.now();
-    if (session.currentTurn) session.currentTurn.llmCompletedAt = llmCompletedAt;
-    log("llm_completed", session, {
-      latency_ms: llmCompletedAt - requestStarted,
-      llm_completed_at: llmCompletedAt,
-    });
+    await withTurnDeadline(TURN_DEADLINE_MS, async (isCancelled) => {
+      const { reply: rawReply, enteredPaymentWait } = await getReply(session, messages);
+      const llmCompletedAt = Date.now();
+      if (session.currentTurn) session.currentTurn.llmCompletedAt = llmCompletedAt;
+      log("llm_completed", session, {
+        latency_ms: llmCompletedAt - requestStarted,
+        llm_completed_at: llmCompletedAt,
+      });
 
-    // Soft cancellation: if the caller interrupted (or spoke again) while
-    // this request was in flight, `generation` has already advanced — the
-    // stale reply is discarded instead of being spoken over the new turn.
-    // (There is no request-cancellation signal to abort the call outright —
-    // this is the honest, documented limitation; see the Phase E report.)
-    if (generation !== session.generation) {
-      log("llm_response_discarded_stale", session);
-      return;
-    }
-    if (!rawReply) {
-      log("llm_empty_reply", session);
-      setState(session, "listening");
-      armSilenceTimer(session);
-      return;
-    }
-
-    // Strip and parse the trailing structured appointment-state block
-    // (see parseApptStateMarker/APPT_STATE_MARKER) — spokenText is what
-    // the caller actually hears; the marker itself never reaches TTS or
-    // the persisted transcript.
-    const { spokenText, state: proposedAppointmentState } = parseApptStateMarker(rawReply);
-    session.appointmentState = mergeAppointmentState(
-      session.appointmentState,
-      proposedAppointmentState,
-    );
-
-    let reply = spokenText;
-    // Once every required field is known AND this turn's model proposed
-    // moving to booking, the RUNTIME — not the model — performs the real
-    // booking attempt and decides what's actually said. See attemptBooking
-    // for why this is deterministic rather than an LLM tool-use round
-    // trip, and for why it's the fix for "never claim booked unless it
-    // actually succeeded".
-    if (
-      session.appointmentState.bookingStatus === "ready_to_book" &&
-      appointmentStateIsComplete(session.appointmentState)
-    ) {
-      const outcome = await attemptBooking(session);
-      reply = outcome.spoken;
-      session.appointmentState = outcome.state;
-    }
-
-    if (!reply) {
-      log("llm_empty_reply", session);
-      setState(session, "listening");
-      armSilenceTimer(session);
-      return;
-    }
-
-    session.turns.push({ role: "assistant", text: reply, at: new Date().toISOString() });
-    await speak(session, reply);
-    if (generation === session.generation) {
-      if (enteredPaymentWait) {
-        setState(session, "waiting_on_payment");
-        armPaymentWaitTimer(session);
-      } else {
+      // Soft cancellation: if the caller interrupted (or spoke again) while
+      // this request was in flight, `generation` has already advanced — the
+      // stale reply is discarded instead of being spoken over the new turn.
+      // (There is no request-cancellation signal to abort the call outright —
+      // this is the honest, documented limitation; see the Phase E report.)
+      if (isCancelled() || generation !== session.generation) {
+        log("llm_response_discarded_stale", session);
+        return;
+      }
+      if (!rawReply) {
+        log("llm_empty_reply", session);
         setState(session, "listening");
         armSilenceTimer(session);
+        return;
       }
-    }
+
+      // Strip and parse the trailing structured appointment-state block
+      // (see parseApptStateMarker/APPT_STATE_MARKER) — spokenText is what
+      // the caller actually hears; the marker itself never reaches TTS or
+      // the persisted transcript.
+      const { spokenText, state: proposedAppointmentState } = parseApptStateMarker(rawReply);
+      session.appointmentState = mergeAppointmentState(
+        session.appointmentState,
+        proposedAppointmentState,
+      );
+
+      let reply = spokenText;
+      // Once every required field is known AND this turn's model proposed
+      // moving to booking, the RUNTIME — not the model — performs the real
+      // booking attempt and decides what's actually said. See attemptBooking
+      // for why this is deterministic rather than an LLM tool-use round
+      // trip, and for why it's the fix for "never claim booked unless it
+      // actually succeeded".
+      if (
+        session.appointmentState.bookingStatus === "ready_to_book" &&
+        appointmentStateIsComplete(session.appointmentState)
+      ) {
+        const outcome = await attemptBooking(session);
+        reply = outcome.spoken;
+        session.appointmentState = outcome.state;
+      }
+
+      if (!reply) {
+        log("llm_empty_reply", session);
+        setState(session, "listening");
+        armSilenceTimer(session);
+        return;
+      }
+
+      // Re-checked here (not just after getReply above): attemptBooking is
+      // itself an extra await — a barge-in, or this same turn-deadline
+      // firing while attemptBooking's own tool calls were still pending,
+      // can advance `session.generation` during that call just as easily
+      // as during getReply. Without this check, a stale reply computed
+      // from before either event could still be pushed/spoken afterwards.
+      if (isCancelled() || generation !== session.generation) {
+        log("llm_response_discarded_stale", session, { afterBooking: true });
+        return;
+      }
+
+      session.turns.push({ role: "assistant", text: reply, at: new Date().toISOString() });
+      await speak(session, reply);
+      if (generation === session.generation) {
+        if (enteredPaymentWait) {
+          setState(session, "waiting_on_payment");
+          armPaymentWaitTimer(session);
+        } else {
+          setState(session, "listening");
+          armSilenceTimer(session);
+        }
+      }
+    });
   } catch (err) {
     // category/status turn a bare message string into something a log
     // line alone can distinguish: a rate limit and a timeout and an
@@ -1411,15 +1486,17 @@ async function handleUserUtterance(session: Session, text: string) {
     // provider failure) visible rather than indistinguishable from one.
     const status = err instanceof ProviderError ? err.status : null;
     const errorCategory =
-      err instanceof ProviderError
-        ? status === 504
-          ? "llm_timeout"
-          : status === 429
-            ? "llm_rate_limited"
-            : status === 401 || status === 403
-              ? "llm_auth_error"
-              : "llm_provider_error"
-        : "llm_unexpected_error";
+      err instanceof TurnTimeoutError
+        ? "turn_deadline_exceeded"
+        : err instanceof ProviderError
+          ? status === 504
+            ? "llm_timeout"
+            : status === 429
+              ? "llm_rate_limited"
+              : status === 401 || status === 403
+                ? "llm_auth_error"
+                : "llm_provider_error"
+          : "llm_unexpected_error";
     log("llm_error", session, {
       message: (err as Error).message,
       status,
@@ -1884,22 +1961,69 @@ export async function startRuntimeSession(
 
   setState(session, "connecting");
 
-  try {
-    const outputCodec = outputCodecFor(input.bridge);
-    const outputSampleRateHz = input.bridge.outboundFormat.sampleRateHz;
-    session.declaredTtsOutputCodec = outputCodec;
-    session.declaredTtsOutputSampleRateHz = outputSampleRateHz;
-    const connectionId = ++session.ttsConnectionIdSeq;
-    session.tts = await timedStep(session, "tts_connect", () =>
-      deps.connectTts({
-        voiceId: input.snapshotAgent.voice_id,
-        language: input.snapshotAgent.primary_language,
-        pace: input.snapshotAgent.speaking_pace,
-        outputCodec,
-        outputSampleRateHz,
-        onEvent: (e) => onTtsEvent(session, e, connectionId),
-      }),
-    );
+  // Task 1 FIX (production incident: ~20.4s between runtime_started and
+  // tts_connected, with stt_connected arriving only ~183ms after that):
+  // this used to `await deps.connectTts(...)` and only THEN start
+  // `deps.connectStt(...)` — a slow TTS handshake fully serialized in
+  // front of STT even though the two connections are completely
+  // independent network round trips. Connecting them concurrently (both
+  // promises started before either is awaited) means a slow TTS provider
+  // connection can no longer delay STT from coming up — the caller's
+  // audio (already being buffered into pendingInboundFrames by the
+  // onInboundFrame handler registered above, regardless of either
+  // connection's state) reaches STT as soon as STT itself is ready,
+  // independent of how long TTS takes. Each connection keeps its own
+  // timedStep timing and its own independent error handling — a TTS
+  // failure no longer prevents STT from having been attempted, and
+  // vice versa.
+  const outputCodec = outputCodecFor(input.bridge);
+  const outputSampleRateHz = input.bridge.outboundFormat.sampleRateHz;
+  session.declaredTtsOutputCodec = outputCodec;
+  session.declaredTtsOutputSampleRateHz = outputSampleRateHz;
+  const sttSampleRateHz = input.bridge.inboundFormat.sampleRateHz;
+  const sttEncoding = input.bridge.inboundFormat.encoding === "mulaw" ? "mulaw" : "linear16";
+  const connectionId = ++session.ttsConnectionIdSeq;
+
+  const ttsConnectPromise = timedStep(session, "tts_connect", () =>
+    deps.connectTts({
+      voiceId: input.snapshotAgent.voice_id,
+      language: input.snapshotAgent.primary_language,
+      pace: input.snapshotAgent.speaking_pace,
+      outputCodec,
+      outputSampleRateHz,
+      onEvent: (e) => onTtsEvent(session, e, connectionId),
+    }),
+  );
+  const sttConnectPromise = timedStep(session, "stt_connect", () =>
+    deps.connectStt({
+      // Always auto-detect (Sarvam's "auto" language code — already
+      // proven in production for multilingual agents) rather than pinning
+      // recognition to the agent's single primary_language. Previously
+      // gated behind the agent's own `multilingual` toggle, which meant a
+      // caller speaking anything other than the configured primary
+      // language on a non-multilingual agent was never even given a
+      // chance to be recognized correctly in the first place — see
+      // resolveResponseLanguage for how the LLM/TTS side falls back to
+      // primary_language if STT detects something outside the common
+      // supported set.
+      //
+      // BUGFIX (production incident): "unknown" is not a value Sarvam's
+      // realtime STT recognizes — it rejected every connection with a
+      // fatal 400 ("Unsupported language_code 'unknown'. Supported
+      // values: auto, hi-IN, ...") and immediately closed the WebSocket
+      // with code 4000, so STT never connected for any call using this
+      // value. "auto" is Sarvam's actual documented auto-detect code.
+      language: "auto",
+      sampleRateHz: sttSampleRateHz,
+      encoding: sttEncoding,
+      onEvent: (e) => onSttEvent(session, e),
+    }),
+  );
+
+  const [ttsOutcome, sttOutcome] = await Promise.allSettled([ttsConnectPromise, sttConnectPromise]);
+
+  if (ttsOutcome.status === "fulfilled") {
+    session.tts = ttsOutcome.value;
     session.activeTtsConnectionId = connectionId;
     session.ttsConnectedAt = Date.now();
     /**
@@ -1912,41 +2036,12 @@ export async function startRuntimeSession(
      * "audio never reaches the caller" report.
      */
     log("tts_connected", session, { outputCodec, outputSampleRateHz });
-  } catch (err) {
-    log("tts_connect_failed", session, { message: (err as Error).message });
-    setState(session, "failed");
-    await terminateRuntimeSession(input.callId, "tts_connect_failed");
-    return handle;
+  } else {
+    log("tts_connect_failed", session, { message: (ttsOutcome.reason as Error).message });
   }
 
-  try {
-    const sttSampleRateHz = input.bridge.inboundFormat.sampleRateHz;
-    const sttEncoding = input.bridge.inboundFormat.encoding === "mulaw" ? "mulaw" : "linear16";
-    session.stt = await timedStep(session, "stt_connect", () =>
-      deps.connectStt({
-        // Always auto-detect (Sarvam's "auto" language code — already
-        // proven in production for multilingual agents) rather than pinning
-        // recognition to the agent's single primary_language. Previously
-        // gated behind the agent's own `multilingual` toggle, which meant a
-        // caller speaking anything other than the configured primary
-        // language on a non-multilingual agent was never even given a
-        // chance to be recognized correctly in the first place — see
-        // resolveResponseLanguage for how the LLM/TTS side falls back to
-        // primary_language if STT detects something outside the common
-        // supported set.
-        //
-        // BUGFIX (production incident): "unknown" is not a value Sarvam's
-        // realtime STT recognizes — it rejected every connection with a
-        // fatal 400 ("Unsupported language_code 'unknown'. Supported
-        // values: auto, hi-IN, ...") and immediately closed the WebSocket
-        // with code 4000, so STT never connected for any call using this
-        // value. "auto" is Sarvam's actual documented auto-detect code.
-        language: "auto",
-        sampleRateHz: sttSampleRateHz,
-        encoding: sttEncoding,
-        onEvent: (e) => onSttEvent(session, e),
-      }),
-    );
+  if (sttOutcome.status === "fulfilled") {
+    session.stt = sttOutcome.value;
     /**
      * Diagnostic (audio format tracing): the exact format this session
      * told the AI voice provider inbound audio would arrive in, derived
@@ -1974,11 +2069,26 @@ export async function startRuntimeSession(
     // see the onInboundFrame registration above.
     for (const frame of session.pendingInboundFrames) session.stt.sendAudioFrame(frame.data);
     session.pendingInboundFrames = [];
-  } catch (err) {
-    log("stt_connect_failed", session, { message: (err as Error).message });
-    await speakFallback(session, err, "stt_connect_failed");
+  } else {
+    log("stt_connect_failed", session, { message: (sttOutcome.reason as Error).message });
+  }
+
+  // The call cannot proceed without BOTH a way to speak and a way to
+  // listen. Either connection failing independently is fatal to the
+  // session — but (unlike the old serial code) the OTHER connection was
+  // still attempted and, if it succeeded, is used here: a working TTS
+  // session speaks an honest apology before the call ends if STT is what
+  // failed; a working STT session is simply closed below if TTS is what
+  // failed (there is nothing to speak the apology with).
+  if (ttsOutcome.status === "rejected" || sttOutcome.status === "rejected") {
+    if (sttOutcome.status === "rejected" && session.tts) {
+      await speakFallback(session, sttOutcome.reason, "stt_connect_failed");
+    }
     setState(session, "failed");
-    await terminateRuntimeSession(input.callId, "stt_connect_failed");
+    await terminateRuntimeSession(
+      input.callId,
+      ttsOutcome.status === "rejected" ? "tts_connect_failed" : "stt_connect_failed",
+    );
     return handle;
   }
 

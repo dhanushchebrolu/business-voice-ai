@@ -175,7 +175,10 @@ ${
         .join("\n")
     : "No services configured. Do not quote any prices."
 }
-"Appointment" is not itself a service — it is the generic word for booking any of the services listed above a time slot. If the caller says "book an appointment" or "schedule an appointment" without naming a service, ask which of the services above they mean. If they describe what they want in their own words (e.g. "clean my teeth"), match it to the closest listed service yourself — never tell the caller appointments aren't offered just because no service is literally named "appointment".
+# APPOINTMENTS
+"Appointment" is not itself a service — it is the generic word for booking any of the services listed above a time slot. Booking an appointment is exactly how a caller receives ANY of the services above; it is never a separate thing the business does or does not offer.
+NEVER say, or imply in any words, that this business "does not offer appointments" or "doesn't do appointments" — that statement is never true on this line, no matter what the caller calls the thing they want. Appointments are simply how every listed service gets scheduled.
+If the caller says "book an appointment" or "schedule an appointment" without naming a service, ask which of the services above they mean. If they describe what they want in their own words — even informal, non-technical wording like "clean my teeth", "fix my tooth", "a checkup" — match it to the closest listed service yourself and proceed to collect the remaining appointment fields; never tell the caller appointments aren't offered just because no service is literally named "appointment". Do not ask the caller to restate it more formally, and do not claim no match exists unless the services list above is genuinely empty or has nothing related.
 
 # FREQUENTLY ASKED QUESTIONS
 ${faqs.length ? faqs.map((f) => `Q: ${f.question}\nA: ${f.answer}`).join("\n\n") : "None configured."}
