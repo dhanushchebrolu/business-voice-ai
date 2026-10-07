@@ -412,7 +412,7 @@ describe("Conversation history window", () => {
 });
 
 describe("STT always requests language auto-detection, never pinned to a single language", () => {
-  test("connectStt is called with language 'unknown' regardless of the agent's multilingual setting", async () => {
+  test("connectStt is called with language 'auto' regardless of the agent's multilingual setting", async () => {
     const h = createHarness();
     const callId = newCallId();
     const input = baseInput(callId, h.bridge);
@@ -422,7 +422,7 @@ describe("STT always requests language auto-detection, never pinned to a single 
     assert.equal(h.stt.connectCalls.length, 1);
     assert.equal(
       h.stt.connectCalls[0]?.language,
-      "unknown",
+      "auto",
       "STT must always auto-detect — a non-multilingual agent must not have recognition pinned to one language",
     );
 

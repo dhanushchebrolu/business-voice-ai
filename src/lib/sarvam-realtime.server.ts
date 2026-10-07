@@ -380,7 +380,7 @@ export interface SttSession {
 }
 
 export interface ConnectSttOptions {
-  /** BCP-47-ish Sarvam language code (e.g. "te-IN"), or "unknown" for auto-detect. */
+  /** BCP-47-ish Sarvam language code (e.g. "te-IN"), or "auto" for auto-detect. */
   language: string;
   sampleRateHz: number;
   encoding: "linear16" | "mulaw";

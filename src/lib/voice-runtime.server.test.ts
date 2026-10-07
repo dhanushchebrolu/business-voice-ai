@@ -364,6 +364,29 @@ describe("silence/timeout handling — wiring", () => {
 });
 
 /**
+ * Production incident (round 8): Sarvam's realtime STT rejects
+ * language_code="unknown" with a fatal 400 ("Unsupported language_code
+ * 'unknown'. Supported values: auto, hi-IN, ...") and immediately closes
+ * the WebSocket with code 4000 — so STT never connected for any call.
+ * "auto" is Sarvam's actual documented auto-detect code. Source-scanned
+ * (same convention as the suites above) since the STT connect call site
+ * isn't exported; voice-runtime-harness.test.ts's "STT always requests
+ * language auto-detection" suite covers the same value via the fake STT's
+ * recorded connect call.
+ */
+describe('STT connect call site uses Sarvam\'s real "auto" language code, not the rejected "unknown"', () => {
+  test('connectStt is called with language: "auto"', () => {
+    const fnStart = src.indexOf("export async function startRuntimeSession(");
+    const connectStart = src.indexOf("session.stt = await deps.connectStt({", fnStart);
+    const connectEnd = src.indexOf("});", connectStart);
+    assert.ok(connectStart > -1 && connectEnd > -1);
+    const connectBody = src.slice(connectStart, connectEnd);
+    assert.match(connectBody, /language:\s*"auto",/);
+    assert.doesNotMatch(connectBody, /language:\s*"unknown",/);
+  });
+});
+
+/**
  * stt:transcript_final_forwarded (production incident round 4): once
  * sarvam-realtime.server.ts's transcript field-name bug was fixed
  * (`text` vs `transcript`), final_transcript events finally reach

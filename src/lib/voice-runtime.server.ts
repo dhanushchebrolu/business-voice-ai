@@ -1196,7 +1196,7 @@ export async function startRuntimeSession(
     const sttSampleRateHz = input.bridge.inboundFormat.sampleRateHz;
     const sttEncoding = input.bridge.inboundFormat.encoding === "mulaw" ? "mulaw" : "linear16";
     session.stt = await deps.connectStt({
-      // Always auto-detect (Sarvam's "unknown" language code — already
+      // Always auto-detect (Sarvam's "auto" language code — already
       // proven in production for multilingual agents) rather than pinning
       // recognition to the agent's single primary_language. Previously
       // gated behind the agent's own `multilingual` toggle, which meant a
@@ -1206,7 +1206,14 @@ export async function startRuntimeSession(
       // resolveResponseLanguage for how the LLM/TTS side falls back to
       // primary_language if STT detects something outside the common
       // supported set.
-      language: "unknown",
+      //
+      // BUGFIX (production incident): "unknown" is not a value Sarvam's
+      // realtime STT recognizes — it rejected every connection with a
+      // fatal 400 ("Unsupported language_code 'unknown'. Supported
+      // values: auto, hi-IN, ...") and immediately closed the WebSocket
+      // with code 4000, so STT never connected for any call using this
+      // value. "auto" is Sarvam's actual documented auto-detect code.
+      language: "auto",
       sampleRateHz: sttSampleRateHz,
       encoding: sttEncoding,
       onEvent: (e) => onSttEvent(session, e),
