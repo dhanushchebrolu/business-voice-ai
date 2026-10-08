@@ -1328,10 +1328,26 @@ function extractPhoneNumber(text: string): string | null {
 
 const EMAIL_SYMBOLIC_PATTERN = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/;
 // The common spoken form Sarvam STT sometimes transcribes verbatim instead
-// of symbols — "dhanush56 at gmail dot com" — single-level domain only
-// (no "dot co dot in"-style multi-part TLDs).
-const EMAIL_SPOKEN_PATTERN =
-  /\b([a-z0-9]+(?:[\s.-]+[a-z0-9]+)*)\s+at\s+([a-z0-9]+(?:[\s-]+[a-z0-9]+)*)\s+dot\s+(com|org|net|in|co|io)\b/i;
+// of symbols — "dhanush56 at gmail dot com". The local part and domain are
+// deliberately each a SINGLE alphanumeric token, not a "[\s.-]+"-joined
+// run of several — production incident: an earlier version allowed a
+// multi-word run before "at" (meant to support a spelled-out local part
+// like "d h a n u s h at gmail dot com"), but since regex.exec always
+// tries the EARLIEST possible starting position, that same greediness let
+// it swallow unrelated LEADING words in the sentence too — "My email is
+// chdhnsh56 at gmail dot com" matched starting at "My", capturing
+// "myemailischdhnsh56" as the local part instead of "chdhnsh56". No test
+// in this codebase ever exercised a genuine multi-word local part or
+// domain, and every real caller utterance seen transcribes a spoken
+// username/domain as one contiguous token — so restricting to a single
+// token is a deliberate, conservative trade: it gives up a theoretical,
+// never-reported, never-tested case to fix the confirmed, common one. The
+// regex engine still naturally retries every later starting position when
+// an earlier one fails to complete the full "local at domain dot tld"
+// shape, so a caller saying "you can reach me at X at Y dot Z" still
+// correctly resolves to the SECOND "at", not the first. Single-level
+// domain only (no "dot co dot in"-style multi-part TLDs).
+const EMAIL_SPOKEN_PATTERN = /\b([a-z0-9]+)\s+at\s+([a-z0-9]+)\s+dot\s+(com|org|net|in|co|io)\b/i;
 
 /** Extracts an email address from the caller's current turn, same priority-over-the-marker reasoning as extractPhoneNumber. Normalized to lowercase "local@domain.tld". */
 function extractEmail(text: string): string | null {
@@ -1339,9 +1355,7 @@ function extractEmail(text: string): string | null {
   if (symbolic) return symbolic[0].toLowerCase();
   const spoken = EMAIL_SPOKEN_PATTERN.exec(text);
   if (spoken) {
-    const local = spoken[1]!.replace(/[\s.-]+/g, "");
-    const domain = spoken[2]!.replace(/[\s-]+/g, "");
-    return `${local}@${domain}.${spoken[3]}`.toLowerCase();
+    return `${spoken[1]}@${spoken[2]}.${spoken[3]}`.toLowerCase();
   }
   return null;
 }

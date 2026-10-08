@@ -3389,7 +3389,11 @@ describe("35. Phone/email are never truncated end-to-end, even when the model's 
     h.llm.setNextReply(
       'Thanks. What date and time would you like?\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":"9999999999","email":"wrong@x.com","preferred_date":null,"preferred_time":null,"preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
     );
-    h.stt.speakUtterance("chdhnsh56 at gmail dot com");
+    // "It's" prefix included deliberately — EMAIL_SPOKEN_PATTERN used to
+    // swallow leading filler words like this into the local part; now
+    // fixed (see its own doc comment), so this is also an end-to-end
+    // regression check for that fix.
+    h.stt.speakUtterance("It's chdhnsh56 at gmail dot com");
     await drain();
     makeTtsFlushCatchUp(h.tts)();
 

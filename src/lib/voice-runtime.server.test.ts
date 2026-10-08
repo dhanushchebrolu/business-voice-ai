@@ -433,21 +433,34 @@ describe("parseCallerIntentFromText — deterministic backstop over the caller's
       assert.equal(parseCallerIntentFromText("My number is 9876543210").email, null);
     });
 
-    // KNOWN PRE-EXISTING LIMITATION (found while testing Fix #3, not
-    // introduced by it): EMAIL_SPOKEN_PATTERN's local-part capture group
-    // is `[a-z0-9]+(?:[\s.-]+[a-z0-9]+)*` to support a multi-word spoken
-    // local part ("dhanush k at gmail dot com") — but that same
-    // greediness lets it swallow unrelated LEADING words in the sentence
-    // too, since regex.exec tries the leftmost starting position first
-    // and "My email is" is itself a valid (if wrong) match for that
-    // group. Out of scope to fix in this round (Fix #3 was about phone
-    // truncation specifically) — tracked here, and as a spawned follow-up
-    // task, rather than silently left uncovered.
-    test("KNOWN LIMITATION: leading filler words before a spoken-form email are incorrectly swallowed into the local part", () => {
+    // Production incident (previously a KNOWN LIMITATION, fixed here):
+    // EMAIL_SPOKEN_PATTERN's local-part capture group used to allow a
+    // multi-word run before "at" (meant to support a spelled-out local
+    // part like "d h a n u s h at gmail dot com") — but since regex.exec
+    // tries the leftmost starting position first, that same greediness
+    // let it swallow unrelated LEADING words in the sentence too. Fixed
+    // by restricting the local part (and the domain) to a single
+    // alphanumeric token each — see EMAIL_SPOKEN_PATTERN's own comment
+    // for why that trade is safe (no test or real call ever exercised a
+    // genuine multi-word local part).
+    test("leading filler words before a spoken-form email are no longer swallowed into the local part", () => {
       assert.equal(
         parseCallerIntentFromText("My email is chdhnsh56 at gmail dot com").email,
-        "myemailischdhnsh56@gmail.com",
-        "documents the current (wrong) behavior — see the spawned follow-up task for the real fix",
+        "chdhnsh56@gmail.com",
+      );
+    });
+
+    test("another common natural-sentence prefix ('It's X at Y dot Z') is also handled correctly", () => {
+      assert.equal(
+        parseCallerIntentFromText("It's chdhnsh56 at gmail dot com").email,
+        "chdhnsh56@gmail.com",
+      );
+    });
+
+    test("a prefix that itself contains the literal word 'at' still resolves to the email's own 'at', not the filler one", () => {
+      assert.equal(
+        parseCallerIntentFromText("You can reach me at chdhnsh56 at gmail dot com").email,
+        "chdhnsh56@gmail.com",
       );
     });
   });
