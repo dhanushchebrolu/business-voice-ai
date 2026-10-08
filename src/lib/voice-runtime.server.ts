@@ -226,6 +226,8 @@ export interface AppointmentState {
   service: string | null;
   customerName: string | null;
   phone: string | null;
+  /** Collected alongside phone for the final booking confirmation (see attemptBooking's book_appointment call) — never required to check availability (see appointmentReadyForAvailabilityCheck). */
+  email: string | null;
   /** YYYY-MM-DD, resolved by the LLM from whatever the caller said ("tomorrow", "next Friday") against the CURRENT DATE the agent's own instructions are built with — see agent-instructions.ts. */
   preferredDate: string | null;
   /** 24-hour HH:mm, local to the business's own timezone. Null when the caller gave only an approximate period (preferredPeriod) or no time preference at all (e.g. "any slots today", "book me at the next available time"). */
@@ -272,6 +274,7 @@ export function emptyAppointmentState(): AppointmentState {
     service: null,
     customerName: null,
     phone: null,
+    email: null,
     preferredDate: null,
     preferredTime: null,
     preferredPeriod: null,
@@ -959,6 +962,7 @@ export function parseApptStateMarker(reply: string): {
     if (typeof parsed["service"] === "string") state.service = parsed["service"];
     if (typeof parsed["customer_name"] === "string") state.customerName = parsed["customer_name"];
     if (typeof parsed["phone"] === "string") state.phone = parsed["phone"];
+    if (typeof parsed["email"] === "string") state.email = parsed["email"];
     if (typeof parsed["preferred_date"] === "string")
       state.preferredDate = parsed["preferred_date"];
     if (typeof parsed["preferred_time"] === "string")
@@ -997,27 +1001,49 @@ export function parseApptStateMarker(reply: string): {
  * overwritten; everything else (including a field the current turn didn't
  * mention) is left exactly as it was.
  *
- * `extracted` is the deterministic date/time backstop over the caller's own
- * raw words (parseCallerIntentFromText, resolved via
- * resolveRelativeDateInTimezone/resolveWeekdayInTimezone/explicitTime —
- * see handleUserUtterance). Same backstop discipline as every other
- * caller-intent backstop in this file: it only ever FILLS IN
- * preferredDate/preferredTime when the marker left them unset THIS turn
- * (production incident: the model's marker is not reliably followed, so an
- * explicit "tomorrow at 3 PM"/"Friday at 4:30" the caller actually said
- * must never be left out just because the marker omitted it) — it never
- * overrides a value the marker DID set. When extraction finds nothing this
- * turn either, the normal marker-then-sticky-current chain applies exactly
- * as before, so a value extraction (or the marker) already established on
- * a PREVIOUS turn is never overwritten by this turn's incomplete/null
+ * `extracted` is the deterministic backstop over the caller's own raw words
+ * (parseCallerIntentFromText — see handleUserUtterance). Two different
+ * priority rules apply, by field:
+ *
+ * - preferredDate/preferredTime: the marker wins when it proposes a value
+ *   THIS turn; extraction only FILLS IN what the marker left unset (same
+ *   backstop discipline as every other caller-intent backstop in this
+ *   file — production incident: the model's marker is not reliably
+ *   followed, so an explicit "tomorrow at 3 PM"/"Friday at 4:30" the
+ *   caller actually said must never be left out just because the marker
+ *   omitted it).
+ * - phone/email: the OPPOSITE priority from date/time — this turn's own
+ *   extraction wins first, then STICKY CURRENT, and the marker is only
+ *   ever consulted as a last resort to fill the gap before any extraction
+ *   has happened at all. Unlike a date/time, these are long, precise
+ *   strings the model has to COPY correctly into its own JSON on EVERY
+ *   turn (it re-emits the whole known state each reply) rather than just
+ *   understand once — production incident: a caller's phone number was
+ *   collected correctly by STT but came back shortened ("7-9-0 0" instead
+ *   of the digits actually given) once the model had to recall/re-type it
+ *   on a LATER turn that never actually restated it. Letting that later
+ *   turn's marker value win over the already-correct sticky-current value
+ *   (the way date/time's marker-wins rule does) is exactly how that
+ *   happened — so here, once a value is known, only a fresh same-turn
+ *   extraction may move it; the marker can never silently degrade it.
+ *
+ * Either way, when extraction finds nothing this turn, the previously
+ * established value is never overwritten by this turn's incomplete/null
  * marker value.
  */
 export function mergeAppointmentState(
   current: AppointmentState,
   proposed: Partial<AppointmentState> | null,
-  extracted?: { preferredDate?: string | null; preferredTime?: string | null },
+  extracted?: {
+    preferredDate?: string | null;
+    preferredTime?: string | null;
+    phone?: string | null;
+    email?: string | null;
+  },
 ): AppointmentState {
-  const hasExtracted = Boolean(extracted?.preferredDate || extracted?.preferredTime);
+  const hasExtracted = Boolean(
+    extracted?.preferredDate || extracted?.preferredTime || extracted?.phone || extracted?.email,
+  );
   if (!proposed && !hasExtracted) return current;
   const proposedSafe = proposed ?? {};
   const preferredDate =
@@ -1043,7 +1069,19 @@ export function mergeAppointmentState(
   return {
     service: proposedSafe.service ?? current.service,
     customerName: proposedSafe.customerName ?? current.customerName,
-    phone: proposedSafe.phone ?? current.phone,
+    // Sticky-current outranks the marker here (the OPPOSITE of
+    // service/customerName/date/time just above, which let a fresh marker
+    // value always win) — production incident: once a phone/email is
+    // correctly known (via this turn's own extraction, or an earlier
+    // turn's), a LATER turn's marker is the model re-typing its own
+    // recollection of the whole state from the conversation history, which
+    // degrading it on a turn that didn't actually restate the number is
+    // exactly how "7-9-0 6-9-0 3-0" became "7-9-0 0" days into the same
+    // call. Only this exact turn's raw extraction is allowed to move it —
+    // the marker only ever fills the gap on the very first turn before any
+    // extraction has happened yet.
+    phone: extracted?.phone ?? current.phone ?? proposedSafe.phone ?? null,
+    email: extracted?.email ?? current.email ?? proposedSafe.email ?? null,
     preferredDate,
     preferredTime,
     preferredPeriod,
@@ -1077,6 +1115,26 @@ function appointmentStateIsComplete(s: AppointmentState): boolean {
   );
 }
 
+/**
+ * Required to trigger a REAL availability check — deliberately narrower
+ * than appointmentStateIsComplete (booking): phone/email are NOT required
+ * here (production incident: a real call collected service, name, date,
+ * and time, then asked for phone/email before ever checking the calendar
+ * — the caller supplied phone/email and the agent merely said "I'm
+ * checking availability now" with no real tool call behind it, because
+ * nothing in the architecture dispatched on phone/email arriving, and
+ * nothing had dispatched earlier either since completeness was defined
+ * including phone). See handleUserUtterance's completion-transition
+ * backstop, which dispatches the instant this becomes true — independent
+ * of the model's own marker, an explicit "yes", or an explicit "is it
+ * available?" question.
+ */
+export function appointmentReadyForAvailabilityCheck(s: AppointmentState): boolean {
+  return Boolean(
+    s.service && s.customerName && s.preferredDate && (s.preferredTime || s.wantsNextAvailable),
+  );
+}
+
 /** Required to check availability — unlike a booking attempt, the caller's name/phone are not needed merely to ask "is this slot free" or "what's available". A specific time is NOT required either — an open "any slots today"/"this afternoon" query is checked and listed by attemptAvailabilityCheck just as validly as an exact-time check. */
 function appointmentSlotIsKnown(s: AppointmentState): boolean {
   return Boolean(s.preferredDate);
@@ -1088,6 +1146,7 @@ function describeKnownAppointmentState(s: AppointmentState): string | null {
   if (s.service) known.push(`service: ${s.service}`);
   if (s.customerName) known.push(`customer name: ${s.customerName}`);
   if (s.phone) known.push(`phone: ${s.phone}`);
+  if (s.email) known.push(`email: ${s.email}`);
   if (s.preferredDate) known.push(`preferred date: ${s.preferredDate}`);
   if (s.preferredTime) known.push(`preferred time: ${s.preferredTime}`);
   else if (s.preferredPeriod) known.push(`preferred time of day: ${s.preferredPeriod}`);
@@ -1146,6 +1205,10 @@ export interface CallerIntentSignals {
   bookingConfirmed: boolean;
   /** The caller asked for a reminder/alert — a capability this codebase does not implement (see REMINDERS_NOT_IMPLEMENTED_NOTICE). */
   reminderRequested: boolean;
+  /** A phone number the caller just spoke, as the raw digit string — see extractPhoneNumber's own doc comment for why this is extracted independently of the marker rather than trusting the model to copy/recall it correctly. Null when no digit run long enough to plausibly be a phone number appears. */
+  phone: string | null;
+  /** An email address the caller just spoke, normalized to lowercase "local@domain.tld" — handles both a symbolic email and the common spoken form STT sometimes transcribes verbatim ("dhanush56 at gmail dot com"). Null when neither shape appears. */
+  email: string | null;
 }
 
 const AVAILABILITY_KEYWORDS =
@@ -1240,6 +1303,49 @@ function extractExplicitTime(text: string): string | null {
   return null;
 }
 
+// Matches a long run of digit groups, optionally separated by whitespace
+// or hyphens (STT often transcribes a spoken phone number digit-by-digit,
+// e.g. "7 9 0 6 9 0 3 0 1 2" or "790-690-3012") — at least 7 digits total,
+// so a short number elsewhere in the sentence (a time, a date, a
+// quantity) is never mistaken for one.
+const PHONE_DIGIT_RUN_PATTERN = /\b(?:\d[\s-]*){6,}\d\b/;
+
+/**
+ * Extracts a phone number as the RAW digit string, read directly off the
+ * caller's current turn — see mergeAppointmentState's own doc comment for
+ * why this takes priority over the model's marker (production incident: a
+ * caller's phone number came back shortened — "7-9-0 0" instead of the
+ * digits actually given — once the model had to recall/re-type it later
+ * in the call; reading the digits straight off the turn they were
+ * actually spoken in avoids ever depending on that recall at all).
+ */
+function extractPhoneNumber(text: string): string | null {
+  const match = PHONE_DIGIT_RUN_PATTERN.exec(text);
+  if (!match) return null;
+  const digits = match[0].replace(/\D/g, "");
+  return digits.length >= 7 ? digits : null;
+}
+
+const EMAIL_SYMBOLIC_PATTERN = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/;
+// The common spoken form Sarvam STT sometimes transcribes verbatim instead
+// of symbols — "dhanush56 at gmail dot com" — single-level domain only
+// (no "dot co dot in"-style multi-part TLDs).
+const EMAIL_SPOKEN_PATTERN =
+  /\b([a-z0-9]+(?:[\s.-]+[a-z0-9]+)*)\s+at\s+([a-z0-9]+(?:[\s-]+[a-z0-9]+)*)\s+dot\s+(com|org|net|in|co|io)\b/i;
+
+/** Extracts an email address from the caller's current turn, same priority-over-the-marker reasoning as extractPhoneNumber. Normalized to lowercase "local@domain.tld". */
+function extractEmail(text: string): string | null {
+  const symbolic = EMAIL_SYMBOLIC_PATTERN.exec(text);
+  if (symbolic) return symbolic[0].toLowerCase();
+  const spoken = EMAIL_SPOKEN_PATTERN.exec(text);
+  if (spoken) {
+    const local = spoken[1]!.replace(/[\s.-]+/g, "");
+    const domain = spoken[2]!.replace(/[\s-]+/g, "");
+    return `${local}@${domain}.${spoken[3]}`.toLowerCase();
+  }
+  return null;
+}
+
 export function parseCallerIntentFromText(text: string): CallerIntentSignals {
   const availabilityRequested =
     AVAILABILITY_KEYWORDS.test(text) &&
@@ -1262,6 +1368,8 @@ export function parseCallerIntentFromText(text: string): CallerIntentSignals {
   const bookingConfirmed =
     BOOKING_CONFIRMATION_PATTERN.test(text) && !BOOKING_NEGATION_PATTERN.test(text);
   const reminderRequested = REMINDER_PATTERN.test(text);
+  const phone = extractPhoneNumber(text);
+  const email = extractEmail(text);
   return {
     availabilityRequested,
     wantsNextAvailable,
@@ -1271,6 +1379,8 @@ export function parseCallerIntentFromText(text: string): CallerIntentSignals {
     explicitTime,
     bookingConfirmed,
     reminderRequested,
+    phone,
+    email,
   };
 }
 
@@ -1645,6 +1755,119 @@ async function resolveBookingContext(
       service: { id: null, durationMinutes: DEFAULT_APPOINTMENT_DURATION_MINUTES },
     };
   }
+}
+
+/**
+ * State-aware acknowledgements (production incident: a generic filler
+ * before every LLM call would mean saying something before every single
+ * turn, including turns that are already fast; this instead speaks a
+ * short, concrete acknowledgement only at specific, well-understood
+ * AppointmentState transitions, naming what was actually just captured —
+ * see handleUserUtterance for where these are used). English only
+ * (en-IN) — a non-English/code-mixed call keeps the model's own wording
+ * entirely rather than mixing in a hardcoded English phrase.
+ */
+
+/** "today"/"tomorrow"/"October 9" — never the bare ISO string, which TTS would read out digit by digit. */
+export function spokenDateLabel(dateIso: string, timeZone: string, now: Date = new Date()): string {
+  const ymdFormatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const todayYmd = ymdFormatter.format(now);
+  if (dateIso === todayYmd) return "today";
+  const tomorrowInstant = new Date(
+    zonedWallTimeToUtc(todayYmd, "12:00", timeZone).getTime() + 24 * 60 * 60 * 1000,
+  );
+  if (dateIso === ymdFormatter.format(tomorrowInstant)) return "tomorrow";
+  const [year, month, day] = dateIso.split("-").map(Number) as [number, number, number];
+  return new Date(Date.UTC(year, month - 1, day, 12)).toLocaleDateString("en-US", {
+    month: "long",
+    day: "numeric",
+  });
+}
+
+/** "3 PM"/"3:30 PM" from a 24-hour "HH:mm" — never the bare 24-hour string. */
+export function spokenTimeLabel(hhmm: string): string {
+  const [hour, minute] = hhmm.split(":").map(Number) as [number, number];
+  const period = hour >= 12 ? "PM" : "AM";
+  const hour12 = hour % 12 === 0 ? 12 : hour % 12;
+  return minute === 0
+    ? `${hour12} ${period}`
+    : `${hour12}:${String(minute).padStart(2, "0")} ${period}`;
+}
+
+/** The caller's requested time, in whatever shape is actually known — an exact time, a period, "the next available time", or a neutral fallback. Never invents a time that isn't in the state. */
+export function describeRequestedTime(state: AppointmentState): string {
+  if (state.preferredTime) return spokenTimeLabel(state.preferredTime);
+  if (state.preferredPeriod) return `the ${state.preferredPeriod}`;
+  if (state.wantsNextAvailable) return "the next available time";
+  return "that time";
+}
+
+/** A short acknowledgement already said this reply makes a second, deterministic one redundant — e.g. the model's own reply already opens with the caller's name, or with a common ack word. Deliberately simple/conservative: a false negative here just means an extra (harmless) short phrase; a false positive would mean skipping a needed acknowledgement, so this only matches clear, common cases. */
+export function replyAlreadyAcknowledges(reply: string, customerName: string | null): boolean {
+  const lead = reply.slice(0, 40).toLowerCase();
+  if (customerName && lead.includes(customerName.toLowerCase())) return true;
+  return /\b(got it|thanks|thank you|great|perfect|noted|sure thing|okay|alright|sounds good)\b/.test(
+    lead,
+  );
+}
+
+/**
+ * Detects a field transition that just happened THIS turn (previous vs.
+ * merged AppointmentState) and returns a short deterministic phrase to
+ * prepend to the model's own reply — never a replacement, so there is
+ * only ever one spoken acknowledgement for a given field, not two. Picks
+ * the MOST ADVANCED applicable transition when several fields arrive in
+ * the same utterance (e.g. "I'm Dhanush and I want teeth cleaning
+ * tomorrow"), so it never says a now-stale "got it, what's your name"
+ * when the caller has already moved the conversation further along.
+ *
+ * Deliberately does not cover the "required info complete" transition —
+ * handleUserUtterance's own completion-triggered dispatch speaks its own
+ * consolidated acknowledgement for that one, immediately before the real
+ * availability check, so there is no second thing to say here.
+ *
+ * Deliberately synchronous — no business-timezone DB lookup. The date
+ * label here is a cosmetic "today"/"tomorrow" nicety, not the booking
+ * logic itself (the real check_calendar_availability/book_appointment
+ * call downstream still resolves and uses the real business timezone via
+ * resolveBookingContext). Using UTC for the label's today/tomorrow
+ * comparison is wrong only in a narrow window near local midnight, where
+ * it falls back to an unambiguous "Month Day" phrasing rather than a
+ * wrong day — an acceptable tradeoff for keeping this function (called on
+ * every ordinary conversational turn) free of any extra await, which
+ * previously pushed existing tests' drain() budgets past their limit.
+ */
+function fieldTransitionAck(previous: AppointmentState, next: AppointmentState): string | null {
+  const timeJustCaptured =
+    !previous.preferredTime &&
+    !previous.preferredPeriod &&
+    !previous.wantsNextAvailable &&
+    (next.preferredTime || next.preferredPeriod || next.wantsNextAvailable) &&
+    next.service &&
+    next.preferredDate;
+  if (timeJustCaptured) {
+    const dateLabel = spokenDateLabel(next.preferredDate!, "UTC");
+    return `Perfect — ${dateLabel} at ${describeRequestedTime(next)}.`;
+  }
+
+  const serviceAndDateJustCaptured =
+    (!previous.service || !previous.preferredDate) && next.service && next.preferredDate;
+  if (serviceAndDateJustCaptured) {
+    const dateLabel = spokenDateLabel(next.preferredDate!, "UTC");
+    return `Got it — ${next.service} ${dateLabel}.`;
+  }
+
+  const nameJustCaptured = !previous.customerName && next.customerName;
+  if (nameJustCaptured) {
+    return `Got it, ${next.customerName}.`;
+  }
+
+  return null;
 }
 
 /**
@@ -2227,6 +2450,7 @@ async function attemptBooking(
         endIso,
         notes: state.service,
         ...(service.id ? { serviceId: service.id } : {}),
+        ...(state.email ? { customerEmail: state.email } : {}),
       },
       ctx,
     ),
@@ -2406,6 +2630,11 @@ async function handleUserUtterance(session: Session, text: string) {
         // the caller actually hears; the marker itself never reaches TTS or
         // the persisted transcript.
         const { spokenText, state: proposedAppointmentState } = parseApptStateMarker(rawReply);
+        // Captured BEFORE the merge below — the completion-transition
+        // backstop further down needs to know what was true a moment ago,
+        // not just what's true now, to detect the exact turn a field
+        // completes rather than re-firing every turn afterward too.
+        const previousAppointmentState = session.appointmentState;
 
         // Deterministic date/time extraction over the caller's own raw
         // words (production incident: an explicit "tomorrow at 3 PM" /
@@ -2416,7 +2645,11 @@ async function handleUserUtterance(session: Session, text: string) {
         // weekday the caller actually said (relativeDate preferred on the
         // rare chance both appear) — only ever FILLS IN what the marker
         // leaves unset this turn, same backstop discipline as
-        // mergeAppointmentState's own doc comment describes.
+        // mergeAppointmentState's own doc comment describes. Phone/email
+        // are also extracted here (callerIntent.phone/email) — see
+        // mergeAppointmentState's doc comment for why those two take the
+        // OPPOSITE priority (extraction over the marker, not just filling
+        // its gaps).
         let extractedDate: string | null = null;
         if (callerIntent.relativeDate || callerIntent.weekday) {
           const timezone = await resolveBusinessTimezone(session.input.businessId);
@@ -2425,11 +2658,13 @@ async function handleUserUtterance(session: Session, text: string) {
             : resolveWeekdayInTimezone(callerIntent.weekday!, timezone);
         }
         let appointmentState = mergeAppointmentState(
-          session.appointmentState,
+          previousAppointmentState,
           proposedAppointmentState,
           {
             preferredDate: extractedDate,
             preferredTime: callerIntent.explicitTime,
+            phone: callerIntent.phone,
+            email: callerIntent.email,
           },
         );
 
@@ -2466,9 +2701,66 @@ async function handleUserUtterance(session: Session, text: string) {
         ) {
           appointmentState = { ...appointmentState, bookingStatus: "ready_to_book" };
         }
+        // Production incident: a real call collected service, name, date,
+        // AND time — every field appointmentReadyForAvailabilityCheck
+        // requires — then asked for phone/email before ever checking the
+        // calendar; the caller supplied phone/email and the agent merely
+        // said "I'm checking availability now" with no real tool call
+        // behind it, because nothing dispatched on the fields becoming
+        // complete and the caller never asked an explicit availability
+        // question or said an explicit "yes" in that exact turn. This
+        // fires the INSTANT the four required fields become complete —
+        // independent of the model's marker, an explicit "yes", or an
+        // explicit "is it available?" — never on a later turn where they
+        // were already complete (wasReadyForAvailability guards that).
+        const wasReadyForAvailability =
+          appointmentReadyForAvailabilityCheck(previousAppointmentState);
+        const completionTriggeredAvailability =
+          !wasReadyForAvailability &&
+          appointmentReadyForAvailabilityCheck(appointmentState) &&
+          appointmentState.bookingStatus !== "ready_to_book";
+        if (completionTriggeredAvailability) {
+          appointmentState = { ...appointmentState, bookingStatus: "checking_availability" };
+        }
         session.appointmentState = appointmentState;
 
         reply = spokenText;
+
+        // Resolved once, up front, so the state-aware-acknowledgement block
+        // below can skip its own work entirely on a turn that's about to
+        // dispatch a real tool call anyway — `reply` gets replaced wholesale
+        // by that outcome's own composed text, so computing (and awaiting)
+        // an acknowledgement first would just be discarded latency for no
+        // benefit, re-introducing exactly the extra-lazy-import timing cost
+        // this file has repeatedly had to tune drain()s around before.
+        const willAttemptBooking =
+          session.appointmentState.bookingStatus === "ready_to_book" &&
+          appointmentStateIsComplete(session.appointmentState);
+        const willCheckAvailability =
+          !willAttemptBooking &&
+          session.appointmentState.bookingStatus === "checking_availability" &&
+          appointmentSlotIsKnown(session.appointmentState);
+
+        // State-aware acknowledgement (never a generic filler before every
+        // LLM call — see fieldTransitionAck's own doc comment): prepended,
+        // never replacing the model's own reply, and skipped entirely when
+        // the model's own wording already reads as an acknowledgement, so
+        // the caller is never told the same thing twice. English only; a
+        // non-English/code-mixed reply is left exactly as the model wrote
+        // it.
+        if (
+          !willAttemptBooking &&
+          !willCheckAvailability &&
+          resolveResponseLanguage(
+            session.detectedLanguage,
+            session.input.snapshotAgent.primary_language,
+          ) === "en-IN"
+        ) {
+          const ack = fieldTransitionAck(previousAppointmentState, appointmentState);
+          if (ack && !replyAlreadyAcknowledges(reply, appointmentState.customerName)) {
+            reply = `${ack} ${reply}`;
+          }
+        }
         // Once every required field is known AND this turn's model proposed
         // moving to booking, the RUNTIME — not the model — performs the real
         // booking attempt and decides what's actually said. See attemptBooking
@@ -2483,10 +2775,7 @@ async function handleUserUtterance(session: Session, text: string) {
         // the model's own plain-text reply — sometimes empty — as the ONLY
         // response, which is the direct cause of the reported "goes silent
         // when checking availability" production incident.
-        if (
-          session.appointmentState.bookingStatus === "ready_to_book" &&
-          appointmentStateIsComplete(session.appointmentState)
-        ) {
+        if (willAttemptBooking) {
           // Production incident: real calendar+LLM round trips left the
           // caller in dead air long enough to say "hello? are you there?".
           // A short, immediate, honest acknowledgement — spoken BEFORE the
@@ -2496,11 +2785,29 @@ async function handleUserUtterance(session: Session, text: string) {
           const outcome = await attemptBooking(session);
           reply = outcome.spoken;
           session.appointmentState = outcome.state;
-        } else if (
-          session.appointmentState.bookingStatus === "checking_availability" &&
-          appointmentSlotIsKnown(session.appointmentState)
-        ) {
-          await speak(session, "Let me check that for you.");
+        } else if (willCheckAvailability) {
+          // The completion transition gets its own consolidated message
+          // (names what was just captured AND what's about to happen) —
+          // speaking the generic ack too would say two things back to
+          // back for the same moment.
+          let ack = "Let me check that for you.";
+          if (completionTriggeredAvailability) {
+            // "UTC" here is the same deliberate cosmetic-label tradeoff as
+            // fieldTransitionAck (see its doc comment) — the REAL
+            // availability check immediately below still resolves and uses
+            // the real business timezone via resolveBookingContext. Doing
+            // it here too would be a second, redundant lazy import spent on
+            // a label, right before the real one is about to run anyway.
+            const state = session.appointmentState;
+            const dateLabel = state.preferredDate
+              ? spokenDateLabel(state.preferredDate, "UTC")
+              : null;
+            const whenLabel = dateLabel
+              ? `${dateLabel} at ${describeRequestedTime(state)}`
+              : describeRequestedTime(state);
+            ack = `Thanks${state.customerName ? `, ${state.customerName}` : ""}. I have everything I need. Let me check whether ${whenLabel} is available.`;
+          }
+          await speak(session, ack);
           const outcome = await attemptAvailabilityCheck(session);
           reply = outcome.spoken;
           session.appointmentState = outcome.state;

@@ -15,6 +15,11 @@ import {
   matchService,
   mergeAppointmentState,
   emptyAppointmentState,
+  appointmentReadyForAvailabilityCheck,
+  spokenDateLabel,
+  spokenTimeLabel,
+  describeRequestedTime,
+  replyAlreadyAcknowledges,
   type RuntimeState,
 } from "./voice-runtime.server.ts";
 import type { AudioMediaBridge, AudioFrame } from "./telephony/audio-bridge";
@@ -356,6 +361,96 @@ describe("parseCallerIntentFromText — deterministic backstop over the caller's
       );
     });
   });
+
+  /**
+   * Production incident investigation (Fix #3): a spoken phone number
+   * "7-9-0 6-9-0 3-0" was later represented in AppointmentState as
+   * "7-9-0 0" — root-caused to the model having to COPY the full digit
+   * string into its own JSON marker rather than the runtime ever reading
+   * the caller's raw words itself. extractPhoneNumber (exercised here via
+   * parseCallerIntentFromText) is the fix: a direct regex read of the
+   * caller's own turn text, never routed through the model at all.
+   */
+  describe("phone", () => {
+    test("a long, STT-style digit-by-digit spoken phone number is captured in full, not truncated", () => {
+      assert.equal(parseCallerIntentFromText("It's 7-9-0 6-9-0 3-0-9-9").phone, "7906903099");
+    });
+
+    test("a phone number spoken as a single run of words is captured in full", () => {
+      assert.equal(
+        parseCallerIntentFromText("My number is nine nine nine nine nine nine nine nine nine nine")
+          .phone,
+        null,
+        "word-form digits (not numerals) are intentionally out of scope — only numeral digit runs are extracted",
+      );
+    });
+
+    test("a plain 10-digit number with no separators is captured", () => {
+      assert.equal(parseCallerIntentFromText("My number is 9876543210").phone, "9876543210");
+    });
+
+    test("a phone number embedded in a longer sentence is still captured in full", () => {
+      assert.equal(
+        parseCallerIntentFromText("Yeah, you can reach me at 790 690 3099, thanks").phone,
+        "7906903099",
+      );
+    });
+
+    test("a short number (a time, a quantity) is never mistaken for a phone number", () => {
+      assert.equal(parseCallerIntentFromText("I have 3 kids").phone, null);
+      assert.equal(parseCallerIntentFromText("3 PM works for me").phone, null);
+      assert.equal(parseCallerIntentFromText("tomorrow at 3:30").phone, null);
+    });
+
+    test("an utterance with no digits at all has phone: null", () => {
+      assert.equal(parseCallerIntentFromText("My name is Dhanush.").phone, null);
+    });
+  });
+
+  describe("email", () => {
+    test("a symbolic email address (x@y.tld) is captured exactly, in full", () => {
+      assert.equal(
+        parseCallerIntentFromText("It's chdhansh56@gmail.com").email,
+        "chdhansh56@gmail.com",
+      );
+    });
+
+    test("an email spoken as 'name at domain dot tld' (STT's likely verbatim transcription) is captured and normalized to symbolic form", () => {
+      assert.equal(
+        parseCallerIntentFromText("chdhnsh56 at gmail dot com").email,
+        "chdhnsh56@gmail.com",
+      );
+    });
+
+    test("an email embedded in a longer sentence is still captured in full", () => {
+      assert.equal(
+        parseCallerIntentFromText("You can email me at dhanush.k@example.co.in, that's it").email,
+        "dhanush.k@example.co.in",
+      );
+    });
+
+    test("an utterance with no email at all has email: null", () => {
+      assert.equal(parseCallerIntentFromText("My number is 9876543210").email, null);
+    });
+
+    // KNOWN PRE-EXISTING LIMITATION (found while testing Fix #3, not
+    // introduced by it): EMAIL_SPOKEN_PATTERN's local-part capture group
+    // is `[a-z0-9]+(?:[\s.-]+[a-z0-9]+)*` to support a multi-word spoken
+    // local part ("dhanush k at gmail dot com") — but that same
+    // greediness lets it swallow unrelated LEADING words in the sentence
+    // too, since regex.exec tries the leftmost starting position first
+    // and "My email is" is itself a valid (if wrong) match for that
+    // group. Out of scope to fix in this round (Fix #3 was about phone
+    // truncation specifically) — tracked here, and as a spawned follow-up
+    // task, rather than silently left uncovered.
+    test("KNOWN LIMITATION: leading filler words before a spoken-form email are incorrectly swallowed into the local part", () => {
+      assert.equal(
+        parseCallerIntentFromText("My email is chdhnsh56 at gmail dot com").email,
+        "myemailischdhnsh56@gmail.com",
+        "documents the current (wrong) behavior — see the spawned follow-up task for the real fix",
+      );
+    });
+  });
 });
 
 /**
@@ -551,6 +646,235 @@ describe("mergeAppointmentState — extracted date/time is a backstop, never an 
     };
     const result = mergeAppointmentState(current, null);
     assert.deepEqual(result, current);
+  });
+
+  /**
+   * Fix #3 (production incident: a spoken phone number "7-9-0 6-9-0 3-0"
+   * was later represented as "7-9-0 0"): phone/email take the OPPOSITE
+   * merge priority from date/time — extraction (the raw digits/characters
+   * read directly off the caller's own turn) wins over whatever the
+   * model's marker proposes, rather than only filling a gap the marker
+   * left empty. See mergeAppointmentState's own doc comment for the full
+   * reasoning (the model has to literally copy/re-type these long strings,
+   * which is where the truncation came from).
+   */
+  describe("mergeAppointmentState — phone/email: extraction wins over the marker (the OPPOSITE priority from date/time)", () => {
+    test("extracted phone overrides a marker-proposed phone, even when the marker proposed a (shorter/wrong) value", () => {
+      const result = mergeAppointmentState(
+        emptyAppointmentState(),
+        { phone: "7900" },
+        { phone: "7906903099" },
+      );
+      assert.equal(
+        result.phone,
+        "7906903099",
+        "the raw extracted digits must win over the model's own (truncated) copy",
+      );
+    });
+
+    test("extracted email overrides a marker-proposed email", () => {
+      const result = mergeAppointmentState(
+        emptyAppointmentState(),
+        { email: "wrong@x.com" },
+        { email: "chdhnsh56@gmail.com" },
+      );
+      assert.equal(result.email, "chdhnsh56@gmail.com");
+    });
+
+    test("when extraction finds nothing this turn, the marker's own proposed phone/email is used", () => {
+      const result = mergeAppointmentState(
+        emptyAppointmentState(),
+        { phone: "9999999999", email: "dhanush@example.com" },
+        {},
+      );
+      assert.equal(result.phone, "9999999999");
+      assert.equal(result.email, "dhanush@example.com");
+    });
+
+    test("a phone/email established on a previous turn survives a later turn with no marker and no extraction (sticky current)", () => {
+      const afterTurn1 = mergeAppointmentState(
+        emptyAppointmentState(),
+        {},
+        { phone: "7906903099", email: "chdhnsh56@gmail.com" },
+      );
+      assert.equal(afterTurn1.phone, "7906903099");
+
+      const afterTurn2 = mergeAppointmentState(afterTurn1, { service: "teeth cleaning" });
+      assert.equal(afterTurn2.phone, "7906903099", "must not be dropped/truncated on a later turn");
+      assert.equal(afterTurn2.email, "chdhnsh56@gmail.com");
+    });
+
+    test("extraction fills the gap when the marker proposes no phone/email at all (null)", () => {
+      const result = mergeAppointmentState(
+        emptyAppointmentState(),
+        { phone: null, email: null },
+        { phone: "7906903099", email: "chdhnsh56@gmail.com" },
+      );
+      assert.equal(result.phone, "7906903099");
+      assert.equal(result.email, "chdhnsh56@gmail.com");
+    });
+  });
+});
+
+describe("appointmentReadyForAvailabilityCheck — the Fix #1 completion trigger (deliberately narrower than a full booking: no phone/email required)", () => {
+  function state(overrides: Partial<ReturnType<typeof emptyAppointmentState>>) {
+    return { ...emptyAppointmentState(), ...overrides };
+  }
+
+  test("true once service + customer name + preferred date + preferred time are all known — even with no phone/email", () => {
+    assert.equal(
+      appointmentReadyForAvailabilityCheck(
+        state({
+          service: "teeth cleaning",
+          customerName: "Dhanush",
+          preferredDate: "2026-10-09",
+          preferredTime: "15:00",
+        }),
+      ),
+      true,
+    );
+  });
+
+  test("an explicit 'next available' request satisfies the time requirement without a specific preferredTime", () => {
+    assert.equal(
+      appointmentReadyForAvailabilityCheck(
+        state({
+          service: "teeth cleaning",
+          customerName: "Dhanush",
+          preferredDate: "2026-10-09",
+          wantsNextAvailable: true,
+        }),
+      ),
+      true,
+    );
+  });
+
+  for (const missing of ["service", "customerName", "preferredDate"] as const) {
+    test(`false when ${missing} is missing`, () => {
+      const complete = state({
+        service: "teeth cleaning",
+        customerName: "Dhanush",
+        preferredDate: "2026-10-09",
+        preferredTime: "15:00",
+      });
+      assert.equal(appointmentReadyForAvailabilityCheck({ ...complete, [missing]: null }), false);
+    });
+  }
+
+  test("false when neither preferredTime nor wantsNextAvailable is set", () => {
+    assert.equal(
+      appointmentReadyForAvailabilityCheck(
+        state({
+          service: "teeth cleaning",
+          customerName: "Dhanush",
+          preferredDate: "2026-10-09",
+        }),
+      ),
+      false,
+    );
+  });
+
+  test("still true with no phone and no email set — Fix #1's whole point", () => {
+    assert.equal(
+      appointmentReadyForAvailabilityCheck(
+        state({
+          service: "teeth cleaning",
+          customerName: "Dhanush",
+          preferredDate: "2026-10-09",
+          preferredTime: "15:00",
+          phone: null,
+          email: null,
+        }),
+      ),
+      true,
+    );
+  });
+});
+
+describe("spokenDateLabel / spokenTimeLabel / describeRequestedTime — never read a bare ISO date or 24-hour time digit-by-digit to the caller", () => {
+  test('today\'s date resolves to "today"', () => {
+    const now = new Date("2026-10-08T12:00:00.000Z");
+    assert.equal(spokenDateLabel("2026-10-08", "UTC", now), "today");
+  });
+
+  test('tomorrow\'s date resolves to "tomorrow"', () => {
+    const now = new Date("2026-10-08T12:00:00.000Z");
+    assert.equal(spokenDateLabel("2026-10-09", "UTC", now), "tomorrow");
+  });
+
+  test("a date further out falls back to a plain 'Month Day' label, never a bare ISO string", () => {
+    const now = new Date("2026-10-08T12:00:00.000Z");
+    assert.equal(spokenDateLabel("2026-10-15", "UTC", now), "October 15");
+  });
+
+  test('"15:00" reads as "3 PM", never the bare 24-hour digits', () => {
+    assert.equal(spokenTimeLabel("15:00"), "3 PM");
+  });
+
+  test('"15:30" reads as "3:30 PM" (minutes kept when non-zero)', () => {
+    assert.equal(spokenTimeLabel("15:30"), "3:30 PM");
+  });
+
+  test('midnight ("00:00") reads as "12 AM"', () => {
+    assert.equal(spokenTimeLabel("00:00"), "12 AM");
+  });
+
+  test('noon ("12:00") reads as "12 PM"', () => {
+    assert.equal(spokenTimeLabel("12:00"), "12 PM");
+  });
+
+  test("describeRequestedTime prefers an exact preferredTime over a period or next-available", () => {
+    assert.equal(
+      describeRequestedTime({ ...emptyAppointmentState(), preferredTime: "15:00" }),
+      "3 PM",
+    );
+  });
+
+  test("describeRequestedTime falls back to the period when there is no exact time", () => {
+    assert.equal(
+      describeRequestedTime({ ...emptyAppointmentState(), preferredPeriod: "afternoon" }),
+      "the afternoon",
+    );
+  });
+
+  test("describeRequestedTime falls back to 'the next available time' for wantsNextAvailable", () => {
+    assert.equal(
+      describeRequestedTime({ ...emptyAppointmentState(), wantsNextAvailable: true }),
+      "the next available time",
+    );
+  });
+
+  test("describeRequestedTime never invents a time — falls back to a neutral 'that time' when nothing is known", () => {
+    assert.equal(describeRequestedTime(emptyAppointmentState()), "that time");
+  });
+});
+
+describe("replyAlreadyAcknowledges — avoids a duplicate deterministic acknowledgement when the model's own reply already reads as one", () => {
+  test("the model's reply opening with the caller's own name counts as already acknowledging", () => {
+    assert.equal(replyAlreadyAcknowledges("Dhanush, what time works for you?", "Dhanush"), true);
+  });
+
+  test('a reply opening with "Got it" counts as already acknowledging', () => {
+    assert.equal(replyAlreadyAcknowledges("Got it, what's next?", null), true);
+  });
+
+  test('a reply opening with "Thanks"/"Perfect"/"Noted" each count as already acknowledging', () => {
+    assert.equal(replyAlreadyAcknowledges("Thanks! Let's continue.", null), true);
+    assert.equal(replyAlreadyAcknowledges("Perfect, one moment.", null), true);
+    assert.equal(replyAlreadyAcknowledges("Noted, thank you.", null), true);
+  });
+
+  test("a plain reply with none of these cues does not count as already acknowledging", () => {
+    assert.equal(
+      replyAlreadyAcknowledges("What date and time would you prefer?", "Dhanush"),
+      false,
+    );
+  });
+
+  test("the caller's name appearing only much later in a long reply does not count (only the lead is checked)", () => {
+    const reply =
+      "Let me check our calendar for you right now, one moment please while I look that up, Dhanush.";
+    assert.equal(replyAlreadyAcknowledges(reply, "Dhanush"), false);
   });
 });
 

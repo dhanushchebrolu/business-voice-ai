@@ -1975,7 +1975,17 @@ describe("30. Conversation state regression — the exact real-call sequence (pr
     );
     makeTtsFlushCatchUp(h.tts)();
 
-    // Step 6: caller selects tomorrow 3pm.
+    // Step 6: caller selects tomorrow 3pm. This is also the exact turn
+    // every required availability-check field (service, name, date, time)
+    // becomes complete, so the completion-triggered-availability backstop
+    // (Fix #1) now fires here too, before step 7's booking confirmation —
+    // its own real check_calendar_availability call needs the default
+    // mock result (NOT_CONFIGURED/isError, since nothing is queued for
+    // this turn specifically), which resolves availabilityStatus back to
+    // "unknown" and bookingStatus back to "collecting", same as any other
+    // honest tool failure. A bigger drain (matching step 5's) is needed so
+    // this extra real dispatch (speak + tool call + composeHonestBookingReply)
+    // fully settles before step 7 fires, rather than racing it.
     h.llm.setNextReply(
       'Tomorrow at 3 PM works. Shall I confirm that?\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":"9999999999","preferred_date":"2026-10-09","preferred_time":"15:00","preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
     );
@@ -1984,7 +1994,7 @@ describe("30. Conversation state regression — the exact real-call sequence (pr
       text: "Well, tomorrow at three p.m.",
       language: "en-IN",
     });
-    await drain();
+    await drain(40);
     makeTtsFlushCatchUp(h.tts)();
 
     // Step 7/8: caller confirms AND asks for a reminder in the SAME
@@ -2817,6 +2827,569 @@ describe("32. Availability check dedup (production reliability fix: no duplicate
       h.tools.calls.filter((c) => c.name === "check_calendar_availability").length,
       2,
       "a genuinely different requested time must trigger its own real calendar check",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+/**
+ * Fix #2 (state-aware acknowledgements): a short deterministic phrase is
+ * prepended to the model's own reply the moment a field transition
+ * actually happens — never a generic "Okay, noted" before every single
+ * LLM call. See fieldTransitionAck/replyAlreadyAcknowledges in
+ * voice-runtime.server.ts.
+ */
+describe("33. State-aware acknowledgements (Fix #2 — deterministic, state-driven, never a generic filler before every LLM call)", () => {
+  test("after the caller's name is captured, a deterministic 'Got it, <name>.' precedes the model's own reply", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    const spokenBefore = h.tts.sentTexts.length;
+    h.llm.setNextReply(
+      'What date and time would you prefer?\n<<<APPT_STATE:{"service":null,"customer_name":"Dhanush","phone":null,"email":null,"preferred_date":null,"preferred_time":null,"preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.speakUtterance("I'm Dhanush");
+    await drain();
+
+    const spoken = h.tts.sentTexts.slice(spokenBefore).join(" ");
+    assert.equal(spoken, "Got it, Dhanush. What date and time would you prefer?");
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("after service and date are captured in a later turn, a deterministic 'Got it — <service> <date label>.' precedes the model's own reply asking for time", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.llm.setNextReply(
+      'What service, date, and time would you like?\n<<<APPT_STATE:{"service":null,"customer_name":"Dhanush","phone":null,"email":null,"preferred_date":null,"preferred_time":null,"preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.speakUtterance("I'm Dhanush");
+    await drain();
+    makeTtsFlushCatchUp(h.tts)();
+
+    const spokenBefore = h.tts.sentTexts.length;
+    h.llm.setNextReply(
+      'What time works for you?\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":null,"email":null,"preferred_date":"2026-10-09","preferred_time":null,"preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.emit({
+      type: "final_transcript",
+      text: "I want teeth cleaning tomorrow",
+      language: "en-IN",
+    });
+    await drain(24);
+
+    const spoken = h.tts.sentTexts.slice(spokenBefore).join(" ");
+    assert.equal(spoken, "Got it — teeth cleaning tomorrow. What time works for you?");
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("no duplicate acknowledgement when the model's own reply already reads as one (e.g. already opens with the caller's name)", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    const spokenBefore = h.tts.sentTexts.length;
+    h.llm.setNextReply(
+      'Dhanush, what date and time would you prefer?\n<<<APPT_STATE:{"service":null,"customer_name":"Dhanush","phone":null,"email":null,"preferred_date":null,"preferred_time":null,"preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.speakUtterance("I'm Dhanush");
+    await drain();
+
+    const spoken = h.tts.sentTexts.slice(spokenBefore).join(" ");
+    assert.equal(
+      spoken,
+      "Dhanush, what date and time would you prefer?",
+      "must not prepend a second 'Got it, Dhanush' on top of the model's own already-acknowledging reply",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+/**
+ * Fix #1 (production incident: a real call collected service, name, date,
+ * AND time, then asked for phone/email before ever checking the calendar
+ * — the caller supplied phone/email and the agent merely said "I'm
+ * checking availability now" with no real tool call behind it). This
+ * describe block proves the completion-transition backstop
+ * (appointmentReadyForAvailabilityCheck in voice-runtime.server.ts) fires
+ * the exact instant service+name+date+time become complete — deliberately
+ * BEFORE phone/email is ever asked for, since those are not required to
+ * check availability — and independent of the model's own marker, an
+ * explicit "yes", or an explicit "is it available?" question.
+ */
+describe("34. Completion-triggered availability check (Fix #1 — fires the instant the 4 required fields are complete, never dependent on the marker/an explicit yes/an explicit availability question)", () => {
+  test("the exact reported scenario: name -> service+date (not yet complete) -> time (completes the 4 fields) immediately dispatches a real availability check, before phone/email is ever asked for", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    // Turn 1: name only.
+    h.llm.setNextReply(
+      'What would you like to book?\n<<<APPT_STATE:{"service":null,"customer_name":"Dhanush","phone":null,"email":null,"preferred_date":null,"preferred_time":null,"preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.speakUtterance("I'm Dhanush");
+    await drain();
+    makeTtsFlushCatchUp(h.tts)();
+
+    // Turn 2: service + date — still missing time, so NOT yet complete.
+    h.llm.setNextReply(
+      'What time works for you?\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":null,"email":null,"preferred_date":"2026-10-09","preferred_time":null,"preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.emit({
+      type: "final_transcript",
+      text: "I want teeth cleaning tomorrow",
+      language: "en-IN",
+    });
+    await drain();
+    makeTtsFlushCatchUp(h.tts)();
+    assert.equal(
+      h.tools.calls.length,
+      0,
+      "must not check availability yet — time is still missing",
+    );
+
+    // Turn 3: time. The marker DELIBERATELY leaves checking_availability
+    // false and ready_to_book false — reproducing the real, confirmed-
+    // unreliable marker emission — so only the deterministic completion
+    // backstop can make this turn actually check the calendar. The
+    // caller says nothing resembling "yes"/"is it available?" — just the
+    // bare time.
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: { slots: [{ start: "2026-10-09T15:00:00.000Z", end: "2026-10-09T15:30:00.000Z" }] },
+      }),
+    });
+    h.llm.setNextReply(
+      'Sure thing.\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":null,"email":null,"preferred_date":"2026-10-09","preferred_time":"15:00","preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.llm.setDelay(0);
+    h.stt.emit({ type: "final_transcript", text: "3 PM", language: "en-IN" });
+    await drain(40);
+
+    const availabilityCall = h.tools.calls.find((c) => c.name === "check_calendar_availability");
+    assert.ok(
+      availabilityCall,
+      "the real check_calendar_availability tool must execute the instant the 4th required field (time) completes the state — no explicit trigger phrase was used",
+    );
+    assert.equal(availabilityCall?.input["dateIso"], "2026-10-09");
+
+    // The consolidated completion-triggered acknowledgement (distinct from
+    // the generic "Let me check that for you." used by the OTHER,
+    // explicit-question backstop) must have been spoken BEFORE the real
+    // result came back.
+    assert.ok(
+      h.tts.sentTexts.some((t) => /have everything I need/i.test(t)),
+      "expected the consolidated completion acknowledgement, naming what was just captured and what's about to happen",
+    );
+
+    // The real Google Calendar result must actually be processed and
+    // reach the caller: the second (composeHonestBookingReply) LLM call
+    // is fed the real tool result, and speak() actually sends something
+    // grounded in it.
+    const factsMessage = h.llm.calls.at(-1)?.find((m) => m.role === "user");
+    assert.match(factsMessage?.content ?? "", /IS available/);
+    assert.ok(
+      h.tts.sentTexts.length > 1,
+      "the caller must actually receive a spoken availability response, not just the acknowledgement",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("still fires when phone/email happen to already be known early, and service/date/time complete only on a later turn — the trigger is the 4 required fields, not which turn phone/email arrived on", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    // Turn 1: name + phone + email given up front, service/date/time all
+    // still unknown — appointmentReadyForAvailabilityCheck is false (no
+    // service/date/time yet) even though phone/email are already known.
+    h.llm.setNextReply(
+      'What would you like to book, and for when?\n<<<APPT_STATE:{"service":null,"customer_name":"Dhanush","phone":"9999999999","email":"dhanush@example.com","preferred_date":null,"preferred_time":null,"preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.speakUtterance("I'm Dhanush, my number is 9999999999 and email is dhanush@example.com");
+    await drain();
+    makeTtsFlushCatchUp(h.tts)();
+    assert.equal(
+      h.tools.calls.length,
+      0,
+      "must not check availability yet — service/date/time are still missing",
+    );
+
+    // Turn 2: service + date + time all arrive together — the exact turn
+    // the 4 required fields complete, even though phone/email were
+    // already known from turn 1.
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: { slots: [{ start: "2026-10-09T15:00:00.000Z", end: "2026-10-09T15:30:00.000Z" }] },
+      }),
+    });
+    h.llm.setNextReply(
+      'One moment.\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":"9999999999","email":"dhanush@example.com","preferred_date":"2026-10-09","preferred_time":"15:00","preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.llm.setDelay(0);
+    h.stt.emit({
+      type: "final_transcript",
+      text: "Teeth cleaning, tomorrow at 3 PM",
+      language: "en-IN",
+    });
+    await drain(40);
+
+    const availabilityCall = h.tools.calls.find((c) => c.name === "check_calendar_availability");
+    assert.ok(availabilityCall, "must dispatch the instant service+date+time complete the state");
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("unavailable slot via the completion trigger: never claims available, never books, offers only the real alternatives", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.llm.setNextReply(
+      'What would you like to book?\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":null,"email":null,"preferred_date":"2026-10-09","preferred_time":null,"preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.speakUtterance("I'm Dhanush, teeth cleaning tomorrow");
+    await drain();
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: {
+          slots: [
+            { start: "2026-10-09T09:00:00.000Z", end: "2026-10-09T09:30:00.000Z" },
+            { start: "2026-10-09T10:30:00.000Z", end: "2026-10-09T11:00:00.000Z" },
+          ],
+        },
+      }),
+    });
+    h.llm.setNextReply(
+      'Got it.\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":null,"email":null,"preferred_date":"2026-10-09","preferred_time":"15:00","preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.llm.setDelay(0);
+    h.stt.emit({ type: "final_transcript", text: "3 PM", language: "en-IN" });
+    await drain(40);
+
+    const bookingCall = h.tools.calls.find((c) => c.name === "book_appointment");
+    assert.equal(bookingCall, undefined, "an unavailable slot must never be booked");
+    const factsMessage = h.llm.calls.at(-1)?.find((m) => m.role === "user");
+    const facts = factsMessage?.content ?? "";
+    assert.match(facts, /NOT available/);
+    assert.match(facts, /9:00\s*AM/i);
+    assert.match(facts, /10:30\s*AM/i);
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("calendar permission failure via the completion trigger (capability disabled — UNKNOWN_TOOL): an honest fallback, never silence, never a fabricated answer", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.llm.setNextReply(
+      'What would you like to book?\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":null,"email":null,"preferred_date":"2026-10-09","preferred_time":null,"preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.speakUtterance("I'm Dhanush, teeth cleaning tomorrow");
+    await drain();
+    makeTtsFlushCatchUp(h.tts)();
+
+    // Same shape a real disabled-capability call actually returns (see
+    // ai-tools.server.ts's TOOL_REGISTRY filtering — a tool whose
+    // capability flag is off is simply absent, so calling its name
+    // produces this exact UNKNOWN_TOOL error).
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: false,
+        error: { code: "UNKNOWN_TOOL", message: "No such tool: check_calendar_availability" },
+      }),
+      isError: true,
+    });
+    h.llm.setNextReply(
+      'Got it.\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":null,"email":null,"preferred_date":"2026-10-09","preferred_time":"15:00","preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.llm.setDelay(0);
+    const spokenBefore = h.tts.sentTexts.length;
+    h.stt.emit({ type: "final_transcript", text: "3 PM", language: "en-IN" });
+    await drain(40);
+
+    const spokenSince = h.tts.sentTexts.slice(spokenBefore);
+    assert.ok(spokenSince.length >= 1, "must never go silent on a permission/capability failure");
+    const factsMessage = h.llm.calls.at(-1)?.find((m) => m.role === "user");
+    const facts = factsMessage?.content ?? "";
+    assert.match(facts, /could not be reached|cannot be confirmed/i);
+    assert.doesNotMatch(
+      facts,
+      /IS available/i,
+      "must never fabricate availability on a tool failure",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("Google Calendar auth failure via the completion trigger: reported as 'not connected', never as the slot being taken", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.llm.setNextReply(
+      'What would you like to book?\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":null,"email":null,"preferred_date":"2026-10-09","preferred_time":null,"preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.speakUtterance("I'm Dhanush, teeth cleaning tomorrow");
+    await drain();
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: false,
+        error: { code: "GOOGLE_AUTH_REQUIRED", message: "not connected" },
+      }),
+      isError: true,
+    });
+    h.llm.setNextReply(
+      'Got it.\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":null,"email":null,"preferred_date":"2026-10-09","preferred_time":"15:00","preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.llm.setDelay(0);
+    h.stt.emit({ type: "final_transcript", text: "3 PM", language: "en-IN" });
+    await drain(40);
+
+    const factsMessage = h.llm.calls.at(-1)?.find((m) => m.role === "user");
+    const facts = factsMessage?.content ?? "";
+    assert.match(facts, /not connected/i);
+    assert.doesNotMatch(
+      facts,
+      /NOT available/i,
+      "an auth failure must not be reported as the slot being taken",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("duplicate availability request right after the completion-triggered check reuses the cached result — no second real calendar call for the unchanged slot", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.llm.setNextReply(
+      'What would you like to book?\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":null,"email":null,"preferred_date":"2026-10-09","preferred_time":null,"preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.speakUtterance("I'm Dhanush, teeth cleaning tomorrow");
+    await drain();
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: { slots: [{ start: "2026-10-09T15:00:00.000Z", end: "2026-10-09T15:30:00.000Z" }] },
+      }),
+    });
+    h.llm.setNextReply(
+      'One moment.\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":null,"email":null,"preferred_date":"2026-10-09","preferred_time":"15:00","preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.llm.setDelay(0);
+    h.stt.emit({ type: "final_transcript", text: "3 PM", language: "en-IN" });
+    await drain(40);
+    makeTtsFlushCatchUp(h.tts)();
+
+    assert.equal(
+      h.tools.calls.filter((c) => c.name === "check_calendar_availability").length,
+      1,
+      "sanity: exactly one real check so far",
+    );
+
+    // The caller asks again for the exact same slot (rephrased) —
+    // appointmentReadyForAvailabilityCheck is ALREADY true (and was
+    // already true at the start of this turn too), so the completion
+    // backstop does not re-fire; the EXPLICIT availabilityRequested
+    // backstop does fire, but the pre-existing dedup guard in
+    // attemptAvailabilityCheck must short-circuit it to the cached result.
+    h.llm.setNextReply(
+      'Let me check.\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":null,"email":null,"preferred_date":"2026-10-09","preferred_time":"15:00","preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.emit({
+      type: "final_transcript",
+      text: "Sorry, is that 3pm slot definitely available?",
+      language: "en-IN",
+    });
+    await drain(40);
+
+    assert.equal(
+      h.tools.calls.filter((c) => c.name === "check_calendar_availability").length,
+      1,
+      "a repeated request for the exact same already-checked slot must not trigger a second real calendar call",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("already-complete appointment state: an unrelated later turn must not re-trigger a second completion-triggered availability check", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.llm.setNextReply(
+      'What would you like to book?\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":null,"email":null,"preferred_date":"2026-10-09","preferred_time":null,"preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.speakUtterance("I'm Dhanush, teeth cleaning tomorrow");
+    await drain();
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: { slots: [{ start: "2026-10-09T15:00:00.000Z", end: "2026-10-09T15:30:00.000Z" }] },
+      }),
+    });
+    h.llm.setNextReply(
+      'One moment.\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":null,"email":null,"preferred_date":"2026-10-09","preferred_time":"15:00","preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.llm.setDelay(0);
+    h.stt.emit({ type: "final_transcript", text: "3 PM", language: "en-IN" });
+    await drain(40);
+    makeTtsFlushCatchUp(h.tts)();
+
+    assert.equal(h.tools.calls.filter((c) => c.name === "check_calendar_availability").length, 1);
+
+    // An entirely unrelated follow-up turn, with the state (service, name,
+    // date, time) still exactly as complete as it was a moment ago —
+    // wasReadyForAvailability is true BEFORE this turn's merge too, so the
+    // transition guard must prevent a second dispatch.
+    h.llm.setNextReply(
+      'Sure, happy to help.\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":null,"email":null,"preferred_date":"2026-10-09","preferred_time":"15:00","preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.emit({
+      type: "final_transcript",
+      text: "By the way, do you also do whitening?",
+      language: "en-IN",
+    });
+    await drain();
+
+    assert.equal(
+      h.tools.calls.filter((c) => c.name === "check_calendar_availability").length,
+      1,
+      "an unrelated turn on already-complete state must not re-trigger a second real availability check",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+/**
+ * Fix #3 (production incident investigation): a spoken phone number
+ * "7-9-0 6-9-0 3-0" was later represented in AppointmentState as "7-9-0
+ * 0" — root-caused to the model having to COPY the caller's digits into
+ * its own JSON marker, which it did unreliably, rather than the runtime
+ * ever reading the caller's raw words directly. This describe block
+ * proves the fix end-to-end: even when the model's marker itself proposes
+ * a truncated/wrong phone or email, the FULL value — extracted directly
+ * from the caller's own turn — is what persists and what actually reaches
+ * the real book_appointment call, never a shortened copy.
+ */
+describe("35. Phone/email are never truncated end-to-end, even when the model's own marker truncates them (Fix #3)", () => {
+  test("a full phone number survives into the real book_appointment call even though the model's marker proposes a truncated one", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    // The marker DELIBERATELY proposes a truncated phone ("7900") even
+    // though the caller's own turn text contains the full number — this
+    // is the exact reproduction of the reported incident's root cause.
+    h.llm.setNextReply(
+      'Thanks. What date and time would you like?\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":"7900","email":null,"preferred_date":null,"preferred_time":null,"preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.speakUtterance("It's 7-9-0 6-9-0 3-0-9-9");
+    await drain();
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: { slots: [{ start: BOOKING_START_ISO, end: "2026-10-08T15:30:00.000Z" }] },
+      }),
+    });
+    h.tools.setNextResult("book_appointment", {
+      content: JSON.stringify({ success: true, data: { id: "booking-2", status: "CONFIRMED" } }),
+    });
+    h.llm.setNextReply(
+      'Great, I\'ll book that now.\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":"7900","email":null,"preferred_date":"2026-10-08","preferred_time":"15:00","preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":true}>>>',
+    );
+    h.llm.setDelay(0);
+    h.stt.emit({
+      type: "final_transcript",
+      text: "Tomorrow at 3pm, please book it",
+      language: "en-IN",
+    });
+    await drain(48);
+
+    const bookingCall = h.tools.calls.find((c) => c.name === "book_appointment");
+    assert.ok(bookingCall, "the booking must actually execute");
+    assert.equal(
+      bookingCall?.input["customerPhone"],
+      "7906903099",
+      "the full extracted phone must reach the real booking call, not the marker's truncated copy",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("a full email address survives into the real book_appointment call even though the model's marker proposes a wrong/truncated one", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.llm.setNextReply(
+      'Thanks. What date and time would you like?\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":"9999999999","email":"wrong@x.com","preferred_date":null,"preferred_time":null,"preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.speakUtterance("chdhnsh56 at gmail dot com");
+    await drain();
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: { slots: [{ start: BOOKING_START_ISO, end: "2026-10-08T15:30:00.000Z" }] },
+      }),
+    });
+    h.tools.setNextResult("book_appointment", {
+      content: JSON.stringify({ success: true, data: { id: "booking-3", status: "CONFIRMED" } }),
+    });
+    h.llm.setNextReply(
+      'Great, I\'ll book that now.\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":"9999999999","email":"wrong@x.com","preferred_date":"2026-10-08","preferred_time":"15:00","preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":true}>>>',
+    );
+    h.llm.setDelay(0);
+    h.stt.emit({
+      type: "final_transcript",
+      text: "Tomorrow at 3pm, please book it",
+      language: "en-IN",
+    });
+    await drain(48);
+
+    const bookingCall = h.tools.calls.find((c) => c.name === "book_appointment");
+    assert.ok(bookingCall, "the booking must actually execute");
+    assert.equal(
+      bookingCall?.input["customerEmail"],
+      "chdhnsh56@gmail.com",
+      "the full extracted email must reach the real booking call, not the marker's wrong copy",
     );
 
     await terminateRuntimeSession(callId, "test cleanup");
