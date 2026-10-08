@@ -459,7 +459,13 @@ describe("LLM request/error diagnostics", () => {
       await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
       h.llm.setNextError(new ProviderError("The AI voice provider timed out. Please retry.", 504));
       h.stt.speakUtterance("Are you open today?");
-      await drain();
+      // Not the default 8: "today" is also a relativeDate signal, so this
+      // turn now also pays for tryEarlyDeterministicDispatch's own
+      // resolveBusinessTimezone lookup (lazy import + fallback) before it
+      // decides early dispatch doesn't apply here and falls through to the
+      // normal getReply/error path — one more microtask hop than before
+      // must fully resolve first.
+      await drain(16);
       await terminateRuntimeSession(callId, "test cleanup");
     });
 
@@ -1202,6 +1208,13 @@ describe("26. Calendar availability check (production incident: the agent went s
     h.tools.setNextResult("check_calendar_availability", {
       content: JSON.stringify({ success: true, data: { slots: [] } }),
     });
+    // This exact utterance (an explicit availability question + an
+    // explicit "tomorrow"/"3pm") is now fully decidable before the LLM is
+    // even called (see tryEarlyDeterministicDispatch) — the queued LLM
+    // reply below is never consumed, since this turn dispatches the real
+    // tool call directly from the caller's own words, resolving "tomorrow"
+    // for real rather than relying on a marker's (here, deliberately
+    // mismatched) hardcoded date.
     h.llm.setNextReply(checkingAvailabilityReply());
     h.llm.setDelay(0);
 
@@ -1209,7 +1222,7 @@ describe("26. Calendar availability check (production incident: the agent went s
     await drain(40);
 
     const availabilityCall = h.tools.calls.find((c) => c.name === "check_calendar_availability");
-    assert.equal(availabilityCall?.input["dateIso"], "2026-10-08");
+    assert.equal(availabilityCall?.input["dateIso"], "2026-10-09");
     assert.equal(typeof availabilityCall?.input["durationMinutes"], "number");
 
     await terminateRuntimeSession(callId, "test cleanup");
@@ -1451,7 +1464,12 @@ describe("26. Calendar availability check (production incident: the agent went s
       'Got it, tomorrow at 3 PM for teeth cleaning.\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":null,"phone":null,"preferred_date":"2026-10-08","preferred_time":"15:00","checking_availability":false,"ready_to_book":false}>>>',
     );
     h.stt.speakUtterance("I'd like teeth cleaning tomorrow at 3pm");
-    await drain();
+    // Not the default 8: this turn now also speaks an immediate pre-LLM
+    // ack (explicitTime is present) and tryEarlyDeterministicDispatch
+    // resolves "tomorrow" via its own resolveBusinessTimezone lookup
+    // before falling through to getReply — more microtask hops than
+    // before must fully resolve first.
+    await drain(24);
     makeTtsFlushCatchUp(h.tts)();
 
     h.llm.setNextReply("And your name?");
@@ -1772,7 +1790,11 @@ describe("28. 'Book me at the next available time' (no exact time given)", () =>
     h.llm.setDelay(0);
 
     h.stt.speakUtterance("Book me at the next available time");
-    await drain(16);
+    // Not 16: every turn now also awaits tryEarlyDeterministicDispatch
+    // (Fix #1/#4) before falling through to getReply when it doesn't
+    // apply — one more microtask hop than before, on top of this test's
+    // already-tight two-sequential-tool-calls-plus-two-LLM-calls budget.
+    await drain(24);
 
     const factsMessage = h.llm.calls.at(-1)?.find((m) => m.role === "user");
     assert.match(factsMessage?.content ?? "", /9:15\s*AM/i);
@@ -3320,19 +3342,26 @@ describe("35. Phone/email are never truncated end-to-end, even when the model's 
     await drain();
     makeTtsFlushCatchUp(h.tts)();
 
+    // "Tomorrow at 3pm, please book it" — with service/name/phone already
+    // known, this is now fully decidable before the LLM is even called
+    // (see tryEarlyDeterministicDispatch): an explicit booking
+    // confirmation plus an explicit date/time against an already-complete
+    // slot. The real resolved "tomorrow" (2026-10-09, one day after this
+    // suite's real run date) is what actually gets requested — never the
+    // marker's own date — so the queued slot below is for that real date,
+    // not BOOKING_START_ISO's 2026-10-08. No marker reply is queued for
+    // this turn: the LLM is never consulted for it at all.
     h.tools.setNextResult("check_calendar_availability", {
       content: JSON.stringify({
         success: true,
-        data: { slots: [{ start: BOOKING_START_ISO, end: "2026-10-08T15:30:00.000Z" }] },
+        data: {
+          slots: [{ start: "2026-10-09T15:00:00.000Z", end: "2026-10-09T15:30:00.000Z" }],
+        },
       }),
     });
     h.tools.setNextResult("book_appointment", {
       content: JSON.stringify({ success: true, data: { id: "booking-2", status: "CONFIRMED" } }),
     });
-    h.llm.setNextReply(
-      'Great, I\'ll book that now.\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":"7900","email":null,"preferred_date":"2026-10-08","preferred_time":"15:00","preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":true}>>>',
-    );
-    h.llm.setDelay(0);
     h.stt.emit({
       type: "final_transcript",
       text: "Tomorrow at 3pm, please book it",
@@ -3364,19 +3393,21 @@ describe("35. Phone/email are never truncated end-to-end, even when the model's 
     await drain();
     makeTtsFlushCatchUp(h.tts)();
 
+    // Same as the phone test above: this turn is now fully decidable
+    // before the LLM is called, against the REAL resolved "tomorrow"
+    // (2026-10-09) — never the marker's own date, which is never
+    // consulted for this turn at all.
     h.tools.setNextResult("check_calendar_availability", {
       content: JSON.stringify({
         success: true,
-        data: { slots: [{ start: BOOKING_START_ISO, end: "2026-10-08T15:30:00.000Z" }] },
+        data: {
+          slots: [{ start: "2026-10-09T15:00:00.000Z", end: "2026-10-09T15:30:00.000Z" }],
+        },
       }),
     });
     h.tools.setNextResult("book_appointment", {
       content: JSON.stringify({ success: true, data: { id: "booking-3", status: "CONFIRMED" } }),
     });
-    h.llm.setNextReply(
-      'Great, I\'ll book that now.\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":"9999999999","email":"wrong@x.com","preferred_date":"2026-10-08","preferred_time":"15:00","preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":true}>>>',
-    );
-    h.llm.setDelay(0);
     h.stt.emit({
       type: "final_transcript",
       text: "Tomorrow at 3pm, please book it",
@@ -3390,6 +3421,175 @@ describe("35. Phone/email are never truncated end-to-end, even when the model's 
       bookingCall?.input["customerEmail"],
       "chdhnsh56@gmail.com",
       "the full extracted email must reach the real booking call, not the marker's wrong copy",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+/**
+ * Production incident (second real call, after the Fix #1/#2/#3 round):
+ * the caller still hit several seconds of total dead air, because EVERY
+ * acknowledgement in this file — including the new state-aware ones —
+ * was computed only AFTER the Sarvam LLM call resolved, with nothing
+ * spoken before it. These tests prove the architectural fix directly:
+ * the deterministic, local acknowledgement (immediateCallerAck) and, where
+ * safe, the real tool dispatch itself (tryEarlyDeterministicDispatch) now
+ * happen without ever waiting on — or in the early-dispatch case, without
+ * ever even calling — the Sarvam LLM.
+ */
+describe("36. Non-blocking architecture (Fix #2/#3/#4 follow-up — immediate ack before the LLM resolves, early dispatch skips the LLM entirely, local fallback when calendar succeeds but phrasing is slow)", () => {
+  test("the immediate pre-LLM acknowledgement is spoken BEFORE a deliberately slow Sarvam LLM call ever resolves", async (t) => {
+    t.mock.timers.enable();
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    // Service/name are unknown, so this turn cannot early-dispatch — it's
+    // a clean test of the immediate ack racing a slow LLM call on its own.
+    h.llm.setNextReply(
+      'What service would you like?\n<<<APPT_STATE:{"service":null,"customer_name":null,"phone":null,"email":null,"preferred_date":null,"preferred_time":"15:00","preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.llm.setDelay(10_000); // deliberately slower than any real production incident observed
+    const spokenBefore = h.tts.sentTexts.length;
+    const llmCallsBefore = h.llm.calls.length;
+
+    h.stt.speakUtterance("Tomorrow at 3 PM");
+    // Only microtask hops — the mock timer has not been ticked forward at
+    // all, so the LLM's own 10s delay cannot possibly have elapsed yet.
+    await drain(16);
+
+    assert.equal(
+      h.llm.calls.length,
+      llmCallsBefore + 1,
+      "the LLM call must have STARTED (it's still pending, not skipped)",
+    );
+    const spokenWhileLlmPending = h.tts.sentTexts.slice(spokenBefore);
+    assert.deepEqual(
+      spokenWhileLlmPending,
+      ["Got it — tomorrow at 3 PM."],
+      "the deterministic local acknowledgement must already be spoken while the Sarvam call is still pending — never dead air",
+    );
+
+    // Now let the slow LLM call actually resolve, and confirm the real
+    // reply follows afterward (the fix is about ORDERING, not about
+    // skipping the model's own reply for a turn like this one).
+    t.mock.timers.tick(10_000);
+    await drain(16);
+    const spokenAfter = h.tts.sentTexts.slice(spokenBefore);
+    assert.ok(
+      spokenAfter.length > spokenWhileLlmPending.length,
+      "the model's own reply must still follow once the slow LLM call finally resolves",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("the early deterministic dispatch never calls the Sarvam LLM at all for this turn, even when it's configured to never resolve", async (t) => {
+    // Mocked so the deliberately enormous setDelay below never schedules a
+    // real, process-keeping-alive timer — it only needs to prove the LLM
+    // call never even starts, never actually elapse.
+    t.mock.timers.enable();
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    // Turn 1: establish service + name (normal marker-driven path).
+    h.llm.setNextReply(
+      'What date and time?\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":null,"email":null,"preferred_date":null,"preferred_time":null,"preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.speakUtterance("I'm Dhanush, teeth cleaning");
+    await drain();
+    makeTtsFlushCatchUp(h.tts)();
+
+    // Turn 2: "3pm tomorrow" completes every field appointmentReadyForAvailabilityCheck
+    // needs, purely from deterministic extraction — no marker needed. The
+    // LLM is set to a delay no test could ever wait out AND no mock timer
+    // is ever ticked forward — if this turn depended on getReply at all,
+    // this test would simply stall with no new tool/TTS activity.
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: { slots: [{ start: "2026-10-09T15:00:00.000Z", end: "2026-10-09T15:30:00.000Z" }] },
+      }),
+    });
+    h.llm.setDelay(2_147_483_647);
+    const llmCallsBefore = h.llm.calls.length;
+    h.stt.emit({ type: "final_transcript", text: "3pm tomorrow", language: "en-IN" });
+    await drain(40);
+
+    const availabilityCall = h.tools.calls.find((c) => c.name === "check_calendar_availability");
+    assert.ok(
+      availabilityCall,
+      "the real check_calendar_availability call must execute without ever waiting on the (never-resolving) LLM call",
+    );
+    // Exactly one new LLM call happens: composeHonestBookingReply's own
+    // short, facts-only phrasing call, which the architecture intentionally
+    // never skips (see its own doc comment) — what's skipped for this
+    // turn is specifically the FULL conversational getReply call.
+    assert.equal(
+      h.llm.calls.length,
+      llmCallsBefore + 1,
+      "exactly one LLM call — the short phrasing call — may happen; the full conversational getReply call must never be reached for this turn",
+    );
+    const newCall = h.llm.calls.at(-1) ?? [];
+    assert.ok(
+      !newCall.some((m) => m.content.includes("3pm tomorrow")),
+      "the one LLM call must be the short phrasing call, never the full conversational prompt (which would include this turn's own raw utterance in its conversation history)",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("Fix #4: when the calendar succeeds but the phrasing LLM call is too slow, the caller hears an honest local fallback — never silence, never the generic turn-deadline apology", async (t) => {
+    t.mock.timers.enable();
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    // Turn 1: establish service+name+date+time (normal marker-driven
+    // path, fast — delay is still 0 at this point).
+    h.llm.setNextReply(
+      'Got it.\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":null,"email":null,"preferred_date":"2026-10-08","preferred_time":"15:00","preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.speakUtterance("Teeth cleaning for Dhanush, today at 3pm");
+    // Not the default 8: this turn's own explicit time triggers both the
+    // immediate pre-LLM ack and tryEarlyDeterministicDispatch's own
+    // resolveBusinessTimezone lookup (for "today") before falling through
+    // to getReply.
+    await drain(24);
+    makeTtsFlushCatchUp(h.tts)();
+
+    // Turn 2: an explicit availability question with the slot already
+    // fully known — dispatches early (see the test above), so the delay
+    // set just below only ever affects composeHonestBookingReply's own
+    // (second) LLM call, never a conversational one.
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: { slots: [{ start: BOOKING_START_ISO, end: "2026-10-08T15:30:00.000Z" }] },
+      }),
+    });
+    h.llm.setDelay(60_000); // exceeds PHRASING_LLM_TIMEOUT_MS (6s)
+    const spokenBefore = h.tts.sentTexts.length;
+    h.stt.emit({ type: "final_transcript", text: "Is that slot available?", language: "en-IN" });
+    await drain(24);
+    t.mock.timers.tick(6_000); // PHRASING_LLM_TIMEOUT_MS
+    await drain(24);
+
+    const spoken = h.tts.sentTexts.slice(spokenBefore).join(" ");
+    assert.match(
+      spoken,
+      /available/i,
+      "must speak the honest local fallback, grounded in the real (available) tool result",
+    );
+    assert.doesNotMatch(
+      spoken,
+      /sorry|trouble|went wrong/i,
+      "must never fall back to a generic apology when the calendar itself succeeded — only the phrasing call was slow",
     );
 
     await terminateRuntimeSession(callId, "test cleanup");

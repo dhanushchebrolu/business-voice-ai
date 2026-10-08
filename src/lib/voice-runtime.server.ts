@@ -1816,6 +1816,8 @@ export function replyAlreadyAcknowledges(reply: string, customerName: string | n
   );
 }
 
+const WEEKDAY_SPOKEN_NAMES = WEEKDAY_NAMES.map((n) => n[0]!.toUpperCase() + n.slice(1));
+
 /**
  * Detects a field transition that just happened THIS turn (previous vs.
  * merged AppointmentState) and returns a short deterministic phrase to
@@ -1825,6 +1827,15 @@ export function replyAlreadyAcknowledges(reply: string, customerName: string | n
  * the same utterance (e.g. "I'm Dhanush and I want teeth cleaning
  * tomorrow"), so it never says a now-stale "got it, what's your name"
  * when the caller has already moved the conversation further along.
+ *
+ * `timeJustCaptured` deliberately does NOT require `next.service` (unlike
+ * an earlier version of this function) — production incident: a real call
+ * had the caller give name, then phone, then date/time, then service
+ * LAST, and requiring service here meant NO deterministic ack ever fired
+ * for the time-capture turn, leaving the caller's entire reply to the
+ * slow, ungrounded Sarvam call. The spoken phrase itself never named the
+ * service either way, so dropping the requirement loses nothing and
+ * covers the real field order.
  *
  * Deliberately does not cover the "required info complete" transition —
  * handleUserUtterance's own completion-triggered dispatch speaks its own
@@ -1848,11 +1859,23 @@ function fieldTransitionAck(previous: AppointmentState, next: AppointmentState):
     !previous.preferredPeriod &&
     !previous.wantsNextAvailable &&
     (next.preferredTime || next.preferredPeriod || next.wantsNextAvailable) &&
-    next.service &&
     next.preferredDate;
   if (timeJustCaptured) {
     const dateLabel = spokenDateLabel(next.preferredDate!, "UTC");
     return `Perfect — ${dateLabel} at ${describeRequestedTime(next)}.`;
+  }
+
+  // Service arriving AFTER date/time were already known (the real call's
+  // actual order) — a case the original (service-and-date-together-only)
+  // version of this function had no phrase for at all.
+  const serviceJustCapturedAfterDateTime =
+    !previous.service &&
+    next.service &&
+    previous.preferredDate &&
+    (previous.preferredTime || previous.preferredPeriod || previous.wantsNextAvailable);
+  if (serviceJustCapturedAfterDateTime) {
+    const dateLabel = spokenDateLabel(next.preferredDate ?? previous.preferredDate!, "UTC");
+    return `Got it — ${next.service} ${dateLabel} at ${describeRequestedTime(next)}.`;
   }
 
   const serviceAndDateJustCaptured =
@@ -1871,6 +1894,77 @@ function fieldTransitionAck(previous: AppointmentState, next: AppointmentState):
 }
 
 /**
+ * The fast path for Fix #2/#3 (production incident: a real call showed
+ * several seconds of total silence after "Tomorrow at 3 p.m. afternoon.",
+ * ending in the caller asking "Hello? Are you there?" — traced to every
+ * acknowledgement in this file being computed only AFTER the Sarvam LLM
+ * call resolved, with nothing spoken before it). Computed from
+ * `callerIntent` (parseCallerIntentFromText's deterministic read of the
+ * caller's OWN words) and the AppointmentState as of BEFORE this turn —
+ * deliberately NOT the model's marker, which does not exist yet at the
+ * point this runs (before getReply is even called). Entirely synchronous
+ * and local: no DB lookup, no LLM round trip, so it can be spoken the
+ * instant the transcript arrives.
+ *
+ * The date/time branch deliberately requires `explicitTime` (not a bare
+ * date alone) before firing — a date-only utterance ("...tomorrow") in
+ * real speech very often also carries a service/name the caller is
+ * naming in the same breath, which this function has no way to see
+ * (service/name have no deterministic extractor); firing early on date
+ * alone would say a LESS informative "Got it — tomorrow." immediately,
+ * then have nothing more to add once the fuller marker-based ack would
+ * otherwise have named the service too. An explicit time is a much more
+ * self-contained, safe-to-acknowledge-immediately statement.
+ */
+function immediateCallerAck(
+  previous: AppointmentState,
+  intent: CallerIntentSignals,
+): string | null {
+  // Only once a specific slot is already clearly on the table — matches
+  // the same gating handleUserUtterance's own bookingConfirmed backstop
+  // applies before escalating to ready_to_book, so a stray "yes"/"sure"
+  // earlier in an unrelated exchange never triggers this.
+  if (
+    intent.bookingConfirmed &&
+    previous.bookingStatus !== "ready_to_book" &&
+    previous.preferredDate &&
+    (previous.preferredTime || previous.wantsNextAvailable)
+  ) {
+    return "Give me just a moment to confirm that.";
+  }
+  // AVAILABILITY_KEYWORDS/AVAILABILITY_QUESTION_SHAPE deliberately also
+  // match a plain business-hours question ("What time do you close?" — see
+  // their own pattern comments for "what time" being a shared trigger),
+  // which is harmless where availabilityRequested is only ever used to
+  // GATE an already-date-known dispatch, but would misfire here as an
+  // immediate ack with no calendar context in play at all. Requiring some
+  // actual date context (already known, or given in this same breath)
+  // before committing to "let me check that for you" avoids that false
+  // positive; a bare, date-less availability-shaped question still gets
+  // the normal (non-immediate) marker-driven handling one turn later.
+  const hasDateContext = Boolean(previous.preferredDate || intent.relativeDate || intent.weekday);
+  if (intent.availabilityRequested && hasDateContext) {
+    return "Sure, let me check that for you.";
+  }
+
+  const timeJustGiven = Boolean(intent.explicitTime) && !previous.preferredTime;
+  if (timeJustGiven) {
+    const dateLabel =
+      intent.relativeDate ??
+      (intent.weekday ? WEEKDAY_SPOKEN_NAMES[intent.weekday.weekday] : null) ??
+      (previous.preferredDate ? spokenDateLabel(previous.preferredDate, "UTC") : null);
+    const timeLabel = spokenTimeLabel(intent.explicitTime!);
+    return dateLabel ? `Got it — ${dateLabel} at ${timeLabel}.` : `Got it — ${timeLabel}.`;
+  }
+
+  if ((intent.phone || intent.email) && !(previous.phone && previous.email)) {
+    return "Got it, thanks.";
+  }
+
+  return null;
+}
+
+/**
  * Phrases a short, honest, caller-language-appropriate reply describing
  * the REAL outcome of a booking attempt — a second, separate, narrowly-
  * scoped LLM call (not the main conversational one) so the wording always
@@ -1883,7 +1977,31 @@ function fieldTransitionAck(previous: AppointmentState, next: AppointmentState):
  * this costs is a deliberate, bounded exception to the "no extra LLM
  * calls per turn" latency goal — not a regression of it.
  */
-async function composeHonestBookingReply(session: Session, facts: string): Promise<string> {
+// Fix #4 (local fallback when the calendar succeeds but the LLM phrasing
+// call is what's slow/fails): bounded well under TURN_DEADLINE_MS, so a
+// slow SECOND Sarvam call (this one) can never, by itself, run the clock
+// out on the whole turn and lose a real, already-known-honest outcome to
+// the generic turn-deadline apology (see withTurnDeadline's own doc
+// comment — that apology is deliberately generic and knows nothing about
+// what actually happened). A few seconds is still ample for a short,
+// one-or-two-sentence paraphrase.
+const PHRASING_LLM_TIMEOUT_MS = 6_000;
+
+/**
+ * `localFallback` is a plain, already caller-facing sentence (never an
+ * LLM-prompt-style instruction, unlike `facts`) — spoken verbatim when
+ * this function's own LLM call is slow enough to exceed
+ * PHRASING_LLM_TIMEOUT_MS, or fails outright. Every call site provides
+ * its own, matching exactly what `facts` says, so the caller always
+ * hears something honest and specific to the real outcome — never a
+ * generic "something went wrong" — regardless of whether the SECOND
+ * Sarvam call (this one) is what's struggling, as opposed to the first.
+ */
+async function composeHonestBookingReply(
+  session: Session,
+  facts: string,
+  localFallback: string,
+): Promise<string> {
   const language = resolveResponseLanguage(
     session.detectedLanguage,
     session.input.snapshotAgent.primary_language,
@@ -1899,13 +2017,16 @@ async function composeHonestBookingReply(session: Session, facts: string): Promi
   const startedAt = Date.now();
   namedLog("voice:tool_result", session, { at: startedAt });
   try {
-    const { reply } = await session.deps.generateReply([
-      {
-        role: "system",
-        content: `You are ${session.input.snapshotAgent.agent_name}, a phone receptionist. Respond in language code ${language}. One or two short sentences, phone-conversation style. State only what the facts below say — never claim a booking succeeded unless the facts say it did. Never mention a support ticket, a callback, or a reminder being created/scheduled/sent unless the facts below explicitly say one was. Do not add any JSON, markers, or notes.`,
-      },
-      { role: "user", content: facts },
-    ]);
+    const { reply } = await withToolDeadline(
+      PHRASING_LLM_TIMEOUT_MS,
+      session.deps.generateReply([
+        {
+          role: "system",
+          content: `You are ${session.input.snapshotAgent.agent_name}, a phone receptionist. Respond in language code ${language}. One or two short sentences, phone-conversation style. State only what the facts below say — never claim a booking succeeded unless the facts say it did. Never mention a support ticket, a callback, or a reminder being created/scheduled/sent unless the facts below explicitly say one was. Do not add any JSON, markers, or notes.`,
+        },
+        { role: "user", content: facts },
+      ]),
+    );
     const spoken = reply.trim();
     namedLog("voice:final_response", session, {
       latency_ms: Date.now() - startedAt,
@@ -1914,15 +2035,12 @@ async function composeHonestBookingReply(session: Session, facts: string): Promi
     return spoken;
   } catch (err) {
     log("booking_reply_composition_failed", session, { message: (err as Error).message });
-    const fallback = facts.toLowerCase().includes("succeeded")
-      ? "Your appointment is confirmed."
-      : "I'm sorry, I couldn't confirm that booking. Someone from our team will follow up with you shortly.";
     namedLog("voice:final_response", session, {
       latency_ms: Date.now() - startedAt,
-      replyLength: fallback.length,
+      replyLength: localFallback.length,
       fellBackToCannedReply: true,
     });
-    return fallback;
+    return localFallback;
   }
 }
 
@@ -1993,6 +2111,20 @@ function calendarErrorFacts(errorCode: string): string {
       return "The calendar did not respond in time. Apologize briefly and say you're having trouble reaching the calendar right now, so you couldn't confirm that slot.";
     default:
       return "The calendar could not be reached right now, so availability cannot be confirmed. Apologize briefly and offer a callback.";
+  }
+}
+
+/** The plain, already caller-facing counterpart to calendarErrorFacts — for composeHonestBookingReply's `localFallback` parameter, same error-code mapping, never an LLM-prompt-style instruction. */
+function calendarErrorFallback(errorCode: string): string {
+  switch (errorCode) {
+    case "GOOGLE_AUTH_REQUIRED":
+    case "NEEDS_REAUTH":
+    case "NOT_CONFIGURED":
+      return "I'm sorry, I'm unable to access the calendar for this business right now, so I can't confirm that yet. I'll have someone call you back to confirm.";
+    case "CALENDAR_TIMEOUT":
+      return "I'm sorry, the calendar is taking longer than expected to respond, so I couldn't confirm that just now. Someone will follow up shortly.";
+    default:
+      return "I'm sorry, I couldn't reach the calendar just now, so I can't confirm that. I'll have someone call you back to confirm.";
   }
 }
 
@@ -2109,6 +2241,9 @@ async function attemptAvailabilityCheck(
         state.availabilityStatus === "available" && state.selectedSlot
           ? "The requested time was already confirmed available by the calendar moments ago — restate that briefly and ask if they'd like you to book it, without checking again."
           : "This exact date/time was already checked moments ago and is NOT available — restate that briefly, same as before, nothing new to add.",
+        state.availabilityStatus === "available" && state.selectedSlot
+          ? "That time is already confirmed available — would you like me to book it?"
+          : "That time isn't available, as I mentioned a moment ago.",
       ),
       state: { ...state, bookingStatus: "collecting" },
     };
@@ -2123,6 +2258,7 @@ async function attemptAvailabilityCheck(
       spoken: await composeHonestBookingReply(
         session,
         "Availability could not be checked because this line isn't configured for live calendar access. Tell the caller you'll have someone confirm and call them back.",
+        "I'm sorry, I'm unable to access the calendar on this line right now. I'll have someone call you back to confirm.",
       ),
       state: { ...state, bookingStatus: "collecting", availabilityStatus: "unknown" },
     };
@@ -2179,7 +2315,11 @@ async function attemptAvailabilityCheck(
       latency_ms: latencyMs,
     });
     return {
-      spoken: await composeHonestBookingReply(session, calendarErrorFacts(errorCode)),
+      spoken: await composeHonestBookingReply(
+        session,
+        calendarErrorFacts(errorCode),
+        calendarErrorFallback(errorCode),
+      ),
       state: { ...state, bookingStatus: "collecting", availabilityStatus: "unknown" },
     };
   }
@@ -2194,6 +2334,7 @@ async function attemptAvailabilityCheck(
         spoken: await composeHonestBookingReply(
           session,
           `The requested slot (${state.preferredTime} on ${state.preferredDate}) IS available, confirmed by the calendar. Tell the caller it's available and ask if they'd like you to book it now.`,
+          "Good news — that time is available. Would you like me to book it?",
         ),
         state: {
           ...state,
@@ -2212,6 +2353,9 @@ async function attemptAvailabilityCheck(
         alternatives.length
           ? `The requested slot (${state.preferredTime} on ${state.preferredDate}) is NOT available. The only real alternative times open that day are: ${alternatives.join(" and ")}. Offer exactly these, nothing else, and ask which they'd prefer. Never invent a time not in this list.`
           : `The requested slot (${state.preferredTime} on ${state.preferredDate}) is NOT available, and there are no other open slots that day. Say so honestly and offer to check a different day.`,
+        alternatives.length
+          ? `That time isn't available. The only open times that day are ${alternatives.join(" and ")}. Would either of those work?`
+          : "That time isn't available, and there are no other open slots that day. Would you like me to check a different day?",
       ),
       state: {
         ...state,
@@ -2237,6 +2381,7 @@ async function attemptAvailabilityCheck(
             ? ", and offer to check a different time of day or a different day"
             : ", and offer to check a different day"
         }. Never say a time is available.`,
+        `There are no open slots on ${state.preferredDate}${periodLabel}. Would you like me to check a different day?`,
       ),
       state: {
         ...state,
@@ -2252,6 +2397,7 @@ async function attemptAvailabilityCheck(
     spoken: await composeHonestBookingReply(
       session,
       `These real times are open on ${state.preferredDate}${periodLabel}: ${listed.join(", ")}. List exactly these times, nothing else, and ask if they'd like to book one. Never invent a time not in this list.`,
+      `These times are open on ${state.preferredDate}${periodLabel}: ${listed.join(", ")}. Would any of those work?`,
     ),
     state: {
       ...state,
@@ -2302,6 +2448,7 @@ async function attemptBooking(
       spoken: await composeHonestBookingReply(
         session,
         "The booking could not be attempted because this line isn't configured for live booking. Tell the caller you'll have someone confirm the appointment and call them back.",
+        "I'm sorry, I'm unable to complete the booking on this line right now. I'll have someone call you back to confirm.",
       ),
       state: { ...state, bookingStatus: "unavailable" },
     };
@@ -2375,7 +2522,11 @@ async function attemptBooking(
       latency_ms: availabilityLatencyMs,
     });
     return {
-      spoken: await composeHonestBookingReply(session, calendarErrorFacts(errorCode)),
+      spoken: await composeHonestBookingReply(
+        session,
+        calendarErrorFacts(errorCode),
+        calendarErrorFallback(errorCode),
+      ),
       state: { ...state, bookingStatus: "collecting" },
     };
   }
@@ -2407,6 +2558,9 @@ async function attemptBooking(
         alternatives.length
           ? `The requested slot (${requestedLabel}) is NOT available. The only real alternative times open that day are: ${alternatives.join(" and ")}. Offer exactly these, nothing else, and ask which they'd prefer. Do not say it was booked.`
           : `There are no open slots available for ${requestedLabel}${state.preferredTime ? "" : " at all"}. Say so honestly and offer to check a different day. Do not say it was booked.`,
+        alternatives.length
+          ? `That time isn't available. The only open times that day are ${alternatives.join(" and ")}. Would either of those work?`
+          : "There are no open slots available for that time. Would you like me to check a different day?",
       ),
       state: {
         ...state,
@@ -2477,6 +2631,9 @@ async function attemptBooking(
         errorCode === "CALENDAR_TIMEOUT"
           ? calendarErrorFacts("CALENDAR_TIMEOUT")
           : "The booking attempt failed on our end. Apologize briefly and say someone will follow up to confirm. Do not say it was booked.",
+        errorCode === "CALENDAR_TIMEOUT"
+          ? calendarErrorFallback("CALENDAR_TIMEOUT")
+          : "I'm sorry, the booking attempt failed on our end. Someone will follow up to confirm.",
       ),
       state: { ...state, bookingStatus: "unavailable" },
     };
@@ -2488,6 +2645,7 @@ async function attemptBooking(
     spoken: await composeHonestBookingReply(
       session,
       `The booking succeeded: ${state.service ?? "the appointment"} for ${state.customerName ?? "the caller"} on ${state.preferredDate} at ${bookedLocalTime}. Confirm this briefly.`,
+      `You're all set — ${state.service ?? "the appointment"} is booked for ${state.customerName ?? "you"} on ${state.preferredDate} at ${bookedLocalTime}.`,
     ),
     state: {
       ...state,
@@ -2500,6 +2658,193 @@ async function attemptBooking(
       selectedSlot: null,
     },
   };
+}
+
+/**
+ * Speaks the short pre-tool-call acknowledgement (skipped when the caller
+ * already got an equivalent one immediately on this turn — see
+ * immediateCallerAck) and performs the real deterministic dispatch,
+ * returning the final spoken reply. Shared between handleUserUtterance's
+ * two dispatch paths — the early, pre-LLM one (tryEarlyDeterministicDispatch)
+ * and the normal, marker-driven one — so both speak identically and a
+ * caller is never told the same thing twice in one turn regardless of
+ * which path got there. Requires `session.appointmentState` already set
+ * to the state this dispatch should act on (both call sites do this
+ * immediately before calling here).
+ */
+async function dispatchDeterministicTool(
+  session: Session,
+  willAttemptBooking: boolean,
+  completionTriggeredAvailability: boolean,
+  immediateAckAlreadySpoken: boolean,
+): Promise<string> {
+  if (willAttemptBooking) {
+    // Production incident: real calendar+LLM round trips left the caller
+    // in dead air long enough to say "hello? are you there?". A short,
+    // immediate, honest acknowledgement — spoken BEFORE the slower real
+    // operation, never claiming an outcome yet — fills that gap with
+    // controlled sound instead of silence. Skipped when immediateCallerAck
+    // already said the equivalent thing for this exact turn.
+    if (!immediateAckAlreadySpoken) {
+      await speak(session, "Give me just a moment to confirm that.");
+    }
+    const outcome = await attemptBooking(session);
+    session.appointmentState = outcome.state;
+    return outcome.spoken;
+  }
+
+  // The completion transition gets its own consolidated message (names
+  // what was just captured AND what's about to happen) — always spoken
+  // even when a generic immediate ack already played, since it says
+  // something genuinely new (the specific date/time/name), never the
+  // same thing twice. The generic "Let me check that for you." is what
+  // gets skipped when redundant with an equivalent immediate ack.
+  let ack = "Let me check that for you.";
+  if (completionTriggeredAvailability) {
+    // "UTC" here is the same deliberate cosmetic-label tradeoff as
+    // fieldTransitionAck (see its doc comment) — the REAL availability
+    // check immediately below still resolves and uses the real business
+    // timezone via resolveBookingContext. Doing it here too would be a
+    // second, redundant lazy import spent on a label, right before the
+    // real one is about to run anyway.
+    const state = session.appointmentState;
+    const dateLabel = state.preferredDate ? spokenDateLabel(state.preferredDate, "UTC") : null;
+    const whenLabel = dateLabel
+      ? `${dateLabel} at ${describeRequestedTime(state)}`
+      : describeRequestedTime(state);
+    ack = `Thanks${state.customerName ? `, ${state.customerName}` : ""}. I have everything I need. Let me check whether ${whenLabel} is available.`;
+  }
+  if (completionTriggeredAvailability || !immediateAckAlreadySpoken) {
+    await speak(session, ack);
+  }
+  const outcome = await attemptAvailabilityCheck(session);
+  session.appointmentState = outcome.state;
+  return outcome.spoken;
+}
+
+/**
+ * Fix #1/#4 (move the deterministic dispatch decision earlier where
+ * SAFE): decides whether THIS turn can be fully handled — a real
+ * check_calendar_availability/book_appointment call, dispatched and
+ * spoken — WITHOUT ever calling the Sarvam LLM at all, using only
+ * `previous` (AppointmentState as of before this turn) and this turn's
+ * deterministic extraction (parseCallerIntentFromText). Deliberately
+ * narrow: service/customerName/email are NEVER set here (there is no
+ * deterministic extractor for them — only the model's marker can read
+ * free text like a service name), so this only ever fires when those
+ * fields were ALREADY known from an EARLIER turn and this turn's own
+ * extraction (an explicit date/time, or an explicit availability
+ * question/booking confirmation against an already-complete slot) is
+ * enough on its own to decide. That makes skipping the LLM call safe:
+ * nothing about service/name is at risk of being lost, since neither one
+ * is changing on this turn by definition. Any turn that doesn't meet this
+ * bar falls through to the normal, marker-driven path unchanged — this
+ * is a strictly additive fast path, never a replacement of the general
+ * mechanism.
+ *
+ * Returns `dispatched: false` when not applicable (the overwhelmingly
+ * common case), letting handleUserUtterance proceed exactly as before —
+ * still carrying `extractedDate`, so the normal marker-driven path that
+ * ALSO needs this same relativeDate/weekday resolution can reuse it
+ * instead of paying for a second resolveBusinessTimezone lookup on the
+ * same turn.
+ */
+async function tryEarlyDeterministicDispatch(
+  session: Session,
+  previous: AppointmentState,
+  callerIntent: CallerIntentSignals,
+  immediateAckAlreadySpoken: boolean,
+): Promise<
+  { dispatched: true; spoken: string } | { dispatched: false; extractedDate: string | null }
+> {
+  // Production incident (found via this round's own regression test for
+  // the exact reported sequence): "Yeah, please confirm. Also, can you
+  // remind me at tomorrow at 1 p.m. that I have an appointment?" — the
+  // caller's OWN explicit time here is about the REMINDER, not the
+  // appointment, but a plain date/time regex has no way to tell the two
+  // apart. The MARKER-driven path is protected from this because the
+  // marker (even an "unreliable" one) still independently states its own
+  // preferred_time, which wins over extraction regardless — but this
+  // early, marker-less preview has nothing to defer to, so a reminder
+  // mentioned in the same breath would otherwise silently clobber the
+  // caller's already-confirmed appointment time with the reminder's time.
+  // Fix: when a reminder is also detected this turn, never let this
+  // turn's own date/time extraction move the preview at all — fall back
+  // to whatever was already known (current/sticky), exactly as if this
+  // turn's own extraction had found nothing.
+  const dateTimeIsAmbiguous = callerIntent.reminderRequested;
+  let extractedDate: string | null = null;
+  if (!dateTimeIsAmbiguous && (callerIntent.relativeDate || callerIntent.weekday)) {
+    const timezone = await resolveBusinessTimezone(session.input.businessId);
+    extractedDate = callerIntent.relativeDate
+      ? resolveRelativeDateInTimezone(callerIntent.relativeDate, timezone)
+      : resolveWeekdayInTimezone(callerIntent.weekday!, timezone);
+  }
+  // `proposed: null` is deliberate — this preview reflects ONLY what's
+  // deterministically extractable this turn, never anything a marker
+  // might have said (there is no marker yet; nothing has called the LLM).
+  let preview = mergeAppointmentState(previous, null, {
+    preferredDate: extractedDate,
+    preferredTime: dateTimeIsAmbiguous ? null : callerIntent.explicitTime,
+    phone: callerIntent.phone,
+    email: callerIntent.email,
+  });
+
+  // Mirrors handleUserUtterance's own marker-driven backstops exactly,
+  // just evaluated against the deterministic preview instead of the
+  // (not-yet-available) merged-with-marker state.
+  if (
+    callerIntent.availabilityRequested &&
+    preview.bookingStatus !== "ready_to_book" &&
+    preview.preferredDate
+  ) {
+    preview = {
+      ...preview,
+      preferredPeriod: preview.preferredPeriod ?? callerIntent.preferredPeriod,
+      wantsNextAvailable: preview.wantsNextAvailable || callerIntent.wantsNextAvailable,
+      bookingStatus: "checking_availability",
+    };
+  }
+  if (
+    callerIntent.bookingConfirmed &&
+    preview.bookingStatus !== "ready_to_book" &&
+    preview.preferredDate &&
+    (preview.preferredTime || preview.wantsNextAvailable)
+  ) {
+    preview = { ...preview, bookingStatus: "ready_to_book" };
+  }
+  const wasReadyForAvailability = appointmentReadyForAvailabilityCheck(previous);
+  const completionTriggeredAvailability =
+    !wasReadyForAvailability &&
+    appointmentReadyForAvailabilityCheck(preview) &&
+    preview.bookingStatus !== "ready_to_book";
+  if (completionTriggeredAvailability) {
+    preview = { ...preview, bookingStatus: "checking_availability" };
+  }
+
+  const willAttemptBooking =
+    preview.bookingStatus === "ready_to_book" && appointmentStateIsComplete(preview);
+  const willCheckAvailability =
+    !willAttemptBooking &&
+    preview.bookingStatus === "checking_availability" &&
+    appointmentSlotIsKnown(preview);
+  if (!willAttemptBooking && !willCheckAvailability) {
+    return { dispatched: false, extractedDate };
+  }
+
+  session.appointmentState = preview;
+  namedLog("voice:early_deterministic_dispatch", session, {
+    willAttemptBooking,
+    willCheckAvailability,
+    completionTriggeredAvailability,
+  });
+  const spoken = await dispatchDeterministicTool(
+    session,
+    willAttemptBooking,
+    completionTriggeredAvailability,
+    immediateAckAlreadySpoken,
+  );
+  return { dispatched: true, spoken };
 }
 
 /**
@@ -2530,6 +2875,11 @@ async function handleUserUtterance(session: Session, text: string) {
   // post-reply state enrichment further down use the exact same read of
   // this turn's caller text.
   const callerIntent = parseCallerIntentFromText(text);
+  // Captured BEFORE any async work this turn — both the immediate ack
+  // below and the early-dispatch fast path need "what was true a moment
+  // ago", and session.appointmentState is not mutated by anything between
+  // here and either of those using it.
+  const previousAppointmentState = session.appointmentState;
   // Defensive: speech_end (onSttEvent) already arms a fresh silence timer
   // the moment the caller stops talking, before final_transcript has even
   // arrived. That timer is only otherwise cleared by a subsequent
@@ -2548,6 +2898,25 @@ async function handleUserUtterance(session: Session, text: string) {
   const generation = ++session.generation;
   const requestStarted = Date.now();
   const llmRequestAt = requestStarted;
+
+  // Fix #2/#3 (production incident: several seconds of total silence
+  // after "Tomorrow at 3 p.m. afternoon.", ending in "Hello? Are you
+  // there?") — a deterministic, local acknowledgement spoken IMMEDIATELY,
+  // before getReply (the Sarvam LLM call) is even invoked below. See
+  // immediateCallerAck's own doc comment for exactly what it covers and
+  // why. `await` here is still effectively immediate — speak() itself
+  // does no LLM/DB work for the common case (same-language reply).
+  // Gated on the same `!generateReplyWithTools` exclusion as every other
+  // deterministic backstop in this file (see tryEarlyDeterministicDispatch's
+  // own comment) — a tool-calling-capable session's own model-driven
+  // reply/tool-use decides what's said, never a heuristic guess made
+  // before the model is even asked.
+  const immediateAck = session.deps.generateReplyWithTools
+    ? null
+    : immediateCallerAck(previousAppointmentState, callerIntent);
+  if (immediateAck) {
+    await speak(session, immediateAck);
+  }
 
   // The runtime's own ground truth for what the caller has already
   // confirmed — see AppointmentState's own doc comment. Built from state
@@ -2585,232 +2954,237 @@ async function handleUserUtterance(session: Session, text: string) {
 
   try {
     await withTurnDeadline(TURN_DEADLINE_MS, async (isCancelled) => {
-      const {
-        reply: rawReply,
-        enteredPaymentWait,
-        usedToolCalling,
-      } = await getReply(session, messages);
-      const llmCompletedAt = Date.now();
-      if (session.currentTurn) session.currentTurn.llmCompletedAt = llmCompletedAt;
-      log("llm_completed", session, {
-        latency_ms: llmCompletedAt - requestStarted,
-        llm_completed_at: llmCompletedAt,
-      });
-
-      // Soft cancellation: if the caller interrupted (or spoke again) while
-      // this request was in flight, `generation` has already advanced — the
-      // stale reply is discarded instead of being spoken over the new turn.
-      // (There is no request-cancellation signal to abort the call outright —
-      // this is the honest, documented limitation; see the Phase E report.)
-      if (isCancelled() || generation !== session.generation) {
-        log("llm_response_discarded_stale", session);
-        return;
-      }
-      if (!rawReply) {
-        log("llm_empty_reply", session);
-        setState(session, "listening");
-        armSilenceTimer(session);
-        return;
-      }
-
-      // The marker-based deterministic backstop below exists only for the
-      // plain-conversational Sarvam path (no native tool-calling — see
-      // parseCallerIntentFromText's own doc comment). When this turn went
-      // through the real AI tool-calling path instead (getReply's
-      // usedToolCalling), the model already executed real tools via
-      // generateReplyWithTools/executeTool with server-derived context —
-      // dispatching attemptBooking/attemptAvailabilityCheck AGAIN here
-      // would silently replace that already-correct, already-honest reply
-      // with a second, redundant tool round trip the caller never asked
-      // this code path to run twice.
-      let reply = rawReply;
-      if (!usedToolCalling) {
-        // Strip and parse the trailing structured appointment-state block
-        // (see parseApptStateMarker/APPT_STATE_MARKER) — spokenText is what
-        // the caller actually hears; the marker itself never reaches TTS or
-        // the persisted transcript.
-        const { spokenText, state: proposedAppointmentState } = parseApptStateMarker(rawReply);
-        // Captured BEFORE the merge below — the completion-transition
-        // backstop further down needs to know what was true a moment ago,
-        // not just what's true now, to detect the exact turn a field
-        // completes rather than re-firing every turn afterward too.
-        const previousAppointmentState = session.appointmentState;
-
-        // Deterministic date/time extraction over the caller's own raw
-        // words (production incident: an explicit "tomorrow at 3 PM" /
-        // "3 PM tomorrow" / "Friday at 4:30" / "next Monday morning" was
-        // sometimes dropped, or nulled out by an incomplete marker, rather
-        // than reliably reaching AppointmentState). Resolved to an actual
-        // date BEFORE the merge below, from whichever of relativeDate/
-        // weekday the caller actually said (relativeDate preferred on the
-        // rare chance both appear) — only ever FILLS IN what the marker
-        // leaves unset this turn, same backstop discipline as
-        // mergeAppointmentState's own doc comment describes. Phone/email
-        // are also extracted here (callerIntent.phone/email) — see
-        // mergeAppointmentState's doc comment for why those two take the
-        // OPPOSITE priority (extraction over the marker, not just filling
-        // its gaps).
-        let extractedDate: string | null = null;
-        if (callerIntent.relativeDate || callerIntent.weekday) {
-          const timezone = await resolveBusinessTimezone(session.input.businessId);
-          extractedDate = callerIntent.relativeDate
-            ? resolveRelativeDateInTimezone(callerIntent.relativeDate, timezone)
-            : resolveWeekdayInTimezone(callerIntent.weekday!, timezone);
+      // Fix #1/#4: try the fully-deterministic fast path FIRST — when it
+      // applies, this turn is handled (and spoken) without ever calling
+      // Sarvam at all. See tryEarlyDeterministicDispatch's own doc comment
+      // for exactly when this is safe. Deliberately gated on the SAME
+      // condition as the marker-based backstop further down
+      // (`!usedToolCalling`, see its own comment): when the session is
+      // configured for native AI tool-calling (generateReplyWithTools —
+      // currently only Claude, not Sarvam, but the code supports it), the
+      // MODEL decides which tool to call and with what arguments, and
+      // this deterministic fast path must never preempt that decision by
+      // guessing it can act first from AppointmentState heuristics alone.
+      const early = session.deps.generateReplyWithTools
+        ? ({ dispatched: false, extractedDate: null } as const)
+        : await tryEarlyDeterministicDispatch(
+            session,
+            previousAppointmentState,
+            callerIntent,
+            Boolean(immediateAck),
+          );
+      let reply: string;
+      let enteredPaymentWait = false;
+      if (early.dispatched) {
+        if (isCancelled() || generation !== session.generation) {
+          log("llm_response_discarded_stale", session, { early: true });
+          return;
         }
-        let appointmentState = mergeAppointmentState(
-          previousAppointmentState,
-          proposedAppointmentState,
-          {
-            preferredDate: extractedDate,
-            preferredTime: callerIntent.explicitTime,
-            phone: callerIntent.phone,
-            email: callerIntent.email,
-          },
-        );
+        reply = early.spoken;
+      } else {
+        const {
+          reply: rawReply,
+          enteredPaymentWait: epw,
+          usedToolCalling,
+        } = await getReply(session, messages);
+        enteredPaymentWait = epw;
+        const llmCompletedAt = Date.now();
+        if (session.currentTurn) session.currentTurn.llmCompletedAt = llmCompletedAt;
+        log("llm_completed", session, {
+          latency_ms: llmCompletedAt - requestStarted,
+          llm_completed_at: llmCompletedAt,
+        });
 
-        // Deterministic backstop (production incident: the model's marker
-        // did not reliably propose checking_availability/ready_to_book every
-        // turn it should have — see parseCallerIntentFromText's own doc
-        // comment). Only ever FILLS IN what the marker left unset, or
-        // escalates bookingStatus the marker should have proposed — never
-        // overrides a value the marker DID set this turn. preferredDate is
-        // already resolved above (from the marker, or the extraction
-        // backstop) by the time this runs.
-        if (
-          callerIntent.availabilityRequested &&
-          appointmentState.bookingStatus !== "ready_to_book" &&
-          appointmentState.preferredDate
-        ) {
-          appointmentState = {
-            ...appointmentState,
-            preferredPeriod: appointmentState.preferredPeriod ?? callerIntent.preferredPeriod,
-            wantsNextAvailable:
-              appointmentState.wantsNextAvailable || callerIntent.wantsNextAvailable,
-            bookingStatus: "checking_availability",
-          };
+        // Soft cancellation: if the caller interrupted (or spoke again) while
+        // this request was in flight, `generation` has already advanced — the
+        // stale reply is discarded instead of being spoken over the new turn.
+        // (There is no request-cancellation signal to abort the call outright —
+        // this is the honest, documented limitation; see the Phase E report.)
+        if (isCancelled() || generation !== session.generation) {
+          log("llm_response_discarded_stale", session);
+          return;
         }
-        // Only applies once a specific slot is already clearly on the table
-        // (a date, and either a time or an explicit "next available") — never
-        // lets a stray "yes"/"sure" earlier in an unrelated exchange misfire
-        // into booking something.
-        if (
-          callerIntent.bookingConfirmed &&
-          appointmentState.bookingStatus !== "ready_to_book" &&
-          appointmentState.preferredDate &&
-          (appointmentState.preferredTime || appointmentState.wantsNextAvailable)
-        ) {
-          appointmentState = { ...appointmentState, bookingStatus: "ready_to_book" };
+        if (!rawReply) {
+          log("llm_empty_reply", session);
+          setState(session, "listening");
+          armSilenceTimer(session);
+          return;
         }
-        // Production incident: a real call collected service, name, date,
-        // AND time — every field appointmentReadyForAvailabilityCheck
-        // requires — then asked for phone/email before ever checking the
-        // calendar; the caller supplied phone/email and the agent merely
-        // said "I'm checking availability now" with no real tool call
-        // behind it, because nothing dispatched on the fields becoming
-        // complete and the caller never asked an explicit availability
-        // question or said an explicit "yes" in that exact turn. This
-        // fires the INSTANT the four required fields become complete —
-        // independent of the model's marker, an explicit "yes", or an
-        // explicit "is it available?" — never on a later turn where they
-        // were already complete (wasReadyForAvailability guards that).
-        const wasReadyForAvailability =
-          appointmentReadyForAvailabilityCheck(previousAppointmentState);
-        const completionTriggeredAvailability =
-          !wasReadyForAvailability &&
-          appointmentReadyForAvailabilityCheck(appointmentState) &&
-          appointmentState.bookingStatus !== "ready_to_book";
-        if (completionTriggeredAvailability) {
-          appointmentState = { ...appointmentState, bookingStatus: "checking_availability" };
-        }
-        session.appointmentState = appointmentState;
 
-        reply = spokenText;
+        // The marker-based deterministic backstop below exists only for the
+        // plain-conversational Sarvam path (no native tool-calling — see
+        // parseCallerIntentFromText's own doc comment). When this turn went
+        // through the real AI tool-calling path instead (getReply's
+        // usedToolCalling), the model already executed real tools via
+        // generateReplyWithTools/executeTool with server-derived context —
+        // dispatching attemptBooking/attemptAvailabilityCheck AGAIN here
+        // would silently replace that already-correct, already-honest reply
+        // with a second, redundant tool round trip the caller never asked
+        // this code path to run twice.
+        reply = rawReply;
+        if (!usedToolCalling) {
+          // Strip and parse the trailing structured appointment-state block
+          // (see parseApptStateMarker/APPT_STATE_MARKER) — spokenText is what
+          // the caller actually hears; the marker itself never reaches TTS or
+          // the persisted transcript.
+          const { spokenText, state: proposedAppointmentState } = parseApptStateMarker(rawReply);
 
-        // Resolved once, up front, so the state-aware-acknowledgement block
-        // below can skip its own work entirely on a turn that's about to
-        // dispatch a real tool call anyway — `reply` gets replaced wholesale
-        // by that outcome's own composed text, so computing (and awaiting)
-        // an acknowledgement first would just be discarded latency for no
-        // benefit, re-introducing exactly the extra-lazy-import timing cost
-        // this file has repeatedly had to tune drain()s around before.
-        const willAttemptBooking =
-          session.appointmentState.bookingStatus === "ready_to_book" &&
-          appointmentStateIsComplete(session.appointmentState);
-        const willCheckAvailability =
-          !willAttemptBooking &&
-          session.appointmentState.bookingStatus === "checking_availability" &&
-          appointmentSlotIsKnown(session.appointmentState);
+          // Deterministic date/time extraction over the caller's own raw
+          // words (production incident: an explicit "tomorrow at 3 PM" /
+          // "3 PM tomorrow" / "Friday at 4:30" / "next Monday morning" was
+          // sometimes dropped, or nulled out by an incomplete marker, rather
+          // than reliably reaching AppointmentState). Resolved to an actual
+          // date from whichever of relativeDate/weekday the caller actually
+          // said (relativeDate preferred on the rare chance both appear) —
+          // only ever FILLS IN what the marker leaves unset this turn, same
+          // backstop discipline as mergeAppointmentState's own doc comment
+          // describes. Reused from `early` (tryEarlyDeterministicDispatch
+          // already resolved this exact same relativeDate/weekday for its
+          // own preview, when applicable) rather than recomputed here — a
+          // second resolveBusinessTimezone lookup on the same turn for the
+          // same answer would be pure waste, and previously pushed several
+          // tests' drain() budgets past their limit. Phone/email are also
+          // extracted here (callerIntent.phone/email) — see
+          // mergeAppointmentState's doc comment for why those two take the
+          // OPPOSITE priority (extraction over the marker, not just filling
+          // its gaps).
+          const extractedDate = early.extractedDate;
+          // Same reminder-ambiguity guard as tryEarlyDeterministicDispatch
+          // (see its own doc comment) — a time mentioned for an unrelated
+          // reminder in the same breath must never be fed in as the
+          // appointment's own preferredTime. The marker normally protects
+          // against this anyway (it wins over extraction here), but this
+          // keeps the fallback-when-the-marker-itself-omits-it case safe
+          // too, rather than relying on the marker always being reliable.
+          let appointmentState = mergeAppointmentState(
+            previousAppointmentState,
+            proposedAppointmentState,
+            {
+              preferredDate: extractedDate,
+              preferredTime: callerIntent.reminderRequested ? null : callerIntent.explicitTime,
+              phone: callerIntent.phone,
+              email: callerIntent.email,
+            },
+          );
 
-        // State-aware acknowledgement (never a generic filler before every
-        // LLM call — see fieldTransitionAck's own doc comment): prepended,
-        // never replacing the model's own reply, and skipped entirely when
-        // the model's own wording already reads as an acknowledgement, so
-        // the caller is never told the same thing twice. English only; a
-        // non-English/code-mixed reply is left exactly as the model wrote
-        // it.
-        if (
-          !willAttemptBooking &&
-          !willCheckAvailability &&
-          resolveResponseLanguage(
-            session.detectedLanguage,
-            session.input.snapshotAgent.primary_language,
-          ) === "en-IN"
-        ) {
-          const ack = fieldTransitionAck(previousAppointmentState, appointmentState);
-          if (ack && !replyAlreadyAcknowledges(reply, appointmentState.customerName)) {
-            reply = `${ack} ${reply}`;
+          // Deterministic backstop (production incident: the model's marker
+          // did not reliably propose checking_availability/ready_to_book every
+          // turn it should have — see parseCallerIntentFromText's own doc
+          // comment). Only ever FILLS IN what the marker left unset, or
+          // escalates bookingStatus the marker should have proposed — never
+          // overrides a value the marker DID set this turn. preferredDate is
+          // already resolved above (from the marker, or the extraction
+          // backstop) by the time this runs.
+          if (
+            callerIntent.availabilityRequested &&
+            appointmentState.bookingStatus !== "ready_to_book" &&
+            appointmentState.preferredDate
+          ) {
+            appointmentState = {
+              ...appointmentState,
+              preferredPeriod: appointmentState.preferredPeriod ?? callerIntent.preferredPeriod,
+              wantsNextAvailable:
+                appointmentState.wantsNextAvailable || callerIntent.wantsNextAvailable,
+              bookingStatus: "checking_availability",
+            };
           }
-        }
-        // Once every required field is known AND this turn's model proposed
-        // moving to booking, the RUNTIME — not the model — performs the real
-        // booking attempt and decides what's actually said. See attemptBooking
-        // for why this is deterministic rather than an LLM tool-use round
-        // trip, and for why it's the fix for "never claim booked unless it
-        // actually succeeded". Exactly one of these two deterministic tool
-        // paths can fire per turn (ready_to_book takes priority — see
-        // parseApptStateMarker) — never both, and never neither when the
-        // caller has asked a calendar question the model can't honestly
-        // answer on its own: that gap (a caller asking "is that slot free?"
-        // with no deterministic hook to answer it) is what previously left
-        // the model's own plain-text reply — sometimes empty — as the ONLY
-        // response, which is the direct cause of the reported "goes silent
-        // when checking availability" production incident.
-        if (willAttemptBooking) {
-          // Production incident: real calendar+LLM round trips left the
-          // caller in dead air long enough to say "hello? are you there?".
-          // A short, immediate, honest acknowledgement — spoken BEFORE the
-          // slower real operation, never claiming an outcome yet — fills
-          // that gap with controlled sound instead of silence.
-          await speak(session, "Give me just a moment to confirm that.");
-          const outcome = await attemptBooking(session);
-          reply = outcome.spoken;
-          session.appointmentState = outcome.state;
-        } else if (willCheckAvailability) {
-          // The completion transition gets its own consolidated message
-          // (names what was just captured AND what's about to happen) —
-          // speaking the generic ack too would say two things back to
-          // back for the same moment.
-          let ack = "Let me check that for you.";
+          // Only applies once a specific slot is already clearly on the table
+          // (a date, and either a time or an explicit "next available") — never
+          // lets a stray "yes"/"sure" earlier in an unrelated exchange misfire
+          // into booking something.
+          if (
+            callerIntent.bookingConfirmed &&
+            appointmentState.bookingStatus !== "ready_to_book" &&
+            appointmentState.preferredDate &&
+            (appointmentState.preferredTime || appointmentState.wantsNextAvailable)
+          ) {
+            appointmentState = { ...appointmentState, bookingStatus: "ready_to_book" };
+          }
+          // Production incident: a real call collected service, name, date,
+          // AND time — every field appointmentReadyForAvailabilityCheck
+          // requires — then asked for phone/email before ever checking the
+          // calendar; the caller supplied phone/email and the agent merely
+          // said "I'm checking availability now" with no real tool call
+          // behind it, because nothing dispatched on the fields becoming
+          // complete and the caller never asked an explicit availability
+          // question or said an explicit "yes" in that exact turn. This
+          // fires the INSTANT the four required fields become complete —
+          // independent of the model's marker, an explicit "yes", or an
+          // explicit "is it available?" — never on a later turn where they
+          // were already complete (wasReadyForAvailability guards that).
+          const wasReadyForAvailability =
+            appointmentReadyForAvailabilityCheck(previousAppointmentState);
+          const completionTriggeredAvailability =
+            !wasReadyForAvailability &&
+            appointmentReadyForAvailabilityCheck(appointmentState) &&
+            appointmentState.bookingStatus !== "ready_to_book";
           if (completionTriggeredAvailability) {
-            // "UTC" here is the same deliberate cosmetic-label tradeoff as
-            // fieldTransitionAck (see its doc comment) — the REAL
-            // availability check immediately below still resolves and uses
-            // the real business timezone via resolveBookingContext. Doing
-            // it here too would be a second, redundant lazy import spent on
-            // a label, right before the real one is about to run anyway.
-            const state = session.appointmentState;
-            const dateLabel = state.preferredDate
-              ? spokenDateLabel(state.preferredDate, "UTC")
-              : null;
-            const whenLabel = dateLabel
-              ? `${dateLabel} at ${describeRequestedTime(state)}`
-              : describeRequestedTime(state);
-            ack = `Thanks${state.customerName ? `, ${state.customerName}` : ""}. I have everything I need. Let me check whether ${whenLabel} is available.`;
+            appointmentState = { ...appointmentState, bookingStatus: "checking_availability" };
           }
-          await speak(session, ack);
-          const outcome = await attemptAvailabilityCheck(session);
-          reply = outcome.spoken;
-          session.appointmentState = outcome.state;
+          session.appointmentState = appointmentState;
+
+          reply = spokenText;
+
+          // Resolved once, up front, so the state-aware-acknowledgement block
+          // below can skip its own work entirely on a turn that's about to
+          // dispatch a real tool call anyway — `reply` gets replaced wholesale
+          // by that outcome's own composed text, so computing (and awaiting)
+          // an acknowledgement first would just be discarded latency for no
+          // benefit, re-introducing exactly the extra-lazy-import timing cost
+          // this file has repeatedly had to tune drain()s around before.
+          const willAttemptBooking =
+            session.appointmentState.bookingStatus === "ready_to_book" &&
+            appointmentStateIsComplete(session.appointmentState);
+          const willCheckAvailability =
+            !willAttemptBooking &&
+            session.appointmentState.bookingStatus === "checking_availability" &&
+            appointmentSlotIsKnown(session.appointmentState);
+
+          // State-aware acknowledgement (never a generic filler before every
+          // LLM call — see fieldTransitionAck's own doc comment): prepended,
+          // never replacing the model's own reply, and skipped entirely when
+          // the model's own wording already reads as an acknowledgement, OR
+          // when the immediate pre-LLM ack already said something this turn
+          // (see immediateCallerAck — never two deterministic acks back to
+          // back), so the caller is never told the same thing twice. English
+          // only; a non-English/code-mixed reply is left exactly as the
+          // model wrote it.
+          if (
+            !immediateAck &&
+            !willAttemptBooking &&
+            !willCheckAvailability &&
+            resolveResponseLanguage(
+              session.detectedLanguage,
+              session.input.snapshotAgent.primary_language,
+            ) === "en-IN"
+          ) {
+            const ack = fieldTransitionAck(previousAppointmentState, appointmentState);
+            if (ack && !replyAlreadyAcknowledges(reply, appointmentState.customerName)) {
+              reply = `${ack} ${reply}`;
+            }
+          }
+          // Once every required field is known AND this turn's model proposed
+          // moving to booking, the RUNTIME — not the model — performs the real
+          // booking attempt and decides what's actually said. See attemptBooking
+          // for why this is deterministic rather than an LLM tool-use round
+          // trip, and for why it's the fix for "never claim booked unless it
+          // actually succeeded". Exactly one of these two deterministic tool
+          // paths can fire per turn (ready_to_book takes priority — see
+          // parseApptStateMarker) — never both, and never neither when the
+          // caller has asked a calendar question the model can't honestly
+          // answer on its own: that gap (a caller asking "is that slot free?"
+          // with no deterministic hook to answer it) is what previously left
+          // the model's own plain-text reply — sometimes empty — as the ONLY
+          // response, which is the direct cause of the reported "goes silent
+          // when checking availability" production incident.
+          if (willAttemptBooking || willCheckAvailability) {
+            reply = await dispatchDeterministicTool(
+              session,
+              willAttemptBooking,
+              completionTriggeredAvailability,
+              Boolean(immediateAck),
+            );
+          }
         }
       }
 
