@@ -8,7 +8,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { workspaceQuery, numbersQuery } from "@/lib/workspace";
 import { agentStatusLabel } from "@/lib/agent-status";
 import { LANGUAGES, VOICES, PACE_MIN, PACE_MAX } from "@/lib/voices";
-import { PERSONAS, CAPABILITIES } from "@/lib/business-types";
+import { PERSONAS, CAPABILITIES, isCapabilityEnabled } from "@/lib/business-types";
 import {
   previewAgentConfig,
   saveAgentConfiguration,
@@ -114,7 +114,19 @@ function AgentPage() {
         transfer_number: agent.transfer_number ?? "",
         custom_personality: agent.custom_personality ?? "",
         greeting: greetings[agent.primary_language] ?? "",
-        capabilities: (agent.capabilities as Record<string, boolean> | null) ?? {},
+        // Reads either the UI's own capability id or the backend permission
+        // key it maps to (CAPABILITY_PERMISSION_KEYS) — so a toggle set
+        // directly on the row (e.g. before this reconciliation existed)
+        // still shows correctly as on.
+        capabilities: Object.fromEntries(
+          CAPABILITIES.map((cap) => [
+            cap.id,
+            isCapabilityEnabled(
+              (agent.capabilities as Record<string, boolean> | null) ?? {},
+              cap.id,
+            ),
+          ]),
+        ),
       });
     }
   }, [agent]);

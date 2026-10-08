@@ -4,6 +4,7 @@ import { z } from "zod";
 import { buildAgentInstructions, validateAgentConfig } from "./agent-instructions";
 import { loadSnapshot, requireBusinessAccess } from "./agent-service.server";
 import { sarvam, ProviderError } from "./sarvam.server";
+import { deriveBackendPermissions } from "./business-types";
 import { assertFeatureUnlocked, checkFeatureAccess } from "./feature-gate.server.ts";
 import { syncPublishedAgentToSarvam } from "./agent-sarvam-sync.server";
 
@@ -160,7 +161,14 @@ export const saveAgentConfiguration = createServerFn({ method: "POST" })
         after_hours_behavior: data.after_hours_behavior,
         transfer_number: data.transfer_number || null,
         custom_personality: data.custom_personality || null,
-        capabilities: data.capabilities,
+        // The dashboard's own capability ids (book_appointment,
+        // check_availability, ...) are preserved as-is alongside the
+        // backend permission keys (calendar_book, calendar_read, ...)
+        // derived from them — see CAPABILITY_PERMISSION_KEYS's own doc
+        // comment for why these must actually match what
+        // calendar-tools.server.ts/ai-tools.server.ts/agent-instructions.ts
+        // check, not just what the toggle itself is named.
+        capabilities: { ...data.capabilities, ...deriveBackendPermissions(data.capabilities) },
         greetings,
       })
       .eq("id", agentRow.id);

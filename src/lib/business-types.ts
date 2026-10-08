@@ -301,6 +301,53 @@ export const CAPABILITIES: CapabilityDef[] = [
   { id: "create_ticket", label: "Create support ticket", description: "Needs a CRM connection", requires: "crm" },
 ];
 
+/**
+ * Reconciles this dashboard's own capability toggle ids with the backend
+ * permission keys calendar-tools.server.ts's `assertToolPermission` and
+ * ai-tools.server.ts's `resolveAvailableTools` actually check on
+ * `agent_configs.capabilities` (`calendar_read`/`calendar_book`/
+ * `calendar_reschedule`/`calendar_cancel` — see also agent-instructions.ts,
+ * which reads `calendar_book` directly to decide whether the system prompt
+ * tells the model it may book at all).
+ *
+ * Before this mapping existed, toggling "Book appointments"/"Check
+ * availability"/etc. in the dashboard only ever wrote the UI's own id
+ * (`book_appointment`, `check_availability`, ...) to `capabilities` — a
+ * different string than the one the backend checks — so the toggle never
+ * actually granted or revoked the permission it claimed to control. Used by
+ * agent.functions.ts's saveAgentConfiguration (write: derive the backend
+ * keys from the UI's own toggles) and app.agent.tsx (read: treat either key
+ * as authoritative when deciding whether a toggle is currently on).
+ */
+export const CAPABILITY_PERMISSION_KEYS: Record<string, string> = {
+  check_availability: "calendar_read",
+  book_appointment: "calendar_book",
+  reschedule_appointment: "calendar_reschedule",
+  cancel_appointment: "calendar_cancel",
+};
+
+/** Whether a dashboard capability toggle is effectively on — true if either the UI's own key or the backend permission key it maps to (CAPABILITY_PERMISSION_KEYS) is true, so a value set either way (a fresh save, or a capability set directly on the row some other way) is reflected correctly. */
+export function isCapabilityEnabled(
+  capabilities: Record<string, boolean>,
+  capabilityId: string,
+): boolean {
+  const backendKey = CAPABILITY_PERMISSION_KEYS[capabilityId];
+  return (
+    Boolean(capabilities[capabilityId]) || (backendKey ? Boolean(capabilities[backendKey]) : false)
+  );
+}
+
+/** Derives the backend permission keys from the dashboard's own capability toggles, to merge into what gets stored — see CAPABILITY_PERMISSION_KEYS. Only ever sets a key this mapping actually covers; every other capability (e.g. answer_faqs) is left for the caller to store as-is. */
+export function deriveBackendPermissions(
+  capabilities: Record<string, boolean>,
+): Record<string, boolean> {
+  const derived: Record<string, boolean> = {};
+  for (const [uiKey, backendKey] of Object.entries(CAPABILITY_PERMISSION_KEYS)) {
+    if (uiKey in capabilities) derived[backendKey] = Boolean(capabilities[uiKey]);
+  }
+  return derived;
+}
+
 export const PERSONAS = [
   { id: "professional", label: "Professional", hint: "Efficient, neutral, business-like" },
   { id: "friendly", label: "Friendly", hint: "Warm and conversational" },

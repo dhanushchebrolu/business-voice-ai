@@ -169,6 +169,17 @@ describe("saveAgentConfiguration — save-only workflow activates the existing a
   test("never touches agent_versions — the versioning/publish table is left entirely alone by this function", () => {
     assert.doesNotMatch(fnSrc, /agent_versions/);
   });
+
+  test("merges deriveBackendPermissions into what's stored — a dashboard toggle actually grants/revokes the backend permission key, not just its own UI id", () => {
+    assert.match(
+      fnSrc,
+      /capabilities:\s*\{\s*\.\.\.data\.capabilities,\s*\.\.\.deriveBackendPermissions\(data\.capabilities\)\s*\}/,
+    );
+  });
+
+  test("imports deriveBackendPermissions from business-types rather than reimplementing the key mapping inline", () => {
+    assert.match(src, /import \{ deriveBackendPermissions \} from "\.\/business-types"/);
+  });
 });
 
 describe("rollbackAgentVersion — same fail-closed guarantees as publish", () => {

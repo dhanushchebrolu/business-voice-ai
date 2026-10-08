@@ -83,7 +83,7 @@ import { resolveGenerateReply } from "./llm-provider.server.ts";
 import { resolveGenerateReplyWithTools } from "./llm-provider.server.ts";
 import { SUPPORTED_VOICE_LANGUAGES, type AgentSnapshot } from "./agent-instructions.ts";
 import type { ClaudeTool } from "./claude.server.ts";
-import { zonedWallTimeToUtc } from "./calendar/timezone.ts";
+import { zonedWallTimeToUtc, dayOfWeekInTimezone } from "./calendar/timezone.ts";
 
 /**
  * Whether `code` is in the TTS/LLM common supported set (SUPPORTED_VOICE_LANGUAGES
@@ -267,7 +267,7 @@ export interface AppointmentState {
   selectedSlot: { start: string; end: string } | null;
 }
 
-function emptyAppointmentState(): AppointmentState {
+export function emptyAppointmentState(): AppointmentState {
   return {
     service: null,
     customerName: null,
@@ -991,21 +991,46 @@ export function parseApptStateMarker(reply: string): {
   }
 }
 
-/** Merges a turn's proposed appointment-state fields into the session's persistent state — only fields the model actually provided this turn are overwritten; everything else (including a field the current turn didn't mention) is left exactly as it was. */
-function mergeAppointmentState(
+/**
+ * Merges a turn's proposed appointment-state fields into the session's
+ * persistent state — only fields the model actually provided this turn are
+ * overwritten; everything else (including a field the current turn didn't
+ * mention) is left exactly as it was.
+ *
+ * `extracted` is the deterministic date/time backstop over the caller's own
+ * raw words (parseCallerIntentFromText, resolved via
+ * resolveRelativeDateInTimezone/resolveWeekdayInTimezone/explicitTime —
+ * see handleUserUtterance). Same backstop discipline as every other
+ * caller-intent backstop in this file: it only ever FILLS IN
+ * preferredDate/preferredTime when the marker left them unset THIS turn
+ * (production incident: the model's marker is not reliably followed, so an
+ * explicit "tomorrow at 3 PM"/"Friday at 4:30" the caller actually said
+ * must never be left out just because the marker omitted it) — it never
+ * overrides a value the marker DID set. When extraction finds nothing this
+ * turn either, the normal marker-then-sticky-current chain applies exactly
+ * as before, so a value extraction (or the marker) already established on
+ * a PREVIOUS turn is never overwritten by this turn's incomplete/null
+ * marker value.
+ */
+export function mergeAppointmentState(
   current: AppointmentState,
   proposed: Partial<AppointmentState> | null,
+  extracted?: { preferredDate?: string | null; preferredTime?: string | null },
 ): AppointmentState {
-  if (!proposed) return current;
-  const preferredDate = proposed.preferredDate ?? current.preferredDate;
+  const hasExtracted = Boolean(extracted?.preferredDate || extracted?.preferredTime);
+  if (!proposed && !hasExtracted) return current;
+  const proposedSafe = proposed ?? {};
+  const preferredDate =
+    proposedSafe.preferredDate ?? extracted?.preferredDate ?? current.preferredDate;
   // preferredTime and preferredPeriod are each independently sticky (a
   // given value persists until the caller gives a new one) — see
   // attemptAvailabilityCheck/attemptBooking for why an exact preferredTime
   // always takes priority over preferredPeriod when, unusually, both end
   // up set at once, rather than this merge trying to clear one in favor of
   // the other.
-  const preferredTime = proposed.preferredTime ?? current.preferredTime;
-  const preferredPeriod = proposed.preferredPeriod ?? current.preferredPeriod;
+  const preferredTime =
+    proposedSafe.preferredTime ?? extracted?.preferredTime ?? current.preferredTime;
+  const preferredPeriod = proposedSafe.preferredPeriod ?? current.preferredPeriod;
   // The requested slot itself changed this turn (a new date/time/period, or
   // a correction to one already given) — any availabilityStatus/selectedSlot
   // carried over from a PREVIOUS check now describes a slot the caller is
@@ -1016,9 +1041,9 @@ function mergeAppointmentState(
     preferredTime !== current.preferredTime ||
     preferredPeriod !== current.preferredPeriod;
   return {
-    service: proposed.service ?? current.service,
-    customerName: proposed.customerName ?? current.customerName,
-    phone: proposed.phone ?? current.phone,
+    service: proposedSafe.service ?? current.service,
+    customerName: proposedSafe.customerName ?? current.customerName,
+    phone: proposedSafe.phone ?? current.phone,
     preferredDate,
     preferredTime,
     preferredPeriod,
@@ -1027,7 +1052,7 @@ function mergeAppointmentState(
     // turn's attempt, not a durable fact — carrying it forward would risk
     // silently resolving a LATER, unrelated booking request (with its own
     // explicit time) as "next available" instead.
-    wantsNextAvailable: proposed.wantsNextAvailable === true,
+    wantsNextAvailable: proposedSafe.wantsNextAvailable === true,
     // bookingStatus is deliberately NOT sticky across turns the way the
     // other fields are: "ready_to_book"/"checking_availability" are only a
     // proposal for THIS turn's attempt (handleUserUtterance resolves it
@@ -1035,7 +1060,7 @@ function mergeAppointmentState(
     // back to "collecting"/"unavailable" for an availability check) —
     // carrying either forward would re-trigger a tool call on a later,
     // unrelated turn.
-    bookingStatus: proposed.bookingStatus ?? "collecting",
+    bookingStatus: proposedSafe.bookingStatus ?? "collecting",
     availabilityStatus: slotChanged ? "unknown" : current.availabilityStatus,
     selectedSlot: slotChanged ? null : current.selectedSlot,
   };
@@ -1113,6 +1138,10 @@ export interface CallerIntentSignals {
   preferredPeriod: "morning" | "afternoon" | "evening" | null;
   /** "today"/"tomorrow", if the caller said either literally — resolved to an actual date by the caller (via resolveRelativeDateInTimezone), never here (no timezone available at plain-text-parsing time). */
   relativeDate: "today" | "tomorrow" | null;
+  /** A weekday the caller named ("Friday", "next Monday"), if any — resolved to an actual date by the caller (via resolveWeekdayInTimezone), never here, same reasoning as relativeDate. Mutually exclusive with relativeDate in practice (handleUserUtterance prefers relativeDate when, unusually, both appear). */
+  weekday: { weekday: number; forceNextWeek: boolean } | null;
+  /** An explicit clock time the caller gave ("3 PM", "4:30"), as 24-hour "HH:mm" — see extractExplicitTime's own doc comment for the am/pm-inference rule when no meridiem was said. Null when no digits shaped like a time appear at all. */
+  explicitTime: string | null;
   /** The caller affirmatively confirmed a booking ("yes", "please confirm", "that works", "go ahead", "book it") — only meaningful where the runtime already knows a specific slot is being discussed (see handleUserUtterance's own gating). */
   bookingConfirmed: boolean;
   /** The caller asked for a reminder/alert — a capability this codebase does not implement (see REMINDERS_NOT_IMPLEMENTED_NOTICE). */
@@ -1150,6 +1179,67 @@ const BOOKING_NEGATION_PATTERN = /\b(no|not|don't|do not|never ?mind|cancel|wait
 const REMINDER_PATTERN =
   /\b(remind(er)?|alert) me\b|\bset (a |an )?remind(er)?\b|\bsend me a remind(er)?\b/i;
 
+// Weekday extraction, e.g. "Friday at 4:30", "next Monday morning" — see
+// resolveWeekdayInTimezone for how the (weekday, forceNextWeek) pair below
+// resolves to an actual date. 0=Sunday..6=Saturday, matching
+// business_hours.day_of_week and calendar/timezone.ts's dayOfWeekInTimezone.
+const WEEKDAY_NAMES = [
+  "sunday",
+  "monday",
+  "tuesday",
+  "wednesday",
+  "thursday",
+  "friday",
+  "saturday",
+] as const;
+const WEEKDAY_PATTERN = new RegExp(`\\b(next\\s+)?(${WEEKDAY_NAMES.join("|")})\\b`, "i");
+
+// Explicit clock time, e.g. "3 PM", "3:30pm", "4:30", "15:00" — see
+// extractExplicitTime's own doc comment for the full extraction/am-pm-
+// inference rule. Checked in order: a meridiem-qualified time is
+// unambiguous and tried first; a bare "H:MM"/"HH:MM" is only treated as a
+// time at all because it has the ":MM" shape (never a lone number).
+const TIME_WITH_MERIDIEM_PATTERN = /\b(1[0-2]|0?[1-9])(?::([0-5]\d))?\s*(a\.?m\.?|p\.?m\.?)\b/i;
+const TIME_24H_OR_BARE_COLON_PATTERN = /\b([01]?\d|2[0-3]):([0-5]\d)\b/;
+
+/**
+ * Extracts an explicit clock time from the caller's own words, normalized
+ * to 24-hour "HH:mm" — matching AppointmentState.preferredTime's own
+ * documented storage format (see formatSlotTime24h). Deliberately requires
+ * either an am/pm suffix or a ":mm" minutes part before treating any digits
+ * as a time at all, so a bare number ("I have 3 kids") is never mistaken
+ * for one.
+ *
+ * When no am/pm is given and the hour alone is ambiguous (1-6), this
+ * assumes PM — the common convention for a business's working hours (an
+ * afternoon/evening appointment is far more often meant by "4:30" than
+ * 4:30 in the dead of night). Hour 7-11 with no meridiem is left as AM
+ * (used as-is); hour 0 or already >= 13 is unambiguous 24-hour notation
+ * and is also used as-is. This is a deliberately simple heuristic, not a
+ * calendar-aware disambiguation — see parseCallerIntentFromText's own doc
+ * comment on why this stays plain pattern matching rather than an NLU
+ * model.
+ */
+function extractExplicitTime(text: string): string | null {
+  const withMeridiem = TIME_WITH_MERIDIEM_PATTERN.exec(text);
+  if (withMeridiem) {
+    let hour = parseInt(withMeridiem[1]!, 10);
+    const minute = withMeridiem[2] ?? "00";
+    const isPm = /p/i.test(withMeridiem[3]!);
+    if (isPm && hour !== 12) hour += 12;
+    if (!isPm && hour === 12) hour = 0;
+    return `${String(hour).padStart(2, "0")}:${minute}`;
+  }
+  const bareColon = TIME_24H_OR_BARE_COLON_PATTERN.exec(text);
+  if (bareColon) {
+    let hour = parseInt(bareColon[1]!, 10);
+    const minute = bareColon[2]!;
+    if (hour >= 1 && hour <= 6) hour += 12; // ambiguous -> assume afternoon
+    return `${String(hour).padStart(2, "0")}:${minute}`;
+  }
+  return null;
+}
+
 export function parseCallerIntentFromText(text: string): CallerIntentSignals {
   const availabilityRequested =
     AVAILABILITY_KEYWORDS.test(text) &&
@@ -1159,6 +1249,16 @@ export function parseCallerIntentFromText(text: string): CallerIntentSignals {
   const wantsNextAvailable = NEXT_AVAILABLE_PATTERN.test(text);
   const preferredPeriod = PERIOD_PATTERNS.find(([re]) => re.test(text))?.[1] ?? null;
   const relativeDate = RELATIVE_DATE_PATTERNS.find(([re]) => re.test(text))?.[1] ?? null;
+  const weekdayMatch = WEEKDAY_PATTERN.exec(text);
+  const weekday = weekdayMatch
+    ? {
+        weekday: WEEKDAY_NAMES.indexOf(
+          weekdayMatch[2]!.toLowerCase() as (typeof WEEKDAY_NAMES)[number],
+        ),
+        forceNextWeek: Boolean(weekdayMatch[1]),
+      }
+    : null;
+  const explicitTime = extractExplicitTime(text);
   const bookingConfirmed =
     BOOKING_CONFIRMATION_PATTERN.test(text) && !BOOKING_NEGATION_PATTERN.test(text);
   const reminderRequested = REMINDER_PATTERN.test(text);
@@ -1167,6 +1267,8 @@ export function parseCallerIntentFromText(text: string): CallerIntentSignals {
     wantsNextAvailable,
     preferredPeriod,
     relativeDate,
+    weekday,
+    explicitTime,
     bookingConfirmed,
     reminderRequested,
   };
@@ -1190,6 +1292,40 @@ function resolveRelativeDateInTimezone(
     zonedWallTimeToUtc(todayYmd, "12:00", timeZone).getTime() + 24 * 60 * 60 * 1000,
   );
   return ymdFormatter.format(tomorrowInstant);
+}
+
+/**
+ * Resolves a caller-named weekday ("Friday", "next Monday") to an actual
+ * YYYY-MM-DD in the business's own timezone — same noon-anchored,
+ * DST-transition-safe technique as resolveRelativeDateInTimezone, reusing
+ * calendar/timezone.ts's own dayOfWeekInTimezone to read what weekday
+ * "today" is.
+ *
+ * Plain "Friday" resolves to the NEAREST such day on or after today
+ * (today itself, if today IS a Friday) — the ordinary meaning of naming a
+ * weekday without qualification. "next Friday" explicitly skips to the
+ * following week's occurrence instead, even when today already is a
+ * Friday.
+ */
+function resolveWeekdayInTimezone(
+  signal: { weekday: number; forceNextWeek: boolean },
+  timeZone: string,
+  now: Date = new Date(),
+): string {
+  const ymdFormatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const todayYmd = ymdFormatter.format(now);
+  const todayWeekday = dayOfWeekInTimezone(todayYmd, timeZone);
+  let daysUntil = (signal.weekday - todayWeekday + 7) % 7;
+  if (signal.forceNextWeek) daysUntil += 7;
+  const targetInstant = new Date(
+    zonedWallTimeToUtc(todayYmd, "12:00", timeZone).getTime() + daysUntil * 24 * 60 * 60 * 1000,
+  );
+  return ymdFormatter.format(targetInstant);
 }
 
 /** This codebase has no reminder/alert-scheduling tool or service — see ai-tools.server.ts's TOOL_REGISTRY, which has none. Injected as grounding context for the turn the caller asks for one, so the model's own reply is honest about it instead of inventing a promise nothing will ever fulfill — see handleUserUtterance. */
@@ -1427,6 +1563,90 @@ async function resolveBusinessTimezone(businessId: string): Promise<string> {
   }
 }
 
+export interface ResolvedService {
+  id: string | null;
+  durationMinutes: number;
+}
+
+/**
+ * Matches the caller's requested service (AppointmentState.service, the
+ * free-text name captured via the marker — e.g. "teeth cleaning") against
+ * this business's configured `services` rows, returning its real
+ * `duration_minutes` — fixing the production gap where every availability
+ * check and booking used a hardcoded 30-minute duration regardless of what
+ * the business actually configured for that service.
+ *
+ * Matches by exact name first (case-insensitive), then falls back to a
+ * substring match either direction (the caller's own wording and the
+ * configured service name are free text on both sides and rarely match
+ * character-for-character — "teeth cleaning" vs. a configured "Teeth
+ * Cleaning & Polish"). Falls back to DEFAULT_APPOINTMENT_DURATION_MINUTES
+ * whenever no service is known, no match is found, or the matched service
+ * has no duration configured — never silently invents a duration that
+ * wasn't actually configured. Pure (no I/O) — see resolveBookingContext
+ * for where `rows` comes from. Exported directly for unit testing — this
+ * codebase's test harness has no real Supabase client to resolve
+ * resolveBookingContext's own DB query through (every harness test already
+ * runs against its fallback), so service-duration coverage (15/30/45/60
+ * minute services, exact vs. substring matching, no-match fallback) tests
+ * this pure function directly instead.
+ */
+export function matchService(
+  rows: { id: string; name: string; duration_minutes: number | null }[],
+  serviceName: string | null,
+): ResolvedService {
+  if (!serviceName) return { id: null, durationMinutes: DEFAULT_APPOINTMENT_DURATION_MINUTES };
+  const normalized = serviceName.trim().toLowerCase();
+  const match =
+    rows.find((s) => s.name.trim().toLowerCase() === normalized) ??
+    rows.find((s) => {
+      const name = s.name.trim().toLowerCase();
+      return name.includes(normalized) || normalized.includes(name);
+    });
+  if (!match) return { id: null, durationMinutes: DEFAULT_APPOINTMENT_DURATION_MINUTES };
+  return {
+    id: match.id,
+    durationMinutes: match.duration_minutes ?? DEFAULT_APPOINTMENT_DURATION_MINUTES,
+  };
+}
+
+/**
+ * Combines the business-timezone lookup (resolveBusinessTimezone's own
+ * query) and the configured-services lookup (matchService's own input)
+ * into a single dynamic import + a single round trip (two queries run
+ * concurrently against the same already-imported client, via
+ * Promise.all) — attemptAvailabilityCheck/attemptBooking need both every
+ * turn, and resolving them as two separate lazy imports would double that
+ * overhead for no benefit. Looked up fresh per attempt rather than
+ * threaded through StartRuntimeSessionInput — see attemptBooking's own
+ * doc comment for why.
+ */
+async function resolveBookingContext(
+  businessId: string,
+  serviceName: string | null,
+): Promise<{ timezone: string; service: ResolvedService }> {
+  try {
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const [businessRes, servicesRes] = await Promise.all([
+      supabaseAdmin.from("businesses").select("timezone").eq("id", businessId).maybeSingle(),
+      supabaseAdmin
+        .from("services")
+        .select("id, name, duration_minutes")
+        .eq("business_id", businessId)
+        .eq("is_active", true),
+    ]);
+    return {
+      timezone: businessRes.data?.timezone ?? "UTC",
+      service: matchService(servicesRes.data ?? [], serviceName),
+    };
+  } catch {
+    return {
+      timezone: "UTC",
+      service: { id: null, durationMinutes: DEFAULT_APPOINTMENT_DURATION_MINUTES },
+    };
+  }
+}
+
 /**
  * Phrases a short, honest, caller-language-appropriate reply describing
  * the REAL outcome of a booking attempt — a second, separate, narrowly-
@@ -1647,6 +1867,30 @@ async function attemptAvailabilityCheck(
   const callId = session.input.callId;
   const businessId = session.input.businessId;
 
+  // Dedup (production reliability gap: a repeated/rephrased "is that still
+  // available?" for the EXACT same date/time/period re-ran a real Google
+  // Calendar + database round trip for information already in hand).
+  // mergeAppointmentState resets availabilityStatus to "unknown" the
+  // instant the requested date/time/period actually changes, so "not
+  // unknown" here reliably means this exact slot was already checked
+  // against the real calendar and nothing about the request has moved
+  // since — reuse that real result instead of calling out again.
+  if (state.availabilityStatus !== "unknown") {
+    namedLog("calendar_tool:skipped_unchanged_request", session, {
+      tool: "check_calendar_availability",
+      availability_status: state.availabilityStatus,
+    });
+    return {
+      spoken: await composeHonestBookingReply(
+        session,
+        state.availabilityStatus === "available" && state.selectedSlot
+          ? "The requested time was already confirmed available by the calendar moments ago — restate that briefly and ask if they'd like you to book it, without checking again."
+          : "This exact date/time was already checked moments ago and is NOT available — restate that briefly, same as before, nothing new to add.",
+      ),
+      state: { ...state, bookingStatus: "collecting" },
+    };
+  }
+
   if (!executeTool || !state.preferredDate) {
     namedLog("calendar_tool:error", session, {
       tool: "check_calendar_availability",
@@ -1667,7 +1911,7 @@ async function attemptAvailabilityCheck(
     agentConfigId: session.input.agentConfigId,
     callId,
   };
-  const timezone = await resolveBusinessTimezone(businessId);
+  const { timezone, service } = await resolveBookingContext(businessId, state.service);
   const exactStartIso = state.preferredTime
     ? zonedWallTimeToUtc(state.preferredDate, state.preferredTime, timezone).toISOString()
     : null;
@@ -1678,6 +1922,7 @@ async function attemptAvailabilityCheck(
     business_id: businessId,
     date: state.preferredDate,
     requested_time: state.preferredTime ?? state.preferredPeriod ?? "any",
+    duration_minutes: service.durationMinutes,
   });
   const startedAt = Date.now();
   namedLog("calendar_tool:provider_request", session, { tool: "check_calendar_availability" });
@@ -1686,7 +1931,7 @@ async function attemptAvailabilityCheck(
     CALENDAR_TOOL_TIMEOUT_MS,
     executeTool(
       "check_calendar_availability",
-      { dateIso: state.preferredDate, durationMinutes: DEFAULT_APPOINTMENT_DURATION_MINUTES },
+      { dateIso: state.preferredDate, durationMinutes: service.durationMinutes },
       ctx,
     ),
   ).catch(timeoutToolResult);
@@ -1845,7 +2090,10 @@ async function attemptBooking(
     agentConfigId: session.input.agentConfigId,
     callId: session.input.callId,
   };
-  const timezone = await resolveBusinessTimezone(session.input.businessId);
+  const { timezone, service } = await resolveBookingContext(
+    session.input.businessId,
+    state.service,
+  );
   // Only computable when the caller gave an exact time — when they asked
   // for "the next available slot" instead, the target start/end is
   // resolved from the real slots list below (slots[0]), never guessed.
@@ -1857,6 +2105,7 @@ async function attemptBooking(
     preferredDate: state.preferredDate,
     preferredTime: state.preferredTime,
     wantsNextAvailable: state.wantsNextAvailable,
+    durationMinutes: service.durationMinutes,
   });
   namedLog("calendar_tool:start", session, {
     tool: "check_calendar_availability",
@@ -1864,6 +2113,7 @@ async function attemptBooking(
     business_id: session.input.businessId,
     date: state.preferredDate,
     requested_time: state.preferredTime,
+    duration_minutes: service.durationMinutes,
   });
   const availabilityStartedAt = Date.now();
   namedLog("calendar_tool:provider_request", session, { tool: "check_calendar_availability" });
@@ -1872,7 +2122,7 @@ async function attemptBooking(
     CALENDAR_TOOL_TIMEOUT_MS,
     executeTool(
       "check_calendar_availability",
-      { dateIso: state.preferredDate, durationMinutes: DEFAULT_APPOINTMENT_DURATION_MINUTES },
+      { dateIso: state.preferredDate, durationMinutes: service.durationMinutes },
       ctx,
     ),
   ).catch(timeoutToolResult);
@@ -1976,6 +2226,7 @@ async function attemptBooking(
         startIso,
         endIso,
         notes: state.service,
+        ...(service.id ? { serviceId: service.id } : {}),
       },
       ctx,
     ),
@@ -2155,9 +2406,31 @@ async function handleUserUtterance(session: Session, text: string) {
         // the caller actually hears; the marker itself never reaches TTS or
         // the persisted transcript.
         const { spokenText, state: proposedAppointmentState } = parseApptStateMarker(rawReply);
+
+        // Deterministic date/time extraction over the caller's own raw
+        // words (production incident: an explicit "tomorrow at 3 PM" /
+        // "3 PM tomorrow" / "Friday at 4:30" / "next Monday morning" was
+        // sometimes dropped, or nulled out by an incomplete marker, rather
+        // than reliably reaching AppointmentState). Resolved to an actual
+        // date BEFORE the merge below, from whichever of relativeDate/
+        // weekday the caller actually said (relativeDate preferred on the
+        // rare chance both appear) — only ever FILLS IN what the marker
+        // leaves unset this turn, same backstop discipline as
+        // mergeAppointmentState's own doc comment describes.
+        let extractedDate: string | null = null;
+        if (callerIntent.relativeDate || callerIntent.weekday) {
+          const timezone = await resolveBusinessTimezone(session.input.businessId);
+          extractedDate = callerIntent.relativeDate
+            ? resolveRelativeDateInTimezone(callerIntent.relativeDate, timezone)
+            : resolveWeekdayInTimezone(callerIntent.weekday!, timezone);
+        }
         let appointmentState = mergeAppointmentState(
           session.appointmentState,
           proposedAppointmentState,
+          {
+            preferredDate: extractedDate,
+            preferredTime: callerIntent.explicitTime,
+          },
         );
 
         // Deterministic backstop (production incident: the model's marker
@@ -2165,26 +2438,21 @@ async function handleUserUtterance(session: Session, text: string) {
         // turn it should have — see parseCallerIntentFromText's own doc
         // comment). Only ever FILLS IN what the marker left unset, or
         // escalates bookingStatus the marker should have proposed — never
-        // overrides a value the marker DID set this turn.
+        // overrides a value the marker DID set this turn. preferredDate is
+        // already resolved above (from the marker, or the extraction
+        // backstop) by the time this runs.
         if (
           callerIntent.availabilityRequested &&
-          appointmentState.bookingStatus !== "ready_to_book"
+          appointmentState.bookingStatus !== "ready_to_book" &&
+          appointmentState.preferredDate
         ) {
-          let resolvedDate = appointmentState.preferredDate;
-          if (!resolvedDate && callerIntent.relativeDate) {
-            const timezone = await resolveBusinessTimezone(session.input.businessId);
-            resolvedDate = resolveRelativeDateInTimezone(callerIntent.relativeDate, timezone);
-          }
-          if (resolvedDate) {
-            appointmentState = {
-              ...appointmentState,
-              preferredDate: resolvedDate,
-              preferredPeriod: appointmentState.preferredPeriod ?? callerIntent.preferredPeriod,
-              wantsNextAvailable:
-                appointmentState.wantsNextAvailable || callerIntent.wantsNextAvailable,
-              bookingStatus: "checking_availability",
-            };
-          }
+          appointmentState = {
+            ...appointmentState,
+            preferredPeriod: appointmentState.preferredPeriod ?? callerIntent.preferredPeriod,
+            wantsNextAvailable:
+              appointmentState.wantsNextAvailable || callerIntent.wantsNextAvailable,
+            bookingStatus: "checking_availability",
+          };
         }
         // Only applies once a specific slot is already clearly on the table
         // (a date, and either a time or an explicit "next available") — never

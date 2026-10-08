@@ -1077,7 +1077,7 @@ describe("15. Deterministic appointment booking (tests H, I, J)", () => {
     h.llm.setDelay(0);
 
     h.stt.speakUtterance("Book an appointment tomorrow at 3pm for teeth cleaning");
-    await drain(16);
+    await drain(40);
 
     const availabilityCall = h.tools.calls.find((c) => c.name === "check_calendar_availability");
     const bookingCall = h.tools.calls.find((c) => c.name === "book_appointment");
@@ -1101,7 +1101,7 @@ describe("15. Deterministic appointment booking (tests H, I, J)", () => {
     h.llm.setNextReply(bookingReadyToBookReply());
 
     h.stt.speakUtterance("Book an appointment tomorrow at 3pm for teeth cleaning");
-    await drain(16);
+    await drain(40);
 
     const bookingCall = h.tools.calls.find((c) => c.name === "book_appointment");
     assert.equal(bookingCall, undefined, "must never attempt to book an unavailable slot");
@@ -1133,7 +1133,7 @@ describe("15. Deterministic appointment booking (tests H, I, J)", () => {
 
     const spokenBefore = h.tts.sentTexts.length;
     h.stt.speakUtterance("Book an appointment tomorrow at 3pm for teeth cleaning");
-    await drain(16);
+    await drain(40);
 
     const spokenSinceBooking = h.tts.sentTexts.slice(spokenBefore).join(" ");
     assert.ok(
@@ -1180,7 +1180,7 @@ describe("26. Calendar availability check (production incident: the agent went s
     h.llm.setDelay(0);
 
     h.stt.speakUtterance("Can you check if that slot is available?");
-    await drain(16);
+    await drain(40);
 
     const availabilityCall = h.tools.calls.find((c) => c.name === "check_calendar_availability");
     assert.ok(
@@ -1206,7 +1206,7 @@ describe("26. Calendar availability check (production incident: the agent went s
     h.llm.setDelay(0);
 
     h.stt.speakUtterance("Can you check if 3pm tomorrow is free?");
-    await drain(16);
+    await drain(40);
 
     const availabilityCall = h.tools.calls.find((c) => c.name === "check_calendar_availability");
     assert.equal(availabilityCall?.input["dateIso"], "2026-10-08");
@@ -1237,7 +1237,7 @@ describe("26. Calendar availability check (production incident: the agent went s
     h.llm.setDelay(0);
 
     h.stt.speakUtterance("Can you check if that slot is available?");
-    await drain(16);
+    await drain(40);
 
     const factsMessage = h.llm.calls.at(-1)?.find((m) => m.role === "user");
     assert.match(factsMessage?.content ?? "", /IS available/);
@@ -1266,7 +1266,7 @@ describe("26. Calendar availability check (production incident: the agent went s
 
     const spokenBefore = h.tts.sentTexts.length;
     h.stt.speakUtterance("Can you check if that slot is available?");
-    await drain(16);
+    await drain(40);
 
     const spokenChunks = h.tts.sentTexts.slice(spokenBefore);
     assert.ok(
@@ -1297,10 +1297,10 @@ describe("26. Calendar availability check (production incident: the agent went s
     // tool call (see handleUserUtterance) — one more microtask hop than
     // before must fully resolve so the tool call's own withToolDeadline
     // timer is actually scheduled before the clock advances below.
-    await drain(16);
+    await drain(40);
 
     t.mock.timers.tick(10_000); // CALENDAR_TOOL_TIMEOUT_MS
-    await drain(16);
+    await drain(40);
 
     const spokenChunks = h.tts.sentTexts.slice(spokenBefore);
     assert.ok(spokenChunks.length >= 1, "a calendar timeout must still produce a spoken fallback");
@@ -1326,7 +1326,7 @@ describe("26. Calendar availability check (production incident: the agent went s
     h.llm.setDelay(0);
 
     h.stt.speakUtterance("Can you check if that slot is available?");
-    await drain(16);
+    await drain(40);
 
     const factsMessage = h.llm.calls.at(-1)?.find((m) => m.role === "user");
     assert.match(factsMessage?.content ?? "", /IS available/);
@@ -1355,7 +1355,7 @@ describe("26. Calendar availability check (production incident: the agent went s
     h.llm.setDelay(0);
 
     h.stt.speakUtterance("Can you check if that slot is available?");
-    await drain(16);
+    await drain(40);
 
     const factsMessage = h.llm.calls.at(-1)?.find((m) => m.role === "user");
     const facts = factsMessage?.content ?? "";
@@ -1386,7 +1386,7 @@ describe("26. Calendar availability check (production incident: the agent went s
     h.llm.setDelay(0);
 
     h.stt.speakUtterance("Book an appointment tomorrow at 3pm for teeth cleaning");
-    await drain(16);
+    await drain(40);
 
     const bookingCall = h.tools.calls.find((c) => c.name === "book_appointment");
     assert.equal(
@@ -1424,7 +1424,7 @@ describe("26. Calendar availability check (production incident: the agent went s
     const sentTextsBefore = h.tts.sentTexts.length;
     const llmCallsBefore = h.llm.calls.length;
     h.stt.speakUtterance("Can you check if that slot is available?");
-    await drain(16);
+    await drain(40);
 
     // user turn -> tool invocation -> tool result -> final LLM response ->
     // speak() — never "tool invocation -> tool result -> return -> silence".
@@ -1488,7 +1488,7 @@ describe("26. Calendar availability check (production incident: the agent went s
     h.llm.setNextReply(checkingAvailabilityReply());
     h.llm.setDelay(0);
     h.stt.speakUtterance("Can you check if that slot is available?");
-    await drain(16);
+    await drain(40);
     makeTtsFlushCatchUp(h.tts)();
 
     h.llm.setNextReply("Great, I'll get that booked for you.");
@@ -1521,7 +1521,7 @@ describe("26. Calendar availability check (production incident: the agent went s
     h.llm.setNextReply(checkingAvailabilityReply());
     h.llm.setDelay(0);
     h.stt.speakUtterance("Can you check if 3pm tomorrow is available?");
-    await drain(16);
+    await drain(40);
     makeTtsFlushCatchUp(h.tts)();
 
     // Caller changes their mind to a different time — the PREVIOUS
@@ -1615,7 +1615,7 @@ describe("27. Open and approximate-period availability requests (production inci
     h.llm.setDelay(0);
 
     h.stt.speakUtterance("Are there any slots available today?");
-    await drain(16);
+    await drain(40);
 
     const availabilityCall = h.tools.calls.find((c) => c.name === "check_calendar_availability");
     assert.ok(availabilityCall, "an open availability request must still invoke the real tool");
@@ -1642,7 +1642,7 @@ describe("27. Open and approximate-period availability requests (production inci
 
     const spokenBefore = h.tts.sentTexts.length;
     h.stt.speakUtterance("Do you have anything available today?");
-    await drain(16);
+    await drain(40);
 
     assert.ok(h.tts.sentTexts.length > spokenBefore, "must speak something — never go silent");
     const factsMessage = h.llm.calls.at(-1)?.find((m) => m.role === "user");
@@ -1673,7 +1673,7 @@ describe("27. Open and approximate-period availability requests (production inci
     h.llm.setDelay(0);
 
     h.stt.speakUtterance("Do you have any slots this afternoon?");
-    await drain(16);
+    await drain(40);
 
     const factsMessage = h.llm.calls.at(-1)?.find((m) => m.role === "user");
     const facts = factsMessage?.content ?? "";
@@ -1700,7 +1700,7 @@ describe("27. Open and approximate-period availability requests (production inci
     h.llm.setDelay(0);
 
     h.stt.speakUtterance("What times are available tomorrow?");
-    await drain(16);
+    await drain(40);
 
     const availabilityCall = h.tools.calls.find((c) => c.name === "check_calendar_availability");
     assert.equal(availabilityCall?.input["dateIso"], "2026-10-09");
@@ -1966,7 +1966,7 @@ describe("30. Conversation state regression — the exact real-call sequence (pr
       text: "Is there any slot available today?",
       language: "en-IN",
     });
-    await drain(16);
+    await drain(40);
 
     const availabilityCall = h.tools.calls.find((c) => c.name === "check_calendar_availability");
     assert.ok(
@@ -2624,6 +2624,199 @@ describe("25. Silence timer generation isolation (test 14: a stale timer must ne
     assert.ok(
       !spokenChunks.some((c) => /still there/i.test(c)),
       "the stale timer must never speak a silence prompt into the new generation's turn",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+describe("31. Deterministic date/time extraction backstop (production reliability fix: an explicit 'tomorrow at 3 PM' the marker omits must still reach a real booking)", () => {
+  test("the marker omits preferred_date/preferred_time entirely — the extraction backstop fills them in from the caller's own words and a real booking still executes", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    // "Tomorrow" resolves against the real current date (this harness has
+    // no real Supabase client to resolve a business timezone through — see
+    // BOOKING_START_ISO's own comment — so resolveRelativeDateInTimezone
+    // falls back to UTC "now"). Computed independently here, the same way
+    // production code does, rather than hardcoding a date that would
+    // silently drift wrong as real time passes.
+    const now = new Date();
+    const tomorrow = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1),
+    );
+    const tomorrowYmd = tomorrow.toISOString().slice(0, 10);
+    const startIso = `${tomorrowYmd}T15:00:00.000Z`;
+    const endIso = `${tomorrowYmd}T15:30:00.000Z`;
+
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: { slots: [{ start: startIso, end: endIso }] },
+      }),
+    });
+    h.tools.setNextResult("book_appointment", {
+      content: JSON.stringify({
+        success: true,
+        data: { id: "booking-extract-1", status: "CONFIRMED" },
+      }),
+    });
+    // Deliberately omits preferred_date/preferred_time (both null) —
+    // reproducing the production incident where the model's own marker
+    // drops fields the caller actually said. Only the deterministic
+    // extraction backstop (parseCallerIntentFromText + mergeAppointmentState's
+    // `extracted` parameter) can recover them from the raw transcript below.
+    h.llm.setNextReply(
+      'Great, let me get that booked.\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":"9999999999","preferred_date":null,"preferred_time":null,"ready_to_book":true}>>>',
+    );
+    h.llm.setDelay(0);
+
+    h.stt.speakUtterance(
+      "Book an appointment tomorrow at 3 PM for teeth cleaning, I'm Dhanush, phone 9999999999, please confirm",
+    );
+    await drain(40);
+
+    const bookingCall = h.tools.calls.find((c) => c.name === "book_appointment");
+    assert.ok(
+      bookingCall,
+      "the extraction backstop must still produce a real booking despite the marker omitting date/time",
+    );
+    assert.equal(
+      bookingCall?.input["startIso"],
+      startIso,
+      "the extracted 'tomorrow at 3 PM' must be the exact time actually booked",
+    );
+    assert.equal(bookingCall?.input["endIso"], endIso);
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("a weekday + explicit time with no meridiem ('Friday at 4:30') is extracted and persists into AppointmentState even when the marker gives nothing at all", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    // No marker at all this turn (plain conversational reply) — the
+    // extraction backstop must still populate preferredDate/preferredTime
+    // from "Friday at 4:30" alone, and the NEXT turn's known-state system
+    // message must reflect it (describeKnownAppointmentState reads state
+    // as of the START of a turn) — proving it was actually persisted, not
+    // just computed and discarded.
+    h.llm.setNextReply("Sure, let me get your name for that booking.");
+    h.stt.speakUtterance("I'd like to come in Friday at 4:30 for a teeth cleaning");
+    await drain(40);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.llm.setNextReply("Thanks.");
+    h.stt.emit({ type: "final_transcript", text: "My name is Dhanush", language: "en-IN" });
+    await drain();
+
+    const nextTurnMessages = h.llm.calls.at(-1) ?? [];
+    const knownStateMessage = nextTurnMessages.find(
+      (m) => m.role === "system" && m.content.includes("CURRENT APPOINTMENT STATE"),
+    );
+    assert.ok(knownStateMessage, "expected the known-state system message");
+    assert.match(
+      knownStateMessage.content,
+      /preferred time: 16:30/,
+      "Friday at 4:30 with no am/pm must be extracted as 16:30 (the afternoon heuristic)",
+    );
+    assert.match(
+      knownStateMessage.content,
+      /preferred date: \d{4}-\d{2}-\d{2}/,
+      "the named weekday must have resolved to an actual date",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+describe("32. Availability check dedup (production reliability fix: no duplicate real calendar calls for an unchanged request)", () => {
+  test("a repeated 'is that still available?' for the exact same unchanged slot never calls check_calendar_availability a second time", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: { slots: [{ start: BOOKING_START_ISO, end: "2026-10-08T15:30:00.000Z" }] },
+      }),
+    });
+    h.llm.setNextReply(checkingAvailabilityReply());
+    h.llm.setDelay(0);
+    h.stt.speakUtterance("Can you check if that slot is available?");
+    await drain(40);
+    makeTtsFlushCatchUp(h.tts)();
+
+    assert.equal(
+      h.tools.calls.filter((c) => c.name === "check_calendar_availability").length,
+      1,
+      "the first, genuine check must have actually happened",
+    );
+
+    // Caller re-asks the SAME question about the SAME unchanged slot — the
+    // marker (unreliably) proposes checking_availability again, exactly as
+    // a real Sarvam reply sometimes does for a rephrased repeat.
+    const spokenBeforeRepeat = h.tts.sentTexts.length;
+    h.llm.setNextReply(checkingAvailabilityReply());
+    h.stt.emit({
+      type: "final_transcript",
+      text: "Sorry, is that still available?",
+      language: "en-IN",
+    });
+    await drain(40);
+
+    assert.equal(
+      h.tools.calls.filter((c) => c.name === "check_calendar_availability").length,
+      1,
+      "a repeated request for the exact same already-checked slot must not call the real calendar tool a second time",
+    );
+    const spokenSinceRepeat = h.tts.sentTexts.slice(spokenBeforeRepeat).join(" ");
+    assert.ok(
+      spokenSinceRepeat.length > 0,
+      "the caller must still hear an answer, not silence, even though no new tool call was made",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("a genuinely DIFFERENT slot (date/time changed) is checked for real again, never reuses the stale cached result", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: { slots: [{ start: BOOKING_START_ISO, end: "2026-10-08T15:30:00.000Z" }] },
+      }),
+    });
+    h.llm.setNextReply(checkingAvailabilityReply());
+    h.llm.setDelay(0);
+    h.stt.speakUtterance("Can you check if 3pm is available?");
+    await drain(40);
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: { slots: [{ start: "2026-10-08T16:00:00.000Z", end: "2026-10-08T16:30:00.000Z" }] },
+      }),
+    });
+    h.llm.setNextReply(checkingAvailabilityReply({ preferred_time: "16:00" }));
+    h.stt.emit({ type: "final_transcript", text: "What about 4pm instead?", language: "en-IN" });
+    await drain(40);
+
+    assert.equal(
+      h.tools.calls.filter((c) => c.name === "check_calendar_availability").length,
+      2,
+      "a genuinely different requested time must trigger its own real calendar check",
     );
 
     await terminateRuntimeSession(callId, "test cleanup");

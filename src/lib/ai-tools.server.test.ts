@@ -69,6 +69,46 @@ describe("resolveAvailableTools — default-deny capability resolution", () => {
     );
   });
 
+  test("grants reschedule_appointment only when calendar_reschedule is true — never implied by calendar_book/calendar_read", async () => {
+    const { client } = makeFakeSupabase([
+      {
+        table: "agent_configs",
+        op: "select.maybeSingle",
+        result: {
+          data: {
+            organization_id: "org-1",
+            capabilities: { calendar_book: true, calendar_read: true },
+          },
+          error: null,
+        },
+      },
+    ]);
+    const tools = await resolveAvailableTools(client, "org-1", "biz-1");
+    assert.equal(
+      tools.some((t) => t.name === "reschedule_appointment"),
+      false,
+      "calendar_book/calendar_read must not implicitly grant rescheduling",
+    );
+  });
+
+  test("grants reschedule_appointment once calendar_reschedule is explicitly true", async () => {
+    const { client } = makeFakeSupabase([
+      {
+        table: "agent_configs",
+        op: "select.maybeSingle",
+        result: {
+          data: { organization_id: "org-1", capabilities: { calendar_reschedule: true } },
+          error: null,
+        },
+      },
+    ]);
+    const tools = await resolveAvailableTools(client, "org-1", "biz-1");
+    assert.deepEqual(
+      tools.map((t) => t.name),
+      ["reschedule_appointment"],
+    );
+  });
+
   test("grants payment_request-gated tools together when that one capability is true", async () => {
     const { client } = makeFakeSupabase([
       {
@@ -129,6 +169,20 @@ describe("executeAiTool — dispatch safety", () => {
       { organizationId: "org-1", businessId: "biz-1", agentConfigId: null, source: "voice" },
       "check_calendar_availability",
       { durationMinutes: 30 }, // missing dateIso
+    );
+    assert.equal(result.isError, true);
+    const parsed = JSON.parse(result.content) as { error: { code: string } };
+    assert.equal(parsed.error.code, "INVALID_TOOL_INPUT");
+    assert.equal(calls.length, 0, "must not query the database for an invalid tool call");
+  });
+
+  test("missing required reschedule_appointment input fields never reach the underlying implementation", async () => {
+    const { client, calls } = makeFakeSupabase([]);
+    const result = await executeAiTool(
+      client,
+      { organizationId: "org-1", businessId: "biz-1", agentConfigId: null, source: "voice" },
+      "reschedule_appointment",
+      { newStartIso: "2026-10-01T15:00:00.000Z", newEndIso: "2026-10-01T15:30:00.000Z" }, // missing bookingId
     );
     assert.equal(result.isError, true);
     const parsed = JSON.parse(result.content) as { error: { code: string } };

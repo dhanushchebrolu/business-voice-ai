@@ -12,6 +12,9 @@ import {
   resolveResponseLanguage,
   parseApptStateMarker,
   parseCallerIntentFromText,
+  matchService,
+  mergeAppointmentState,
+  emptyAppointmentState,
   type RuntimeState,
 } from "./voice-runtime.server.ts";
 import type { AudioMediaBridge, AudioFrame } from "./telephony/audio-bridge";
@@ -217,6 +220,87 @@ describe("parseCallerIntentFromText — deterministic backstop over the caller's
     });
   });
 
+  describe("weekday", () => {
+    test('"Friday" is detected with forceNextWeek false', () => {
+      assert.deepEqual(parseCallerIntentFromText("Friday at 4:30").weekday, {
+        weekday: 5,
+        forceNextWeek: false,
+      });
+    });
+    test('"next Monday morning" detects Monday with forceNextWeek true', () => {
+      assert.deepEqual(parseCallerIntentFromText("next Monday morning").weekday, {
+        weekday: 1,
+        forceNextWeek: true,
+      });
+    });
+    test("every weekday name resolves to its correct 0=Sunday..6=Saturday index", () => {
+      const expected: [string, number][] = [
+        ["Sunday", 0],
+        ["Monday", 1],
+        ["Tuesday", 2],
+        ["Wednesday", 3],
+        ["Thursday", 4],
+        ["Friday", 5],
+        ["Saturday", 6],
+      ];
+      for (const [name, index] of expected) {
+        assert.equal(
+          parseCallerIntentFromText(`Can I come in on ${name}?`).weekday?.weekday,
+          index,
+          `expected ${name} to resolve to index ${index}`,
+        );
+      }
+    });
+    test("case-insensitive", () => {
+      assert.equal(parseCallerIntentFromText("how about friday").weekday?.weekday, 5);
+    });
+    test("an utterance with no weekday name has weekday: null", () => {
+      assert.equal(parseCallerIntentFromText("Is there any slot available today?").weekday, null);
+    });
+  });
+
+  describe("explicitTime", () => {
+    test('"3 PM" resolves to 15:00', () => {
+      assert.equal(parseCallerIntentFromText("tomorrow at 3 PM").explicitTime, "15:00");
+    });
+    test('"3 PM tomorrow" (time first) resolves identically regardless of word order', () => {
+      assert.equal(parseCallerIntentFromText("3 PM tomorrow").explicitTime, "15:00");
+    });
+    test('"3:30pm" (no space, lowercase, with minutes) resolves to 15:30', () => {
+      assert.equal(parseCallerIntentFromText("Can we do 3:30pm?").explicitTime, "15:30");
+    });
+    test('"12 PM" is noon (12:00), not midnight', () => {
+      assert.equal(parseCallerIntentFromText("12 PM works").explicitTime, "12:00");
+    });
+    test('"12 AM" is midnight (00:00)', () => {
+      assert.equal(parseCallerIntentFromText("12 AM").explicitTime, "00:00");
+    });
+    test('"9 AM" resolves to 09:00', () => {
+      assert.equal(parseCallerIntentFromText("9 AM please").explicitTime, "09:00");
+    });
+    test('"Friday at 4:30" (no meridiem) assumes afternoon — 16:30', () => {
+      assert.equal(parseCallerIntentFromText("Friday at 4:30").explicitTime, "16:30");
+    });
+    test('"10:15" (no meridiem, hour 7-11) is left as-is — 10:15', () => {
+      assert.equal(parseCallerIntentFromText("how about 10:15").explicitTime, "10:15");
+    });
+    test('an already-unambiguous 24-hour time ("15:00") is used as-is', () => {
+      assert.equal(parseCallerIntentFromText("15:00 works for me").explicitTime, "15:00");
+    });
+    test("a bare number with no am/pm or minutes is never mistaken for a time", () => {
+      assert.equal(parseCallerIntentFromText("I have 3 kids").explicitTime, null);
+      assert.equal(parseCallerIntentFromText("I'll be there in 10 minutes").explicitTime, null);
+    });
+    test('"next Monday morning" has no explicit time — only a period', () => {
+      const result = parseCallerIntentFromText("next Monday morning");
+      assert.equal(result.explicitTime, null);
+      assert.equal(result.preferredPeriod, "morning");
+    });
+    test("an utterance with no time at all has explicitTime: null", () => {
+      assert.equal(parseCallerIntentFromText("My name is Dhanush.").explicitTime, null);
+    });
+  });
+
   describe("bookingConfirmed", () => {
     for (const phrase of [
       "Yeah, please confirm.",
@@ -271,6 +355,202 @@ describe("parseCallerIntentFromText — deterministic backstop over the caller's
         false,
       );
     });
+  });
+});
+
+/**
+ * Production reliability gap: every availability check and booking used a
+ * hardcoded 30-minute appointment duration regardless of what the business
+ * actually configured per service — matchService is the pure matching core
+ * resolveBookingContext uses to read the real services.duration_minutes
+ * instead. Tested directly (not through the harness) because this
+ * codebase's test harness has no real Supabase client to resolve
+ * resolveBookingContext's own DB query through.
+ */
+describe("matchService — resolves the caller's requested service to its configured duration_minutes", () => {
+  const rows = [
+    { id: "svc-15", name: "Quick Consultation", duration_minutes: 15 },
+    { id: "svc-30", name: "Teeth Cleaning", duration_minutes: 30 },
+    { id: "svc-45", name: "Deep Cleaning & Polish", duration_minutes: 45 },
+    { id: "svc-60", name: "Full Checkup", duration_minutes: 60 },
+  ];
+
+  for (const [name, id, minutes] of [
+    ["Quick Consultation", "svc-15", 15],
+    ["Teeth Cleaning", "svc-30", 30],
+    ["Deep Cleaning & Polish", "svc-45", 45],
+    ["Full Checkup", "svc-60", 60],
+  ] as [string, string, number][]) {
+    test(`exact name match resolves "${name}" to its configured ${minutes}-minute duration`, () => {
+      const result = matchService(rows, name);
+      assert.equal(result.id, id);
+      assert.equal(result.durationMinutes, minutes);
+    });
+  }
+
+  test("exact match is case-insensitive", () => {
+    const result = matchService(rows, "teeth cleaning");
+    assert.equal(result.id, "svc-30");
+    assert.equal(result.durationMinutes, 30);
+  });
+
+  test("the caller's free-text wording substring-matches a longer configured name (45-minute service)", () => {
+    // Caller said "teeth cleaning" without the "& Polish" suffix.
+    const result = matchService(rows, "deep cleaning");
+    assert.equal(result.id, "svc-45");
+    assert.equal(result.durationMinutes, 45);
+  });
+
+  test("a configured name that is a substring of the caller's longer free-text wording also matches", () => {
+    const result = matchService(rows, "I'd like the full checkup please");
+    assert.equal(result.id, "svc-60");
+    assert.equal(result.durationMinutes, 60);
+  });
+
+  test("no service known at all (null) falls back to the default duration, never guesses", () => {
+    const result = matchService(rows, null);
+    assert.equal(result.id, null);
+    assert.equal(result.durationMinutes, 30);
+  });
+
+  test("a service name that matches nothing configured falls back to the default duration", () => {
+    const result = matchService(rows, "haircut");
+    assert.equal(result.id, null);
+    assert.equal(result.durationMinutes, 30);
+  });
+
+  test("a matched service with no duration configured (null) falls back to the default, never invents one", () => {
+    const result = matchService(
+      [{ id: "svc-x", name: "Mystery Service", duration_minutes: null }],
+      "mystery service",
+    );
+    assert.equal(result.id, "svc-x");
+    assert.equal(result.durationMinutes, 30);
+  });
+
+  test("an empty services list always falls back to the default duration", () => {
+    const result = matchService([], "teeth cleaning");
+    assert.equal(result.id, null);
+    assert.equal(result.durationMinutes, 30);
+  });
+});
+
+/**
+ * Production incident (round 2 of the appointment reliability fixes): an
+ * explicit "tomorrow at 3 PM" / "Friday at 4:30" the caller actually said
+ * must reach AppointmentState even when the model's own marker leaves
+ * preferred_date/preferred_time unset — but a marker value that IS
+ * present must never be overridden by the extraction backstop, matching
+ * every other caller-intent backstop in this file (availabilityRequested,
+ * bookingConfirmed). mergeAppointmentState's `extracted` parameter is this
+ * backstop; tested directly here since it is the exact mechanism, not an
+ * end-to-end proxy for it.
+ */
+describe("mergeAppointmentState — extracted date/time is a backstop, never an override", () => {
+  test("extraction fills in preferredDate when the marker proposes none (null)", () => {
+    const result = mergeAppointmentState(
+      emptyAppointmentState(),
+      { preferredDate: null, preferredTime: null },
+      { preferredDate: "2026-10-09", preferredTime: null },
+    );
+    assert.equal(result.preferredDate, "2026-10-09");
+  });
+
+  test("extraction fills in preferredTime when the marker proposes none (null)", () => {
+    const result = mergeAppointmentState(
+      emptyAppointmentState(),
+      { preferredDate: "2026-10-09", preferredTime: null },
+      { preferredDate: null, preferredTime: "15:00" },
+    );
+    assert.equal(result.preferredTime, "15:00");
+  });
+
+  test("extraction fills in BOTH date and time when the marker proposes neither", () => {
+    const result = mergeAppointmentState(
+      emptyAppointmentState(),
+      { preferredDate: null, preferredTime: null },
+      { preferredDate: "2026-10-09", preferredTime: "15:00" },
+    );
+    assert.equal(result.preferredDate, "2026-10-09");
+    assert.equal(result.preferredTime, "15:00");
+  });
+
+  test("extraction fills the date/time gap even when the marker is entirely absent (null, not just incomplete)", () => {
+    const result = mergeAppointmentState(emptyAppointmentState(), null, {
+      preferredDate: "2026-10-09",
+      preferredTime: "15:00",
+    });
+    assert.equal(result.preferredDate, "2026-10-09");
+    assert.equal(result.preferredTime, "15:00");
+  });
+
+  test("a marker-proposed preferredDate is NEVER overridden by extraction, even when extraction found a different date", () => {
+    const result = mergeAppointmentState(
+      emptyAppointmentState(),
+      { preferredDate: "2026-10-10", preferredTime: null },
+      { preferredDate: "2026-10-09", preferredTime: null },
+    );
+    assert.equal(result.preferredDate, "2026-10-10", "the marker's own value must win");
+  });
+
+  test("a marker-proposed preferredTime is NEVER overridden by extraction, even when extraction found a different time", () => {
+    const result = mergeAppointmentState(
+      emptyAppointmentState(),
+      { preferredDate: null, preferredTime: "16:00" },
+      { preferredDate: null, preferredTime: "15:00" },
+    );
+    assert.equal(result.preferredTime, "16:00", "the marker's own value must win");
+  });
+
+  test("a value extraction established on a PREVIOUS turn survives this turn's incomplete/null marker (sticky current)", () => {
+    const afterTurn1 = mergeAppointmentState(
+      emptyAppointmentState(),
+      { preferredDate: null },
+      {
+        preferredDate: "2026-10-09",
+        preferredTime: "15:00",
+      },
+    );
+    assert.equal(afterTurn1.preferredDate, "2026-10-09");
+
+    // Turn 2: marker proposes nothing new, and this turn's own text has no
+    // date/time to extract either (extracted is undefined/empty) — the
+    // PREVIOUS turn's correctly-extracted value must survive untouched.
+    const afterTurn2 = mergeAppointmentState(afterTurn1, { service: "teeth cleaning" });
+    assert.equal(afterTurn2.preferredDate, "2026-10-09", "must not be nulled out");
+    assert.equal(afterTurn2.preferredTime, "15:00", "must not be nulled out");
+  });
+
+  test("changing the extracted date invalidates a stale availabilityStatus/selectedSlot, same as a marker-driven change", () => {
+    const checked: ReturnType<typeof emptyAppointmentState> = {
+      ...emptyAppointmentState(),
+      preferredDate: "2026-10-09",
+      preferredTime: "15:00",
+      availabilityStatus: "available",
+      selectedSlot: { start: "2026-10-09T15:00:00.000Z", end: "2026-10-09T15:30:00.000Z" },
+    };
+    const result = mergeAppointmentState(
+      checked,
+      { preferredTime: null },
+      {
+        preferredDate: null,
+        preferredTime: "16:00",
+      },
+    );
+    assert.equal(result.preferredTime, "16:00");
+    assert.equal(result.availabilityStatus, "unknown", "the old 15:00 result no longer applies");
+    assert.equal(result.selectedSlot, null);
+  });
+
+  test("no proposed marker AND no extraction returns the exact same state untouched", () => {
+    const current = {
+      ...emptyAppointmentState(),
+      preferredDate: "2026-10-09",
+      preferredTime: "15:00",
+      availabilityStatus: "available" as const,
+    };
+    const result = mergeAppointmentState(current, null);
+    assert.deepEqual(result, current);
   });
 });
 

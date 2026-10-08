@@ -28,6 +28,7 @@ import type { ClaudeTool } from "./claude.server.ts";
 import {
   check_calendar_availability,
   create_calendar_event,
+  update_calendar_event,
 } from "./calendar/calendar-tools.server.ts";
 import {
   create_payment_required_booking,
@@ -166,6 +167,40 @@ const TOOL_REGISTRY: Record<string, ToolDefinition> = {
         source: ctx.source,
         idempotencyKey,
         notes: str(input, "notes"),
+      });
+      return asToolOutput(result);
+    },
+  },
+
+  reschedule_appointment: {
+    capability: "calendar_reschedule",
+    schema: {
+      name: "reschedule_appointment",
+      description:
+        "Move an EXISTING confirmed booking to a new start/end time — re-checks the calendar for conflicts before moving it, and updates the real Google Calendar event. Only call this for a booking the caller already has (you need its bookingId); use book_appointment to create a brand new one instead.",
+      input_schema: {
+        type: "object",
+        properties: {
+          bookingId: { type: "string", description: "The id of the existing booking to move." },
+          newStartIso: { type: "string", description: "New appointment start time, ISO 8601." },
+          newEndIso: { type: "string", description: "New appointment end time, ISO 8601." },
+        },
+        required: ["bookingId", "newStartIso", "newEndIso"],
+      },
+    },
+    async execute(supabaseAdmin, ctx, input) {
+      const bookingId = str(input, "bookingId");
+      const newStartIso = str(input, "newStartIso");
+      const newEndIso = str(input, "newEndIso");
+      if (!bookingId || !newStartIso || !newEndIso) {
+        return invalidInput("bookingId, newStartIso and newEndIso are required.");
+      }
+      const result = await update_calendar_event(supabaseAdmin, {
+        organizationId: ctx.organizationId,
+        businessId: ctx.businessId,
+        bookingId,
+        newStartIso,
+        newEndIso,
       });
       return asToolOutput(result);
     },
