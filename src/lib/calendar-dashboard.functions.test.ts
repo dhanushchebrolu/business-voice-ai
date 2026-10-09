@@ -44,7 +44,11 @@ describe("authentication and tenant derivation", () => {
   });
 
   test("business ownership is re-validated via resolveBusiness for every function that takes a businessId", () => {
-    const occurrences = code.split("await resolveBusiness(").length - 1;
+    // getCalendarDayView's call is wrapped in timedStep (diagnostics for
+    // the deployed-calendar-page investigation), so it reads
+    // `timedStep(..., () => resolveBusiness(...))` rather than a bare
+    // `await resolveBusiness(...)` — still awaited, just one level deeper.
+    const occurrences = (code.match(/resolveBusiness\(supabaseAdmin,/g) ?? []).length;
     assert.ok(
       occurrences >= 4,
       "expected resolveBusiness to be called for getCalendarDayView, setWeeklyHours, applyDailyOverride, removeDailyOverride",
@@ -142,5 +146,65 @@ describe("day-view slot state reuses the one precedence resolver, never a second
 
   test("a slot already covered by a confirmed/pending booking is never reported as merely 'open', regardless of the override state", () => {
     assert.match(code, /overlapsBooking\s*\?\s*"booked"/);
+  });
+});
+
+/**
+ * Deployed-calendar-page investigation (klyro.aiblaze-io.workers.dev
+ * /app/calendar showing the generic "Could not load this day's calendar."
+ * with no console error and no failed network request): every operation
+ * getCalendarDayView performs now carries a correlation id, a fixed
+ * operation name, and elapsed time, logged server-side, with a
+ * DiagnosedStepError (embedding the same operation name + correlation id
+ * + sanitized error code) reaching the client in place of the original
+ * error — so the failing step is always identifiable from the rendered
+ * ErrorState text alone, not just from logs the client can't see.
+ */
+describe("getCalendarDayView — every step is wrapped in structured diagnostics (correlation id, operation name, elapsed time)", () => {
+  test("imports newCorrelationId/timedStep from the shared diagnostics module", () => {
+    assert.match(
+      src,
+      /import \{ newCorrelationId, timedStep \} from "@\/lib\/observability\/server-fn-diagnostics"/,
+    );
+  });
+
+  test("generates one correlation id per request, shared across every step", () => {
+    const handlerStart = code.indexOf("export const getCalendarDayView");
+    const handlerEnd = code.indexOf("\nconst setWeeklyHoursInputSchema");
+    const handlerBody = code.slice(handlerStart, handlerEnd);
+    assert.match(handlerBody, /const correlationId = newCorrelationId\(\);/);
+    const correlationUsages = (handlerBody.match(/correlationId/g) ?? []).length;
+    assert.ok(
+      correlationUsages >= 6,
+      "expected the one correlationId to be threaded through every timedStep call",
+    );
+  });
+
+  test("every database-touching step (org context, business, schedule/sync fetch, bookings/external) is wrapped in timedStep with a distinct operation name", () => {
+    const handlerStart = code.indexOf("export const getCalendarDayView");
+    const handlerEnd = code.indexOf("\nconst setWeeklyHoursInputSchema");
+    const handlerBody = code.slice(handlerStart, handlerEnd);
+    for (const operation of [
+      "resolve_org_context",
+      "resolve_business",
+      "fetch_schedule_and_sync_state",
+      "compute_day_bounds",
+      "fetch_bookings_and_external_busy",
+      "resolve_effective_open_ranges",
+    ]) {
+      assert.match(
+        handlerBody,
+        new RegExp(`timedStep\\(\\s*"${operation}"`),
+        `expected a timedStep("${operation}", ...) call`,
+      );
+    }
+  });
+
+  test("resolveOrgContext checks the Supabase error field before falling back to 'No workspace found' — a real query failure must never be misreported as 'no workspace'", () => {
+    const fnStart = code.indexOf("async function resolveOrgContext(");
+    const fnEnd = code.indexOf("\nfunction requireWriteRole", fnStart);
+    const fnBody = code.slice(fnStart, fnEnd);
+    assert.match(fnBody, /const \{ data: membership, error \} = await supabase/);
+    assert.match(fnBody, /if \(error\) throw error;/);
   });
 });

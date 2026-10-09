@@ -11,6 +11,7 @@ import {
   type BusinessHoursDay,
   type BusinessHourOverride,
 } from "@/lib/calendar/calendar-service.server";
+import { newCorrelationId, timedStep } from "@/lib/observability/server-fn-diagnostics";
 
 /**
  * Hospital dashboard calendar — day view + weekly-hours + daily-override
@@ -46,12 +47,13 @@ async function resolveOrgContext(context: {
   const supabase = context.supabase as import("@supabase/supabase-js").SupabaseClient<
     import("@/integrations/supabase/types").Database
   >;
-  const { data: membership } = await supabase
+  const { data: membership, error } = await supabase
     .from("organization_members")
     .select("organization_id, role")
     .eq("user_id", context.userId)
     .limit(1)
     .maybeSingle();
+  if (error) throw error;
   if (!membership) throw new Error("No workspace found for your account.");
   return { organizationId: membership.organization_id, role: membership.role };
 }
@@ -90,38 +92,56 @@ export const getCalendarDayView = createServerFn({ method: "GET" })
   .inputValidator((input: unknown) => dayViewInputSchema.parse(input))
   .middleware([requireSupabaseAuth])
   .handler(async ({ data, context }) => {
-    const { organizationId, role } = await resolveOrgContext(context);
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const business = await resolveBusiness(supabaseAdmin, organizationId, data.businessId);
+    const correlationId = newCorrelationId();
+    const LOG = "calendar_day_view";
 
-    const [hoursRes, overrideRes, connectionRes, conflictsRes] = await Promise.all([
-      supabaseAdmin
-        .from("business_hours")
-        .select("day_of_week, is_closed, intervals")
-        .eq("business_id", data.businessId),
-      supabaseAdmin
-        .from("business_hour_overrides")
-        .select("id, is_full_day_closure, intervals, reason")
-        .eq("business_id", data.businessId)
-        .eq("override_date", data.dateIso)
-        .maybeSingle(),
-      supabaseAdmin
-        .from("google_calendar_connections")
-        .select("id, status, last_sync_at, last_error")
-        .eq("business_id", data.businessId)
-        .eq("provider", "google")
-        .maybeSingle(),
-      supabaseAdmin
-        .from("calendar_sync_conflicts")
-        .select("id, booking_id, conflict_type, details, created_at")
-        .eq("business_id", data.businessId)
-        .eq("status", "OPEN")
-        .order("created_at", { ascending: false }),
-    ]);
-    if (hoursRes.error) throw hoursRes.error;
-    if (overrideRes.error) throw overrideRes.error;
-    if (connectionRes.error) throw connectionRes.error;
-    if (conflictsRes.error) throw conflictsRes.error;
+    const { organizationId, role } = await timedStep(
+      "resolve_org_context",
+      correlationId,
+      LOG,
+      () => resolveOrgContext(context),
+    );
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const business = await timedStep("resolve_business", correlationId, LOG, () =>
+      resolveBusiness(supabaseAdmin, organizationId, data.businessId),
+    );
+
+    const { hoursRes, overrideRes, connectionRes, conflictsRes } = await timedStep(
+      "fetch_schedule_and_sync_state",
+      correlationId,
+      LOG,
+      async () => {
+        const [hoursRes, overrideRes, connectionRes, conflictsRes] = await Promise.all([
+          supabaseAdmin
+            .from("business_hours")
+            .select("day_of_week, is_closed, intervals")
+            .eq("business_id", data.businessId),
+          supabaseAdmin
+            .from("business_hour_overrides")
+            .select("id, is_full_day_closure, intervals, reason")
+            .eq("business_id", data.businessId)
+            .eq("override_date", data.dateIso)
+            .maybeSingle(),
+          supabaseAdmin
+            .from("google_calendar_connections")
+            .select("id, status, last_sync_at, last_error")
+            .eq("business_id", data.businessId)
+            .eq("provider", "google")
+            .maybeSingle(),
+          supabaseAdmin
+            .from("calendar_sync_conflicts")
+            .select("id, booking_id, conflict_type, details, created_at")
+            .eq("business_id", data.businessId)
+            .eq("status", "OPEN")
+            .order("created_at", { ascending: false }),
+        ]);
+        if (hoursRes.error) throw hoursRes.error;
+        if (overrideRes.error) throw overrideRes.error;
+        if (connectionRes.error) throw connectionRes.error;
+        if (conflictsRes.error) throw conflictsRes.error;
+        return { hoursRes, overrideRes, connectionRes, conflictsRes };
+      },
+    );
 
     const weeklyHours: BusinessHoursDay[] = (hoursRes.data ?? []).map((r) => ({
       dayOfWeek: r.day_of_week,
@@ -140,9 +160,15 @@ export const getCalendarDayView = createServerFn({ method: "GET" })
         }
       : undefined;
 
-    const { start: dayStartUtc, end: dayEndUtc } = businessDayUtcBounds(
-      data.dateIso,
-      business.timezone,
+    // Not awaited (pure, synchronous JS) — still wrapped because a
+    // malformed business.timezone (e.g. not a real IANA zone) throws a
+    // RangeError here, and this step name is what tells that case apart
+    // from an actual database failure above.
+    const { start: dayStartUtc, end: dayEndUtc } = await timedStep(
+      "compute_day_bounds",
+      correlationId,
+      LOG,
+      () => Promise.resolve(businessDayUtcBounds(data.dateIso, business.timezone)),
     );
     const connection = connectionRes.data;
 
@@ -154,33 +180,43 @@ export const getCalendarDayView = createServerFn({ method: "GET" })
     }[] = [];
     let externalBusy: { start_at: string | null; end_at: string | null }[] = [];
     if (connection) {
-      const [bookingsRes, externalRes] = await Promise.all([
-        supabaseAdmin
-          .from("bookings")
-          .select("id, start_at, end_at, customer_name")
-          .eq("calendar_connection_id", connection.id)
-          .not("status", "in", "(CANCELLED,NO_SHOW)")
-          .lt("start_at", dayEndUtc.toISOString())
-          .gt("end_at", dayStartUtc.toISOString()),
-        supabaseAdmin
-          .from("external_calendar_events")
-          .select("start_at, end_at")
-          .eq("calendar_connection_id", connection.id)
-          .neq("status", "cancelled")
-          .lt("start_at", dayEndUtc.toISOString())
-          .gt("end_at", dayStartUtc.toISOString()),
-      ]);
-      if (bookingsRes.error) throw bookingsRes.error;
-      if (externalRes.error) throw externalRes.error;
-      confirmedBookings = bookingsRes.data ?? [];
-      externalBusy = externalRes.data ?? [];
+      const { confirmedBookings: bookings, externalBusy: external } = await timedStep(
+        "fetch_bookings_and_external_busy",
+        correlationId,
+        LOG,
+        async () => {
+          const [bookingsRes, externalRes] = await Promise.all([
+            supabaseAdmin
+              .from("bookings")
+              .select("id, start_at, end_at, customer_name")
+              .eq("calendar_connection_id", connection.id)
+              .not("status", "in", "(CANCELLED,NO_SHOW)")
+              .lt("start_at", dayEndUtc.toISOString())
+              .gt("end_at", dayStartUtc.toISOString()),
+            supabaseAdmin
+              .from("external_calendar_events")
+              .select("start_at, end_at")
+              .eq("calendar_connection_id", connection.id)
+              .neq("status", "cancelled")
+              .lt("start_at", dayEndUtc.toISOString())
+              .gt("end_at", dayStartUtc.toISOString()),
+          ]);
+          if (bookingsRes.error) throw bookingsRes.error;
+          if (externalRes.error) throw externalRes.error;
+          return {
+            confirmedBookings: bookingsRes.data ?? [],
+            externalBusy: externalRes.data ?? [],
+          };
+        },
+      );
+      confirmedBookings = bookings;
+      externalBusy = external;
     }
 
-    const openRanges = resolveEffectiveOpenRangesUtc(
-      data.dateIso,
-      business.timezone,
-      weeklyHours,
-      override,
+    const openRanges = await timedStep("resolve_effective_open_ranges", correlationId, LOG, () =>
+      Promise.resolve(
+        resolveEffectiveOpenRangesUtc(data.dateIso, business.timezone, weeklyHours, override),
+      ),
     );
 
     const SLOT_MINUTES = 30;
