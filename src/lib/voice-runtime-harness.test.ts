@@ -3841,13 +3841,19 @@ describe("38. Side-effect staleness (Round F — a booking side effect, not just
     const endIso = `${tomorrowYmd}T15:30:00.000Z`;
 
     h.tools.setNextResult("check_calendar_availability", {
-      content: JSON.stringify({ success: true, data: { slots: [{ start: startIso, end: endIso }] } }),
+      content: JSON.stringify({
+        success: true,
+        data: { slots: [{ start: startIso, end: endIso }] },
+      }),
     });
     // Deliberately slow — the window this test needs open long enough for
     // a barge-in to land before attemptBooking's own staleness check.
     h.tools.setNextDelay("check_calendar_availability", 5_000);
     h.tools.setNextResult("book_appointment", {
-      content: JSON.stringify({ success: true, data: { id: "should-never-be-created", status: "CONFIRMED" } }),
+      content: JSON.stringify({
+        success: true,
+        data: { id: "should-never-be-created", status: "CONFIRMED" },
+      }),
     });
     h.llm.setNextReply(
       'Great, let me get that booked.\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":"9999999999","preferred_date":null,"preferred_time":null,"ready_to_book":true}>>>',
@@ -3882,6 +3888,85 @@ describe("38. Side-effect staleness (Round F — a booking side effect, not just
     assert.ok(
       availabilityCall,
       "the already-in-flight read-only availability check is allowed to finish (it has no side effect)",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("a slot confirmed available on one turn, then taken by someone else before the caller books it, is correctly rejected with fresh alternatives — never a false confirmation", async () => {
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    // Turn 1: establish everything AND ask if the slot is free. The
+    // calendar genuinely reports it as open right now.
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: { slots: [{ start: "2026-10-09T15:00:00.000Z", end: "2026-10-09T15:30:00.000Z" }] },
+      }),
+    });
+    h.llm.setNextReply(
+      'Yes, that time is open. Would you like me to book it?\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":"9000000000","preferred_date":"2026-10-09","preferred_time":"15:00","checking_availability":true,"ready_to_book":false}>>>',
+    );
+    h.llm.setDelay(0);
+    h.stt.speakUtterance(
+      "I'm Dhanush, phone 9000000000, is 3pm available tomorrow for teeth cleaning",
+    );
+    await drain(40);
+
+    const availabilityAnswer = h.tts.sentTexts.join(" ");
+    assert.match(availabilityAnswer, /available|open|free/i);
+
+    // Between this turn and the next, someone else takes the exact same
+    // slot (a different caller, the business owner booking directly in
+    // Google Calendar, etc.) — the NEXT check_calendar_availability call
+    // (the one attemptBooking runs fresh, never trusting the earlier
+    // answer) now reports it as taken, with two real alternatives.
+    makeTtsFlushCatchUp(h.tts)();
+    const spokenBeforeBookAttempt = h.tts.sentTexts.length;
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: {
+          slots: [
+            { start: "2026-10-09T15:30:00.000Z", end: "2026-10-09T16:00:00.000Z" },
+            { start: "2026-10-09T16:00:00.000Z", end: "2026-10-09T16:30:00.000Z" },
+          ],
+        },
+      }),
+    });
+    h.tools.setNextResult("book_appointment", { content: "{}" }); // must never be consumed
+    // "Yes, please book it" + the already-sticky slot/service/name/phone
+    // dispatches EARLY (tryEarlyDeterministicDispatch's bookingConfirmed
+    // backstop) — no conversational getReply call happens at all, so this
+    // queued reply is consumed by composeHonestBookingReply's own short
+    // facts-phrasing call instead (the fake LLM has no real language
+    // understanding, so the reply is written to match what that call's
+    // own facts message asks for: honestly declining and offering the
+    // two real alternatives the fresh recheck returned).
+    h.llm.setNextReply(
+      "That time isn't available. The only open times that day are 3:30 PM and 4:00 PM. Would either of those work?",
+    );
+    h.stt.emit({ type: "final_transcript", text: "Yes, please book it", language: "en-IN" });
+    await drain(40);
+
+    assert.equal(
+      h.tools.calls.find((c) => c.name === "book_appointment"),
+      undefined,
+      "book_appointment must never be called once the fresh re-check shows the slot taken",
+    );
+    const response = h.tts.sentTexts.slice(spokenBeforeBookAttempt).join(" ");
+    assert.doesNotMatch(
+      response,
+      /you'?re all set|is booked|confirmed/i,
+      "must never claim success for a slot that was actually taken",
+    );
+    assert.match(
+      response,
+      /3:30|4:00|4 ?pm/i,
+      "must offer the real, freshly-returned alternatives, not silence or a stale claim",
     );
 
     await terminateRuntimeSession(callId, "test cleanup");
