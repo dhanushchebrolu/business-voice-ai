@@ -106,42 +106,58 @@ export const getCalendarDayView = createServerFn({ method: "GET" })
       resolveBusiness(supabaseAdmin, organizationId, data.businessId),
     );
 
-    const { hoursRes, overrideRes, connectionRes, conflictsRes } = await timedStep(
-      "fetch_schedule_and_sync_state",
-      correlationId,
-      LOG,
-      async () => {
-        const [hoursRes, overrideRes, connectionRes, conflictsRes] = await Promise.all([
-          supabaseAdmin
-            .from("business_hours")
-            .select("day_of_week, is_closed, intervals")
-            .eq("business_id", data.businessId),
-          supabaseAdmin
-            .from("business_hour_overrides")
-            .select("id, is_full_day_closure, intervals, reason")
-            .eq("business_id", data.businessId)
-            .eq("override_date", data.dateIso)
-            .maybeSingle(),
-          supabaseAdmin
-            .from("google_calendar_connections")
-            .select("id, status, last_sync_at, last_error")
-            .eq("business_id", data.businessId)
-            .eq("provider", "google")
-            .maybeSingle(),
-          supabaseAdmin
-            .from("calendar_sync_conflicts")
-            .select("id, booking_id, conflict_type, details, created_at")
-            .eq("business_id", data.businessId)
-            .eq("status", "OPEN")
-            .order("created_at", { ascending: false }),
-        ]);
-        if (hoursRes.error) throw hoursRes.error;
-        if (overrideRes.error) throw overrideRes.error;
-        if (connectionRes.error) throw connectionRes.error;
-        if (conflictsRes.error) throw conflictsRes.error;
-        return { hoursRes, overrideRes, connectionRes, conflictsRes };
-      },
-    );
+    // Each of these four tables is queried by its own timedStep (run in
+    // parallel, not sequentially — Promise.all below) rather than one
+    // combined "fetch_schedule_and_sync_state" step: business_hours and
+    // google_calendar_connections predate the hospital-calendar feature
+    // and are read by several other pages too, while business_hour_
+    // overrides and calendar_sync_conflicts were introduced by, and are
+    // read ONLY by, this one feature (20261009100000_hospital_calendar_
+    // overrides_and_gcal_sync.sql) — a PGRST205 ("table not in schema
+    // cache") on one of the latter two, with every other calendar/booking
+    // page unaffected, is a materially different diagnosis (that one
+    // migration's tables specifically) than on one of the former two
+    // (something broader). A combined step name couldn't tell these apart.
+    const [hoursRes, overrideRes, connectionRes, conflictsRes] = await Promise.all([
+      timedStep("fetch_business_hours", correlationId, LOG, async () => {
+        const res = await supabaseAdmin
+          .from("business_hours")
+          .select("day_of_week, is_closed, intervals")
+          .eq("business_id", data.businessId);
+        if (res.error) throw res.error;
+        return res;
+      }),
+      timedStep("fetch_business_hour_overrides", correlationId, LOG, async () => {
+        const res = await supabaseAdmin
+          .from("business_hour_overrides")
+          .select("id, is_full_day_closure, intervals, reason")
+          .eq("business_id", data.businessId)
+          .eq("override_date", data.dateIso)
+          .maybeSingle();
+        if (res.error) throw res.error;
+        return res;
+      }),
+      timedStep("fetch_google_calendar_connection", correlationId, LOG, async () => {
+        const res = await supabaseAdmin
+          .from("google_calendar_connections")
+          .select("id, status, last_sync_at, last_error")
+          .eq("business_id", data.businessId)
+          .eq("provider", "google")
+          .maybeSingle();
+        if (res.error) throw res.error;
+        return res;
+      }),
+      timedStep("fetch_calendar_sync_conflicts", correlationId, LOG, async () => {
+        const res = await supabaseAdmin
+          .from("calendar_sync_conflicts")
+          .select("id, booking_id, conflict_type, details, created_at")
+          .eq("business_id", data.businessId)
+          .eq("status", "OPEN")
+          .order("created_at", { ascending: false });
+        if (res.error) throw res.error;
+        return res;
+      }),
+    ]);
 
     const weeklyHours: BusinessHoursDay[] = (hoursRes.data ?? []).map((r) => ({
       dayOfWeek: r.day_of_week,
@@ -180,37 +196,32 @@ export const getCalendarDayView = createServerFn({ method: "GET" })
     }[] = [];
     let externalBusy: { start_at: string | null; end_at: string | null }[] = [];
     if (connection) {
-      const { confirmedBookings: bookings, externalBusy: external } = await timedStep(
-        "fetch_bookings_and_external_busy",
-        correlationId,
-        LOG,
-        async () => {
-          const [bookingsRes, externalRes] = await Promise.all([
-            supabaseAdmin
-              .from("bookings")
-              .select("id, start_at, end_at, customer_name")
-              .eq("calendar_connection_id", connection.id)
-              .not("status", "in", "(CANCELLED,NO_SHOW)")
-              .lt("start_at", dayEndUtc.toISOString())
-              .gt("end_at", dayStartUtc.toISOString()),
-            supabaseAdmin
-              .from("external_calendar_events")
-              .select("start_at, end_at")
-              .eq("calendar_connection_id", connection.id)
-              .neq("status", "cancelled")
-              .lt("start_at", dayEndUtc.toISOString())
-              .gt("end_at", dayStartUtc.toISOString()),
-          ]);
-          if (bookingsRes.error) throw bookingsRes.error;
-          if (externalRes.error) throw externalRes.error;
-          return {
-            confirmedBookings: bookingsRes.data ?? [],
-            externalBusy: externalRes.data ?? [],
-          };
-        },
-      );
-      confirmedBookings = bookings;
-      externalBusy = external;
+      const [bookingsRes, externalRes] = await Promise.all([
+        timedStep("fetch_bookings", correlationId, LOG, async () => {
+          const res = await supabaseAdmin
+            .from("bookings")
+            .select("id, start_at, end_at, customer_name")
+            .eq("calendar_connection_id", connection.id)
+            .not("status", "in", "(CANCELLED,NO_SHOW)")
+            .lt("start_at", dayEndUtc.toISOString())
+            .gt("end_at", dayStartUtc.toISOString());
+          if (res.error) throw res.error;
+          return res;
+        }),
+        timedStep("fetch_external_calendar_events", correlationId, LOG, async () => {
+          const res = await supabaseAdmin
+            .from("external_calendar_events")
+            .select("start_at, end_at")
+            .eq("calendar_connection_id", connection.id)
+            .neq("status", "cancelled")
+            .lt("start_at", dayEndUtc.toISOString())
+            .gt("end_at", dayStartUtc.toISOString());
+          if (res.error) throw res.error;
+          return res;
+        }),
+      ]);
+      confirmedBookings = bookingsRes.data ?? [];
+      externalBusy = externalRes.data ?? [];
     }
 
     const openRanges = await timedStep("resolve_effective_open_ranges", correlationId, LOG, () =>

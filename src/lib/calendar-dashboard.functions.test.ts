@@ -180,24 +180,44 @@ describe("getCalendarDayView — every step is wrapped in structured diagnostics
     );
   });
 
-  test("every database-touching step (org context, business, schedule/sync fetch, bookings/external) is wrapped in timedStep with a distinct operation name", () => {
+  test("every database-touching step has its OWN timedStep with a distinct, per-table operation name — never one combined step covering several tables", () => {
+    // A combined step (the original design) can only say "something in
+    // this batch failed," which is exactly what made a live PGRST205
+    // report ambiguous between 4 different tables. One step per table
+    // means the operation name alone identifies the relation.
     const handlerStart = code.indexOf("export const getCalendarDayView");
     const handlerEnd = code.indexOf("\nconst setWeeklyHoursInputSchema");
     const handlerBody = code.slice(handlerStart, handlerEnd);
     for (const operation of [
       "resolve_org_context",
       "resolve_business",
-      "fetch_schedule_and_sync_state",
+      "fetch_business_hours",
+      "fetch_business_hour_overrides",
+      "fetch_google_calendar_connection",
+      "fetch_calendar_sync_conflicts",
       "compute_day_bounds",
-      "fetch_bookings_and_external_busy",
+      "fetch_bookings",
+      "fetch_external_calendar_events",
       "resolve_effective_open_ranges",
     ]) {
       assert.match(
         handlerBody,
-        new RegExp(`timedStep\\(\\s*"${operation}"`),
+        new RegExp(`timedStep\\(\\s*"${operation}"|timedStep\\("${operation}",`),
         `expected a timedStep("${operation}", ...) call`,
       );
     }
+    assert.doesNotMatch(handlerBody, /timedStep\(\s*"fetch_schedule_and_sync_state"/);
+    assert.doesNotMatch(handlerBody, /timedStep\(\s*"fetch_bookings_and_external_busy"/);
+  });
+
+  test("the four schedule/sync-state queries run in parallel (one Promise.all of four timedSteps), not sequentially", () => {
+    const handlerStart = code.indexOf("export const getCalendarDayView");
+    const promiseAllIdx = code.indexOf("Promise.all([", handlerStart);
+    const block = code.slice(promiseAllIdx, promiseAllIdx + 2200);
+    assert.match(block, /timedStep\("fetch_business_hours"/);
+    assert.match(block, /timedStep\("fetch_business_hour_overrides"/);
+    assert.match(block, /timedStep\("fetch_google_calendar_connection"/);
+    assert.match(block, /timedStep\("fetch_calendar_sync_conflicts"/);
   });
 
   test("resolveOrgContext checks the Supabase error field before falling back to 'No workspace found' — a real query failure must never be misreported as 'no workspace'", () => {

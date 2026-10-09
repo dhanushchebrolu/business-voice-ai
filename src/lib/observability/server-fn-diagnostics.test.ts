@@ -110,6 +110,48 @@ describe("timedStep", () => {
     );
   });
 
+  test("a PGRST205 (table not in PostgREST's schema cache) names the exact table in both the server log and the client-visible message — structure, never patient/row data, so it's safe to surface", async () => {
+    const pgrst205 = Object.assign(
+      new Error("Could not find the table 'public.business_hour_overrides' in the schema cache"),
+      { code: "PGRST205" },
+    );
+    await assert.rejects(
+      () =>
+        timedStep("fetch_business_hour_overrides", "omiqxhuh", "calendar_day_view", async () => {
+          throw pgrst205;
+        }),
+      (err: unknown) => {
+        assert.ok(err instanceof DiagnosedStepError);
+        assert.equal(err.missingTable, "public.business_hour_overrides");
+        assert.match(err.message, /fetch_business_hour_overrides/);
+        assert.match(err.message, /public\.business_hour_overrides/);
+        assert.match(err.message, /PGRST205/);
+        assert.match(err.message, /omiqxhuh/);
+        return true;
+      },
+    );
+    const [, payload] = errorCalls[0] as [string, Record<string, unknown>];
+    assert.equal(payload["missingTable"], "public.business_hour_overrides");
+  });
+
+  test("a non-PGRST205 error never has its message parsed for a table name, even if it happens to contain similar text", async () => {
+    const otherError = Object.assign(
+      new Error("Could not find the table 'public.business_hour_overrides' in the schema cache"),
+      { code: "PGRST116" },
+    );
+    await assert.rejects(
+      () =>
+        timedStep("fetch_business_hour_overrides", "corr-6", "calendar_day_view", async () => {
+          throw otherError;
+        }),
+      (err: unknown) => {
+        assert.ok(err instanceof DiagnosedStepError);
+        assert.equal(err.missingTable, undefined);
+        return true;
+      },
+    );
+  });
+
   test("a step slower than 3s logs a slow-step warning on success, not an error", async () => {
     const result = await timedStep("slow_op", "corr-5", "calendar_day_view", async () => {
       // Simulate elapsed time without actually sleeping 3s in the test.
