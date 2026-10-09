@@ -41,28 +41,29 @@ export class BookingError extends Error {
  * working schedule for that date — full-day closures and date-specific
  * open/close overrides included — using the exact same precedence
  * resolution computeAvailability uses to decide what to OFFER
- * (resolveEffectiveOpenRangesUtc), so a slot can never be approved here by
- * some second, divergent notion of "open" (spec section 5: "the backend
- * must reject... a slot outside the hospital's working schedule... not
- * approved by an applicable daily override"). Called from every active
- * booking entry point below (direct voice/manual booking, payment hold,
- * and reschedule) immediately before the atomic overlap-protected
- * write — fetched fresh every time, never reused from an earlier
- * availability lookup, the same "latest available check" convention this
- * module already uses for the external-calendar busy recheck a few lines
- * below in createBooking.
+ * (resolveEffectiveOpenRangesUtc).
  *
- * This check and the atomic insert are not in the same database
- * transaction (closing that completely would mean moving this same
- * resolution into the create_booking_atomic SQL function itself — a
- * reasonable future hardening step, not done here to avoid a second,
- * SQL-side reimplementation of the precedence rules this function already
- * owns as the single source of truth). The residual race this leaves —
- * staff closing the slot in the exact instant between this check and the
- * atomic insert — is the same class of acknowledged, documented gap as the
- * external-calendar race already accepted in this module; the advisory
- * lock below still makes two concurrent ClickAI bookings for the same slot
- * impossible regardless.
+ * As of 20261009120000_atomic_schedule_validation_and_locking.sql, this is
+ * NO LONGER called from createBooking() or createPaymentRequiredBooking()
+ * below — the staff-closes-a-slot-vs-AI-books-it race that a JS-level
+ * pre-check here could never fully close (a separate database round-trip
+ * from the atomic insert) is now closed by moving the same precedence
+ * resolution INSIDE create_booking_atomic's own transaction
+ * (validate_booking_schedule, under the same per-business advisory lock
+ * every schedule-mutating operation now takes). That SQL-side check is
+ * authoritative for both of those entry points; this JS function would
+ * only ever be a redundant, driftable second implementation for them.
+ *
+ * rescheduleBooking() below does NOT go through create_booking_atomic (it
+ * updates an existing row via its own direct conflict check), so it still
+ * calls this function as a pre-check — reschedule-vs-closure races are a
+ * known, documented, OUT-OF-SCOPE residual gap for this function, carried
+ * over unchanged from before: staff closing the slot in the exact instant
+ * between this check and reschedule's own update can still slip through.
+ * Closing that would mean giving reschedule the same atomic treatment
+ * create_booking_atomic now has — not done here since it wasn't part of
+ * the race this change was scoped to fix (voice/manual/payment-hold
+ * booking CREATION vs. schedule mutation).
  */
 async function assertSlotWithinSchedule(
   supabaseAdmin: Client,
@@ -224,14 +225,20 @@ function intervalsOverlap(aStart: string, aEnd: string, bStart: string, bEnd: st
  * let a customer be told "confirmed" before anything durable backs that
  * claim.
  *
- * Concurrency: the idempotency check, the internal-conflict re-check, and
- * the insert all run inside ONE Postgres transaction via the
- * create_booking_atomic RPC (see its own migration doc comment) —
- * pg_advisory_xact_lock keyed on the calendar connection serializes
- * concurrent attempts long enough for a FULL time-range overlap check
- * (not just an exact-start-time index) to be race-free. Two concurrent
- * requests for overlapping-but-different-start times on the same
- * connection can never both succeed.
+ * Concurrency: the idempotency check, the schedule validation (business
+ * hours, daily overrides, full-day closures — see
+ * validate_booking_schedule), the internal-conflict re-check, and the
+ * insert all run inside ONE Postgres transaction via the
+ * create_booking_atomic RPC (see its own migration doc comments,
+ * 20261009090000 and 20261009120000) — a per-business advisory lock
+ * (acquired before the schedule check) and a per-calendar-connection
+ * advisory lock (acquired before the overlap check) together serialize
+ * concurrent attempts long enough for both checks to be race-free. Two
+ * concurrent requests for overlapping-but-different-start times on the
+ * same connection can never both succeed, and a staff member closing the
+ * slot cannot be bypassed by a booking already in flight — whichever
+ * transaction reaches the business lock first commits or rolls back
+ * before the other can read the schedule/booking state it depends on.
  *
  * That lock only protects against another ClickAI booking on the same
  * connection — it has no visibility into the EXTERNAL calendar (an event
@@ -269,14 +276,6 @@ export async function createBooking(
     if (error) throw error;
     if (existing) return toRecord(existing);
   }
-
-  await assertSlotWithinSchedule(
-    supabaseAdmin,
-    input.businessId,
-    input.timezone,
-    input.startIso,
-    input.endIso,
-  );
 
   const contactId = await resolveContactId(supabaseAdmin, input);
 
@@ -319,6 +318,16 @@ export async function createBooking(
     // of this function.
     if (rpcError.message?.includes("SLOT_NO_LONGER_AVAILABLE") || rpcError.code === "23505") {
       throw new BookingError("That time slot is no longer available.", "SLOT_NO_LONGER_AVAILABLE");
+    }
+    // The RPC's own validate_booking_schedule (inside the same transaction
+    // and lock as the insert above) rejected this — the authoritative
+    // schedule check now that assertSlotWithinSchedule no longer runs for
+    // this entry point. See this function's own doc comment.
+    if (rpcError.message?.includes("SLOT_OUTSIDE_SCHEDULE")) {
+      throw new BookingError(
+        "That time is outside the hospital's working schedule.",
+        "SLOT_OUTSIDE_SCHEDULE",
+      );
     }
     throw rpcError;
   }
@@ -512,11 +521,13 @@ export async function getBooking(
  * booking that resolves to CONFIRMED within the same function call), a
  * payment hold can sit open for several minutes, which widens the
  * double-booking race window significantly. This calls the
- * create_booking_payment_hold Postgres function (see the Phase 4 DB
- * migration's own doc comment for exactly why a JS-level advisory lock
- * cannot provide this guarantee across separate PostgREST calls) so the
- * idempotency check, the advisory lock, the full time-range overlap
- * re-check, and the insert all run inside one database transaction.
+ * create_booking_payment_hold Postgres function, a thin wrapper over
+ * create_booking_atomic (see 20261009090000 and 20261009120000's own doc
+ * comments), so the idempotency check, the per-business schedule
+ * validation, the per-calendar-connection advisory lock, the full
+ * time-range overlap re-check, and the insert all run inside one database
+ * transaction — the same authoritative schedule check createBooking() now
+ * relies on; no separate JS-level pre-check is needed here either.
  */
 export type PaymentHoldRecord = BookingRecord & {
   holdExpiresAt: string | null;
@@ -569,14 +580,6 @@ export async function createPaymentRequiredBooking(
     throw new BookingError("End time must be after start time.", "INVALID_INPUT");
   }
 
-  await assertSlotWithinSchedule(
-    supabaseAdmin,
-    input.businessId,
-    input.timezone,
-    input.startIso,
-    input.endIso,
-  );
-
   const contactId = await resolveContactId(supabaseAdmin, input);
   const holdExpiresAt = new Date(
     Date.now() + (input.holdDurationMinutes ?? DEFAULT_HOLD_DURATION_MINUTES) * 60_000,
@@ -603,6 +606,12 @@ export async function createPaymentRequiredBooking(
   if (error) {
     if (error.message?.includes("SLOT_NO_LONGER_AVAILABLE")) {
       throw new BookingError("That time slot is no longer available.", "SLOT_NO_LONGER_AVAILABLE");
+    }
+    if (error.message?.includes("SLOT_OUTSIDE_SCHEDULE")) {
+      throw new BookingError(
+        "That time is outside the hospital's working schedule.",
+        "SLOT_OUTSIDE_SCHEDULE",
+      );
     }
     throw error;
   }

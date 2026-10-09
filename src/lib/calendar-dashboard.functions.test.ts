@@ -80,19 +80,55 @@ describe("role-based authorization — viewer is read-only", () => {
   });
 });
 
-describe("override writes target the one-row-per-date unique key, never a parallel structure", () => {
-  test("applyDailyOverride upserts on (business_id, override_date) — one row per date, matching the table's own UNIQUE constraint", () => {
-    assert.match(code, /onConflict:\s*"business_id,override_date"/);
+describe("schedule mutations go through the locked RPCs, never a direct table write", () => {
+  test("applyDailyOverride calls apply_business_schedule_override, not a direct .upsert()", () => {
+    const applyHandler = code.slice(
+      code.indexOf("export const applyDailyOverride"),
+      code.indexOf("export const removeDailyOverride"),
+    );
+    assert.match(applyHandler, /\.rpc\(\s*"apply_business_schedule_override"/);
+    assert.doesNotMatch(applyHandler, /\.upsert\(/);
   });
 
-  test("removeDailyOverride deletes by (business_id, override_date), not a soft-delete flag", () => {
-    const removeHandler = code.slice(code.indexOf("export const removeDailyOverride"));
-    assert.match(removeHandler, /\.delete\(\)/);
-    assert.doesNotMatch(removeHandler, /is_full_day_closure:\s*false/);
+  test("removeDailyOverride calls remove_business_schedule_override, not a direct .delete()", () => {
+    const removeHandler = code.slice(
+      code.indexOf("export const removeDailyOverride"),
+      code.indexOf("const resolveConflictInputSchema"),
+    );
+    assert.match(removeHandler, /\.rpc\(\s*"remove_business_schedule_override"/);
+    assert.doesNotMatch(removeHandler, /\.delete\(\)/);
   });
 
-  test("a full-day closure clears any stored sub-interval decisions (intervals become irrelevant once is_full_day_closure is true)", () => {
-    assert.match(code, /intervals:\s*data\.isFullDayClosure\s*\?\s*\[\]\s*:\s*data\.intervals/);
+  test("setWeeklyHours calls set_business_weekly_hours, not a direct .update()", () => {
+    const setHoursHandler = code.slice(
+      code.indexOf("export const setWeeklyHours"),
+      code.indexOf("const overrideIntervalSchema"),
+    );
+    assert.match(setHoursHandler, /\.rpc\(\s*"set_business_weekly_hours"/);
+    assert.doesNotMatch(setHoursHandler, /\.update\(/);
+  });
+
+  test("a full-day closure clears any stored sub-interval decisions sent to the RPC (intervals become irrelevant once is_full_day_closure is true)", () => {
+    assert.match(code, /p_intervals:\s*data\.isFullDayClosure\s*\?\s*\[\]\s*:\s*data\.intervals/);
+  });
+
+  test("applyDailyOverride maps the RPC's active-booking conflict into a clear, non-raw error message", () => {
+    const applyHandler = code.slice(
+      code.indexOf("export const applyDailyOverride"),
+      code.indexOf("export const removeDailyOverride"),
+    );
+    assert.match(applyHandler, /CANNOT_CLOSE_SLOT_WITH_ACTIVE_BOOKING/);
+  });
+
+  test("every new RPC call passes p_organization_id sourced from resolveOrgContext, never a client-supplied field", () => {
+    const rpcCalls =
+      code.match(
+        /\.rpc\(\s*"(apply_business_schedule_override|remove_business_schedule_override|set_business_weekly_hours)"[\s\S]*?\}\)/g,
+      ) ?? [];
+    assert.ok(rpcCalls.length >= 3, "expected all three new RPC call sites");
+    for (const call of rpcCalls) {
+      assert.match(call, /p_organization_id:\s*organizationId/);
+    }
   });
 });
 

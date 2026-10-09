@@ -119,11 +119,12 @@ function fakeProvider(overrides: Partial<CalendarProvider> = {}): CalendarProvid
 /**
  * assertSlotWithinSchedule's two reads (business_hours day row, then
  * business_hour_overrides for the date) — scripted here as "wide open, no
- * override" so fixtures built around BASE_INPUT/PAYMENT_HOLD_INPUT's own
- * 10:30-11:00 IST times never trip a schedule rejection. Spread these two
- * entries immediately before the first scripted call for any test whose
- * input reaches assertSlotWithinSchedule (i.e. every test that isn't
- * short-circuited earlier by an idempotency hit or an INVALID_INPUT throw).
+ * override". Only still needed for rescheduleBooking's own tests below;
+ * createBooking()/createPaymentRequiredBooking() no longer call
+ * assertSlotWithinSchedule at all (schedule validation moved into
+ * create_booking_atomic's own SQL transaction — see
+ * 20261009120000_atomic_schedule_validation_and_locking.sql and
+ * booking-service.server.ts's own doc comments).
  */
 const OPEN_SCHEDULE_CALLS = [
   {
@@ -152,7 +153,6 @@ const BASE_INPUT: CreateBookingInput = {
 describe("createBooking", () => {
   test("happy path: no idempotency key, no conflict -> atomic RPC create, create event, confirm", async () => {
     const { client, calls } = makeFakeSupabase([
-      ...OPEN_SCHEDULE_CALLS,
       { result: { data: { id: "contact-1" }, error: null } }, // contact upsert
       {
         result: {
@@ -235,7 +235,6 @@ describe("createBooking", () => {
 
   test("rejects a slot the atomic RPC's own overlap check finds already booked, before any event is created", async () => {
     const { client, calls } = makeFakeSupabase([
-      ...OPEN_SCHEDULE_CALLS,
       { result: { data: { id: "contact-1" }, error: null } }, // contact upsert
       { result: { data: null, error: { message: "SLOT_NO_LONGER_AVAILABLE" } } }, // RPC conflict
     ]);
@@ -260,7 +259,6 @@ describe("createBooking", () => {
 
   test("rejects a slot the EXTERNAL calendar's own busy periods show as taken, before the atomic RPC is even called", async () => {
     const { client, calls } = makeFakeSupabase([
-      ...OPEN_SCHEDULE_CALLS,
       { result: { data: { id: "contact-1" }, error: null } }, // contact upsert
     ]);
     const provider = fakeProvider({
@@ -293,7 +291,6 @@ describe("createBooking", () => {
 
   test("a duplicate-key DB error from the atomic RPC (should be rare given its own advisory lock, but any other insert path could still hit the exact-start index) is reported as SLOT_NO_LONGER_AVAILABLE, not a raw DB error", async () => {
     const { client } = makeFakeSupabase([
-      ...OPEN_SCHEDULE_CALLS,
       { result: { data: { id: "contact-1" }, error: null } }, // contact upsert
       { result: { data: null, error: { code: "23505", message: "duplicate key" } } }, // RPC races and loses
     ]);
@@ -310,7 +307,6 @@ describe("createBooking", () => {
 
   test("reconciliation: booking is inserted but the Google event fails -> marked CALENDAR_SYNC_FAILED, never silently lost", async () => {
     const { client, calls } = makeFakeSupabase([
-      ...OPEN_SCHEDULE_CALLS,
       { result: { data: { id: "contact-1" }, error: null } }, // contact upsert
       {
         result: {
@@ -355,115 +351,35 @@ describe("createBooking", () => {
  * 5: "the backend must reject... a slot outside the hospital's working
  * schedule... a closed slot or full-day closure... a slot not approved by
  * an applicable daily override" — "client-side validation is
- * insufficient"). BASE_INPUT's own slot (2026-09-25T10:30:00.000Z —
- * 16:00-16:30 IST) is used as the fixed point of reference throughout.
+ * insufficient"). As of
+ * 20261009120000_atomic_schedule_validation_and_locking.sql, this
+ * validation runs INSIDE create_booking_atomic's own transaction
+ * (validate_booking_schedule) — closing the race where a staff member
+ * could close the slot in the window between a separate JS-level check
+ * and the atomic insert. createBooking() itself no longer does its own
+ * schedule check at all; its only remaining job is mapping the RPC's
+ * SLOT_OUTSIDE_SCHEDULE exception to a BookingError, same as it already
+ * does for SLOT_NO_LONGER_AVAILABLE. The precedence rules THEMSELVES
+ * (full-day closure, override open/close, weekly hours) are exercised
+ * against real PostgreSQL in this session's own concurrency verification
+ * (see the final report) and by business_effective_open_ranges's own
+ * migration test — this describe block only verifies the JS-side mapping.
  */
-describe("createBooking — schedule/override rejection (assertSlotWithinSchedule)", () => {
-  test("rejects a slot on a day the recurring weekly schedule marks closed, before touching the contact or the atomic RPC", async () => {
-    const { client, calls } = makeFakeSupabase([
-      { result: { data: { is_closed: true, intervals: [] }, error: null } }, // business_hours: closed
-      { result: { data: null, error: null } }, // no override
-    ]);
-    const provider = fakeProvider();
-    await assert.rejects(
-      () => createBooking(client, provider, BASE_INPUT),
-      (err: unknown) => {
-        assert.ok(err instanceof BookingError);
-        assert.equal(err.code, "SLOT_OUTSIDE_SCHEDULE");
-        return true;
-      },
-    );
-    assert.equal(calls.filter((c) => c.table === "contacts").length, 0);
-    assert.equal(calls.filter((c) => c.method === "rpc").length, 0);
-  });
-
-  test("rejects a slot on an otherwise-open day when a full-day-closure override exists for that date", async () => {
-    const { client, calls } = makeFakeSupabase([
-      ...OPEN_SCHEDULE_CALLS.slice(0, 1), // business_hours: open
-      { result: { data: { is_full_day_closure: true, intervals: [] }, error: null } }, // full-day closure override
-    ]);
-    const provider = fakeProvider();
-    await assert.rejects(
-      () => createBooking(client, provider, BASE_INPUT),
-      (err: unknown) => {
-        assert.ok(err instanceof BookingError);
-        assert.equal(err.code, "SLOT_OUTSIDE_SCHEDULE");
-        return true;
-      },
-    );
-    assert.equal(calls.filter((c) => c.method === "rpc").length, 0);
-  });
-
-  test("rejects a slot the recurring weekly schedule would open, when a date-specific override explicitly closes exactly that slot", async () => {
-    const { client, calls } = makeFakeSupabase([
-      ...OPEN_SCHEDULE_CALLS.slice(0, 1), // business_hours: wide open
-      {
-        result: {
-          data: {
-            is_full_day_closure: false,
-            intervals: [{ start: "16:00", end: "16:30", isOpen: false }], // closes exactly BASE_INPUT's 16:00-16:30 IST slot
-          },
-          error: null,
-        },
-      },
-    ]);
-    const provider = fakeProvider();
-    await assert.rejects(
-      () => createBooking(client, provider, BASE_INPUT),
-      (err: unknown) => {
-        assert.ok(err instanceof BookingError);
-        assert.equal(err.code, "SLOT_OUTSIDE_SCHEDULE");
-        return true;
-      },
-    );
-    assert.equal(calls.filter((c) => c.method === "rpc").length, 0);
-  });
-
-  test("approves a slot the recurring weekly schedule marks closed, when a date-specific override explicitly opens exactly that slot", async () => {
+describe("createBooking — maps the RPC's authoritative schedule rejection", () => {
+  test("SLOT_OUTSIDE_SCHEDULE from create_booking_atomic is mapped to a BookingError with that code, never a raw Postgres error", async () => {
     const { client } = makeFakeSupabase([
-      { result: { data: { is_closed: true, intervals: [] }, error: null } }, // business_hours: closed
-      {
-        result: {
-          data: {
-            is_full_day_closure: false,
-            intervals: [{ start: "16:00", end: "17:00", isOpen: true }], // opens 16:00-17:00 IST, covering BASE_INPUT's slot
-          },
-          error: null,
-        },
-      },
       { result: { data: { id: "contact-1" }, error: null } }, // contact upsert
-      {
-        result: {
-          data: {
-            id: "booking-1",
-            status: "PENDING_CONFIRMATION",
-            start_at: BASE_INPUT.startIso,
-            end_at: BASE_INPUT.endIso,
-            timezone: "Asia/Kolkata",
-            google_event_id: null,
-            contact_id: "contact-1",
-          },
-          error: null,
-        },
-      }, // create_booking_atomic RPC
-      {
-        result: {
-          data: {
-            id: "booking-1",
-            status: "CONFIRMED",
-            start_at: BASE_INPUT.startIso,
-            end_at: BASE_INPUT.endIso,
-            timezone: "Asia/Kolkata",
-            google_event_id: "google-event-1",
-            contact_id: "contact-1",
-          },
-          error: null,
-        },
-      }, // confirm update
+      { result: { data: null, error: { message: "SLOT_OUTSIDE_SCHEDULE" } } }, // RPC: schedule rejection
     ]);
     const provider = fakeProvider();
-    const result = await createBooking(client, provider, BASE_INPUT);
-    assert.equal(result.status, "CONFIRMED");
+    await assert.rejects(
+      () => createBooking(client, provider, BASE_INPUT),
+      (err: unknown) => {
+        assert.ok(err instanceof BookingError);
+        assert.equal(err.code, "SLOT_OUTSIDE_SCHEDULE");
+        return true;
+      },
+    );
   });
 });
 
@@ -781,7 +697,6 @@ const PAYMENT_HOLD_INPUT: CreatePaymentRequiredBookingInput = {
 describe("createPaymentRequiredBooking", () => {
   test("resolves the contact, then calls the atomic RPC, and returns a PENDING_PAYMENT hold", async () => {
     const { client, calls } = makeFakeSupabase([
-      ...OPEN_SCHEDULE_CALLS,
       { result: { data: { id: "contact-1" }, error: null } }, // contact upsert
       {
         result: {
@@ -836,7 +751,6 @@ describe("createPaymentRequiredBooking", () => {
 
   test("maps the RPC's SLOT_NO_LONGER_AVAILABLE exception to a BookingError, never a raw Postgres error", async () => {
     const { client } = makeFakeSupabase([
-      ...OPEN_SCHEDULE_CALLS,
       { result: { data: { id: "contact-1" }, error: null } },
       { result: { data: null, error: { message: "SLOT_NO_LONGER_AVAILABLE" } } },
     ]);
@@ -850,9 +764,23 @@ describe("createPaymentRequiredBooking", () => {
     );
   });
 
+  test("maps the RPC's SLOT_OUTSIDE_SCHEDULE exception (create_booking_payment_hold delegates to create_booking_atomic, same authoritative schedule check) to a BookingError", async () => {
+    const { client } = makeFakeSupabase([
+      { result: { data: { id: "contact-1" }, error: null } },
+      { result: { data: null, error: { message: "SLOT_OUTSIDE_SCHEDULE" } } },
+    ]);
+    await assert.rejects(
+      () => createPaymentRequiredBooking(client, PAYMENT_HOLD_INPUT),
+      (err: unknown) => {
+        assert.ok(err instanceof BookingError);
+        assert.equal(err.code, "SLOT_OUTSIDE_SCHEDULE");
+        return true;
+      },
+    );
+  });
+
   test("propagates an unrelated database error as-is (never silently swallowed)", async () => {
     const { client } = makeFakeSupabase([
-      ...OPEN_SCHEDULE_CALLS,
       { result: { data: { id: "contact-1" }, error: null } },
       { result: { data: null, error: { message: "connection reset" } } },
     ]);

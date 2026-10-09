@@ -3961,6 +3961,55 @@ export type Database = {
           updated_at: string;
         };
       };
+      apply_business_schedule_override: {
+        Args: {
+          p_business_id: string;
+          p_intervals: Json;
+          p_is_full_day_closure: boolean;
+          p_organization_id: string;
+          p_override_date: string;
+          p_reason: string | null;
+        };
+        Returns: {
+          business_id: string;
+          created_at: string;
+          created_by: string | null;
+          id: string;
+          intervals: Json;
+          is_full_day_closure: boolean;
+          organization_id: string;
+          override_date: string;
+          reason: string | null;
+          updated_at: string;
+        };
+      };
+      remove_business_schedule_override: {
+        Args: { p_business_id: string; p_organization_id: string; p_override_date: string };
+        Returns: undefined;
+      };
+      set_business_weekly_hours: {
+        Args: {
+          p_business_id: string;
+          p_day_of_week: number;
+          p_intervals: Json;
+          p_is_closed: boolean;
+          p_organization_id: string;
+        };
+        Returns: undefined;
+      };
+      validate_booking_schedule: {
+        Args: {
+          p_business_id: string;
+          p_end_at: string;
+          p_start_at: string;
+          p_timezone: string;
+        };
+        Returns: undefined;
+      };
+      business_effective_open_ranges: {
+        Args: { p_business_id: string; p_date: string; p_timezone: string };
+        Returns: { range_end: string; range_start: string }[];
+      };
       customer_rate: { Args: { _key: string; _org: string }; Returns: number };
       debit_wallet_for_call: {
         Args: {

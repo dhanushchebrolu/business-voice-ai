@@ -254,6 +254,17 @@ const setWeeklyHoursInputSchema = z.object({
   intervals: z.array(z.object({ start: z.string(), end: z.string() })),
 });
 
+/**
+ * Delegates to set_business_weekly_hours (20261009120000's own doc
+ * comment) rather than a direct .update() — that RPC takes the same
+ * per-business advisory lock create_booking_atomic now takes before its
+ * own schedule validation, so this write can never interleave with an
+ * in-flight booking's validate-then-insert. resolveBusiness() is still
+ * called first purely for the explicit, friendly ownership error; the
+ * RPC's own WHERE...EXISTS ownership check is the actual (belt-and-
+ * suspenders) tenant-safety boundary, same two-layer pattern as the rest
+ * of this codebase's server functions.
+ */
 export const setWeeklyHours = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => setWeeklyHoursInputSchema.parse(input))
   .middleware([requireSupabaseAuth])
@@ -263,11 +274,13 @@ export const setWeeklyHours = createServerFn({ method: "POST" })
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     await resolveBusiness(supabaseAdmin, organizationId, data.businessId);
 
-    const { error } = await supabaseAdmin
-      .from("business_hours")
-      .update({ is_closed: data.isClosed, intervals: data.isClosed ? [] : data.intervals })
-      .eq("business_id", data.businessId)
-      .eq("day_of_week", data.dayOfWeek);
+    const { error } = await supabaseAdmin.rpc("set_business_weekly_hours", {
+      p_organization_id: organizationId,
+      p_business_id: data.businessId,
+      p_day_of_week: data.dayOfWeek,
+      p_is_closed: data.isClosed,
+      p_intervals: data.isClosed ? [] : data.intervals,
+    });
     if (error) throw error;
     return { ok: true };
   });
@@ -296,6 +309,16 @@ const applyOverrideInputSchema = z.object({
  * needing their own merge logic server-side (spec: "reuse existing
  * structures", applied here to the override ROW itself as the one unit of
  * change, matching its own UNIQUE(business_id, override_date) shape).
+ *
+ * Delegates to apply_business_schedule_override (20261009120000's own doc
+ * comment), which takes the same per-business advisory lock
+ * create_booking_atomic takes, so this write and a concurrent booking's
+ * validate-then-insert can never interleave — whichever reaches the lock
+ * first wins outright; the other either sees the new, already-committed
+ * state, or proceeds on the old state before this write can start. The
+ * RPC also rejects (CANNOT_CLOSE_SLOT_WITH_ACTIVE_BOOKING) any attempt to
+ * close a period that already has a confirmed/pending booking — never
+ * silently invalidating it, per the task's own explicit requirement.
  */
 export const applyDailyOverride = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => applyOverrideInputSchema.parse(input))
@@ -306,18 +329,22 @@ export const applyDailyOverride = createServerFn({ method: "POST" })
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const business = await resolveBusiness(supabaseAdmin, organizationId, data.businessId);
 
-    const { error } = await supabaseAdmin.from("business_hour_overrides").upsert(
-      {
-        organization_id: organizationId,
-        business_id: data.businessId,
-        override_date: data.dateIso,
-        is_full_day_closure: data.isFullDayClosure,
-        intervals: data.isFullDayClosure ? [] : data.intervals,
-        reason: data.reason ?? null,
-      },
-      { onConflict: "business_id,override_date" },
-    );
-    if (error) throw error;
+    const { error } = await supabaseAdmin.rpc("apply_business_schedule_override", {
+      p_organization_id: organizationId,
+      p_business_id: data.businessId,
+      p_override_date: data.dateIso,
+      p_is_full_day_closure: data.isFullDayClosure,
+      p_intervals: data.isFullDayClosure ? [] : data.intervals,
+      p_reason: data.reason ?? null,
+    });
+    if (error) {
+      if (error.message?.includes("CANNOT_CLOSE_SLOT_WITH_ACTIVE_BOOKING")) {
+        throw new Error(
+          "This would close a slot that already has an active booking. Cancel or reschedule that booking first.",
+        );
+      }
+      throw error;
+    }
     return { ok: true, timezone: business.timezone };
   });
 
@@ -326,7 +353,17 @@ const removeOverrideInputSchema = z.object({
   dateIso: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Expected YYYY-MM-DD"),
 });
 
-/** Deletes the override row — restores the recurring weekly schedule for that date with no other side effect (there is deliberately no soft-delete; see the migration's own doc comment). */
+/**
+ * Deletes the override row — restores the recurring weekly schedule for
+ * that date with no other side effect (there is deliberately no
+ * soft-delete; see the migration's own doc comment). Delegates to
+ * remove_business_schedule_override, which takes the same per-business
+ * lock as every other schedule-mutating operation — removal can never
+ * silently invalidate a booking (it only ever widens what's open, and an
+ * existing booking's own protection comes from create_booking_atomic's
+ * overlap check, not from the override), so no conflict check is needed
+ * here, only the lock for coordination.
+ */
 export const removeDailyOverride = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => removeOverrideInputSchema.parse(input))
   .middleware([requireSupabaseAuth])
@@ -336,11 +373,11 @@ export const removeDailyOverride = createServerFn({ method: "POST" })
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     await resolveBusiness(supabaseAdmin, organizationId, data.businessId);
 
-    const { error } = await supabaseAdmin
-      .from("business_hour_overrides")
-      .delete()
-      .eq("business_id", data.businessId)
-      .eq("override_date", data.dateIso);
+    const { error } = await supabaseAdmin.rpc("remove_business_schedule_override", {
+      p_organization_id: organizationId,
+      p_business_id: data.businessId,
+      p_override_date: data.dateIso,
+    });
     if (error) throw error;
     return { ok: true };
   });
