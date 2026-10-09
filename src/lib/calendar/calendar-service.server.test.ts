@@ -165,3 +165,43 @@ describe("computeAvailability — service duration determines slot length", () =
     }
   });
 });
+
+/**
+ * A business break (e.g. a 13:00-14:00 lunch break) is modeled as a GAP
+ * between two separate business_hours intervals on the same day — never a
+ * busy period, and never a special case computeAvailability needs its own
+ * branch for: candidate slots are generated independently per interval
+ * (see the `for (const interval of day.intervals)` loop), so a time that
+ * falls outside every interval is never offered, by construction.
+ */
+describe("computeAvailability — business breaks (a gap between two business_hours intervals)", () => {
+  test("no slots are ever generated during the gap between a morning and an afternoon interval", () => {
+    const slots = computeAvailability({
+      ...BASE,
+      dateIso: "2026-09-25",
+      timezone: "Asia/Kolkata",
+      businessHours: [
+        {
+          dayOfWeek: FRIDAY,
+          isClosed: false,
+          intervals: [
+            { start: "09:00", end: "13:00" }, // morning
+            { start: "14:00", end: "18:00" }, // afternoon, after the lunch break
+          ],
+        },
+      ],
+    });
+    const breakStartUtc = new Date("2026-09-25T07:30:00.000Z"); // 13:00 IST
+    const breakEndUtc = new Date("2026-09-25T08:30:00.000Z"); // 14:00 IST
+    for (const slot of slots) {
+      const start = new Date(slot.start);
+      assert.ok(
+        start < breakStartUtc || start >= breakEndUtc,
+        `slot ${slot.start} falls inside the 13:00-14:00 IST break`,
+      );
+    }
+    // Sanity: slots on both sides of the break are still offered.
+    assert.ok(slots.some((s) => s.start === "2026-09-25T03:30:00.000Z")); // 09:00 IST
+    assert.ok(slots.some((s) => s.start === "2026-09-25T08:30:00.000Z")); // 14:00 IST
+  });
+});

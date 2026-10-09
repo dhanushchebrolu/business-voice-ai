@@ -3813,3 +3813,77 @@ describe("37. Regression: the exact real production call sequence (Round E)", ()
     await terminateRuntimeSession(callId, "test cleanup");
   });
 });
+
+/**
+ * Round F audit finding: Round E's generation checks only ever suppressed
+ * SPEECH — the real book_appointment side effect still ran unconditionally
+ * once dispatched. "Caller: Book 3 PM. Caller immediately: Wait, don't
+ * book." must never result in a real appointment just because the
+ * availability round trip for the first utterance happened to start
+ * first. attemptBooking now checks staleness immediately before the real
+ * book_appointment call (not just before speaking its result) and skips
+ * the side effect entirely when already stale at that point.
+ */
+describe("38. Side-effect staleness (Round F — a booking side effect, not just its speech, must be suppressed once stale)", () => {
+  test("caller interruption while the availability check is still in flight prevents book_appointment from ever being called", async (t) => {
+    t.mock.timers.enable();
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    const now = new Date();
+    const tomorrow = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1),
+    );
+    const tomorrowYmd = tomorrow.toISOString().slice(0, 10);
+    const startIso = `${tomorrowYmd}T15:00:00.000Z`;
+    const endIso = `${tomorrowYmd}T15:30:00.000Z`;
+
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({ success: true, data: { slots: [{ start: startIso, end: endIso }] } }),
+    });
+    // Deliberately slow — the window this test needs open long enough for
+    // a barge-in to land before attemptBooking's own staleness check.
+    h.tools.setNextDelay("check_calendar_availability", 5_000);
+    h.tools.setNextResult("book_appointment", {
+      content: JSON.stringify({ success: true, data: { id: "should-never-be-created", status: "CONFIRMED" } }),
+    });
+    h.llm.setNextReply(
+      'Great, let me get that booked.\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":"9999999999","preferred_date":null,"preferred_time":null,"ready_to_book":true}>>>',
+    );
+    h.llm.setDelay(0);
+
+    h.stt.speakUtterance(
+      "Book an appointment tomorrow at 3 PM for teeth cleaning, I'm Dhanush, phone 9999999999, please confirm",
+    );
+    // Enough hops for getReply to resolve and attemptBooking to reach (and
+    // start awaiting) the slow check_calendar_availability call — not
+    // enough for that 5s delay to have elapsed yet.
+    await drain(40);
+
+    // Caller barges in WHILE the availability check is still pending —
+    // exactly the "book it" / immediately "wait, don't" shape.
+    h.stt.emit({ type: "speech_start" });
+    h.stt.emit({ type: "final_transcript", text: "Wait, don't book that", language: "en-IN" });
+    await drain(16);
+
+    // Let the slow availability check finally resolve.
+    t.mock.timers.tick(5_000);
+    await drain(24);
+
+    const bookingCall = h.tools.calls.find((c) => c.name === "book_appointment");
+    assert.equal(
+      bookingCall,
+      undefined,
+      "book_appointment must never be called once the turn went stale before it was dispatched",
+    );
+    const availabilityCall = h.tools.calls.find((c) => c.name === "check_calendar_availability");
+    assert.ok(
+      availabilityCall,
+      "the already-in-flight read-only availability check is allowed to finish (it has no side effect)",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});

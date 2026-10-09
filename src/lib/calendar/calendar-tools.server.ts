@@ -26,6 +26,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { computeAvailability, type AvailabilitySlot } from "./calendar-service.server.ts";
+import { businessDayUtcBounds } from "./timezone.ts";
 import {
   createBooking,
   rescheduleBooking,
@@ -177,8 +178,19 @@ export async function check_calendar_availability(
       ctx.connectionId,
     );
 
-    const dayStart = `${input.dateIso}T00:00:00.000Z`;
-    const dayEnd = `${input.dateIso}T23:59:59.999Z`;
+    // Timezone-correct business-day boundary (production bug: the naive
+    // `${dateIso}T00:00:00.000Z`..`T23:59:59.999Z` window used here before
+    // is only correct when the business timezone is literally UTC — for
+    // a timezone ahead of UTC it starts hours after the business day
+    // actually begins locally, and for one behind UTC it misses the
+    // business's own late-evening hours, which roll into the next UTC
+    // calendar date. See businessDayUtcBounds's own doc comment).
+    const { start: dayStartUtc, end: dayEndUtc } = businessDayUtcBounds(
+      input.dateIso,
+      ctx.timezone,
+    );
+    const dayStart = dayStartUtc.toISOString();
+    const dayEnd = dayEndUtc.toISOString();
     const [googleBusyPeriods, existingBookingsRes] = await Promise.all([
       provider.getBusyPeriods({ calendarId, timeMinIso: dayStart, timeMaxIso: dayEnd }),
       supabaseAdmin
@@ -187,7 +199,7 @@ export async function check_calendar_availability(
         .eq("calendar_connection_id", ctx.connectionId)
         .not("status", "in", "(CANCELLED,NO_SHOW)")
         .gte("start_at", dayStart)
-        .lte("start_at", dayEnd),
+        .lt("start_at", dayEnd),
     ]);
     if (existingBookingsRes.error) throw existingBookingsRes.error;
 

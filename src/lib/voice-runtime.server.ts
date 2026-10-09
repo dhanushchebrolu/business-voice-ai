@@ -2571,6 +2571,7 @@ async function attemptAvailabilityCheck(
  */
 async function attemptBooking(
   session: Session,
+  generation: number,
 ): Promise<{ spoken: string; state: AppointmentState }> {
   const state = session.appointmentState;
   const executeTool = session.deps.executeTool;
@@ -2706,6 +2707,26 @@ async function attemptBooking(
       },
     };
   }
+  // Checked HERE — immediately before committing to the real
+  // book_appointment side effect — not just before speaking the result
+  // afterward. A stale generation check that only suppresses SPEECH is
+  // not sufficient once a turn has actually performed a booking side
+  // effect: a caller who said "book it" and then immediately "wait,
+  // don't" must never end up with a real appointment just because this
+  // turn's availability round trip happened to start first. This is the
+  // one point that can still prevent the side effect itself — once the
+  // real executeTool("book_appointment", ...) call below has actually
+  // been dispatched, there is no cancellation mechanism in this codebase
+  // (see handleUserUtterance's own comment on this honest limitation),
+  // so a caller who interrupts AFTER that point cannot stop the booking
+  // from being created; that residual window is a genuine,
+  // acknowledged distributed-system limitation, not something this check
+  // claims to close.
+  if (session.generation !== generation) {
+    log("booking_attempt_skipped_stale", session);
+    return { spoken: "", state };
+  }
+
   const startIso = targetSlot.start;
   const endIso = targetSlot.end;
   // The REAL time being booked — for an exact-time request this equals
@@ -2841,7 +2862,7 @@ async function dispatchDeterministicTool(
     if (!immediateAckAlreadySpoken && stillCurrent()) {
       await speak(session, "Give me just a moment to confirm that.");
     }
-    const outcome = await attemptBooking(session);
+    const outcome = await attemptBooking(session, generation);
     session.appointmentState = outcome.state;
     return stillCurrent() ? outcome.spoken : null;
   }

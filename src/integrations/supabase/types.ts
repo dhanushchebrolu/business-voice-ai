@@ -3640,6 +3640,53 @@ export type Database = {
         Args: { p_email: string | null; p_user_id: string };
         Returns: boolean;
       };
+      create_booking_atomic: {
+        Args: {
+          p_agent_config_id: string | null;
+          p_business_id: string;
+          p_calendar_connection_id: string | null;
+          p_call_id: string | null;
+          p_contact_id: string | null;
+          p_customer_email: string | null;
+          p_customer_name: string | null;
+          p_customer_phone: string | null;
+          p_end_at: string;
+          p_hold_expires_at: string | null;
+          p_idempotency_key: string | null;
+          p_notes: string | null;
+          p_organization_id: string;
+          p_service_id: string | null;
+          p_source: string;
+          p_start_at: string;
+          p_status: string;
+          p_timezone: string;
+        };
+        Returns: {
+          agent_config_id: string | null;
+          business_id: string;
+          calendar_connection_id: string | null;
+          call_id: string | null;
+          contact_id: string | null;
+          created_at: string;
+          customer_email: string | null;
+          customer_name: string | null;
+          customer_phone: string | null;
+          end_at: string;
+          google_event_id: string | null;
+          hold_expires_at: string | null;
+          id: string;
+          idempotency_key: string | null;
+          metadata: Json;
+          notes: string | null;
+          organization_id: string;
+          service_id: string | null;
+          source: string;
+          start_at: string;
+          status: string;
+          timezone: string;
+          updated_at: string;
+        };
+      };
       create_booking_payment_hold: {
         Args: {
           p_agent_config_id: string | null;

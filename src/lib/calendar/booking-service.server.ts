@@ -115,12 +115,41 @@ export interface CreateBookingInput {
   businessName: string; // for the Google event description
 }
 
+/** Proper interval overlap — see calendar-service.server.ts's own `overlaps` for why this, not an exact-start comparison. */
+function intervalsOverlap(aStart: string, aEnd: string, bStart: string, bEnd: string): boolean {
+  return (
+    new Date(aStart).getTime() < new Date(bEnd).getTime() &&
+    new Date(bStart).getTime() < new Date(aEnd).getTime()
+  );
+}
+
 /**
- * Creates a booking. Sequence exactly matches spec section 21: insert the
- * booking row first (PENDING_CONFIRMATION), then create the Google event,
- * then mark CONFIRMED only once the event exists — never the reverse,
- * which would let a customer be told "confirmed" before anything durable
- * backs that claim.
+ * Creates a booking. Sequence: insert the booking row first
+ * (PENDING_CONFIRMATION), then create the Google event, then mark
+ * CONFIRMED only once the event exists — never the reverse, which would
+ * let a customer be told "confirmed" before anything durable backs that
+ * claim.
+ *
+ * Concurrency: the idempotency check, the internal-conflict re-check, and
+ * the insert all run inside ONE Postgres transaction via the
+ * create_booking_atomic RPC (see its own migration doc comment) —
+ * pg_advisory_xact_lock keyed on the calendar connection serializes
+ * concurrent attempts long enough for a FULL time-range overlap check
+ * (not just an exact-start-time index) to be race-free. Two concurrent
+ * requests for overlapping-but-different-start times on the same
+ * connection can never both succeed.
+ *
+ * That lock only protects against another ClickAI booking on the same
+ * connection — it has no visibility into the EXTERNAL calendar (an event
+ * created directly in Google Calendar, or by another integration, between
+ * the caller's last availability check and now). Google's Events.insert
+ * API has no "reject if overlapping" option (a calendar is not a
+ * resource-scheduling system), so the busy-period recheck immediately
+ * below is the only available protection for that case — and it still
+ * leaves a genuine, acknowledged residual race in the instant between
+ * that recheck and the createEvent call a few lines later: closing that
+ * completely would require Google itself to offer an atomic
+ * check-and-create primitive, which it does not.
  */
 export async function createBooking(
   supabaseAdmin: Client,
@@ -131,8 +160,11 @@ export async function createBooking(
     throw new BookingError("End time must be after start time.", "INVALID_INPUT");
   }
 
-  // Idempotent creation: a retried request with the same key returns the
-  // existing booking instead of creating a duplicate Google event.
+  // Cheap early-out for the common "retried after already succeeding" case
+  // — avoids the external busy-period fetch and contact upsert below for
+  // a request we already know is done. The RPC's own idempotency check
+  // (inside the same lock) remains the single source of truth; this is
+  // purely an optimization, not a correctness requirement.
   if (input.idempotencyKey) {
     const { data: existing, error } = await supabaseAdmin
       .from("bookings")
@@ -144,55 +176,57 @@ export async function createBooking(
     if (existing) return toRecord(existing);
   }
 
-  // Re-check availability immediately before insert (spec section 22) —
-  // the caller already ran computeAvailability once to present slots to
-  // the customer, but time has passed since then, so re-verify against
-  // the current state of this exact calendar connection.
-  const { data: conflicting, error: conflictError } = await supabaseAdmin
-    .from("bookings")
-    .select("id")
-    .eq("calendar_connection_id", input.calendarConnectionId)
-    .not("status", "in", "(CANCELLED,NO_SHOW)")
-    .lt("start_at", input.endIso)
-    .gt("end_at", input.startIso)
-    .limit(1);
-  if (conflictError) throw conflictError;
-  if (conflicting && conflicting.length > 0) {
+  const contactId = await resolveContactId(supabaseAdmin, input);
+
+  // External-calendar race check (see this function's own doc comment) —
+  // fetched fresh here, never reused from an earlier availability check.
+  const externalBusy = await provider.getBusyPeriods({
+    calendarId: input.calendarId,
+    timeMinIso: input.startIso,
+    timeMaxIso: input.endIso,
+  });
+  if (externalBusy.some((b) => intervalsOverlap(b.start, b.end, input.startIso, input.endIso))) {
     throw new BookingError("That time slot is no longer available.", "SLOT_NO_LONGER_AVAILABLE");
   }
 
-  const contactId = await resolveContactId(supabaseAdmin, input);
-
-  const { data: booking, error: insertError } = await supabaseAdmin
-    .from("bookings")
-    .insert({
-      organization_id: input.organizationId,
-      business_id: input.businessId,
-      calendar_connection_id: input.calendarConnectionId,
-      service_id: input.serviceId ?? null,
-      agent_config_id: input.agentConfigId ?? null,
-      contact_id: contactId,
-      status: "PENDING_CONFIRMATION",
-      start_at: input.startIso,
-      end_at: input.endIso,
-      timezone: input.timezone,
-      customer_name: input.customerName ?? null,
-      customer_phone: input.customerPhone ?? null,
-      customer_email: input.customerEmail ?? null,
-      source: input.source,
-      idempotency_key: input.idempotencyKey ?? null,
-      notes: input.notes ?? null,
-    })
-    .select("id, status, start_at, end_at, timezone, google_event_id, contact_id")
-    .single();
-  if (insertError) {
+  const { data: bookingRow, error: rpcError } = await supabaseAdmin.rpc("create_booking_atomic", {
+    p_organization_id: input.organizationId,
+    p_business_id: input.businessId,
+    p_calendar_connection_id: input.calendarConnectionId,
+    p_service_id: input.serviceId ?? null,
+    p_agent_config_id: input.agentConfigId ?? null,
+    p_contact_id: contactId,
+    p_start_at: input.startIso,
+    p_end_at: input.endIso,
+    p_timezone: input.timezone,
+    p_customer_name: input.customerName ?? null,
+    p_customer_phone: input.customerPhone ?? null,
+    p_customer_email: input.customerEmail ?? null,
+    p_source: input.source,
+    p_idempotency_key: input.idempotencyKey ?? null,
+    p_status: "PENDING_CONFIRMATION",
+    p_hold_expires_at: null,
+    p_call_id: null,
+    p_notes: input.notes ?? null,
+  });
+  if (rpcError) {
     // The DB-level exact-start-time unique index (idx_bookings_no_exact_start_clash)
-    // is the last line of defense against the race the application-level
-    // re-check above narrows but cannot fully close without btree_gist.
-    if (insertError.code === "23505") {
+    // is a secondary backstop for any insert path that bypasses this RPC
+    // entirely (e.g. a direct admin-dashboard write) — the RPC's own
+    // advisory-lock overlap check above is what actually protects callers
+    // of this function.
+    if (rpcError.message?.includes("SLOT_NO_LONGER_AVAILABLE") || rpcError.code === "23505") {
       throw new BookingError("That time slot is no longer available.", "SLOT_NO_LONGER_AVAILABLE");
     }
-    throw insertError;
+    throw rpcError;
+  }
+  const booking = bookingRow;
+  // The RPC's own idempotency check found an existing row (possibly
+  // already CONFIRMED, CALENDAR_SYNC_FAILED, etc. from an earlier,
+  // successful call with this same key) — already resolved, same
+  // early-return shape as the pre-check above.
+  if (booking.status !== "PENDING_CONFIRMATION") {
+    return toRecord(booking);
   }
 
   const title = `Appointment - ${input.customerName ?? "Customer"}`;

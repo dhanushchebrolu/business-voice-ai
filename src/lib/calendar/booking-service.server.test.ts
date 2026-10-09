@@ -131,9 +131,8 @@ const BASE_INPUT: CreateBookingInput = {
 };
 
 describe("createBooking", () => {
-  test("happy path: no idempotency key, no conflict -> insert, create event, confirm", async () => {
+  test("happy path: no idempotency key, no conflict -> atomic RPC create, create event, confirm", async () => {
     const { client, calls } = makeFakeSupabase([
-      { result: { data: null, error: null } }, // conflict check
       { result: { data: { id: "contact-1" }, error: null } }, // contact upsert
       {
         result: {
@@ -148,7 +147,7 @@ describe("createBooking", () => {
           },
           error: null,
         },
-      }, // insert
+      }, // create_booking_atomic RPC
       {
         result: {
           data: {
@@ -170,9 +169,14 @@ describe("createBooking", () => {
     assert.equal(result.status, "CONFIRMED");
     assert.equal(result.googleEventId, "google-event-1");
 
-    const insertCall = calls.find((c) => c.method === "insert" && c.table === "bookings");
-    const payload = insertCall!.args[0] as Record<string, unknown>;
-    assert.equal(payload["status"], "PENDING_CONFIRMATION");
+    const rpcCall = calls.find((c) => c.table === "create_booking_atomic" && c.method === "rpc");
+    const payload = rpcCall!.args[0] as Record<string, unknown>;
+    assert.equal(payload["p_status"], "PENDING_CONFIRMATION");
+    assert.equal(
+      calls.filter((c) => c.table === "bookings" && c.method === "insert").length,
+      0,
+      "the direct .insert() path must no longer be used — creation goes through the atomic RPC",
+    );
   });
 
   test("idempotent retry: an existing booking with the same key is returned, no new insert/event", async () => {
@@ -209,11 +213,18 @@ describe("createBooking", () => {
     assert.equal(calls.filter((c) => c.table === "bookings" && c.method === "insert").length, 0);
   });
 
-  test("rejects a slot that a conflict check finds already booked, before any insert", async () => {
+  test("rejects a slot the atomic RPC's own overlap check finds already booked, before any event is created", async () => {
     const { client, calls } = makeFakeSupabase([
-      { result: { data: [{ id: "other-booking" }], error: null } },
+      { result: { data: { id: "contact-1" }, error: null } }, // contact upsert
+      { result: { data: null, error: { message: "SLOT_NO_LONGER_AVAILABLE" } } }, // RPC conflict
     ]);
-    const provider = fakeProvider();
+    let eventCreated = false;
+    const provider = fakeProvider({
+      createEvent: async () => {
+        eventCreated = true;
+        throw new Error("must not be called");
+      },
+    });
     await assert.rejects(
       () => createBooking(client, provider, BASE_INPUT),
       (err: unknown) => {
@@ -222,7 +233,30 @@ describe("createBooking", () => {
         return true;
       },
     );
+    assert.equal(eventCreated, false);
     assert.equal(calls.filter((c) => c.table === "bookings" && c.method === "insert").length, 0);
+  });
+
+  test("rejects a slot the EXTERNAL calendar's own busy periods show as taken, before the atomic RPC is even called", async () => {
+    const { client, calls } = makeFakeSupabase([
+      { result: { data: { id: "contact-1" }, error: null } }, // contact upsert
+    ]);
+    const provider = fakeProvider({
+      getBusyPeriods: async () => [{ start: BASE_INPUT.startIso, end: BASE_INPUT.endIso }],
+    });
+    await assert.rejects(
+      () => createBooking(client, provider, BASE_INPUT),
+      (err: unknown) => {
+        assert.ok(err instanceof BookingError);
+        assert.equal(err.code, "SLOT_NO_LONGER_AVAILABLE");
+        return true;
+      },
+    );
+    assert.equal(
+      calls.filter((c) => c.method === "rpc").length,
+      0,
+      "an external conflict is caught before the atomic RPC is ever called",
+    );
   });
 
   test("rejects end time before or equal to start time without touching the database", async () => {
@@ -235,11 +269,10 @@ describe("createBooking", () => {
     assert.equal(calls.length, 0);
   });
 
-  test("a duplicate-key DB error (exact-start-time race) is reported as SLOT_NO_LONGER_AVAILABLE, not a raw DB error", async () => {
+  test("a duplicate-key DB error from the atomic RPC (should be rare given its own advisory lock, but any other insert path could still hit the exact-start index) is reported as SLOT_NO_LONGER_AVAILABLE, not a raw DB error", async () => {
     const { client } = makeFakeSupabase([
-      { result: { data: null, error: null } }, // conflict check passes
       { result: { data: { id: "contact-1" }, error: null } }, // contact upsert
-      { result: { data: null, error: { code: "23505", message: "duplicate key" } } }, // insert races and loses
+      { result: { data: null, error: { code: "23505", message: "duplicate key" } } }, // RPC races and loses
     ]);
     const provider = fakeProvider();
     await assert.rejects(
@@ -254,7 +287,6 @@ describe("createBooking", () => {
 
   test("reconciliation: booking is inserted but the Google event fails -> marked CALENDAR_SYNC_FAILED, never silently lost", async () => {
     const { client, calls } = makeFakeSupabase([
-      { result: { data: null, error: null } }, // conflict check
       { result: { data: { id: "contact-1" }, error: null } }, // contact upsert
       {
         result: {
@@ -269,7 +301,7 @@ describe("createBooking", () => {
           },
           error: null,
         },
-      }, // insert
+      }, // create_booking_atomic RPC
       { result: { error: null } }, // reconciliation update (no .single() chained on this path in the real code — see below)
     ]);
     const provider = fakeProvider({

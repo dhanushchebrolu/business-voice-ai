@@ -60,3 +60,30 @@ export function dayOfWeekInTimezone(dateIso: string, timeZone: string): number {
   const map: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
   return map[weekday] ?? 0;
 }
+
+/**
+ * [dayStartUtc, dayEndUtc) for the business's own calendar day in its own
+ * timezone — fixes the production gap where callers fetched external
+ * busy periods / internal bookings using a naive `${dateIso}T00:00:00.000Z`
+ * .. `T23:59:59.999Z` window (correct ONLY when the business timezone is
+ * literally UTC). For a timezone ahead of UTC (e.g. Asia/Kolkata, +5:30),
+ * that naive window starts several hours AFTER the business day actually
+ * begins locally, missing any real conflict in the business's own early
+ * morning; for a timezone behind UTC (the Americas), the business's late
+ * evening hours roll into the NEXT UTC calendar date and are missed at the
+ * other end. Returned as exclusive-end Date instants so a caller can pass
+ * them straight to a free/busy query or compare directly, mirroring
+ * zonedWallTimeToUtc's own Date-returning convention.
+ */
+export function businessDayUtcBounds(
+  dateIso: string,
+  timeZone: string,
+): { start: Date; end: Date } {
+  const [year, month, day] = dateIso.split("-").map(Number) as [number, number, number];
+  const nextDay = new Date(Date.UTC(year, month - 1, day + 1));
+  const nextDateIso = nextDay.toISOString().slice(0, 10);
+  return {
+    start: zonedWallTimeToUtc(dateIso, "00:00", timeZone),
+    end: zonedWallTimeToUtc(nextDateIso, "00:00", timeZone),
+  };
+}
