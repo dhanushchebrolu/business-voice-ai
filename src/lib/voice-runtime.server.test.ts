@@ -13,6 +13,7 @@ import {
   parseApptStateMarker,
   parseCallerIntentFromText,
   matchService,
+  matchServiceInText,
   mergeAppointmentState,
   emptyAppointmentState,
   appointmentReadyForAvailabilityCheck,
@@ -544,6 +545,68 @@ describe("matchService — resolves the caller's requested service to its config
 });
 
 /**
+ * Production incident (Round E): "General checkup, and let me know if that
+ * slot is free or not." dispatched an early availability check with
+ * AppointmentState.service still null, silently defaulting to a 30-minute
+ * slot regardless of what the business actually configured for a general
+ * checkup — because nothing captured the service name from the caller's
+ * own text before tryEarlyDeterministicDispatch ran (no marker had been
+ * consulted yet). matchServiceInText is the REVERSE lookup direction from
+ * matchService (raw text -> configured name, not known name -> row) that
+ * fixes this; tested directly here, same reasoning as matchService's own
+ * suite above.
+ */
+describe("matchServiceInText — captures a configured service's name directly from the caller's own turn text", () => {
+  const rows = [
+    { id: "svc-15", name: "Quick Consultation", duration_minutes: 15 },
+    { id: "svc-30", name: "General Checkup", duration_minutes: 30 },
+    { id: "svc-45", name: "Deep Cleaning & Polish", duration_minutes: 45 },
+    { id: "svc-60", name: "Cleaning", duration_minutes: 60 },
+  ];
+
+  test('the exact real-incident phrase: "General checkup, and let me know if that slot is free or not." matches "General Checkup"', () => {
+    const result = matchServiceInText(
+      rows,
+      "General checkup, and let me know if that slot is free or not.",
+    );
+    assert.equal(result, "General Checkup");
+  });
+
+  test("matching is case-insensitive", () => {
+    assert.equal(
+      matchServiceInText(rows, "I'd like a quick consultation please"),
+      "Quick Consultation",
+    );
+  });
+
+  test("prefers the LONGEST matching configured name, so a short name doesn't shadow a more specific one also present", () => {
+    // Both "Cleaning" and "Deep Cleaning & Polish" are substrings this
+    // text could match — the longer, more specific one must win.
+    const result = matchServiceInText(rows, "I'd like the deep cleaning & polish service");
+    assert.equal(result, "Deep Cleaning & Polish");
+  });
+
+  test("a plain mention of the shorter name alone still matches it", () => {
+    assert.equal(matchServiceInText(rows, "Just a cleaning please"), "Cleaning");
+  });
+
+  test("no configured service name appears anywhere in the text: returns null, never guesses", () => {
+    assert.equal(matchServiceInText(rows, "What time do you close?"), null);
+  });
+
+  test("an empty services list always returns null", () => {
+    assert.equal(matchServiceInText([], "General checkup please"), null);
+  });
+
+  test("a row with an empty/whitespace-only name is skipped rather than matching everything", () => {
+    assert.equal(
+      matchServiceInText([{ id: "svc-x", name: "   ", duration_minutes: 30 }], "anything at all"),
+      null,
+    );
+  });
+});
+
+/**
  * Production incident (round 2 of the appointment reliability fixes): an
  * explicit "tomorrow at 3 PM" / "Friday at 4:30" the caller actually said
  * must reach AppointmentState even when the model's own marker leaves
@@ -659,6 +722,41 @@ describe("mergeAppointmentState — extracted date/time is a backstop, never an 
     };
     const result = mergeAppointmentState(current, null);
     assert.deepEqual(result, current);
+  });
+
+  /**
+   * Item 2 (Round E): matchServiceInText's result is fed into
+   * mergeAppointmentState's `extracted.service` using the SAME
+   * marker-wins-fills-gap priority as date/time (not phone/email's
+   * sticky-wins priority) — see mergeAppointmentState's own doc comment
+   * for why.
+   */
+  describe("mergeAppointmentState — extracted.service follows the SAME marker-wins-fills-gap priority as date/time", () => {
+    test("extraction fills in service when the marker proposes none (undefined/absent)", () => {
+      const result = mergeAppointmentState(emptyAppointmentState(), null, {
+        service: "General Checkup",
+      });
+      assert.equal(result.service, "General Checkup");
+    });
+
+    test("a marker-proposed service is NEVER overridden by extraction, even when extraction found a different name", () => {
+      const result = mergeAppointmentState(
+        emptyAppointmentState(),
+        { service: "Teeth Cleaning" },
+        { service: "General Checkup" },
+      );
+      assert.equal(result.service, "Teeth Cleaning", "the marker's own value must win");
+    });
+
+    test("a service captured on a PREVIOUS turn survives a later turn with no new extraction (sticky current)", () => {
+      const afterTurn1 = mergeAppointmentState(emptyAppointmentState(), null, {
+        service: "General Checkup",
+      });
+      assert.equal(afterTurn1.service, "General Checkup");
+
+      const afterTurn2 = mergeAppointmentState(afterTurn1, { preferredTime: "15:00" });
+      assert.equal(afterTurn2.service, "General Checkup", "must not be nulled out");
+    });
   });
 
   /**

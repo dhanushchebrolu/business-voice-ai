@@ -60,7 +60,7 @@ function baseInput(
 }
 
 /** Flushes pending microtask chains (no real I/O in this harness, so a handful of Promise.resolve() hops is always enough — never a real delay). */
-async function drain(hops = 8) {
+async function drain(hops = 14) {
   for (let i = 0; i < hops; i++) await Promise.resolve();
 }
 
@@ -1472,21 +1472,46 @@ describe("26. Calendar availability check (production incident: the agent went s
     await drain(24);
     makeTtsFlushCatchUp(h.tts)();
 
-    h.llm.setNextReply("And your name?");
+    // "Can you check if that's available" now matches
+    // AVAILABILITY_IMPERATIVE_PATTERN (item 1's broadened detection) even
+    // with no "?" — and with preferredDate already sticky-known from the
+    // turn above, this is now fully decidable by tryEarlyDeterministicDispatch
+    // without ever asking the LLM: the strongest possible proof that the
+    // caller is "not asked again" for a date/time already confirmed is
+    // that the runtime answers the calendar question directly, using the
+    // EXACT sticky date/time from the earlier turn, never a fresh LLM
+    // turn that could re-ask for it.
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: { slots: [{ start: BOOKING_START_ISO, end: "2026-10-08T15:30:00.000Z" }] },
+      }),
+    });
     h.stt.emit({
       type: "final_transcript",
       text: "Can you check if that's available",
       language: "en-IN",
     });
-    await drain();
+    await drain(24);
 
-    const secondTurnMessages = h.llm.calls[1] ?? [];
-    const knownStateMessage = secondTurnMessages.find(
-      (m) => m.role === "system" && m.content.includes("CURRENT APPOINTMENT STATE"),
+    const availabilityCall = h.tools.calls.find((c) => c.name === "check_calendar_availability");
+    assert.ok(availabilityCall, "the real check_calendar_availability tool must be invoked");
+    assert.equal(
+      availabilityCall?.input["dateIso"],
+      "2026-10-08",
+      "the sticky date from the earlier turn is reused, never re-asked for",
     );
-    assert.ok(knownStateMessage, "expected the known-state system message");
-    assert.match(knownStateMessage.content, /2026-10-08/);
-    assert.match(knownStateMessage.content, /15:00/);
+    // The ONLY LLM call this turn makes (if any) is composeHonestBookingReply's
+    // own narrow phrasing round trip over the REAL tool result — never a
+    // fresh full-context conversational turn fed this turn's own raw
+    // caller text (which is what a normal getReply call, and any re-ask
+    // of the date/time, would always include).
+    for (const call of h.llm.calls.slice(1)) {
+      assert.ok(
+        !call.some((m) => m.content === "Can you check if that's available"),
+        "no fresh conversational LLM turn — this turn must stay fully deterministic",
+      );
+    }
 
     await terminateRuntimeSession(callId, "test cleanup");
   });
@@ -1755,7 +1780,11 @@ describe("28. 'Book me at the next available time' (no exact time given)", () =>
     h.llm.setDelay(0);
 
     h.stt.speakUtterance("Book me at the next available time");
-    await drain(16);
+    // Not the (now-bumped) default: this turn also resolves the
+    // configured-services lookup (service still unknown on a fresh
+    // session — see tryEarlyDeterministicDispatch/resolveDeterministicExtractionContext)
+    // before the marker-driven booking path runs.
+    await drain(20);
 
     const bookingCall = h.tools.calls.find((c) => c.name === "book_appointment");
     assert.ok(bookingCall, "must actually book, not just check");
@@ -3594,6 +3623,191 @@ describe("36. Non-blocking architecture (Fix #2/#3/#4 follow-up — immediate ac
       spoken,
       /sorry|trouble|went wrong/i,
       "must never fall back to a generic apology when the calendar itself succeeded — only the phrasing call was slow",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+/**
+ * Round E regression suite — the exact real production call reported
+ * after 7604b2a still went quiet: "Book an appointment." / "I am
+ * Dhanush." / a phone number / "Tomorrow at 3 p.m. afternoon." /
+ * [silence] / "Hello? Are you there?" / "General checkup, and let me
+ * know if that slot is free or not." / [silence again]. These tests
+ * cover the 9-item fix list for that report: items 1 (imperative
+ * availability phrasing), 3 (immediate ack preserved), 4 (a fresh
+ * utterance's ack is never blocked by a previous slow turn), and 6
+ * (a stale calendar result is never spoken after the caller has moved
+ * on/interrupted). Item 2 (real service duration) is covered directly by
+ * matchServiceInText's own unit tests in voice-runtime.server.test.ts —
+ * this harness has no real Supabase client for resolveBookingContext's
+ * query to resolve through (see matchService's own doc comment), so
+ * durationMinutes here can only be asserted to be a number, not which
+ * one.
+ */
+describe("37. Regression: the exact real production call sequence (Round E)", () => {
+  test("'Tomorrow at 3 PM.' then 'General checkup, and let me know if that slot is free or not.' — both turns get an immediate ack, neither waits on the other's slow backend work, and the sticky date/time is reused without re-asking", async (t) => {
+    t.mock.timers.enable();
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    // Setup turn: the caller's name is already known, matching the real
+    // call (name was given before the date/time).
+    h.llm.setNextReply(
+      'Thanks, Dhanush. What can I help you with?\n<<<APPT_STATE:{"service":null,"customer_name":"Dhanush","phone":null,"email":null,"preferred_date":null,"preferred_time":null,"preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.speakUtterance("I am Dhanush");
+    await drain();
+    makeTtsFlushCatchUp(h.tts)();
+
+    // Turn: "Tomorrow at 3 PM." — the LLM call is deliberately slow (as in
+    // the real incident), so this is a clean test of the immediate ack
+    // never waiting for it.
+    h.llm.setNextReply(
+      'Got it.\n<<<APPT_STATE:{"service":null,"customer_name":"Dhanush","phone":null,"email":null,"preferred_date":"2026-10-09","preferred_time":"15:00","preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.llm.setDelay(10_000);
+    const spokenBeforeTurn1 = h.tts.sentTexts.length;
+    h.stt.speakUtterance("Tomorrow at 3 p.m. afternoon.");
+    await drain(16);
+
+    assert.deepEqual(
+      h.tts.sentTexts.slice(spokenBeforeTurn1),
+      ["Got it — tomorrow at 3 PM."],
+      "the deterministic local acknowledgement must be spoken immediately — never dead air",
+    );
+
+    // Let the slow first-turn LLM call finally resolve (in the real
+    // incident this is the window where the caller said "Hello? Are you
+    // there?" before the agent finally responded).
+    t.mock.timers.tick(10_000);
+    await drain(16);
+    makeTtsFlushCatchUp(h.tts)();
+
+    // Turn: "General checkup, and let me know if that slot is free or
+    // not." — this turn's own real calendar check is deliberately slow,
+    // so this is a clean test of THIS turn's own immediate ack never
+    // waiting for ITS OWN slow backend work (item 4's requirement).
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: { slots: [{ start: "2026-10-09T15:00:00.000Z", end: "2026-10-09T15:30:00.000Z" }] },
+      }),
+    });
+    h.tools.setNextDelay("check_calendar_availability", 10_000);
+    const spokenBeforeTurn2 = h.tts.sentTexts.length;
+    h.stt.emit({
+      type: "final_transcript",
+      text: "General checkup, and let me know if that slot is free or not.",
+      language: "en-IN",
+    });
+    await drain(16);
+
+    assert.deepEqual(
+      h.tts.sentTexts.slice(spokenBeforeTurn2),
+      ["Sure, let me check that for you."],
+      "the second turn's own immediate ack must fire right away, without waiting for its own slow calendar check to resolve",
+    );
+
+    // Let the slow calendar check finally resolve.
+    t.mock.timers.tick(10_000);
+    await drain(24);
+
+    // The availability check reused the sticky date from turn 1 — it was
+    // never re-asked for.
+    const availabilityCall = h.tools.calls.find((c) => c.name === "check_calendar_availability");
+    assert.ok(availabilityCall, "the real check_calendar_availability tool must be invoked");
+    assert.equal(availabilityCall?.input["dateIso"], "2026-10-09");
+    assert.equal(
+      typeof availabilityCall?.input["durationMinutes"],
+      "number",
+      "a real duration is always passed, never omitted",
+    );
+
+    const allSpoken = h.tts.sentTexts.join(" ");
+    assert.doesNotMatch(
+      allSpoken,
+      /hello\?|are you there/i,
+      "the caller is never left waiting long enough to ask if the agent is still there",
+    );
+
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("caller interruption during a slow calendar/LLM operation: the new turn's immediate ack is not blocked, and the interrupted turn's stale result is never spoken", async (t) => {
+    t.mock.timers.enable();
+    const h = createHarness();
+    const callId = newCallId();
+    await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    makeTtsFlushCatchUp(h.tts)();
+
+    // Setup: name + service known, so "Tomorrow at 3pm" alone can
+    // dispatch a REAL (early) availability check, deliberately slow.
+    h.llm.setNextReply(
+      'What date and time?\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":null,"email":null,"preferred_date":null,"preferred_time":null,"preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.speakUtterance("I'm Dhanush, teeth cleaning");
+    await drain();
+    makeTtsFlushCatchUp(h.tts)();
+
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: { slots: [{ start: "2026-10-09T15:00:00.000Z", end: "2026-10-09T15:30:00.000Z" }] },
+      }),
+    });
+    h.tools.setNextDelay("check_calendar_availability", 20_000); // deliberately slow, in-flight calendar call
+    h.stt.speakUtterance("3pm tomorrow");
+    await drain(24);
+
+    // The real calendar call has genuinely started (and is still pending)
+    // by this point — confirmed below, after it eventually resolves.
+    const spokenBeforeInterrupt = h.tts.sentTexts.length;
+
+    // The caller barges in WHILE the calendar call is still in flight —
+    // exactly the real-incident shape (caller speaks again during dead
+    // air) — then gives their phone number (a deterministically
+    // extracted field, independent of the still-pending date/time
+    // question, so its own immediate ack is unambiguous here).
+    h.stt.emit({ type: "speech_start" });
+    h.llm.setNextReply(
+      'Got it.\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":"9876543210","email":null,"preferred_date":"2026-10-09","preferred_time":"15:00","preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+    );
+    h.stt.emit({
+      type: "final_transcript",
+      text: "Actually, my number is 9876543210",
+      language: "en-IN",
+    });
+    await drain(16);
+
+    assert.deepEqual(
+      h.tts.sentTexts.slice(spokenBeforeInterrupt),
+      ["Got it, thanks."],
+      "the interrupting turn's own immediate ack must fire right away, not blocked by the still-in-flight calendar call from the turn it interrupted",
+    );
+
+    // Now let the ORIGINAL (interrupted) turn finally unblock — its own
+    // (stale, generation-mismatched) composed reply must never reach
+    // speak(), even though session.appointmentState still gets updated
+    // with whatever real outcome the calendar call returned (it
+    // genuinely happened). Unblocking this also lets the interrupting
+    // turn's own queued utteranceQueue entry finally run its own getReply
+    // call — that reply (whatever it is) legitimately IS spoken, since
+    // its generation is current; what must never appear is language
+    // describing the STALE turn's own outcome (an availability answer
+    // for the ORIGINAL "3pm tomorrow" request).
+    const spokenBeforeStaleResolve = h.tts.sentTexts.length;
+    t.mock.timers.tick(20_000);
+    await drain(24);
+
+    const afterStale = h.tts.sentTexts.slice(spokenBeforeStaleResolve).join(" ");
+    assert.doesNotMatch(
+      afterStale,
+      /available|free|slot/i,
+      "the stale (interrupted) turn's own composed availability answer must never be spoken once the caller has moved on",
     );
 
     await terminateRuntimeSession(callId, "test cleanup");

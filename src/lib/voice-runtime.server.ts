@@ -498,6 +498,27 @@ interface Session {
    * reply push-or-discard) fully completes before the next one starts.
    */
   utteranceQueue: Promise<void>;
+  /**
+   * The lightweight sibling of utteranceQueue — serializes ONLY the
+   * immediate-ack speak() calls fired from enqueueUserUtterance's fast
+   * phase, which deliberately runs OUTSIDE utteranceQueue (see that
+   * function's own doc comment for why). Exists purely so two rapid-fire
+   * immediate acks can't interleave their own speak() calls (speak() has
+   * one await suspension point before its synchronous chunk-sending
+   * loop) — it has nothing to do with, and never substitutes for,
+   * utteranceQueue's booking/TTS-race protection over the SLOW phase.
+   */
+  immediateAckQueue: Promise<void>;
+  /**
+   * Cached the first time tryEarlyDeterministicDispatch needs the
+   * business's configured services (matchServiceInText) — null until
+   * fetched. The configured list doesn't change mid-call, so caching it
+   * on the session avoids repeating that DB round trip on every turn
+   * before the caller's service becomes known (previously as wasteful as
+   * refetching the business timezone on every turn — see
+   * resolveBookingContext's own "combine, don't repeat" discipline).
+   */
+  cachedServices: { id: string; name: string; duration_minutes: number | null }[] | null;
   /** Runtime-owned appointment fields, persisted across turns independent of the LLM's own conversational memory — see AppointmentState's own doc comment. */
   appointmentState: AppointmentState;
   /** The language_code the current TTS connection was opened with — see maybeSwitchTtsLanguage. Starts at the agent's primary_language (what startRuntimeSession connects with). */
@@ -1030,6 +1051,14 @@ export function parseApptStateMarker(reply: string): {
  * Either way, when extraction finds nothing this turn, the previously
  * established value is never overwritten by this turn's incomplete/null
  * marker value.
+ *
+ * `extracted.service` (matchServiceInText's result) uses the SAME
+ * marker-wins-fills-gap priority as preferredDate/preferredTime, not
+ * phone/email's sticky priority — like a date/time, a service name is
+ * something the model is generally reliable about once it hears it, and
+ * this field only exists to catch the one turn where the caller just
+ * named it and no marker has proposed it yet (see
+ * tryEarlyDeterministicDispatch).
  */
 export function mergeAppointmentState(
   current: AppointmentState,
@@ -1039,10 +1068,15 @@ export function mergeAppointmentState(
     preferredTime?: string | null;
     phone?: string | null;
     email?: string | null;
+    service?: string | null;
   },
 ): AppointmentState {
   const hasExtracted = Boolean(
-    extracted?.preferredDate || extracted?.preferredTime || extracted?.phone || extracted?.email,
+    extracted?.preferredDate ||
+    extracted?.preferredTime ||
+    extracted?.phone ||
+    extracted?.email ||
+    extracted?.service,
   );
   if (!proposed && !hasExtracted) return current;
   const proposedSafe = proposed ?? {};
@@ -1067,7 +1101,7 @@ export function mergeAppointmentState(
     preferredTime !== current.preferredTime ||
     preferredPeriod !== current.preferredPeriod;
   return {
-    service: proposedSafe.service ?? current.service,
+    service: proposedSafe.service ?? extracted?.service ?? current.service,
     customerName: proposedSafe.customerName ?? current.customerName,
     // Sticky-current outranks the marker here (the OPPOSITE of
     // service/customerName/date/time just above, which let a fresh marker
@@ -1217,6 +1251,16 @@ const AVAILABILITY_QUESTION_SHAPE =
   /\b(any|anything|do you have|what('s| is)|is there|are there|what times?)\b/i;
 const NEXT_AVAILABLE_PATTERN =
   /\b(next available|earliest|soonest|first available|as soon as possible|asap)\b/i;
+// Production incident: "General checkup, and let me know if that slot is
+// free or not." never set availabilityRequested at all — it matches
+// AVAILABILITY_KEYWORDS (via "free") but has no "?" and doesn't match
+// AVAILABILITY_QUESTION_SHAPE's question-word list, since it's phrased as
+// an imperative request rather than a question. Deliberately requires BOTH
+// an imperative verb AND an "if/whether" clause before the availability
+// word, so a plain statement like "I'd like to book a teeth cleaning" (no
+// conditional at all) still never matches.
+const AVAILABILITY_IMPERATIVE_PATTERN =
+  /\b(let me know|check|see|find out|tell me)\b[\s\S]*?\b(if|whether)\b[\s\S]*?\b(free|available|open)\b/i;
 const PERIOD_PATTERNS: [RegExp, "morning" | "afternoon" | "evening"][] = [
   [/\bmorning\b/i, "morning"],
   [/\bafternoon\b/i, "afternoon"],
@@ -1365,7 +1409,8 @@ export function parseCallerIntentFromText(text: string): CallerIntentSignals {
     AVAILABILITY_KEYWORDS.test(text) &&
     (AVAILABILITY_QUESTION_SHAPE.test(text) ||
       /\?/.test(text) ||
-      NEXT_AVAILABLE_PATTERN.test(text));
+      NEXT_AVAILABLE_PATTERN.test(text) ||
+      AVAILABILITY_IMPERATIVE_PATTERN.test(text));
   const wantsNextAvailable = NEXT_AVAILABLE_PATTERN.test(text);
   const preferredPeriod = PERIOD_PATTERNS.find(([re]) => re.test(text))?.[1] ?? null;
   const relativeDate = RELATIVE_DATE_PATTERNS.find(([re]) => re.test(text))?.[1] ?? null;
@@ -1735,6 +1780,35 @@ export function matchService(
 }
 
 /**
+ * The REVERSE lookup direction from matchService: scans the caller's own
+ * raw turn text for any configured service's name appearing as a
+ * case-insensitive substring, so a service mentioned for the first time
+ * ("General checkup") is captured into AppointmentState.service the
+ * SAME turn it's said, rather than waiting on the model's own marker to
+ * propose it. Prefers the LONGEST matching name — a short configured name
+ * like "Cleaning" would otherwise match before a more specific "Deep
+ * Cleaning & Polish" that's also present in the row set. Pure (no I/O);
+ * `rows` comes from resolveDeterministicExtractionContext. Returns the
+ * matched row's own name (not the caller's wording), so a later
+ * matchService lookup against it is a trivial exact-name hit.
+ */
+export function matchServiceInText(
+  rows: { id: string; name: string; duration_minutes: number | null }[],
+  text: string,
+): string | null {
+  const lowerText = text.toLowerCase();
+  let best: string | null = null;
+  for (const row of rows) {
+    const name = row.name.trim();
+    if (!name) continue;
+    if (lowerText.includes(name.toLowerCase()) && (!best || name.length > best.length)) {
+      best = name;
+    }
+  }
+  return best;
+}
+
+/**
  * Combines the business-timezone lookup (resolveBusinessTimezone's own
  * query) and the configured-services lookup (matchService's own input)
  * into a single dynamic import + a single round trip (two queries run
@@ -1767,6 +1841,54 @@ async function resolveBookingContext(
     return {
       timezone: "UTC",
       service: { id: null, durationMinutes: DEFAULT_APPOINTMENT_DURATION_MINUTES },
+    };
+  }
+}
+
+/**
+ * tryEarlyDeterministicDispatch's own combined fetch — mirrors
+ * resolveBookingContext's "one dynamic import, Promise.all both queries"
+ * discipline, but for the two DIFFERENT lookups the deterministic
+ * extraction preview conditionally needs: the business timezone (to
+ * resolve a relativeDate/weekday into an actual date) and the configured
+ * services list (for matchServiceInText). Each is fetched only when its
+ * own `needs*` flag is set — a turn with no date word and an
+ * already-known service costs nothing here — but when BOTH are needed,
+ * this is still exactly one round trip, not two separate lazy imports
+ * (the exact class of duplicate-DB-call regression this file has
+ * repeatedly had to fix; see resolveBookingContext's own doc comment).
+ */
+async function resolveDeterministicExtractionContext(
+  businessId: string,
+  needsTimezone: boolean,
+  needsServices: boolean,
+): Promise<{
+  timezone: string | null;
+  services: { id: string; name: string; duration_minutes: number | null }[] | null;
+}> {
+  if (!needsTimezone && !needsServices) return { timezone: null, services: null };
+  try {
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const [businessRes, servicesRes] = await Promise.all([
+      needsTimezone
+        ? supabaseAdmin.from("businesses").select("timezone").eq("id", businessId).maybeSingle()
+        : Promise.resolve(null),
+      needsServices
+        ? supabaseAdmin
+            .from("services")
+            .select("id, name, duration_minutes")
+            .eq("business_id", businessId)
+            .eq("is_active", true)
+        : Promise.resolve(null),
+    ]);
+    return {
+      timezone: needsTimezone ? (businessRes?.data?.timezone ?? "UTC") : null,
+      services: needsServices ? (servicesRes?.data ?? []) : null,
+    };
+  } catch {
+    return {
+      timezone: needsTimezone ? "UTC" : null,
+      services: needsServices ? [] : null,
     };
   }
 }
@@ -2685,26 +2807,43 @@ async function attemptBooking(
  * which path got there. Requires `session.appointmentState` already set
  * to the state this dispatch should act on (both call sites do this
  * immediately before calling here).
+ *
+ * `generation` is this turn's own generation number (captured in
+ * enqueueUserUtterance's fast phase, before this call was ever reached) —
+ * checked immediately before EACH speak() call below, never just once.
+ * There is no cancellation signal in this codebase (see
+ * handleUserUtterance's own comment on this honest limitation), so the
+ * real attemptBooking/attemptAvailabilityCheck call below always runs to
+ * completion and session.appointmentState is always updated with its
+ * real outcome — the calendar operation genuinely happened and its
+ * result must persist regardless of whether the caller has since moved
+ * on. Only the SPOKEN half is conditional: returns `null` instead of the
+ * composed reply whenever session.generation has moved past `generation`
+ * by the time there's something to say, so a stale result from a turn
+ * the caller has already interrupted or moved past can never reach TTS.
  */
 async function dispatchDeterministicTool(
   session: Session,
   willAttemptBooking: boolean,
   completionTriggeredAvailability: boolean,
   immediateAckAlreadySpoken: boolean,
-): Promise<string> {
+  generation: number,
+): Promise<string | null> {
+  const stillCurrent = () => session.generation === generation;
   if (willAttemptBooking) {
     // Production incident: real calendar+LLM round trips left the caller
     // in dead air long enough to say "hello? are you there?". A short,
     // immediate, honest acknowledgement — spoken BEFORE the slower real
     // operation, never claiming an outcome yet — fills that gap with
     // controlled sound instead of silence. Skipped when immediateCallerAck
-    // already said the equivalent thing for this exact turn.
-    if (!immediateAckAlreadySpoken) {
+    // already said the equivalent thing for this exact turn, or when this
+    // turn has already gone stale before even getting this far.
+    if (!immediateAckAlreadySpoken && stillCurrent()) {
       await speak(session, "Give me just a moment to confirm that.");
     }
     const outcome = await attemptBooking(session);
     session.appointmentState = outcome.state;
-    return outcome.spoken;
+    return stillCurrent() ? outcome.spoken : null;
   }
 
   // The completion transition gets its own consolidated message (names
@@ -2728,12 +2867,12 @@ async function dispatchDeterministicTool(
       : describeRequestedTime(state);
     ack = `Thanks${state.customerName ? `, ${state.customerName}` : ""}. I have everything I need. Let me check whether ${whenLabel} is available.`;
   }
-  if (completionTriggeredAvailability || !immediateAckAlreadySpoken) {
+  if ((completionTriggeredAvailability || !immediateAckAlreadySpoken) && stillCurrent()) {
     await speak(session, ack);
   }
   const outcome = await attemptAvailabilityCheck(session);
   session.appointmentState = outcome.state;
-  return outcome.spoken;
+  return stillCurrent() ? outcome.spoken : null;
 }
 
 /**
@@ -2758,18 +2897,37 @@ async function dispatchDeterministicTool(
  *
  * Returns `dispatched: false` when not applicable (the overwhelmingly
  * common case), letting handleUserUtterance proceed exactly as before —
- * still carrying `extractedDate`, so the normal marker-driven path that
- * ALSO needs this same relativeDate/weekday resolution can reuse it
- * instead of paying for a second resolveBusinessTimezone lookup on the
- * same turn.
+ * still carrying `extractedDate`/`matchedServiceName`, so the normal
+ * marker-driven path that ALSO needs this same relativeDate/weekday
+ * resolution and configured-services lookup can reuse them instead of
+ * paying for a second round trip on the same turn.
+ *
+ * `generation` (this turn's own, captured in enqueueUserUtterance's fast
+ * phase) is threaded straight through to dispatchDeterministicTool —
+ * see its own doc comment for the staleness suppression that provides.
+ *
+ * Deterministic SERVICE matching (item 2 — production gap: "General
+ * checkup, and let me know if that slot is free or not." dispatched an
+ * early availability check with service still null, silently defaulting
+ * to a 30-minute slot regardless of what the business actually
+ * configured for a general checkup): whenever `previous.service` is
+ * still unknown, this also scans the caller's raw text for any
+ * configured service's name (matchServiceInText) and feeds a match into
+ * the same preview, using the SAME marker-wins-fills-gap priority as
+ * date/time — a service name is something the model generally gets
+ * right once it hears it, so this exists only to catch the one turn the
+ * caller just named it, before any marker has had a chance to.
  */
 async function tryEarlyDeterministicDispatch(
   session: Session,
   previous: AppointmentState,
   callerIntent: CallerIntentSignals,
   immediateAckAlreadySpoken: boolean,
+  generation: number,
+  text: string,
 ): Promise<
-  { dispatched: true; spoken: string } | { dispatched: false; extractedDate: string | null }
+  | { dispatched: true; spoken: string | null }
+  | { dispatched: false; extractedDate: string | null; matchedServiceName: string | null }
 > {
   // Production incident (found via this round's own regression test for
   // the exact reported sequence): "Yeah, please confirm. Also, can you
@@ -2787,12 +2945,36 @@ async function tryEarlyDeterministicDispatch(
   // to whatever was already known (current/sticky), exactly as if this
   // turn's own extraction had found nothing.
   const dateTimeIsAmbiguous = callerIntent.reminderRequested;
+  const needsTimezone =
+    !dateTimeIsAmbiguous && Boolean(callerIntent.relativeDate || callerIntent.weekday);
+  const needsServices = previous.service === null;
+  // Only actually fetched when not already cached on the session (see
+  // session.cachedServices's own doc comment) — the configured list is
+  // the same for every turn of this call, so a turn that repeats
+  // needsServices=true (the caller still hasn't named their service)
+  // after the FIRST such turn reuses the cached list instead of paying
+  // for the DB round trip again.
+  const needsServicesFetch = needsServices && session.cachedServices === null;
   let extractedDate: string | null = null;
-  if (!dateTimeIsAmbiguous && (callerIntent.relativeDate || callerIntent.weekday)) {
-    const timezone = await resolveBusinessTimezone(session.input.businessId);
-    extractedDate = callerIntent.relativeDate
-      ? resolveRelativeDateInTimezone(callerIntent.relativeDate, timezone)
-      : resolveWeekdayInTimezone(callerIntent.weekday!, timezone);
+  let matchedServiceName: string | null = null;
+  if (needsTimezone || needsServicesFetch) {
+    const ctx = await resolveDeterministicExtractionContext(
+      session.input.businessId,
+      needsTimezone,
+      needsServicesFetch,
+    );
+    if (needsTimezone) {
+      const timezone = ctx.timezone ?? "UTC";
+      extractedDate = callerIntent.relativeDate
+        ? resolveRelativeDateInTimezone(callerIntent.relativeDate, timezone)
+        : resolveWeekdayInTimezone(callerIntent.weekday!, timezone);
+    }
+    if (needsServicesFetch) {
+      session.cachedServices = ctx.services ?? [];
+    }
+  }
+  if (needsServices) {
+    matchedServiceName = matchServiceInText(session.cachedServices ?? [], text);
   }
   // `proposed: null` is deliberate — this preview reflects ONLY what's
   // deterministically extractable this turn, never anything a marker
@@ -2802,6 +2984,7 @@ async function tryEarlyDeterministicDispatch(
     preferredTime: dateTimeIsAmbiguous ? null : callerIntent.explicitTime,
     phone: callerIntent.phone,
     email: callerIntent.email,
+    service: matchedServiceName,
   });
 
   // Mirrors handleUserUtterance's own marker-driven backstops exactly,
@@ -2843,7 +3026,7 @@ async function tryEarlyDeterministicDispatch(
     preview.bookingStatus === "checking_availability" &&
     appointmentSlotIsKnown(preview);
   if (!willAttemptBooking && !willCheckAvailability) {
-    return { dispatched: false, extractedDate };
+    return { dispatched: false, extractedDate, matchedServiceName };
   }
 
   session.appointmentState = preview;
@@ -2857,29 +3040,67 @@ async function tryEarlyDeterministicDispatch(
     willAttemptBooking,
     completionTriggeredAvailability,
     immediateAckAlreadySpoken,
+    generation,
   );
   return { dispatched: true, spoken };
 }
 
 /**
- * Serializes handleUserUtterance calls onto session.utteranceQueue — see
- * that field's own doc comment for why. onSttEvent's "final_transcript"
- * case calls this instead of invoking handleUserUtterance directly, so two
- * final_transcript events landing close together (a provider redelivery,
- * or a new utterance arriving while the previous one's LLM call is still
- * in flight) can never race: the first call's entire body — its own "user"
- * turn push, its LLM call, and its reply push-or-discard — always finishes
- * before the next one's "user" turn is pushed.
+ * Entry point for a final transcript (onSttEvent's "final_transcript"
+ * case calls this instead of handleUserUtterance directly). Splits each
+ * turn into two independently-scheduled phases:
+ *
+ * 1. FAST phase — run synchronously right here, before anything is
+ *    queued. Computes and speaks the deterministic immediateCallerAck,
+ *    if any — see its own doc comment for exactly what it covers —
+ *    through the lightweight session.immediateAckQueue, NEVER
+ *    session.utteranceQueue. This is the production fix for "a new
+ *    caller utterance must not be forced to wait for a previous slow
+ *    calendar/LLM operation to finish before it gets its own immediate
+ *    acknowledgement". The ack needs no staleness protection of its own:
+ *    nothing can be more current than the turn that was JUST accepted,
+ *    so it's simply spoken, synchronously-triggered, right here.
+ * 2. SLOW phase (handleUserUtterance) — marker merge,
+ *    tryEarlyDeterministicDispatch, getReply, tool dispatch. Still fully
+ *    serialized via session.utteranceQueue, deliberately UNCHANGED: this
+ *    is what prevents two bookings or two calendar checks from ever
+ *    running concurrently, AND is what makes `session.generation`'s bump
+ *    meaningful (still done inside handleUserUtterance itself, exactly
+ *    as before — see its own comment). Moving that bump OUT here too was
+ *    tried and reverted: it broke the "two final_transcript events
+ *    arriving close together, no actual barge-in in between" case — both
+ *    utterances deserve a real reply, but bumping generation at enqueue
+ *    time (unserialized) made the FIRST one's own in-flight reply look
+ *    "stale" the instant the second was merely ACCEPTED, before the
+ *    first's turn in the queue had even finished. Only the fast ack
+ *    moved out of the queue; generation's bump-and-compare semantics
+ *    stay exactly where — and exactly when — they always were.
+ *
+ * session.immediateAckQueue exists only to stop two rapid-fire immediate
+ * acks' own speak() calls from interleaving each other (speak() has one
+ * await suspension point before its synchronous chunk-sending loop) — it
+ * is NOT a second copy of utteranceQueue's booking/TTS-race protection,
+ * which the slow phase above still owns in full.
  */
 function enqueueUserUtterance(session: Session, text: string) {
+  const immediateAck = session.deps.generateReplyWithTools
+    ? null
+    : immediateCallerAck(session.appointmentState, parseCallerIntentFromText(text));
+  if (immediateAck) {
+    session.immediateAckQueue = session.immediateAckQueue.then(() =>
+      speak(session, immediateAck).catch((err: unknown) => {
+        log("immediate_ack_error", session, { message: (err as Error).message });
+      }),
+    );
+  }
   session.utteranceQueue = session.utteranceQueue.then(() =>
-    handleUserUtterance(session, text).catch((err: unknown) => {
+    handleUserUtterance(session, text, immediateAck).catch((err: unknown) => {
       log("utterance_queue_error", session, { message: (err as Error).message });
     }),
   );
 }
 
-async function handleUserUtterance(session: Session, text: string) {
+async function handleUserUtterance(session: Session, text: string, immediateAck: string | null) {
   session.turns.push({ role: "user", text, at: new Date().toISOString() });
   // Deterministic backstop over the caller's own raw words — see
   // parseCallerIntentFromText's own doc comment for the production
@@ -2887,12 +3108,19 @@ async function handleUserUtterance(session: Session, text: string) {
   // reliably followed every turn). Computed once, up front, so both the
   // pre-reply system-message grounding below (reminders) and the
   // post-reply state enrichment further down use the exact same read of
-  // this turn's caller text.
+  // this turn's caller text. Recomputed here (enqueueUserUtterance's fast
+  // phase already computed its own copy for immediateCallerAck) rather
+  // than threaded through — it's a pure, cheap regex pass, and threading
+  // it would only save that.
   const callerIntent = parseCallerIntentFromText(text);
-  // Captured BEFORE any async work this turn — both the immediate ack
-  // below and the early-dispatch fast path need "what was true a moment
-  // ago", and session.appointmentState is not mutated by anything between
-  // here and either of those using it.
+  // Captured HERE — not reused from enqueueUserUtterance's fast-phase
+  // read — because this turn's place in utteranceQueue means a PREVIOUS
+  // turn's slow-phase work (e.g. a booking/availability outcome) may have
+  // mutated session.appointmentState in the gap between this utterance
+  // being accepted and this turn actually starting. The early-dispatch
+  // fast path and the rest of this turn both need "what's true right
+  // now", not a possibly-stale snapshot from before this turn's own place
+  // in the queue was reached.
   const previousAppointmentState = session.appointmentState;
   // Defensive: speech_end (onSttEvent) already arms a fresh silence timer
   // the moment the caller stops talking, before final_transcript has even
@@ -2909,28 +3137,12 @@ async function handleUserUtterance(session: Session, text: string) {
   // request_payment call).
   clearPaymentWaitTimer(session);
   setState(session, "thinking");
+  // Bumped HERE — still gated by utteranceQueue, exactly as before this
+  // round's changes — see enqueueUserUtterance's own doc comment for why
+  // this must NOT move any earlier.
   const generation = ++session.generation;
   const requestStarted = Date.now();
   const llmRequestAt = requestStarted;
-
-  // Fix #2/#3 (production incident: several seconds of total silence
-  // after "Tomorrow at 3 p.m. afternoon.", ending in "Hello? Are you
-  // there?") — a deterministic, local acknowledgement spoken IMMEDIATELY,
-  // before getReply (the Sarvam LLM call) is even invoked below. See
-  // immediateCallerAck's own doc comment for exactly what it covers and
-  // why. `await` here is still effectively immediate — speak() itself
-  // does no LLM/DB work for the common case (same-language reply).
-  // Gated on the same `!generateReplyWithTools` exclusion as every other
-  // deterministic backstop in this file (see tryEarlyDeterministicDispatch's
-  // own comment) — a tool-calling-capable session's own model-driven
-  // reply/tool-use decides what's said, never a heuristic guess made
-  // before the model is even asked.
-  const immediateAck = session.deps.generateReplyWithTools
-    ? null
-    : immediateCallerAck(previousAppointmentState, callerIntent);
-  if (immediateAck) {
-    await speak(session, immediateAck);
-  }
 
   // The runtime's own ground truth for what the caller has already
   // confirmed — see AppointmentState's own doc comment. Built from state
@@ -2980,17 +3192,19 @@ async function handleUserUtterance(session: Session, text: string) {
       // this deterministic fast path must never preempt that decision by
       // guessing it can act first from AppointmentState heuristics alone.
       const early = session.deps.generateReplyWithTools
-        ? ({ dispatched: false, extractedDate: null } as const)
+        ? ({ dispatched: false, extractedDate: null, matchedServiceName: null } as const)
         : await tryEarlyDeterministicDispatch(
             session,
             previousAppointmentState,
             callerIntent,
             Boolean(immediateAck),
+            generation,
+            text,
           );
       let reply: string;
       let enteredPaymentWait = false;
       if (early.dispatched) {
-        if (isCancelled() || generation !== session.generation) {
+        if (isCancelled() || generation !== session.generation || early.spoken === null) {
           log("llm_response_discarded_stale", session, { early: true });
           return;
         }
@@ -3063,6 +3277,10 @@ async function handleUserUtterance(session: Session, text: string) {
           // OPPOSITE priority (extraction over the marker, not just filling
           // its gaps).
           const extractedDate = early.extractedDate;
+          // Same reuse reasoning as extractedDate just above, for
+          // matchServiceInText's own configured-services lookup — see
+          // tryEarlyDeterministicDispatch's doc comment.
+          const matchedServiceName = early.matchedServiceName;
           // Same reminder-ambiguity guard as tryEarlyDeterministicDispatch
           // (see its own doc comment) — a time mentioned for an unrelated
           // reminder in the same breath must never be fed in as the
@@ -3078,6 +3296,7 @@ async function handleUserUtterance(session: Session, text: string) {
               preferredTime: callerIntent.reminderRequested ? null : callerIntent.explicitTime,
               phone: callerIntent.phone,
               email: callerIntent.email,
+              service: matchedServiceName,
             },
           );
 
@@ -3192,12 +3411,18 @@ async function handleUserUtterance(session: Session, text: string) {
           // response, which is the direct cause of the reported "goes silent
           // when checking availability" production incident.
           if (willAttemptBooking || willCheckAvailability) {
-            reply = await dispatchDeterministicTool(
+            const dispatched = await dispatchDeterministicTool(
               session,
               willAttemptBooking,
               completionTriggeredAvailability,
               Boolean(immediateAck),
+              generation,
             );
+            if (dispatched === null) {
+              log("llm_response_discarded_stale", session, { afterDispatch: true });
+              return;
+            }
+            reply = dispatched;
           }
         }
       }
@@ -3695,6 +3920,8 @@ export async function startRuntimeSession(
     activeSpeechGeneration: 0,
     staleAudioDropLogged: false,
     utteranceQueue: Promise.resolve(),
+    immediateAckQueue: Promise.resolve(),
+    cachedServices: null,
     appointmentState: emptyAppointmentState(),
     ttsLanguage: input.snapshotAgent.primary_language,
     currentTurnTranscriptFinalAt: null,
