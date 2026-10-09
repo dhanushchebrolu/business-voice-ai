@@ -15,7 +15,15 @@ import {
   testAgentText,
   getProviderStatus,
 } from "@/lib/agent.functions";
-import { PageHeader, SectionCard, LoadingState, StatusPill } from "@/components/app/primitives";
+import {
+  PageHeader,
+  SectionCard,
+  LoadingState,
+  ErrorState,
+  EmptyState,
+  StatusPill,
+} from "@/components/app/primitives";
+import { describeQueryError } from "@/lib/query-error";
 import { ServiceLocked } from "@/components/app/ServiceLocked";
 import { featureLocksQuery } from "@/lib/access";
 import { Button } from "@/components/ui/button";
@@ -50,7 +58,13 @@ export const Route = createFileRoute("/app/agent")({
 function AgentPage() {
   const { user } = useAuth();
   const qc = useQueryClient();
-  const { data: ws, isLoading } = useQuery(workspaceQuery(user?.id));
+  const {
+    data: ws,
+    isLoading,
+    isError: wsIsError,
+    error: wsError,
+    refetch: refetchWs,
+  } = useQuery(workspaceQuery(user?.id));
   const business = ws?.business ?? null;
   const agent = ws?.agent ?? null;
   const { data: locks } = useQuery(featureLocksQuery(ws?.organization?.id));
@@ -131,7 +145,37 @@ function AgentPage() {
     }
   }, [agent]);
 
-  if (isLoading || !business || !agent) return <LoadingState label="Loading receptionist" />;
+  if (isLoading) return <LoadingState label="Loading receptionist" />;
+  if (wsIsError) {
+    return (
+      <ErrorState
+        message={describeQueryError(wsError, "Could not load your workspace.")}
+        onRetry={() => void refetchWs()}
+      />
+    );
+  }
+  if (!business) {
+    // app.tsx's AppLayout already redirects to /app/onboarding whenever the
+    // workspace has no business yet — this only renders during that brief
+    // transition, or defensively if this page is ever reached directly.
+    return (
+      <EmptyState
+        title="No business set up yet"
+        description="Finish setting up your business to configure your receptionist."
+      />
+    );
+  }
+  if (!agent) {
+    // Onboarding creates business + agent_configs together — a business
+    // with no agent row is a data-integrity gap, not a normal transient
+    // state, so this is a real dead end rather than a perpetual spinner.
+    return (
+      <ErrorState
+        message="Your receptionist configuration is missing. Try reloading, or contact support if this keeps happening."
+        onRetry={() => void refetchWs()}
+      />
+    );
+  }
 
   async function save() {
     if (!agent || !business) return;

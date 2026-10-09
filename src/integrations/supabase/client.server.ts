@@ -4,10 +4,20 @@
 // For user-authenticated queries (with RLS), use the auth middleware instead.
 import { createClient } from '@supabase/supabase-js';
 import type { Database } from './types';
+import { fetchWithTiming } from '../../lib/observability/supabase-fetch-timing';
 
 function isNewSupabaseApiKey(value: string): boolean {
   return value.startsWith('sb_publishable_') || value.startsWith('sb_secret_');
 }
+
+// Bounds every admin-client Supabase REST/RPC call made from server
+// functions and route handlers. Without this, a stalled connection (DB
+// connection-pool pressure, a lock held longer than expected, a dropped
+// response) never resolves or rejects, so the server function's promise —
+// and whatever client-side loading state is awaiting it — hangs
+// indefinitely instead of surfacing as a retryable error. Same pattern as
+// REQUEST_TIMEOUT_MS in claude.server.ts / sarvam.server.ts.
+const SUPABASE_FETCH_TIMEOUT_MS = 20_000;
 
 function createSupabaseFetch(supabaseKey: string): typeof fetch {
   return (input, init) => {
@@ -25,7 +35,11 @@ function createSupabaseFetch(supabaseKey: string): typeof fetch {
     }
 
     headers.set('apikey', supabaseKey);
-    return fetch(input, { ...init, headers });
+    return fetchWithTiming('supabase_fetch_admin', input, {
+      ...init,
+      headers,
+      signal: init?.signal ?? AbortSignal.timeout(SUPABASE_FETCH_TIMEOUT_MS),
+    });
   };
 }
 

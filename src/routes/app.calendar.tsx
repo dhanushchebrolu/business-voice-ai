@@ -15,7 +15,15 @@ import {
   removeDailyOverride,
   resolveSyncConflict,
 } from "@/lib/calendar-dashboard.functions";
-import { PageHeader, SectionCard, LoadingState, StatusPill } from "@/components/app/primitives";
+import {
+  PageHeader,
+  SectionCard,
+  LoadingState,
+  ErrorState,
+  EmptyState,
+  StatusPill,
+} from "@/components/app/primitives";
+import { describeQueryError } from "@/lib/query-error";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -95,11 +103,23 @@ function dayViewQuery(businessId: string | undefined, dateIso: string) {
 function CalendarPage() {
   const { user } = useAuth();
   const queryClient = useQueryClient();
-  const { data: ws } = useQuery(workspaceQuery(user?.id));
+  const {
+    data: ws,
+    isLoading: wsLoading,
+    isError: wsIsError,
+    error: wsError,
+    refetch: refetchWs,
+  } = useQuery(workspaceQuery(user?.id));
   const businessId = ws?.business?.id;
 
   const [dateIso, setDateIso] = useState(todayIso());
-  const { data: view, isLoading } = useQuery(dayViewQuery(businessId, dateIso));
+  const {
+    data: view,
+    isLoading,
+    isError: viewIsError,
+    error: viewError,
+    refetch: refetchView,
+  } = useQuery(dayViewQuery(businessId, dateIso));
 
   const setWeeklyHoursFn = useServerFn(setWeeklyHours);
   const applyOverrideFn = useServerFn(applyDailyOverride);
@@ -262,7 +282,26 @@ function CalendarPage() {
     }
   }
 
-  if (!businessId) return <LoadingState label="Loading workspace" />;
+  if (wsLoading) return <LoadingState label="Loading workspace" />;
+  if (wsIsError) {
+    return (
+      <ErrorState
+        message={describeQueryError(wsError, "Could not load your workspace.")}
+        onRetry={() => void refetchWs()}
+      />
+    );
+  }
+  if (!businessId) {
+    // app.tsx's AppLayout already redirects to /app/onboarding whenever the
+    // workspace has no business yet — this only renders during that brief
+    // transition, or defensively if this page is ever reached directly.
+    return (
+      <EmptyState
+        title="No business set up yet"
+        description="Finish setting up your business to use the calendar."
+      />
+    );
+  }
 
   const readOnly = view?.role === "viewer";
 
@@ -300,7 +339,14 @@ function CalendarPage() {
           </div>
         }
       >
-        {isLoading || !view ? (
+        {isLoading ? (
+          <LoadingState label="Loading day view" />
+        ) : viewIsError ? (
+          <ErrorState
+            message={describeQueryError(viewError, "Could not load this day's calendar.")}
+            onRetry={() => void refetchView()}
+          />
+        ) : !view ? (
           <LoadingState label="Loading day view" />
         ) : (
           <div className="space-y-5">

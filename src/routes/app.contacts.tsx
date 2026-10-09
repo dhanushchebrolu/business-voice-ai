@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useRef, useState } from "react";
-import { Contact, Search, Upload, PhoneOff } from "lucide-react";
+import { Contact, Search, Upload, PhoneOff, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "@/hooks/useAuth";
 import { workspaceQuery, contactsQuery, type ContactRow } from "@/lib/workspace";
@@ -11,9 +11,11 @@ import {
   PageHeader,
   EmptyState,
   LoadingState,
+  ErrorState,
   SectionCard,
   StatusPill,
 } from "@/components/app/primitives";
+import { describeQueryError } from "@/lib/query-error";
 import { ServiceLocked } from "@/components/app/ServiceLocked";
 import { featureLocksQuery } from "@/lib/access";
 import { Input } from "@/components/ui/input";
@@ -42,13 +44,14 @@ function ContactsPage() {
   const qc = useQueryClient();
   const { data: ws } = useQuery(workspaceQuery(user?.id));
   const orgId = ws?.organization?.id;
-  const { data: contacts, isLoading } = useQuery(contactsQuery(orgId));
+  const { data: contacts, isLoading, isError, error, refetch } = useQuery(contactsQuery(orgId));
   const { data: locks } = useQuery(featureLocksQuery(orgId));
   const phoneLocked = locks?.["phone"] === true;
   const lifecycle = ws?.organization?.lifecycle_status ?? "not_provisioned";
 
   const [q, setQ] = useState("");
   const [uploadOpen, setUploadOpen] = useState(false);
+  const [importing, setImporting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const filtered = useMemo(() => {
@@ -91,8 +94,13 @@ function ContactsPage() {
                 className="h-9 w-48 pl-8"
               />
             </div>
-            <Button size="sm" onClick={() => setUploadOpen(true)}>
-              <Upload className="mr-1.5 size-3.5" /> Upload CSV
+            <Button size="sm" onClick={() => setUploadOpen(true)} disabled={importing}>
+              {importing ? (
+                <Loader2 className="mr-1.5 size-3.5 animate-spin" />
+              ) : (
+                <Upload className="mr-1.5 size-3.5" />
+              )}
+              {importing ? "Importing…" : "Upload CSV"}
             </Button>
           </div>
         }
@@ -102,6 +110,11 @@ function ContactsPage() {
 
       {isLoading ? (
         <LoadingState label="Loading contacts" />
+      ) : isError ? (
+        <ErrorState
+          message={describeQueryError(error, "Could not load your contacts.")}
+          onRetry={() => void refetch()}
+        />
       ) : filtered.length ? (
         <SectionCard title={`${filtered.length} contacts`}>
           <div className="-mx-5 overflow-x-auto">
@@ -166,41 +179,56 @@ function ContactsPage() {
           const file = e.target.files?.[0];
           e.target.value = "";
           if (!file || !orgId) return;
-          const text = await file.text();
-          const table = csvToTable(text);
-          const phoneColumn = table.headers.find((h) => /phone/i.test(h)) ?? table.headers[0] ?? "";
-          const summary = validateContactRows(table, phoneColumn);
+          setImporting(true);
+          try {
+            const text = await file.text();
+            const table = csvToTable(text);
+            const phoneColumn =
+              table.headers.find((h) => /phone/i.test(h)) ?? table.headers[0] ?? "";
+            const summary = validateContactRows(table, phoneColumn);
 
-          let created = 0;
-          let updated = 0;
-          for (const row of summary.valid) {
-            const { data: existing } = await supabase
-              .from("contacts")
-              .select("id")
-              .eq("organization_id", orgId)
-              .eq("phone", row.phone!)
-              .maybeSingle();
-            if (existing) {
-              await supabase
+            let created = 0;
+            let updated = 0;
+            for (const row of summary.valid) {
+              const { data: existing } = await supabase
                 .from("contacts")
-                .update({ custom_fields: row.fields as never })
-                .eq("id", existing.id);
-              updated++;
-            } else {
-              const { error } = await supabase.from("contacts").insert({
-                organization_id: orgId,
-                name: row.fields["name"] ?? row.fields["Name"] ?? null,
-                phone: row.phone!,
-                custom_fields: row.fields as never,
-                source: "csv_import",
-              });
-              if (!error) created++;
+                .select("id")
+                .eq("organization_id", orgId)
+                .eq("phone", row.phone!)
+                .maybeSingle();
+              if (existing) {
+                await supabase
+                  .from("contacts")
+                  .update({ custom_fields: row.fields as never })
+                  .eq("id", existing.id);
+                updated++;
+              } else {
+                const { error } = await supabase.from("contacts").insert({
+                  organization_id: orgId,
+                  name: row.fields["name"] ?? row.fields["Name"] ?? null,
+                  phone: row.phone!,
+                  custom_fields: row.fields as never,
+                  source: "csv_import",
+                });
+                if (!error) created++;
+              }
             }
+            toast.success(
+              `Imported ${created + updated} contacts (${created} new, ${updated} updated). ${summary.invalid.length} invalid, ${summary.duplicates.length} duplicate rows skipped.`,
+            );
+          } catch (err) {
+            // A row-level Supabase error already stays non-fatal above (counted
+            // as neither created nor updated); this only catches something
+            // upstream of the loop (e.g. file.text()/csvToTable failing, or a
+            // genuine network/timeout error from one of the row calls) so the
+            // user sees a real failure instead of a silent partial import.
+            toast.error(
+              err instanceof Error ? err.message : "Could not import this file. Please try again.",
+            );
+          } finally {
+            setImporting(false);
+            await qc.invalidateQueries({ queryKey: ["contacts", orgId] });
           }
-          toast.success(
-            `Imported ${created + updated} contacts (${created} new, ${updated} updated). ${summary.invalid.length} invalid, ${summary.duplicates.length} duplicate rows skipped.`,
-          );
-          await qc.invalidateQueries({ queryKey: ["contacts", orgId] });
         }}
       />
 

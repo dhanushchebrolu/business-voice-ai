@@ -2,10 +2,21 @@
 import { createClient } from '@supabase/supabase-js';
 import type { Database } from './types';
 import { brokeredPreviewStorage } from './previewAuthStorage';
+import { fetchWithTiming } from '../../lib/observability/supabase-fetch-timing';
 
 function isNewSupabaseApiKey(value: string): boolean {
   return value.startsWith('sb_publishable_') || value.startsWith('sb_secret_');
 }
+
+// Every Supabase REST/RPC/Auth call in the browser goes through this one
+// fetch. Without a bound, a stalled connection (backend latency, a
+// saturated Postgres connection pool, a dropped response) never resolves
+// or rejects — the calling useQuery's isLoading simply never flips, which
+// is what a page "stuck loading indefinitely" actually is. Same pattern
+// and magnitude as the existing REQUEST_TIMEOUT_MS in claude.server.ts /
+// sarvam.server.ts for other external calls; tune this one constant to
+// change the bound everywhere it's used.
+const SUPABASE_FETCH_TIMEOUT_MS = 20_000;
 
 function createSupabaseFetch(supabaseKey: string): typeof fetch {
   return (input, init) => {
@@ -23,7 +34,11 @@ function createSupabaseFetch(supabaseKey: string): typeof fetch {
     }
 
     headers.set('apikey', supabaseKey);
-    return fetch(input, { ...init, headers });
+    return fetchWithTiming('supabase_fetch_client', input, {
+      ...init,
+      headers,
+      signal: init?.signal ?? AbortSignal.timeout(SUPABASE_FETCH_TIMEOUT_MS),
+    });
   };
 }
 

@@ -3,12 +3,20 @@ import { createMiddleware } from '@tanstack/react-start'
 import { getRequest } from '@tanstack/react-start/server'
 import { createClient } from '@supabase/supabase-js'
 import type { Database } from './types'
+import { fetchWithTiming } from '../../lib/observability/supabase-fetch-timing'
 
 
 
 function isNewSupabaseApiKey(value: string): boolean {
   return value.startsWith('sb_publishable_') || value.startsWith('sb_secret_');
 }
+
+// This middleware gates every server function (bookings, calendar, agent
+// config, ...). Without a bound here, a stalled auth.getClaims() call or
+// RLS-scoped query below never resolves, hanging the entire server
+// function call — and any client-side spinner awaiting it — indefinitely.
+// Same pattern as REQUEST_TIMEOUT_MS in claude.server.ts / sarvam.server.ts.
+const SUPABASE_FETCH_TIMEOUT_MS = 20_000;
 
 function createSupabaseFetch(supabaseKey: string): typeof fetch {
   return (input, init) => {
@@ -26,7 +34,11 @@ function createSupabaseFetch(supabaseKey: string): typeof fetch {
     }
 
     headers.set('apikey', supabaseKey);
-    return fetch(input, { ...init, headers });
+    return fetchWithTiming('supabase_fetch_middleware', input, {
+      ...init,
+      headers,
+      signal: init?.signal ?? AbortSignal.timeout(SUPABASE_FETCH_TIMEOUT_MS),
+    });
   };
 }
 

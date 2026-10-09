@@ -13,18 +13,19 @@ export { deriveDestination };
  * used to sign in.
  */
 export async function resolvePostAuthDestination(userId: string): Promise<PostAuthDestination> {
-  const { data: admin } = await supabase
-    .from("platform_admins")
-    .select("is_active")
-    .eq("user_id", userId)
-    .maybeSingle();
-
-  const { data: membership } = await supabase
-    .from("organization_members")
-    .select("organization_id, organizations(lifecycle_status)")
-    .order("created_at")
-    .limit(1)
-    .maybeSingle();
+  const [adminRes, membershipRes] = await Promise.all([
+    supabase.from("platform_admins").select("is_active").eq("user_id", userId).maybeSingle(),
+    supabase
+      .from("organization_members")
+      .select("organization_id, organizations(lifecycle_status)")
+      .order("created_at")
+      .limit(1)
+      .maybeSingle(),
+  ]);
+  if (adminRes.error) throw adminRes.error;
+  if (membershipRes.error) throw membershipRes.error;
+  const admin = adminRes.data;
+  const membership = membershipRes.data;
   const org = membership?.organizations as { lifecycle_status: string } | null;
 
   return deriveDestination({

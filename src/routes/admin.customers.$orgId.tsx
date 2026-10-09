@@ -9,6 +9,7 @@ import { getProvisioningReadiness, getKlyroRuntimeReadiness } from "@/lib/admin-
 import { retryProvisioning } from "@/lib/telephony-admin.functions";
 import { testSarvamInboundDeployment, testSarvamOutboundCall } from "@/lib/sarvam-admin.functions";
 import { getProfitAnalytics } from "@/lib/admin-finance.functions";
+import { describeQueryError } from "@/lib/query-error";
 import {
   PageHeader,
   SectionCard,
@@ -110,12 +111,22 @@ function CustomerDetail() {
     queryFn: () => fetchDetail({ data: { orgId } }),
   });
 
-  const { data: readiness } = useQuery({
+  const {
+    data: readiness,
+    isError: readinessIsError,
+    error: readinessError,
+    refetch: refetchReadiness,
+  } = useQuery({
     queryKey: ["admin-customer-readiness", orgId],
     queryFn: () => fetchReadiness({ data: { orgId } }),
   });
 
-  const { data: klyroReadiness } = useQuery({
+  const {
+    data: klyroReadiness,
+    isError: klyroIsError,
+    error: klyroError,
+    refetch: refetchKlyro,
+  } = useQuery({
     queryKey: ["admin-customer-klyro-readiness", orgId],
     queryFn: () => fetchKlyroReadiness({ data: { orgId } }),
   });
@@ -123,7 +134,13 @@ function CustomerDetail() {
   // getProfitAnalytics is the existing, platform-wide margin computation
   // (admin-finance.functions.ts) — reused as-is and filtered to this one
   // org rather than re-deriving revenue/provider-cost/margin here.
-  const { data: profit } = useQuery({
+  const {
+    data: profit,
+    isLoading: profitIsLoading,
+    isError: profitIsError,
+    error: profitError,
+    refetch: refetchProfit,
+  } = useQuery({
     queryKey: ["admin-profit-analytics"],
     queryFn: () => fetchProfit(),
   });
@@ -245,7 +262,12 @@ function CustomerDetail() {
             ) : null
           }
         >
-          {readiness ? (
+          {readinessIsError ? (
+            <ErrorState
+              message={describeQueryError(readinessError, "Could not run health checks.")}
+              onRetry={() => void refetchReadiness()}
+            />
+          ) : readiness ? (
             <ul className="divide-y divide-border">
               {readiness.checks.map((check) => (
                 <li
@@ -523,7 +545,12 @@ function CustomerDetail() {
           ) : null
         }
       >
-        {klyroReadiness ? (
+        {klyroIsError ? (
+          <ErrorState
+            message={describeQueryError(klyroError, "Could not load runtime readiness.")}
+            onRetry={() => void refetchKlyro()}
+          />
+        ) : klyroReadiness ? (
           <>
             <ul className="grid gap-1.5 text-sm sm:grid-cols-2">
               <li className="flex items-center justify-between gap-3">
@@ -613,7 +640,14 @@ function CustomerDetail() {
         </SectionCard>
 
         <SectionCard title="Finance" description="Provider cost and margin — admin-only.">
-          {financeRow ? (
+          {profitIsLoading ? (
+            <LoadingState label="Loading finance" />
+          ) : profitIsError ? (
+            <ErrorState
+              message={describeQueryError(profitError, "Could not load finance data.")}
+              onRetry={() => void refetchProfit()}
+            />
+          ) : financeRow ? (
             <div className="grid grid-cols-2 gap-2 text-sm">
               <StatCard label="Revenue" value={formatMoney(financeRow.revenue)} tone="accent" />
               <StatCard label="Provider cost" value={formatMoney(financeRow.providerCost)} />
@@ -624,7 +658,7 @@ function CustomerDetail() {
               />
             </div>
           ) : (
-            <LoadingState label="Loading finance" />
+            <p className="text-sm text-muted-foreground">No financial activity yet.</p>
           )}
         </SectionCard>
       </div>

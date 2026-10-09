@@ -10,7 +10,9 @@ import {
   StatusPill,
   LoadingState,
   EmptyState,
+  ErrorState,
 } from "@/components/app/primitives";
+import { describeQueryError } from "@/lib/query-error";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -97,7 +99,7 @@ function BookingsPage() {
   const queryClient = useQueryClient();
   const cancelFn = useServerFn(cancelBookingManual);
   const rescheduleFn = useServerFn(rescheduleBookingManual);
-  const { data: bookings, isLoading } = useQuery(bookingsQuery);
+  const { data: bookings, isLoading, isError, error, refetch } = useQuery(bookingsQuery);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [reschedulingId, setReschedulingId] = useState<string | null>(null);
   const [newStartLocal, setNewStartLocal] = useState("");
@@ -156,6 +158,11 @@ function BookingsPage() {
 
       {isLoading ? (
         <LoadingState label="Loading bookings" />
+      ) : isError ? (
+        <ErrorState
+          message={describeQueryError(error, "Could not load your bookings.")}
+          onRetry={() => void refetch()}
+        />
       ) : !bookings || bookings.length === 0 ? (
         <EmptyState
           title="No bookings yet"

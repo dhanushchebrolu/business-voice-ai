@@ -18,7 +18,9 @@ import {
   StatusPill,
   EmptyState,
   LoadingState,
+  ErrorState,
 } from "@/components/app/primitives";
+import { describeQueryError } from "@/lib/query-error";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -71,8 +73,19 @@ const CONTACT_STATUS_TONE: Record<string, "live" | "ready" | "idle" | "error"> =
 function CampaignDetailPage() {
   const { campaignId } = Route.useParams();
   const qc = useQueryClient();
-  const { data: campaign, isLoading } = useQuery(campaignQuery(campaignId));
-  const { data: contacts } = useQuery(campaignContactsQuery(campaignId));
+  const {
+    data: campaign,
+    isLoading,
+    isError,
+    error,
+    refetch,
+  } = useQuery(campaignQuery(campaignId));
+  const {
+    data: contacts,
+    isError: contactsIsError,
+    error: contactsError,
+    refetch: refetchContacts,
+  } = useQuery(campaignContactsQuery(campaignId));
 
   const [uploadOpen, setUploadOpen] = useState(false);
   const [file, setFile] = useState<File | null>(null);
@@ -81,6 +94,7 @@ function CampaignDetailPage() {
   const [phoneColumn, setPhoneColumn] = useState("");
   const [mapping, setMapping] = useState<Record<string, string>>({});
   const [importing, setImporting] = useState(false);
+  const [actionPending, setActionPending] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const stats = useMemo(() => {
@@ -128,45 +142,45 @@ function CampaignDetailPage() {
     }
   }
 
-  async function doLaunch() {
+  // These start/stop a real outbound-calling campaign — never idempotent,
+  // so they must never auto-retry and must never be fireable twice
+  // concurrently from a double click while the first call is in flight.
+  async function runAction(action: () => Promise<unknown>, successMessage: string) {
+    if (actionPending) return;
+    setActionPending(true);
     try {
-      await launchCampaign({ data: { campaignId } });
-      toast.success("Campaign launched — calls will begin within the scheduled window.");
+      await action();
+      toast.success(successMessage);
       await invalidate();
     } catch (err) {
       toast.error((err as Error).message);
+    } finally {
+      setActionPending(false);
     }
   }
-  async function doPause() {
-    try {
-      await pauseCampaign({ data: { campaignId } });
-      toast.success("Campaign paused.");
-      await invalidate();
-    } catch (err) {
-      toast.error((err as Error).message);
-    }
-  }
-  async function doResume() {
-    try {
-      await resumeCampaign({ data: { campaignId } });
-      toast.success("Campaign resumed.");
-      await invalidate();
-    } catch (err) {
-      toast.error((err as Error).message);
-    }
-  }
-  async function doCancel() {
+  const doLaunch = () =>
+    runAction(
+      () => launchCampaign({ data: { campaignId } }),
+      "Campaign launched — calls will begin within the scheduled window.",
+    );
+  const doPause = () =>
+    runAction(() => pauseCampaign({ data: { campaignId } }), "Campaign paused.");
+  const doResume = () =>
+    runAction(() => resumeCampaign({ data: { campaignId } }), "Campaign resumed.");
+  const doCancel = () => {
     if (!confirm("Cancel this campaign? Contacts not yet called will not be dialed.")) return;
-    try {
-      await cancelCampaign({ data: { campaignId } });
-      toast.success("Campaign cancelled.");
-      await invalidate();
-    } catch (err) {
-      toast.error((err as Error).message);
-    }
-  }
+    void runAction(() => cancelCampaign({ data: { campaignId } }), "Campaign cancelled.");
+  };
 
   if (isLoading) return <LoadingState label="Loading campaign" />;
+  if (isError) {
+    return (
+      <ErrorState
+        message={describeQueryError(error, "Could not load this campaign.")}
+        onRetry={() => void refetch()}
+      />
+    );
+  }
   if (!campaign) return <EmptyState icon={Users2} title="Campaign not found" description="" />;
 
   return (
@@ -180,17 +194,17 @@ function CampaignDetailPage() {
               {campaign.status}
             </StatusPill>
             {["draft", "scheduled", "paused"].includes(campaign.status) ? (
-              <Button size="sm" onClick={doLaunch}>
+              <Button size="sm" onClick={doLaunch} disabled={actionPending}>
                 {campaign.status === "paused" ? "Resume" : "Launch campaign"}
               </Button>
             ) : null}
             {campaign.status === "running" ? (
-              <Button size="sm" variant="secondary" onClick={doPause}>
+              <Button size="sm" variant="secondary" onClick={doPause} disabled={actionPending}>
                 Pause
               </Button>
             ) : null}
             {!["completed", "cancelled"].includes(campaign.status) ? (
-              <Button size="sm" variant="ghost" onClick={doCancel}>
+              <Button size="sm" variant="ghost" onClick={doCancel} disabled={actionPending}>
                 Cancel
               </Button>
             ) : null}
@@ -219,7 +233,12 @@ function CampaignDetailPage() {
           </Button>
         }
       >
-        {total ? (
+        {contactsIsError ? (
+          <ErrorState
+            message={describeQueryError(contactsError, "Could not load enrolled contacts.")}
+            onRetry={() => void refetchContacts()}
+          />
+        ) : total ? (
           <div className="-mx-5 overflow-x-auto">
             <table className="w-full min-w-[560px] text-sm">
               <thead>

@@ -80,3 +80,29 @@ describe("app.bookings.tsx — reschedule is actually wired to the existing back
     assert.match(fnBody, /Number\.isNaN\(newStart\.getTime\(\)\)/);
   });
 });
+
+/**
+ * Loading-state audit (whole-app loading/performance audit): listBookings
+ * failing (including a request that times out via the new shared
+ * SUPABASE_FETCH_TIMEOUT_MS bound) previously left isLoading=false,
+ * bookings=undefined, and fell straight into the "No bookings yet" empty
+ * state — an error silently misreported as "there is nothing here" rather
+ * than surfaced and retryable.
+ */
+describe("app.bookings.tsx — a failed fetch is a real, retryable error, never a silent empty state", () => {
+  test("destructures isError/error/refetch from the bookings query", () => {
+    assert.match(code, /isLoading,\s*isError,\s*error,\s*refetch\s*\} = useQuery\(bookingsQuery\)/);
+  });
+
+  test("renders ErrorState with a retry action before falling through to the empty-state branch", () => {
+    const loadingIdx = code.indexOf("{isLoading ? (");
+    const emptyIdx = code.indexOf("!bookings || bookings.length === 0");
+    const errorIdx = code.indexOf("isError ? (", loadingIdx);
+    assert.ok(loadingIdx > -1 && errorIdx > -1 && emptyIdx > -1);
+    assert.ok(loadingIdx < errorIdx && errorIdx < emptyIdx);
+    const block = code.slice(errorIdx, emptyIdx);
+    assert.match(block, /<ErrorState/);
+    assert.match(block, /onRetry=\{\(\) => void refetch\(\)\}/);
+    assert.match(block, /describeQueryError\(error,/);
+  });
+});

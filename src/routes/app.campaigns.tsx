@@ -7,9 +7,11 @@ import {
   PageHeader,
   EmptyState,
   LoadingState,
+  ErrorState,
   SectionCard,
   StatusPill,
 } from "@/components/app/primitives";
+import { describeQueryError } from "@/lib/query-error";
 import { ServiceLocked } from "@/components/app/ServiceLocked";
 import { featureLocksQuery } from "@/lib/access";
 import { Button } from "@/components/ui/button";
@@ -43,7 +45,7 @@ function CampaignsPage() {
   const { user } = useAuth();
   const { data: ws } = useQuery(workspaceQuery(user?.id));
   const orgId = ws?.organization?.id;
-  const { data: campaigns, isLoading } = useQuery(campaignsQuery(orgId));
+  const { data: campaigns, isLoading, isError, error, refetch } = useQuery(campaignsQuery(orgId));
   const { data: locks } = useQuery(featureLocksQuery(orgId));
   const phoneLocked = locks?.["phone"] === true;
   const lifecycle = ws?.organization?.lifecycle_status ?? "not_provisioned";
@@ -66,6 +68,11 @@ function CampaignsPage() {
 
       {isLoading ? (
         <LoadingState label="Loading campaigns" />
+      ) : isError ? (
+        <ErrorState
+          message={describeQueryError(error, "Could not load your campaigns.")}
+          onRetry={() => void refetch()}
+        />
       ) : campaigns?.length ? (
         <SectionCard title={`${campaigns.length} campaigns`}>
           <div className="-mx-5 overflow-x-auto">

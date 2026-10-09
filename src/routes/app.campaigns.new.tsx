@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import { useAuth } from "@/hooks/useAuth";
 import { workspaceQuery, numbersQuery } from "@/lib/workspace";
 import { supabase } from "@/integrations/supabase/client";
+import { describeQueryError } from "@/lib/query-error";
 import { LANGUAGES } from "@/lib/voices";
 import { PageHeader, SectionCard } from "@/components/app/primitives";
 import { Input } from "@/components/ui/input";
@@ -71,38 +72,43 @@ function NewCampaignPage() {
       return;
     }
     setSaving(true);
-    const { data, error } = await supabase
-      .from("campaigns")
-      .insert({
-        organization_id: orgId,
-        business_id: ws.business?.id ?? null,
-        agent_config_id: ws.agent.id,
-        phone_number_id: phoneNumberId,
-        name: name.trim(),
-        objective: objective.trim() || null,
-        call_instructions: instructions.trim() || null,
-        language: language || null,
-        schedule: {
-          startDate: startDate || undefined,
-          endDate: endDate || undefined,
-          windowStart: windowStart || undefined,
-          windowEnd: windowEnd || undefined,
-          days,
-          timezone: ws.organization?.timezone ?? "Asia/Kolkata",
-        } as never,
-        max_attempts: maxAttempts,
-        retry_after_minutes: retryAfterMinutes,
-        created_by: user?.id ?? null,
-      })
-      .select("id")
-      .single();
-    setSaving(false);
-    if (error || !data) {
-      toast.error("Could not create this campaign.");
-      return;
+    try {
+      const { data, error } = await supabase
+        .from("campaigns")
+        .insert({
+          organization_id: orgId,
+          business_id: ws.business?.id ?? null,
+          agent_config_id: ws.agent.id,
+          phone_number_id: phoneNumberId,
+          name: name.trim(),
+          objective: objective.trim() || null,
+          call_instructions: instructions.trim() || null,
+          language: language || null,
+          schedule: {
+            startDate: startDate || undefined,
+            endDate: endDate || undefined,
+            windowStart: windowStart || undefined,
+            windowEnd: windowEnd || undefined,
+            days,
+            timezone: ws.organization?.timezone ?? "Asia/Kolkata",
+          } as never,
+          max_attempts: maxAttempts,
+          retry_after_minutes: retryAfterMinutes,
+          created_by: user?.id ?? null,
+        })
+        .select("id")
+        .single();
+      if (error || !data) {
+        toast.error(describeQueryError(error, "Could not create this campaign."));
+        return;
+      }
+      toast.success("Campaign created. Add contacts next.");
+      navigate({ to: "/app/campaigns/$campaignId", params: { campaignId: data.id } });
+    } catch (err) {
+      toast.error(describeQueryError(err, "Could not create this campaign."));
+    } finally {
+      setSaving(false);
     }
-    toast.success("Campaign created. Add contacts next.");
-    navigate({ to: "/app/campaigns/$campaignId", params: { campaignId: data.id } });
   }
 
   return (
