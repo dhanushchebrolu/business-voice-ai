@@ -38,7 +38,7 @@ export async function loadSnapshot(supabase: Client, businessId: string): Promis
     hours: (hours.data ?? []).map((h) => ({
       day_of_week: h.day_of_week,
       is_closed: h.is_closed,
-      intervals: (h.intervals as unknown as { from: string; to: string }[]) ?? [],
+      intervals: (h.intervals as unknown as { start: string; end: string }[]) ?? [],
     })),
     services: (services.data ?? []).map((s) => ({
       name: s.name,

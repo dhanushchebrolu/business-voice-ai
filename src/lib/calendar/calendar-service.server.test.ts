@@ -205,3 +205,116 @@ describe("computeAvailability — business breaks (a gap between two business_ho
     assert.ok(slots.some((s) => s.start === "2026-09-25T08:30:00.000Z")); // 14:00 IST
   });
 });
+
+/**
+ * Daily override precedence (hospital calendar spec section 3, 6 required
+ * schedule-generation scenarios): a full-day closure beats everything; a
+ * date-specific open/close decision beats the recurring weekly hours for
+ * that one date only; and neither can ever force open a slot that's
+ * already booked or externally busy.
+ */
+describe("computeAvailability — daily override precedence", () => {
+  test("1. no override present — the recurring weekly schedule applies unmodified", () => {
+    const slots = computeAvailability({ ...BASE, dateIso: "2026-09-25", timezone: "Asia/Kolkata" });
+    assert.equal(slots.length, 4); // same as the no-override baseline
+  });
+
+  test("2. a full-day closure override removes every slot, even though the recurring weekly day is open", () => {
+    const slots = computeAvailability({
+      ...BASE,
+      dateIso: "2026-09-25",
+      timezone: "Asia/Kolkata",
+      override: { isFullDayClosure: true, intervals: [] },
+    });
+    assert.deepEqual(slots, []);
+  });
+
+  test("3. a full-day closure wins even if the same override also lists an 'open' interval", () => {
+    const slots = computeAvailability({
+      ...BASE,
+      dateIso: "2026-09-25",
+      timezone: "Asia/Kolkata",
+      override: {
+        isFullDayClosure: true,
+        intervals: [{ start: "09:00", end: "10:00", isOpen: true }],
+      },
+    });
+    assert.deepEqual(slots, []);
+  });
+
+  test("4. an 'open' override interval adds slots outside the recurring weekly hours", () => {
+    const slots = computeAvailability({
+      ...BASE,
+      dateIso: "2026-09-25",
+      timezone: "Asia/Kolkata",
+      businessHours: [{ dayOfWeek: FRIDAY, isClosed: true, intervals: [] }], // recurring day is CLOSED
+      override: {
+        isFullDayClosure: false,
+        intervals: [{ start: "09:00", end: "10:00", isOpen: true }],
+      },
+    });
+    const starts = slots.map((s) => s.start);
+    assert.deepEqual(starts, ["2026-09-25T03:30:00.000Z", "2026-09-25T04:00:00.000Z"]); // 09:00, 09:30 IST
+  });
+
+  test("5. a 'close' override interval removes slots that the recurring weekly hours would otherwise have opened", () => {
+    const slots = computeAvailability({
+      ...BASE,
+      dateIso: "2026-09-25",
+      timezone: "Asia/Kolkata",
+      // recurring hours: 09:00-11:00 IST (BASE); close 09:30-10:00 IST for this one date.
+      override: {
+        isFullDayClosure: false,
+        intervals: [{ start: "09:30", end: "10:00", isOpen: false }],
+      },
+    });
+    const starts = slots.map((s) => s.start);
+    assert.deepEqual(starts, [
+      "2026-09-25T03:30:00.000Z", // 09:00 IST
+      "2026-09-25T04:30:00.000Z", // 10:00 IST
+      "2026-09-25T05:00:00.000Z", // 10:30 IST
+    ]);
+  });
+
+  test("6. a 'close' override always wins over an overlapping 'open' in the same override (conservative precedence) and an override can never reopen a slot already taken by a confirmed booking or Google-busy period", () => {
+    const sameRangeBothWays = computeAvailability({
+      ...BASE,
+      dateIso: "2026-09-25",
+      timezone: "Asia/Kolkata",
+      override: {
+        isFullDayClosure: false,
+        intervals: [
+          { start: "09:00", end: "09:30", isOpen: true },
+          { start: "09:00", end: "09:30", isOpen: false },
+        ],
+      },
+    });
+    assert.equal(
+      sameRangeBothWays.some((s) => s.start === "2026-09-25T03:30:00.000Z"),
+      false,
+      "close must win over open for the exact same range",
+    );
+
+    // Override opens 14:00-15:00 IST (outside the recurring 09:00-11:00 window), but an
+    // existing ClickAI booking already occupies 14:00-14:30 IST — the override cannot
+    // silently reopen it.
+    const withExistingBooking = computeAvailability({
+      ...BASE,
+      dateIso: "2026-09-25",
+      timezone: "Asia/Kolkata",
+      override: {
+        isFullDayClosure: false,
+        intervals: [{ start: "14:00", end: "15:00", isOpen: true }],
+      },
+      existingBookings: [{ start: "2026-09-25T08:30:00.000Z", end: "2026-09-25T09:00:00.000Z" }], // 14:00-14:30 IST
+    });
+    assert.equal(
+      withExistingBooking.some((s) => s.start === "2026-09-25T08:30:00.000Z"),
+      false,
+      "an override must never reopen a slot an existing booking already occupies",
+    );
+    assert.ok(
+      withExistingBooking.some((s) => s.start === "2026-09-25T09:00:00.000Z"), // 14:30 IST — still offered
+    );
+  });
+});

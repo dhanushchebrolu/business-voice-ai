@@ -47,6 +47,7 @@ import { Route as AppAgentRouteImport } from './routes/app.agent'
 import { Route as AppBillingRouteImport } from './routes/app.billing'
 import { Route as AppBookingsRouteImport } from './routes/app.bookings'
 import { Route as AppBusinessRouteImport } from './routes/app.business'
+import { Route as AppCalendarRouteImport } from './routes/app.calendar'
 import { Route as AppCallsRouteImport } from './routes/app.calls'
 import { Route as AppCampaignsRouteImport } from './routes/app.campaigns'
 import { Route as AppContactsRouteImport } from './routes/app.contacts'
@@ -65,7 +66,9 @@ import { Route as AppCampaignsCampaignIdRouteImport } from './routes/app.campaig
 import { Route as AppCampaignsNewRouteImport } from './routes/app.campaigns.new'
 import { Route as ApiPublicCronDispatchCampaignsRouteImport } from './routes/api/public/cron/dispatch-campaigns'
 import { Route as ApiPublicCronExpirePaymentsRouteImport } from './routes/api/public/cron/expire-payments'
+import { Route as ApiPublicCronSyncGoogleCalendarsRouteImport } from './routes/api/public/cron/sync-google-calendars'
 import { Route as ApiPublicSarvamClientContextRouteImport } from './routes/api/public/sarvam/client-context'
+import { Route as ApiPublicWebhooksGoogleCalendarRouteImport } from './routes/api/public/webhooks/google-calendar'
 import { Route as ApiPublicWebhooksInstagramRouteImport } from './routes/api/public/webhooks/instagram'
 import { Route as ApiPublicWebhooksRazorpayRouteImport } from './routes/api/public/webhooks/razorpay'
 import { Route as ApiPublicWebhooksRazorpayPaymentsRouteImport } from './routes/api/public/webhooks/razorpay-payments'
@@ -268,6 +271,11 @@ const AppBusinessRoute = AppBusinessRouteImport.update({
   path: '/business',
   getParentRoute: () => AppRoute,
 } as any)
+const AppCalendarRoute = AppCalendarRouteImport.update({
+  id: '/calendar',
+  path: '/calendar',
+  getParentRoute: () => AppRoute,
+} as any)
 const AppCallsRoute = AppCallsRouteImport.update({
   id: '/calls',
   path: '/calls',
@@ -360,10 +368,22 @@ const ApiPublicCronExpirePaymentsRoute =
     path: '/api/public/cron/expire-payments',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicCronSyncGoogleCalendarsRoute =
+  ApiPublicCronSyncGoogleCalendarsRouteImport.update({
+    id: '/api/public/cron/sync-google-calendars',
+    path: '/api/public/cron/sync-google-calendars',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicSarvamClientContextRoute =
   ApiPublicSarvamClientContextRouteImport.update({
     id: '/api/public/sarvam/client-context',
     path: '/api/public/sarvam/client-context',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicWebhooksGoogleCalendarRoute =
+  ApiPublicWebhooksGoogleCalendarRouteImport.update({
+    id: '/api/public/webhooks/google-calendar',
+    path: '/api/public/webhooks/google-calendar',
     getParentRoute: () => rootRouteImport,
   } as any)
 const ApiPublicWebhooksInstagramRoute =
@@ -463,6 +483,7 @@ export interface FileRoutesByFullPath {
   '/app/billing': typeof AppBillingRoute
   '/app/bookings': typeof AppBookingsRoute
   '/app/business': typeof AppBusinessRoute
+  '/app/calendar': typeof AppCalendarRoute
   '/app/calls': typeof AppCallsRoute
   '/app/campaigns': typeof AppCampaignsRouteWithChildren
   '/app/contacts': typeof AppContactsRoute
@@ -484,7 +505,9 @@ export interface FileRoutesByFullPath {
   '/admin/customers/': typeof AdminCustomersIndexRoute
   '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
   '/api/public/cron/expire-payments': typeof ApiPublicCronExpirePaymentsRoute
+  '/api/public/cron/sync-google-calendars': typeof ApiPublicCronSyncGoogleCalendarsRoute
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
+  '/api/public/webhooks/google-calendar': typeof ApiPublicWebhooksGoogleCalendarRoute
   '/api/public/webhooks/instagram': typeof ApiPublicWebhooksInstagramRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/razorpay-payments': typeof ApiPublicWebhooksRazorpayPaymentsRoute
@@ -528,6 +551,7 @@ export interface FileRoutesByTo {
   '/app/billing': typeof AppBillingRoute
   '/app/bookings': typeof AppBookingsRoute
   '/app/business': typeof AppBusinessRoute
+  '/app/calendar': typeof AppCalendarRoute
   '/app/calls': typeof AppCallsRoute
   '/app/campaigns': typeof AppCampaignsRouteWithChildren
   '/app/contacts': typeof AppContactsRoute
@@ -549,7 +573,9 @@ export interface FileRoutesByTo {
   '/admin/customers': typeof AdminCustomersIndexRoute
   '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
   '/api/public/cron/expire-payments': typeof ApiPublicCronExpirePaymentsRoute
+  '/api/public/cron/sync-google-calendars': typeof ApiPublicCronSyncGoogleCalendarsRoute
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
+  '/api/public/webhooks/google-calendar': typeof ApiPublicWebhooksGoogleCalendarRoute
   '/api/public/webhooks/instagram': typeof ApiPublicWebhooksInstagramRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/razorpay-payments': typeof ApiPublicWebhooksRazorpayPaymentsRoute
@@ -598,6 +624,7 @@ export interface FileRoutesById {
   '/app/billing': typeof AppBillingRoute
   '/app/bookings': typeof AppBookingsRoute
   '/app/business': typeof AppBusinessRoute
+  '/app/calendar': typeof AppCalendarRoute
   '/app/calls': typeof AppCallsRoute
   '/app/campaigns': typeof AppCampaignsRouteWithChildren
   '/app/contacts': typeof AppContactsRoute
@@ -619,7 +646,9 @@ export interface FileRoutesById {
   '/admin/customers/': typeof AdminCustomersIndexRoute
   '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
   '/api/public/cron/expire-payments': typeof ApiPublicCronExpirePaymentsRoute
+  '/api/public/cron/sync-google-calendars': typeof ApiPublicCronSyncGoogleCalendarsRoute
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
+  '/api/public/webhooks/google-calendar': typeof ApiPublicWebhooksGoogleCalendarRoute
   '/api/public/webhooks/instagram': typeof ApiPublicWebhooksInstagramRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/razorpay-payments': typeof ApiPublicWebhooksRazorpayPaymentsRoute
@@ -669,6 +698,7 @@ export interface FileRouteTypes {
     | '/app/billing'
     | '/app/bookings'
     | '/app/business'
+    | '/app/calendar'
     | '/app/calls'
     | '/app/campaigns'
     | '/app/contacts'
@@ -690,7 +720,9 @@ export interface FileRouteTypes {
     | '/admin/customers/'
     | '/api/public/cron/dispatch-campaigns'
     | '/api/public/cron/expire-payments'
+    | '/api/public/cron/sync-google-calendars'
     | '/api/public/sarvam/client-context'
+    | '/api/public/webhooks/google-calendar'
     | '/api/public/webhooks/instagram'
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/razorpay-payments'
@@ -734,6 +766,7 @@ export interface FileRouteTypes {
     | '/app/billing'
     | '/app/bookings'
     | '/app/business'
+    | '/app/calendar'
     | '/app/calls'
     | '/app/campaigns'
     | '/app/contacts'
@@ -755,7 +788,9 @@ export interface FileRouteTypes {
     | '/admin/customers'
     | '/api/public/cron/dispatch-campaigns'
     | '/api/public/cron/expire-payments'
+    | '/api/public/cron/sync-google-calendars'
     | '/api/public/sarvam/client-context'
+    | '/api/public/webhooks/google-calendar'
     | '/api/public/webhooks/instagram'
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/razorpay-payments'
@@ -803,6 +838,7 @@ export interface FileRouteTypes {
     | '/app/billing'
     | '/app/bookings'
     | '/app/business'
+    | '/app/calendar'
     | '/app/calls'
     | '/app/campaigns'
     | '/app/contacts'
@@ -824,7 +860,9 @@ export interface FileRouteTypes {
     | '/admin/customers/'
     | '/api/public/cron/dispatch-campaigns'
     | '/api/public/cron/expire-payments'
+    | '/api/public/cron/sync-google-calendars'
     | '/api/public/sarvam/client-context'
+    | '/api/public/webhooks/google-calendar'
     | '/api/public/webhooks/instagram'
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/razorpay-payments'
@@ -856,7 +894,9 @@ export interface RootRouteChildren {
   TermsRoute: typeof TermsRoute
   ApiPublicCronDispatchCampaignsRoute: typeof ApiPublicCronDispatchCampaignsRoute
   ApiPublicCronExpirePaymentsRoute: typeof ApiPublicCronExpirePaymentsRoute
+  ApiPublicCronSyncGoogleCalendarsRoute: typeof ApiPublicCronSyncGoogleCalendarsRoute
   ApiPublicSarvamClientContextRoute: typeof ApiPublicSarvamClientContextRoute
+  ApiPublicWebhooksGoogleCalendarRoute: typeof ApiPublicWebhooksGoogleCalendarRoute
   ApiPublicWebhooksInstagramRoute: typeof ApiPublicWebhooksInstagramRoute
   ApiPublicWebhooksRazorpayRoute: typeof ApiPublicWebhooksRazorpayRoute
   ApiPublicWebhooksRazorpayPaymentsRoute: typeof ApiPublicWebhooksRazorpayPaymentsRoute
@@ -1137,6 +1177,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppBusinessRouteImport
       parentRoute: typeof AppRoute
     }
+    '/app/calendar': {
+      id: '/app/calendar'
+      path: '/calendar'
+      fullPath: '/app/calendar'
+      preLoaderRoute: typeof AppCalendarRouteImport
+      parentRoute: typeof AppRoute
+    }
     '/app/calls': {
       id: '/app/calls'
       path: '/calls'
@@ -1263,11 +1310,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicCronExpirePaymentsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/cron/sync-google-calendars': {
+      id: '/api/public/cron/sync-google-calendars'
+      path: '/api/public/cron/sync-google-calendars'
+      fullPath: '/api/public/cron/sync-google-calendars'
+      preLoaderRoute: typeof ApiPublicCronSyncGoogleCalendarsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/sarvam/client-context': {
       id: '/api/public/sarvam/client-context'
       path: '/api/public/sarvam/client-context'
       fullPath: '/api/public/sarvam/client-context'
       preLoaderRoute: typeof ApiPublicSarvamClientContextRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/webhooks/google-calendar': {
+      id: '/api/public/webhooks/google-calendar'
+      path: '/api/public/webhooks/google-calendar'
+      fullPath: '/api/public/webhooks/google-calendar'
+      preLoaderRoute: typeof ApiPublicWebhooksGoogleCalendarRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/public/webhooks/instagram': {
@@ -1427,6 +1488,7 @@ interface AppRouteChildren {
   AppBillingRoute: typeof AppBillingRoute
   AppBookingsRoute: typeof AppBookingsRoute
   AppBusinessRoute: typeof AppBusinessRoute
+  AppCalendarRoute: typeof AppCalendarRoute
   AppCallsRoute: typeof AppCallsRoute
   AppCampaignsRoute: typeof AppCampaignsRouteWithChildren
   AppContactsRoute: typeof AppContactsRoute
@@ -1446,6 +1508,7 @@ const AppRouteChildren: AppRouteChildren = {
   AppBillingRoute: AppBillingRoute,
   AppBookingsRoute: AppBookingsRoute,
   AppBusinessRoute: AppBusinessRoute,
+  AppCalendarRoute: AppCalendarRoute,
   AppCallsRoute: AppCallsRoute,
   AppCampaignsRoute: AppCampaignsRouteWithChildren,
   AppContactsRoute: AppContactsRoute,
@@ -1491,7 +1554,9 @@ const rootRouteChildren: RootRouteChildren = {
   TermsRoute: TermsRoute,
   ApiPublicCronDispatchCampaignsRoute: ApiPublicCronDispatchCampaignsRoute,
   ApiPublicCronExpirePaymentsRoute: ApiPublicCronExpirePaymentsRoute,
+  ApiPublicCronSyncGoogleCalendarsRoute: ApiPublicCronSyncGoogleCalendarsRoute,
   ApiPublicSarvamClientContextRoute: ApiPublicSarvamClientContextRoute,
+  ApiPublicWebhooksGoogleCalendarRoute: ApiPublicWebhooksGoogleCalendarRoute,
   ApiPublicWebhooksInstagramRoute: ApiPublicWebhooksInstagramRoute,
   ApiPublicWebhooksRazorpayRoute: ApiPublicWebhooksRazorpayRoute,
   ApiPublicWebhooksRazorpayPaymentsRoute:

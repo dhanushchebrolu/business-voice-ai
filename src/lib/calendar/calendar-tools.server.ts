@@ -25,7 +25,11 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
-import { computeAvailability, type AvailabilitySlot } from "./calendar-service.server.ts";
+import {
+  computeAvailability,
+  type AvailabilitySlot,
+  type BusinessHourOverride,
+} from "./calendar-service.server.ts";
 import { businessDayUtcBounds } from "./timezone.ts";
 import {
   createBooking,
@@ -124,6 +128,37 @@ export async function resolveCalendarContext(
   };
 }
 
+/**
+ * The single date's daily override (business_hour_overrides), if one
+ * exists — shared by both the availability lookup (so the AI never offers
+ * a closed/overridden-closed slot) and the atomic booking revalidation
+ * (so a staff member closing a slot mid-booking can't be bypassed; see
+ * booking-service.server.ts). Returns undefined (not an empty override)
+ * when no row exists for that date, so callers can tell "no override" from
+ * "an override that opens/closes nothing" — resolveEffectiveIntervals in
+ * calendar-service.server.ts already treats both the same way, but keeping
+ * the distinction here costs nothing and matches the table's own shape.
+ */
+export async function resolveOverrideForDate(
+  supabaseAdmin: Client,
+  businessId: string,
+  dateIso: string,
+): Promise<BusinessHourOverride | undefined> {
+  const { data, error } = await supabaseAdmin
+    .from("business_hour_overrides")
+    .select("is_full_day_closure, intervals")
+    .eq("business_id", businessId)
+    .eq("override_date", dateIso)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) return undefined;
+  return {
+    isFullDayClosure: data.is_full_day_closure,
+    intervals:
+      (data.intervals as unknown as { start: string; end: string; isOpen: boolean }[]) ?? [],
+  };
+}
+
 export async function assertToolPermission(
   supabaseAdmin: Client,
   organizationId: string,
@@ -191,7 +226,7 @@ export async function check_calendar_availability(
     );
     const dayStart = dayStartUtc.toISOString();
     const dayEnd = dayEndUtc.toISOString();
-    const [googleBusyPeriods, existingBookingsRes] = await Promise.all([
+    const [googleBusyPeriods, existingBookingsRes, override] = await Promise.all([
       provider.getBusyPeriods({ calendarId, timeMinIso: dayStart, timeMaxIso: dayEnd }),
       supabaseAdmin
         .from("bookings")
@@ -200,6 +235,7 @@ export async function check_calendar_availability(
         .not("status", "in", "(CANCELLED,NO_SHOW)")
         .gte("start_at", dayStart)
         .lt("start_at", dayEnd),
+      resolveOverrideForDate(supabaseAdmin, input.businessId, input.dateIso),
     ]);
     if (existingBookingsRes.error) throw existingBookingsRes.error;
 
@@ -207,6 +243,7 @@ export async function check_calendar_availability(
       dateIso: input.dateIso,
       timezone: ctx.timezone,
       businessHours: ctx.businessHours,
+      override,
       durationMinutes: input.durationMinutes,
       bufferMinutes: input.bufferMinutes,
       googleBusyPeriods,

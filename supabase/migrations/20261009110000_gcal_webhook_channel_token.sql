@@ -1,0 +1,19 @@
+-- Google Calendar push-notification channel authentication.
+--
+-- Google's push notifications (events.watch) carry NO cryptographic
+-- signature — the documented mechanism for verifying a notification
+-- actually originates from the channel ClickAI itself registered is the
+-- `token` parameter passed at watch-registration time, which Google echoes
+-- back on every notification as the `X-Goog-Channel-Token` header. This
+-- column stores that per-channel secret so the webhook route
+-- (google-calendar-sync.server.ts's handleWebhookNotification) can reject a
+-- notification whose token doesn't match before doing any sync work —
+-- otherwise anyone who discovers the (otherwise-unauthenticated) webhook
+-- URL and a valid channel_id could trigger unlimited sync work for that
+-- tenant. A mismatch only wastes an attacker's time; a forged notification
+-- can never inject fake calendar data, since syncConnection always re-fetches
+-- the real state from Google using ClickAI's own stored credentials — but
+-- requiring the token still closes an easy, free-standing DoS/enumeration
+-- vector, matching this codebase's existing "always verify the webhook"
+-- posture (razorpay-payments.ts, whatsapp.ts).
+ALTER TABLE public.google_calendar_connections ADD COLUMN IF NOT EXISTS channel_token TEXT;

@@ -2771,6 +2771,10 @@ export type Database = {
           business_id: string;
           calendar_id: string | null;
           calendar_name: string | null;
+          channel_expiration: string | null;
+          channel_id: string | null;
+          channel_resource_id: string | null;
+          channel_token: string | null;
           created_at: string;
           encrypted_credentials: string | null;
           google_account_id: string | null;
@@ -2784,6 +2788,7 @@ export type Database = {
           provider: string;
           scopes: string[];
           status: string;
+          sync_token: string | null;
           token_expires_at: string | null;
           updated_at: string;
         };
@@ -2791,6 +2796,10 @@ export type Database = {
           business_id: string;
           calendar_id?: string | null;
           calendar_name?: string | null;
+          channel_expiration?: string | null;
+          channel_id?: string | null;
+          channel_resource_id?: string | null;
+          channel_token?: string | null;
           created_at?: string;
           encrypted_credentials?: string | null;
           google_account_id?: string | null;
@@ -2804,6 +2813,7 @@ export type Database = {
           provider?: string;
           scopes?: string[];
           status?: string;
+          sync_token?: string | null;
           token_expires_at?: string | null;
           updated_at?: string;
         };
@@ -2811,6 +2821,10 @@ export type Database = {
           business_id?: string;
           calendar_id?: string | null;
           calendar_name?: string | null;
+          channel_expiration?: string | null;
+          channel_id?: string | null;
+          channel_resource_id?: string | null;
+          channel_token?: string | null;
           created_at?: string;
           encrypted_credentials?: string | null;
           google_account_id?: string | null;
@@ -2824,6 +2838,7 @@ export type Database = {
           provider?: string;
           scopes?: string[];
           status?: string;
+          sync_token?: string | null;
           token_expires_at?: string | null;
           updated_at?: string;
         };
@@ -2961,6 +2976,220 @@ export type Database = {
             columns: ["service_id"];
             isOneToOne: false;
             referencedRelation: "services";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      business_hour_overrides: {
+        Row: {
+          business_id: string;
+          created_at: string;
+          created_by: string | null;
+          id: string;
+          intervals: Json;
+          is_full_day_closure: boolean;
+          organization_id: string;
+          override_date: string;
+          reason: string | null;
+          updated_at: string;
+        };
+        Insert: {
+          business_id: string;
+          created_at?: string;
+          created_by?: string | null;
+          id?: string;
+          intervals?: Json;
+          is_full_day_closure?: boolean;
+          organization_id: string;
+          override_date: string;
+          reason?: string | null;
+          updated_at?: string;
+        };
+        Update: {
+          business_id?: string;
+          created_at?: string;
+          created_by?: string | null;
+          id?: string;
+          intervals?: Json;
+          is_full_day_closure?: boolean;
+          organization_id?: string;
+          override_date?: string;
+          reason?: string | null;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "business_hour_overrides_business_id_fkey";
+            columns: ["business_id"];
+            isOneToOne: false;
+            referencedRelation: "businesses";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "business_hour_overrides_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      external_calendar_events: {
+        Row: {
+          business_id: string;
+          calendar_connection_id: string;
+          created_at: string;
+          end_at: string | null;
+          google_event_id: string;
+          id: string;
+          is_all_day: boolean;
+          is_clickai_managed: boolean;
+          last_synced_at: string;
+          linked_booking_id: string | null;
+          organization_id: string;
+          raw_updated_at: string | null;
+          start_at: string | null;
+          status: string;
+        };
+        Insert: {
+          business_id: string;
+          calendar_connection_id: string;
+          created_at?: string;
+          end_at?: string | null;
+          google_event_id: string;
+          id?: string;
+          is_all_day?: boolean;
+          is_clickai_managed?: boolean;
+          last_synced_at?: string;
+          linked_booking_id?: string | null;
+          organization_id: string;
+          raw_updated_at?: string | null;
+          start_at?: string | null;
+          status?: string;
+        };
+        Update: {
+          business_id?: string;
+          calendar_connection_id?: string;
+          created_at?: string;
+          end_at?: string | null;
+          google_event_id?: string;
+          id?: string;
+          is_all_day?: boolean;
+          is_clickai_managed?: boolean;
+          last_synced_at?: string;
+          linked_booking_id?: string | null;
+          organization_id?: string;
+          raw_updated_at?: string | null;
+          start_at?: string | null;
+          status?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "external_calendar_events_business_id_fkey";
+            columns: ["business_id"];
+            isOneToOne: false;
+            referencedRelation: "businesses";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "external_calendar_events_calendar_connection_id_fkey";
+            columns: ["calendar_connection_id"];
+            isOneToOne: false;
+            referencedRelation: "google_calendar_connections";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "external_calendar_events_linked_booking_id_fkey";
+            columns: ["linked_booking_id"];
+            isOneToOne: false;
+            referencedRelation: "bookings";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "external_calendar_events_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      calendar_sync_conflicts: {
+        Row: {
+          booking_id: string | null;
+          business_id: string;
+          calendar_connection_id: string;
+          conflict_type: string;
+          created_at: string;
+          details: Json;
+          google_event_id: string | null;
+          id: string;
+          organization_id: string;
+          resolution_notes: string | null;
+          resolved_at: string | null;
+          resolved_by: string | null;
+          status: string;
+          updated_at: string;
+        };
+        Insert: {
+          booking_id?: string | null;
+          business_id: string;
+          calendar_connection_id: string;
+          conflict_type: string;
+          created_at?: string;
+          details?: Json;
+          google_event_id?: string | null;
+          id?: string;
+          organization_id: string;
+          resolution_notes?: string | null;
+          resolved_at?: string | null;
+          resolved_by?: string | null;
+          status?: string;
+          updated_at?: string;
+        };
+        Update: {
+          booking_id?: string | null;
+          business_id?: string;
+          calendar_connection_id?: string;
+          conflict_type?: string;
+          created_at?: string;
+          details?: Json;
+          google_event_id?: string | null;
+          id?: string;
+          organization_id?: string;
+          resolution_notes?: string | null;
+          resolved_at?: string | null;
+          resolved_by?: string | null;
+          status?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "calendar_sync_conflicts_booking_id_fkey";
+            columns: ["booking_id"];
+            isOneToOne: false;
+            referencedRelation: "bookings";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "calendar_sync_conflicts_business_id_fkey";
+            columns: ["business_id"];
+            isOneToOne: false;
+            referencedRelation: "businesses";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "calendar_sync_conflicts_calendar_connection_id_fkey";
+            columns: ["calendar_connection_id"];
+            isOneToOne: false;
+            referencedRelation: "google_calendar_connections";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "calendar_sync_conflicts_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
             referencedColumns: ["id"];
           },
         ];

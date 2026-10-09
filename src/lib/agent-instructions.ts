@@ -42,7 +42,7 @@ export interface AgentSnapshot {
     timezone: string;
     currency: string;
   };
-  hours: { day_of_week: number; is_closed: boolean; intervals: { from: string; to: string }[] }[];
+  hours: { day_of_week: number; is_closed: boolean; intervals: { start: string; end: string }[] }[];
   services: {
     name: string;
     description?: string | null;
@@ -79,7 +79,7 @@ function formatHours(hours: AgentSnapshot["hours"]): string {
     .sort((a, b) => a.day_of_week - b.day_of_week)
     .map((h) => {
       if (h.is_closed || !h.intervals?.length) return `${DAYS[h.day_of_week]}: Closed`;
-      return `${DAYS[h.day_of_week]}: ${h.intervals.map((i) => `${i.from}–${i.to}`).join(", ")}`;
+      return `${DAYS[h.day_of_week]}: ${h.intervals.map((i) => `${i.start}–${i.end}`).join(", ")}`;
     })
     .join("\n");
 }

@@ -67,3 +67,17 @@ export function resolveGoogleCalendarConfig(): GoogleCalendarConfig | null {
     redirectUri: process.env["GOOGLE_CALENDAR_REDIRECT_URI"]!,
   };
 }
+
+/**
+ * The public HTTPS URL of this deployment's Google Calendar push-notification
+ * webhook route (src/routes/api/public/webhooks/google-calendar.ts) —
+ * required by events.watch's `address` parameter. A separate env var from
+ * GOOGLE_CALENDAR_REDIRECT_URI (that one is the OAuth consent-screen
+ * callback, a different route with a different purpose) even though both
+ * are derived from the same deployment's base URL in practice. Returns null
+ * (never throws) when unset — callers (ensureWatchChannel) decide how to
+ * fail, same convention as resolveGoogleCalendarConfig.
+ */
+export function resolveGoogleCalendarWebhookUrl(): string | null {
+  return process.env["GOOGLE_CALENDAR_WEBHOOK_URL"] || null;
+}

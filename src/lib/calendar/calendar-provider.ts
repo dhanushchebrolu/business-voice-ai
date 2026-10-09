@@ -14,7 +14,13 @@ export type CalendarProviderErrorCode =
   | "CALENDAR_RATE_LIMITED"
   | "CALENDAR_CONFLICT"
   | "CALENDAR_UNAVAILABLE"
-  | "EVENT_NOT_FOUND";
+  | "EVENT_NOT_FOUND"
+  // Incremental-sync specific (events.list with an expired syncToken, HTTP
+  // 410) — the provider's documented signal to discard the stored token and
+  // perform a fresh full resync, not a generic failure. Not used by the
+  // booking path (createEvent/getBusyPeriods/etc.) at all, only by the
+  // Google Calendar sync service (google-calendar-sync.server.ts).
+  | "SYNC_TOKEN_EXPIRED";
 
 /** Safe-to-surface, provider-agnostic error — callers never see a raw Google error (spec section 35: "never show raw provider errors to customers"). */
 export class CalendarProviderError extends Error {

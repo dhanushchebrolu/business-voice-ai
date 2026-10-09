@@ -19,14 +19,108 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import type { CalendarProvider } from "./calendar-provider.ts";
 import { CalendarProviderError } from "./calendar-provider.ts";
+import {
+  resolveEffectiveOpenRangesUtc,
+  type BusinessHoursDay,
+  type BusinessHourOverride,
+} from "./calendar-service.server.ts";
+import { dayOfWeekInTimezone, localDateIsoInTimezone } from "./timezone.ts";
 
 type Client = SupabaseClient<Database>;
 
 export class BookingError extends Error {
-  code: "SLOT_NO_LONGER_AVAILABLE" | "NOT_FOUND" | "INVALID_INPUT";
+  code: "SLOT_NO_LONGER_AVAILABLE" | "NOT_FOUND" | "INVALID_INPUT" | "SLOT_OUTSIDE_SCHEDULE";
   constructor(message: string, code: BookingError["code"]) {
     super(message);
     this.code = code;
+  }
+}
+
+/**
+ * Re-validates that [startIso, endIso) actually falls within the hospital's
+ * working schedule for that date — full-day closures and date-specific
+ * open/close overrides included — using the exact same precedence
+ * resolution computeAvailability uses to decide what to OFFER
+ * (resolveEffectiveOpenRangesUtc), so a slot can never be approved here by
+ * some second, divergent notion of "open" (spec section 5: "the backend
+ * must reject... a slot outside the hospital's working schedule... not
+ * approved by an applicable daily override"). Called from every active
+ * booking entry point below (direct voice/manual booking, payment hold,
+ * and reschedule) immediately before the atomic overlap-protected
+ * write — fetched fresh every time, never reused from an earlier
+ * availability lookup, the same "latest available check" convention this
+ * module already uses for the external-calendar busy recheck a few lines
+ * below in createBooking.
+ *
+ * This check and the atomic insert are not in the same database
+ * transaction (closing that completely would mean moving this same
+ * resolution into the create_booking_atomic SQL function itself — a
+ * reasonable future hardening step, not done here to avoid a second,
+ * SQL-side reimplementation of the precedence rules this function already
+ * owns as the single source of truth). The residual race this leaves —
+ * staff closing the slot in the exact instant between this check and the
+ * atomic insert — is the same class of acknowledged, documented gap as the
+ * external-calendar race already accepted in this module; the advisory
+ * lock below still makes two concurrent ClickAI bookings for the same slot
+ * impossible regardless.
+ */
+async function assertSlotWithinSchedule(
+  supabaseAdmin: Client,
+  businessId: string,
+  timezone: string,
+  startIso: string,
+  endIso: string,
+): Promise<void> {
+  const dateIso = localDateIsoInTimezone(new Date(startIso), timezone);
+  const dayOfWeek = dayOfWeekInTimezone(dateIso, timezone);
+
+  const [hoursRes, overrideRes] = await Promise.all([
+    supabaseAdmin
+      .from("business_hours")
+      .select("is_closed, intervals")
+      .eq("business_id", businessId)
+      .eq("day_of_week", dayOfWeek)
+      .maybeSingle(),
+    supabaseAdmin
+      .from("business_hour_overrides")
+      .select("is_full_day_closure, intervals")
+      .eq("business_id", businessId)
+      .eq("override_date", dateIso)
+      .maybeSingle(),
+  ]);
+  if (hoursRes.error) throw hoursRes.error;
+  if (overrideRes.error) throw overrideRes.error;
+
+  const businessHours: BusinessHoursDay[] = hoursRes.data
+    ? [
+        {
+          dayOfWeek,
+          isClosed: hoursRes.data.is_closed,
+          intervals: (hoursRes.data.intervals as unknown as { start: string; end: string }[]) ?? [],
+        },
+      ]
+    : [];
+  const override: BusinessHourOverride | undefined = overrideRes.data
+    ? {
+        isFullDayClosure: overrideRes.data.is_full_day_closure,
+        intervals:
+          (overrideRes.data.intervals as unknown as {
+            start: string;
+            end: string;
+            isOpen: boolean;
+          }[]) ?? [],
+      }
+    : undefined;
+
+  const openRanges = resolveEffectiveOpenRangesUtc(dateIso, timezone, businessHours, override);
+  const start = new Date(startIso).getTime();
+  const end = new Date(endIso).getTime();
+  const within = openRanges.some((r) => start >= r.start.getTime() && end <= r.end.getTime());
+  if (!within) {
+    throw new BookingError(
+      "That time is outside the hospital's working schedule.",
+      "SLOT_OUTSIDE_SCHEDULE",
+    );
   }
 }
 
@@ -176,6 +270,14 @@ export async function createBooking(
     if (existing) return toRecord(existing);
   }
 
+  await assertSlotWithinSchedule(
+    supabaseAdmin,
+    input.businessId,
+    input.timezone,
+    input.startIso,
+    input.endIso,
+  );
+
   const contactId = await resolveContactId(supabaseAdmin, input);
 
   // External-calendar race check (see this function's own doc comment) —
@@ -285,13 +387,23 @@ export async function rescheduleBooking(
 ): Promise<BookingRecord> {
   const { data: booking, error } = await supabaseAdmin
     .from("bookings")
-    .select("id, organization_id, calendar_connection_id, google_event_id, timezone, status")
+    .select(
+      "id, organization_id, business_id, calendar_connection_id, google_event_id, timezone, status",
+    )
     .eq("id", input.bookingId)
     .maybeSingle();
   if (error) throw error;
   if (!booking || booking.organization_id !== input.organizationId) {
     throw new BookingError("Booking not found.", "NOT_FOUND");
   }
+
+  await assertSlotWithinSchedule(
+    supabaseAdmin,
+    booking.business_id,
+    booking.timezone,
+    input.newStartIso,
+    input.newEndIso,
+  );
 
   if (booking.calendar_connection_id) {
     const { data: conflicting, error: conflictError } = await supabaseAdmin
@@ -456,6 +568,14 @@ export async function createPaymentRequiredBooking(
   if (new Date(input.endIso).getTime() <= new Date(input.startIso).getTime()) {
     throw new BookingError("End time must be after start time.", "INVALID_INPUT");
   }
+
+  await assertSlotWithinSchedule(
+    supabaseAdmin,
+    input.businessId,
+    input.timezone,
+    input.startIso,
+    input.endIso,
+  );
 
   const contactId = await resolveContactId(supabaseAdmin, input);
   const holdExpiresAt = new Date(

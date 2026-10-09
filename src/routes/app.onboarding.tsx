@@ -103,7 +103,11 @@ function Onboarding() {
         business_id: business.id,
         day_of_week: day,
         is_closed: !openDays.includes(day),
-        intervals: openDays.includes(day) ? [{ from: openTime, to: closeTime }] : [],
+        // {start, end} — matches calendar-service.server.ts's
+        // BusinessHoursInterval (the AI booking/availability engine's own
+        // contract), not the legacy {from, to} shape this seed used to
+        // write.
+        intervals: openDays.includes(day) ? [{ start: openTime, end: closeTime }] : [],
       }));
       await supabase.from("business_hours").insert(hours);
 

@@ -1,0 +1,110 @@
+import { test, describe } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+const src = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "calendar-dashboard.functions.ts"),
+  "utf8",
+);
+const code = src.replace(/\/\*\*[\s\S]*?\*\//g, "");
+
+/**
+ * Source-scan verification, same technique as bookings.functions.test.ts's
+ * own tests — appropriate here for the same reason: these are thin
+ * createServerFn wrappers whose interesting behavior IS the wiring
+ * (auth middleware present, tenant/role checks actually called, no
+ * server-trusted field ever sourced from client input), which a static
+ * scan verifies directly and unambiguously, rather than needing to
+ * reconstruct TanStack Start's server-function runtime to invoke them.
+ * The actual business logic these functions delegate to
+ * (resolveEffectiveOpenRangesUtc, the override precedence rules) is
+ * already covered by calendar-service.server.test.ts.
+ */
+
+describe("authentication and tenant derivation", () => {
+  test("every exported server function is gated by requireSupabaseAuth", () => {
+    const matches = src.match(/\.middleware\(\[requireSupabaseAuth\]\)/g) ?? [];
+    assert.equal(
+      matches.length,
+      5,
+      "getCalendarDayView, setWeeklyHours, applyDailyOverride, removeDailyOverride, resolveSyncConflict",
+    );
+  });
+
+  test("organizationId always comes from organization_members via resolveOrgContext, never from client input", () => {
+    assert.match(src, /await resolveOrgContext\(context\)/);
+    assert.doesNotMatch(src, /organizationId:\s*(data|input)\./);
+  });
+
+  test("no input schema accepts an organizationId or role field from the client", () => {
+    assert.doesNotMatch(src, /organizationId:\s*z\./);
+    assert.doesNotMatch(src, /role:\s*z\./);
+  });
+
+  test("business ownership is re-validated via resolveBusiness for every function that takes a businessId", () => {
+    const occurrences = code.split("await resolveBusiness(").length - 1;
+    assert.ok(
+      occurrences >= 4,
+      "expected resolveBusiness to be called for getCalendarDayView, setWeeklyHours, applyDailyOverride, removeDailyOverride",
+    );
+    assert.match(code, /business\.organization_id !== organizationId/);
+  });
+
+  test("a sync conflict's organization ownership is re-validated before it can be resolved", () => {
+    assert.match(code, /conflict\.organization_id !== organizationId/);
+  });
+});
+
+describe("role-based authorization — viewer is read-only", () => {
+  test("every write function calls requireWriteRole before touching the database", () => {
+    const matches = code.match(/requireWriteRole\(role\);/g) ?? [];
+    assert.equal(
+      matches.length,
+      4,
+      "setWeeklyHours, applyDailyOverride, removeDailyOverride, resolveSyncConflict",
+    );
+  });
+
+  test("getCalendarDayView (a read) never calls requireWriteRole", () => {
+    const dayViewHandler = code.slice(
+      code.indexOf("export const getCalendarDayView"),
+      code.indexOf("export const setWeeklyHours"),
+    );
+    assert.doesNotMatch(dayViewHandler, /requireWriteRole/);
+  });
+
+  test("requireWriteRole rejects exactly the 'viewer' role and nothing else by name", () => {
+    assert.match(code, /role === "viewer"/);
+  });
+});
+
+describe("override writes target the one-row-per-date unique key, never a parallel structure", () => {
+  test("applyDailyOverride upserts on (business_id, override_date) — one row per date, matching the table's own UNIQUE constraint", () => {
+    assert.match(code, /onConflict:\s*"business_id,override_date"/);
+  });
+
+  test("removeDailyOverride deletes by (business_id, override_date), not a soft-delete flag", () => {
+    const removeHandler = code.slice(code.indexOf("export const removeDailyOverride"));
+    assert.match(removeHandler, /\.delete\(\)/);
+    assert.doesNotMatch(removeHandler, /is_full_day_closure:\s*false/);
+  });
+
+  test("a full-day closure clears any stored sub-interval decisions (intervals become irrelevant once is_full_day_closure is true)", () => {
+    assert.match(code, /intervals:\s*data\.isFullDayClosure\s*\?\s*\[\]\s*:\s*data\.intervals/);
+  });
+});
+
+describe("day-view slot state reuses the one precedence resolver, never a second implementation", () => {
+  test("imports resolveEffectiveOpenRangesUtc from calendar-service.server rather than re-deriving precedence here", () => {
+    assert.match(
+      src,
+      /import\(?.*resolveEffectiveOpenRangesUtc.*from ["']@\/lib\/calendar\/calendar-service\.server["']/s,
+    );
+  });
+
+  test("a slot already covered by a confirmed/pending booking is never reported as merely 'open', regardless of the override state", () => {
+    assert.match(code, /overlapsBooking\s*\?\s*"booked"/);
+  });
+});

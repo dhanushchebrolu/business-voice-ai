@@ -52,6 +52,35 @@ export function zonedWallTimeToUtc(
   return new Date(utcGuessMs - offset);
 }
 
+/** The business's own local calendar date ("YYYY-MM-DD") for a UTC instant, in the given IANA timezone — the inverse of zonedWallTimeToUtc's date handling. Used to map a booking's UTC start instant back to which local day's business_hours/business_hour_overrides row governs it. */
+export function localDateIsoInTimezone(instant: Date, timeZone: string): string {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const parts = dtf.formatToParts(instant);
+  const map: Record<string, string> = {};
+  for (const p of parts) map[p.type] = p.value;
+  return `${map["year"]}-${map["month"]}-${map["day"]}`;
+}
+
+/** The business's own local wall-clock time ("HH:mm") for a UTC instant, in the given IANA timezone — the inverse of zonedWallTimeToUtc's time handling. Used by the dashboard calendar (app.calendar.tsx) to convert a clicked slot's UTC start/end back into the local HH:mm pair business_hour_overrides.intervals stores. */
+export function utcToLocalHHmm(instant: Date, timeZone: string): string {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  const parts = dtf.formatToParts(instant);
+  const map: Record<string, string> = {};
+  for (const p of parts) map[p.type] = p.value;
+  const hour = map["hour"] === "24" ? "00" : map["hour"];
+  return `${hour}:${map["minute"]}`;
+}
+
 /** The day-of-week (0=Sunday .. 6=Saturday, matching business_hours.day_of_week) for a date in the given timezone. */
 export function dayOfWeekInTimezone(dateIso: string, timeZone: string): number {
   const noon = zonedWallTimeToUtc(dateIso, "12:00", timeZone);

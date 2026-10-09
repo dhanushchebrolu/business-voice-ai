@@ -151,7 +151,14 @@ function BusinessPage() {
             <ul className="divide-y divide-border">
               {DAYS.map((day, i) => {
                 const row = hours?.find((h) => h.day_of_week === i);
-                const interval = (row?.intervals as { from: string; to: string }[] | null)?.[0];
+                // Canonical shape is {start, end} — matching
+                // calendar-service.server.ts's BusinessHoursInterval (the
+                // AI booking/availability engine's own contract). Fixed a
+                // pre-existing mismatch here: this editor used to write
+                // {from, to}, which the availability engine never read,
+                // silently breaking slot generation for any business that
+                // configured hours through this tab.
+                const interval = (row?.intervals as { start: string; end: string }[] | null)?.[0];
                 return (
                   <li key={day} className="flex flex-wrap items-center gap-3 py-2.5">
                     <span className="w-28 text-sm font-medium">{day}</span>
@@ -161,7 +168,7 @@ function BusinessPage() {
                         if (!row) return;
                         await supabase
                           .from("business_hours")
-                          .update({ is_closed: !open, intervals: open ? [interval ?? { from: "09:00", to: "19:00" }] : [] })
+                          .update({ is_closed: !open, intervals: open ? [interval ?? { start: "09:00", end: "19:00" }] : [] })
                           .eq("id", row.id);
                         refresh();
                       }}
@@ -170,15 +177,15 @@ function BusinessPage() {
                       <span className="text-xs text-muted-foreground">Closed</span>
                     ) : (
                       <div className="flex items-center gap-2">
-                        {(["from", "to"] as const).map((key) => (
+                        {(["start", "end"] as const).map((key) => (
                           <Input
                             key={key}
                             type="time"
                             className="h-8 w-[120px]"
-                            value={interval?.[key] ?? (key === "from" ? "09:00" : "19:00")}
+                            value={interval?.[key] ?? (key === "start" ? "09:00" : "19:00")}
                             onChange={async (e) => {
                               if (!row) return;
-                              const base = interval ?? { from: "09:00", to: "19:00" };
+                              const base = interval ?? { start: "09:00", end: "19:00" };
                               await supabase
                                 .from("business_hours")
                                 .update({ intervals: [{ ...base, [key]: e.target.value }] })

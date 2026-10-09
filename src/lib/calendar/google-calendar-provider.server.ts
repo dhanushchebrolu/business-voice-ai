@@ -65,6 +65,11 @@ function mapErrorResponse(
         "CALENDAR_CONFLICT",
         "That change conflicts with the current calendar state.",
       );
+    case 410:
+      return new CalendarProviderError(
+        "SYNC_TOKEN_EXPIRED",
+        "Google Calendar sync token has expired; a full resync is required.",
+      );
     case 429:
       return new CalendarProviderError(
         "CALENDAR_RATE_LIMITED",
@@ -109,6 +114,32 @@ function mapGoogleEvent(raw: {
           ? "tentative"
           : "confirmed",
   };
+}
+
+/**
+ * A Google Calendar event as events.list returns it, kept closer to the
+ * raw API shape than NormalizedCalendarEvent — the sync/reconciliation
+ * service (google-calendar-sync.server.ts) needs fields NormalizedCalendarEvent
+ * deliberately omits (updated, extendedProperties for ClickAI-origin
+ * detection, and the all-day date-only start/end shape) that the booking
+ * path (which only ever reads/writes its OWN events) never needed.
+ */
+export interface RawGoogleSyncEvent {
+  id: string;
+  status: "confirmed" | "tentative" | "cancelled";
+  summary?: string | undefined;
+  start?: { dateTime?: string; date?: string } | undefined;
+  end?: { dateTime?: string; date?: string } | undefined;
+  /** Google's own last-modified timestamp for this event (RFC3339). */
+  updated?: string | undefined;
+}
+
+export interface IncrementalSyncPage {
+  events: RawGoogleSyncEvent[];
+  /** Present only on the final page of a sync pass. */
+  nextSyncToken?: string | undefined;
+  /** Present when there are more pages to fetch (pass back as pageToken). */
+  nextPageToken?: string | undefined;
 }
 
 export class GoogleCalendarProvider implements CalendarProvider {
@@ -268,5 +299,88 @@ export class GoogleCalendarProvider implements CalendarProvider {
       if (err instanceof CalendarProviderError && err.code === "CALENDAR_NOT_FOUND") return null;
       throw err;
     }
+  }
+
+  // ============================================================
+  // Google-specific incremental-sync operations (events.watch /
+  // events.list + syncToken). Deliberately NOT part of the generic
+  // CalendarProvider interface — a push-notification channel and a sync
+  // token/cursor are Google Calendar API v3 concepts, not something every
+  // future provider is guaranteed to have an equivalent of. Only
+  // google-calendar-sync.server.ts calls these, importing this concrete
+  // class directly rather than going through the CalendarProvider
+  // abstraction the booking path uses.
+  // ============================================================
+
+  /**
+   * Registers (or re-registers) a push-notification channel for this
+   * calendar. `channelToken` is an opaque secret ClickAI generates and
+   * Google echoes back on every notification as X-Goog-Channel-Token —
+   * the only way to verify a notification actually originates from this
+   * channel, since Google does not sign webhook payloads.
+   */
+  async watchEvents(
+    calendarId: string,
+    channelId: string,
+    channelToken: string,
+    webhookUrl: string,
+  ): Promise<{ resourceId: string; expirationMs: number }> {
+    const result = await this.request<{ resourceId?: string; expiration?: string }>(
+      "POST",
+      `/calendars/${encodeURIComponent(calendarId)}/events/watch`,
+      { id: channelId, type: "web_hook", address: webhookUrl, token: channelToken },
+    );
+    if (!result?.resourceId) {
+      throw new CalendarProviderError(
+        "CALENDAR_UNAVAILABLE",
+        "Google Calendar did not return a channel resource id.",
+      );
+    }
+    return {
+      resourceId: result.resourceId,
+      expirationMs: result.expiration ? Number(result.expiration) : Date.now() + 7 * 86_400_000,
+    };
+  }
+
+  /** Best-effort: stops a previously-registered push-notification channel. Not calling this is harmless — the channel simply expires on its own at expirationMs. */
+  async stopChannel(channelId: string, resourceId: string): Promise<void> {
+    await this.request("POST", "/channels/stop", { id: channelId, resourceId });
+  }
+
+  /**
+   * One page of events.list, in either incremental mode (syncToken set —
+   * the ONLY query param Google allows alongside it) or bootstrap mode (no
+   * syncToken yet — timeMinIso bounds the initial window so a brand-new
+   * connection doesn't pull a calendar's entire history). Throws a
+   * CalendarProviderError with code SYNC_TOKEN_EXPIRED on a 410 response —
+   * callers must discard the stored token and bootstrap fresh, per
+   * Google's documented incremental-sync contract.
+   */
+  async listEventsPage(
+    calendarId: string,
+    options: {
+      syncToken?: string | undefined;
+      pageToken?: string | undefined;
+      timeMinIso?: string | undefined;
+    },
+  ): Promise<IncrementalSyncPage> {
+    const params = new URLSearchParams({ singleEvents: "true", showDeleted: "true" });
+    if (options.syncToken) {
+      params.set("syncToken", options.syncToken);
+    } else if (options.timeMinIso) {
+      params.set("timeMin", options.timeMinIso);
+    }
+    if (options.pageToken) params.set("pageToken", options.pageToken);
+
+    const result = await this.request<{
+      items?: RawGoogleSyncEvent[];
+      nextPageToken?: string;
+      nextSyncToken?: string;
+    }>("GET", `/calendars/${encodeURIComponent(calendarId)}/events?${params.toString()}`);
+    return {
+      events: result?.items ?? [],
+      nextSyncToken: result?.nextSyncToken,
+      nextPageToken: result?.nextPageToken,
+    };
   }
 }

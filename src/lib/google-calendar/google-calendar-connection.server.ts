@@ -294,3 +294,12 @@ export async function getCalendarProviderForConnection(
   );
   return { provider: new GoogleCalendarProvider({ accessToken, fetchImpl }), calendarId };
 }
+
+// Exported under this name (same alias-export convention as
+// razorpay-connection.server.ts's own getValidRazorpayAccessToken) for the
+// Google-specific sync service (google-calendar-sync.server.ts), which
+// needs the raw access token to call events.watch/events.list directly —
+// operations that are Google Calendar-specific (not part of the
+// provider-agnostic CalendarProvider interface) and therefore deliberately
+// bypass getCalendarProviderForConnection's generic wrapper.
+export { getValidAccessToken as getValidGoogleAccessToken };

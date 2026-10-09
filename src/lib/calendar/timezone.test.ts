@@ -1,6 +1,12 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { zonedWallTimeToUtc, dayOfWeekInTimezone, businessDayUtcBounds } from "./timezone.ts";
+import {
+  zonedWallTimeToUtc,
+  dayOfWeekInTimezone,
+  businessDayUtcBounds,
+  utcToLocalHHmm,
+  localDateIsoInTimezone,
+} from "./timezone.ts";
 
 describe("zonedWallTimeToUtc", () => {
   test("converts an Asia/Kolkata (UTC+5:30, no DST) wall time correctly", () => {
@@ -94,5 +100,44 @@ describe("dayOfWeekInTimezone", () => {
     const pacificDay = dayOfWeekInTimezone("2026-09-25", "America/Los_Angeles");
     assert.equal(typeof kolkataDay, "number");
     assert.equal(typeof pacificDay, "number");
+  });
+});
+
+describe("utcToLocalHHmm — the inverse of zonedWallTimeToUtc's time handling", () => {
+  test("round-trips exactly for the instant zonedWallTimeToUtc produces", () => {
+    const utc = zonedWallTimeToUtc("2026-09-25", "16:00", "Asia/Kolkata");
+    assert.equal(utcToLocalHHmm(utc, "Asia/Kolkata"), "16:00");
+  });
+
+  test("the same UTC instant reads as a different local time in a different timezone", () => {
+    const utc = zonedWallTimeToUtc("2026-09-25", "09:00", "America/New_York");
+    assert.equal(utcToLocalHHmm(utc, "America/New_York"), "09:00");
+    assert.notEqual(utcToLocalHHmm(utc, "Asia/Kolkata"), "09:00");
+  });
+
+  test("midnight local time is reported as 00:00, not 24:00", () => {
+    const utc = zonedWallTimeToUtc("2026-09-25", "00:00", "UTC");
+    assert.equal(utcToLocalHHmm(utc, "UTC"), "00:00");
+  });
+});
+
+describe("localDateIsoInTimezone — the inverse of zonedWallTimeToUtc's date handling", () => {
+  test("round-trips exactly for the instant zonedWallTimeToUtc produces", () => {
+    const utc = zonedWallTimeToUtc("2026-09-25", "16:00", "Asia/Kolkata");
+    assert.equal(localDateIsoInTimezone(utc, "Asia/Kolkata"), "2026-09-25");
+  });
+
+  test("a late-UTC instant can fall on a different local calendar date behind UTC", () => {
+    // 2026-09-25T23:30:00.000Z is still 2026-09-25 evening in New York (UTC-4 in September).
+    const lateUtc = new Date("2026-09-25T23:30:00.000Z");
+    assert.equal(localDateIsoInTimezone(lateUtc, "America/New_York"), "2026-09-25");
+  });
+
+  test("an early-UTC instant can fall on the PREVIOUS local calendar date ahead of UTC", () => {
+    // 2026-09-25T00:30:00.000Z is already 2026-09-25 06:00 in Kolkata (UTC+5:30) — same date
+    // here, but right at UTC midnight the date can roll differently for a timezone ahead of UTC.
+    const earlyUtc = new Date("2026-09-24T19:00:00.000Z"); // 2026-09-25T00:30 IST
+    assert.equal(localDateIsoInTimezone(earlyUtc, "Asia/Kolkata"), "2026-09-25");
+    assert.equal(localDateIsoInTimezone(earlyUtc, "UTC"), "2026-09-24");
   });
 });
