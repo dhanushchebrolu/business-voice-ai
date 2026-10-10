@@ -1706,7 +1706,7 @@ async function getReply(
   return { reply, enteredPaymentWait: false, usedToolCalling: false };
 }
 
-/** Appointment length assumed when the caller's requested service has no known duration — this flow doesn't attempt to match the free-text service name the caller used against the business's configured services list, so a per-service duration isn't available here. */
+/** Absolute last-resort appointment length — used only when the business's own configured default (businesses.default_appointment_duration_minutes, resolved per-call in resolveBookingContext) genuinely could not be read, e.g. the DB lookup itself failed. Never the primary fallback; see matchService's own doc comment. */
 const DEFAULT_APPOINTMENT_DURATION_MINUTES = 30;
 
 function safeJsonParse(text: string): Record<string, unknown> | null {
@@ -1749,11 +1749,15 @@ export interface ResolvedService {
  * substring match either direction (the caller's own wording and the
  * configured service name are free text on both sides and rarely match
  * character-for-character — "teeth cleaning" vs. a configured "Teeth
- * Cleaning & Polish"). Falls back to DEFAULT_APPOINTMENT_DURATION_MINUTES
- * whenever no service is known, no match is found, or the matched service
- * has no duration configured — never silently invents a duration that
- * wasn't actually configured. Pure (no I/O) — see resolveBookingContext
- * for where `rows` comes from. Exported directly for unit testing — this
+ * Cleaning & Polish"). Falls back to `fallbackDurationMinutes` — the
+ * business's own configured default_appointment_duration_minutes
+ * (resolveBookingContext resolves it per-call; the bare
+ * DEFAULT_APPOINTMENT_DURATION_MINUTES constant is only its own
+ * last-resort default) — whenever no service is known, no match is found,
+ * or the matched service has no duration configured; never silently
+ * invents a duration that wasn't actually configured. Pure (no I/O) — see
+ * resolveBookingContext for where `rows` comes from. Exported directly
+ * for unit testing — this
  * codebase's test harness has no real Supabase client to resolve
  * resolveBookingContext's own DB query through (every harness test already
  * runs against its fallback), so service-duration coverage (15/30/45/60
@@ -1763,8 +1767,9 @@ export interface ResolvedService {
 export function matchService(
   rows: { id: string; name: string; duration_minutes: number | null }[],
   serviceName: string | null,
+  fallbackDurationMinutes: number = DEFAULT_APPOINTMENT_DURATION_MINUTES,
 ): ResolvedService {
-  if (!serviceName) return { id: null, durationMinutes: DEFAULT_APPOINTMENT_DURATION_MINUTES };
+  if (!serviceName) return { id: null, durationMinutes: fallbackDurationMinutes };
   const normalized = serviceName.trim().toLowerCase();
   const match =
     rows.find((s) => s.name.trim().toLowerCase() === normalized) ??
@@ -1772,10 +1777,10 @@ export function matchService(
       const name = s.name.trim().toLowerCase();
       return name.includes(normalized) || normalized.includes(name);
     });
-  if (!match) return { id: null, durationMinutes: DEFAULT_APPOINTMENT_DURATION_MINUTES };
+  if (!match) return { id: null, durationMinutes: fallbackDurationMinutes };
   return {
     id: match.id,
-    durationMinutes: match.duration_minutes ?? DEFAULT_APPOINTMENT_DURATION_MINUTES,
+    durationMinutes: match.duration_minutes ?? fallbackDurationMinutes,
   };
 }
 
@@ -1826,16 +1831,23 @@ async function resolveBookingContext(
   try {
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const [businessRes, servicesRes] = await Promise.all([
-      supabaseAdmin.from("businesses").select("timezone").eq("id", businessId).maybeSingle(),
+      supabaseAdmin
+        .from("businesses")
+        .select("timezone, default_appointment_duration_minutes")
+        .eq("id", businessId)
+        .maybeSingle(),
       supabaseAdmin
         .from("services")
         .select("id, name, duration_minutes")
         .eq("business_id", businessId)
         .eq("is_active", true),
     ]);
+    const fallbackDurationMinutes =
+      businessRes.data?.default_appointment_duration_minutes ??
+      DEFAULT_APPOINTMENT_DURATION_MINUTES;
     return {
       timezone: businessRes.data?.timezone ?? "UTC",
-      service: matchService(servicesRes.data ?? [], serviceName),
+      service: matchService(servicesRes.data ?? [], serviceName, fallbackDurationMinutes),
     };
   } catch {
     return {

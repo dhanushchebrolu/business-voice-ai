@@ -542,6 +542,34 @@ describe("matchService — resolves the caller's requested service to its config
     assert.equal(result.id, null);
     assert.equal(result.durationMinutes, 30);
   });
+
+  test("a business-configured default duration is used instead of the bare 30-minute constant when no service is known", () => {
+    const result = matchService(rows, null, 45);
+    assert.equal(result.id, null);
+    assert.equal(result.durationMinutes, 45);
+  });
+
+  test("a business-configured default duration is used when no service matches", () => {
+    const result = matchService(rows, "haircut", 45);
+    assert.equal(result.id, null);
+    assert.equal(result.durationMinutes, 45);
+  });
+
+  test("a business-configured default duration is used when the matched service has no duration configured", () => {
+    const result = matchService(
+      [{ id: "svc-x", name: "Mystery Service", duration_minutes: null }],
+      "mystery service",
+      45,
+    );
+    assert.equal(result.id, "svc-x");
+    assert.equal(result.durationMinutes, 45);
+  });
+
+  test("a matched service's own configured duration always wins over the business-level default", () => {
+    const result = matchService(rows, "Teeth Cleaning", 45);
+    assert.equal(result.id, "svc-30");
+    assert.equal(result.durationMinutes, 30);
+  });
 });
 
 /**

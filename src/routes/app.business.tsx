@@ -63,6 +63,7 @@ function BusinessPage() {
     primary_phone: "",
     email: "",
     website: "",
+    default_appointment_duration_minutes: "30",
   });
   const [saving, setSaving] = useState(false);
   const [savingDay, setSavingDay] = useState<number | null>(null);
@@ -77,6 +78,9 @@ function BusinessPage() {
         primary_phone: business.primary_phone ?? "",
         email: business.email ?? "",
         website: business.website ?? "",
+        default_appointment_duration_minutes: String(
+          business.default_appointment_duration_minutes ?? 30,
+        ),
       });
     }
   }, [business]);
@@ -87,8 +91,16 @@ function BusinessPage() {
 
   async function saveProfile() {
     if (!business) return;
+    const defaultDuration = Number(profile.default_appointment_duration_minutes);
+    if (!Number.isInteger(defaultDuration) || defaultDuration <= 0) {
+      toast.error("Default appointment duration must be a whole number of minutes greater than 0.");
+      return;
+    }
     setSaving(true);
-    const { error } = await supabase.from("businesses").update(profile).eq("id", business.id);
+    const { error } = await supabase
+      .from("businesses")
+      .update({ ...profile, default_appointment_duration_minutes: defaultDuration })
+      .eq("id", business.id);
     setSaving(false);
     if (error) {
       toast.error("Could not save changes.");
@@ -257,6 +269,20 @@ function BusinessPage() {
                   onChange={(e) => setProfile({ ...profile, website: e.target.value })}
                 />
               </Field>
+              <Field label="Default appointment duration (minutes)">
+                <Input
+                  type="number"
+                  min={1}
+                  value={profile.default_appointment_duration_minutes}
+                  onChange={(e) =>
+                    setProfile({ ...profile, default_appointment_duration_minutes: e.target.value })
+                  }
+                />
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Used for appointment slots and {type.itemLabelPlural.toLowerCase()} that don't
+                  have their own duration set below.
+                </p>
+              </Field>
             </div>
           </SectionCard>
         </TabsContent>
@@ -289,16 +315,26 @@ function BusinessPage() {
         <TabsContent value="services" className="mt-4">
           <ListEditor
             title={type.itemLabelPlural}
-            description={`Only these ${type.itemLabelPlural.toLowerCase()} and prices may be quoted on calls.`}
+            description={`Only these ${type.itemLabelPlural.toLowerCase()}, prices and durations may be quoted on calls. Leave duration blank to use the business's default appointment duration (set on the Profile tab).`}
             fields={[
               { key: "name", label: type.itemLabel, placeholder: "Name" },
               { key: "price", label: "Price", placeholder: "5000", numeric: true },
+              {
+                key: "duration_minutes",
+                label: "Duration (min)",
+                placeholder: "30",
+                numeric: true,
+              },
               { key: "description", label: "Details", placeholder: "Optional details" },
             ]}
             rows={(services ?? []).map((s) => ({
               id: s.id,
               primary: s.name,
-              secondary: [s.price ? `₹${s.price}` : null, s.description]
+              secondary: [
+                s.price ? `₹${s.price}` : null,
+                s.duration_minutes ? `${s.duration_minutes} min` : null,
+                s.description,
+              ]
                 .filter(Boolean)
                 .join(" · "),
             }))}
@@ -306,6 +342,7 @@ function BusinessPage() {
               await addRow("services", {
                 name: String(v["name"]),
                 price: v["price"] ? Number(v["price"]) : null,
+                duration_minutes: v["duration_minutes"] ? Number(v["duration_minutes"]) : null,
                 description: v["description"] || null,
               });
             }}

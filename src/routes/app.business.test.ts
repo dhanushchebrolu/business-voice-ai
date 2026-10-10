@@ -114,6 +114,25 @@ describe("app.business.tsx — Opening hours editor validates before writing dir
   });
 });
 
+describe("app.business.tsx — treatment duration is configurable, not assumed", () => {
+  test("the Treatments/services editor exposes a duration_minutes field", () => {
+    const servicesTabIdx = src.indexOf('<TabsContent value="services"');
+    const servicesTabEnd = src.indexOf('<TabsContent value="faqs"');
+    const servicesTabBody = src.slice(servicesTabIdx, servicesTabEnd);
+    assert.match(servicesTabBody, /key:\s*"duration_minutes"/);
+    assert.match(servicesTabBody, /duration_minutes:\s*v\["duration_minutes"\]\s*\?\s*Number/);
+  });
+
+  test("saveProfile validates and persists a whole-number, positive default_appointment_duration_minutes", () => {
+    const fnStart = src.indexOf("async function saveProfile(");
+    const fnEnd = src.indexOf("\n  async function addRow(");
+    const fnBody = src.slice(fnStart, fnEnd);
+    assert.match(fnBody, /Number\(profile\.default_appointment_duration_minutes\)/);
+    assert.match(fnBody, /!Number\.isInteger\(defaultDuration\)\s*\|\|\s*defaultDuration\s*<=\s*0/);
+    assert.match(fnBody, /default_appointment_duration_minutes:\s*defaultDuration/);
+  });
+});
+
 describe("app.business.tsx — HoursRow has save-in-flight protection (last-writer-wins race fix)", () => {
   test("BusinessPage tracks a per-day savingDay state and threads it into HoursRow as `disabled`", () => {
     assert.match(src, /const \[savingDay, setSavingDay\] = useState<number \| null>\(null\);/);
