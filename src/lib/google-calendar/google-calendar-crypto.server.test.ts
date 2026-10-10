@@ -177,7 +177,18 @@ describe("key handling", () => {
     } catch (err) {
       const message = (err as Error).message;
       assert.doesNotMatch(message, /super-secret-value-should-never-appear-in-errors/);
-      assert.doesNotMatch(message, new RegExp(key));
+      // `key` is random base64 (randomBytes(32).toString("base64")), which
+      // can contain regex metacharacters (`+` above all) — passing it to
+      // `new RegExp()` made this test flaky: it threw a SyntaxError on
+      // ~2.4% of runs (measured), and even when it didn't throw, `+`/`*`-
+      // adjacent sequences could change what the pattern actually matched
+      // instead of checking for the literal key. The intent is a literal
+      // substring check, so do that directly.
+      assert.equal(
+        message.includes(key),
+        false,
+        "error message must never contain the raw key material",
+      );
     }
   });
 });
