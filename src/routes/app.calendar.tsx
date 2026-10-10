@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useQueryClient, queryOptions } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { ChevronLeft, ChevronRight, Loader2, AlertTriangle, RefreshCw } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
@@ -76,6 +76,8 @@ function addDaysIso(dateIso: string, delta: number): string {
   const next = new Date(Date.UTC(y, m - 1, d + delta));
   return next.toISOString().slice(0, 10);
 }
+
+const DEFAULT_WEEKLY_INTERVAL = { start: "09:00", end: "19:00" };
 
 type SlotState = "open" | "closed" | "booked" | "externally_busy";
 
@@ -551,46 +553,98 @@ function CalendarPage() {
           <ul className="divide-y divide-border">
             {DAYS.map((day, i) => {
               const row = view.weeklyHours.find((h) => h.dayOfWeek === i);
-              const interval = row?.intervals[0];
               return (
-                <li key={day} className="flex flex-wrap items-center gap-3 py-2.5">
-                  <span className="w-28 text-sm font-medium">{day}</span>
-                  <Switch
-                    checked={!row?.isClosed}
-                    disabled={readOnly || savingAction === `weekly-${i}`}
-                    onCheckedChange={(open) =>
-                      saveWeeklyDay(
-                        i,
-                        !open,
-                        open ? [interval ?? { start: "09:00", end: "19:00" }] : [],
-                      )
-                    }
-                  />
-                  {row?.isClosed ? (
-                    <span className="text-xs text-muted-foreground">Closed</span>
-                  ) : (
-                    <div className="flex items-center gap-2">
-                      {(["start", "end"] as const).map((key) => (
-                        <Input
-                          key={key}
-                          type="time"
-                          className="h-8 w-[120px]"
-                          disabled={readOnly || savingAction === `weekly-${i}`}
-                          value={interval?.[key] ?? (key === "start" ? "09:00" : "19:00")}
-                          onChange={(e) => {
-                            const base = interval ?? { start: "09:00", end: "19:00" };
-                            saveWeeklyDay(i, false, [{ ...base, [key]: e.target.value }]);
-                          }}
-                        />
-                      ))}
-                    </div>
-                  )}
-                </li>
+                <WeeklyHoursRow
+                  key={day}
+                  day={day}
+                  row={row}
+                  disabled={readOnly || savingAction === `weekly-${i}`}
+                  onToggle={(open) => {
+                    const stored = row?.intervals[0];
+                    // Reopening never re-persists an already-invalid stored
+                    // interval (e.g. a legacy {"start":"23:59","end":"00:00"}
+                    // row) — see HoursRow's identical note in app.business.tsx
+                    // for why that specific value can never be fixed by
+                    // editing either field alone once it's resubmitted.
+                    const safeInterval =
+                      stored && !describeInvalidInterval(stored) ? stored : DEFAULT_WEEKLY_INTERVAL;
+                    void saveWeeklyDay(i, !open, open ? [safeInterval] : []);
+                  }}
+                  onSaveInterval={(interval) => void saveWeeklyDay(i, false, [interval])}
+                />
               );
             })}
           </ul>
         </SectionCard>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * One weekday's hours row, mirroring HoursRow in app.business.tsx (same
+ * underlying bug, same fix — see that component's own doc comment for why
+ * buffering both fields locally and committing once on blur of the pair,
+ * rather than on each input's own onChange, is what lets a legacy-invalid
+ * stored interval be corrected at all).
+ */
+function WeeklyHoursRow({
+  day,
+  row,
+  disabled,
+  onToggle,
+  onSaveInterval,
+}: {
+  day: string;
+  row: { isClosed: boolean; intervals: { start: string; end: string }[] } | undefined;
+  disabled: boolean;
+  onToggle: (open: boolean) => void;
+  onSaveInterval: (interval: { start: string; end: string }) => void;
+}) {
+  const stored = row?.intervals[0];
+  const [draft, setDraft] = useState(stored ?? DEFAULT_WEEKLY_INTERVAL);
+
+  useEffect(() => {
+    setDraft(stored ?? DEFAULT_WEEKLY_INTERVAL);
+    // stored is a new object literal every render — see HoursRow's
+    // identical note in app.business.tsx.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stored?.start, stored?.end]);
+
+  function commit() {
+    if (stored && draft.start === stored.start && draft.end === stored.end) return;
+    onSaveInterval(draft);
+  }
+
+  function handleGroupBlur(e: React.FocusEvent<HTMLDivElement>) {
+    if (e.relatedTarget instanceof Node && e.currentTarget.contains(e.relatedTarget)) return;
+    commit();
+  }
+
+  return (
+    <li className="flex flex-wrap items-center gap-3 py-2.5">
+      <span className="w-28 text-sm font-medium">{day}</span>
+      <Switch checked={!row?.isClosed} disabled={disabled} onCheckedChange={onToggle} />
+      {row?.isClosed ? (
+        <span className="text-xs text-muted-foreground">Closed</span>
+      ) : (
+        <div className="flex items-center gap-2" onBlur={handleGroupBlur}>
+          <Input
+            type="time"
+            className="h-8 w-[120px]"
+            disabled={disabled}
+            value={draft.start}
+            onChange={(e) => setDraft((d) => ({ ...d, start: e.target.value }))}
+          />
+          <Input
+            type="time"
+            className="h-8 w-[120px]"
+            disabled={disabled}
+            value={draft.end}
+            onChange={(e) => setDraft((d) => ({ ...d, end: e.target.value }))}
+          />
+        </div>
+      )}
+    </li>
   );
 }

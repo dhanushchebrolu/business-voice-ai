@@ -5,7 +5,14 @@ import { toast } from "sonner";
 import { Loader2, Plus, Trash2 } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
-import { workspaceQuery, servicesQuery, faqsQuery, rulesQuery, hoursQuery } from "@/lib/workspace";
+import {
+  workspaceQuery,
+  servicesQuery,
+  faqsQuery,
+  rulesQuery,
+  hoursQuery,
+  type HoursRow as BusinessHoursRecord,
+} from "@/lib/workspace";
 import { getBusinessType, DAYS } from "@/lib/business-types";
 import {
   describeInvalidInterval,
@@ -18,6 +25,8 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+
+const DEFAULT_HOURS_INTERVAL = { start: "09:00", end: "19:00" };
 
 export const Route = createFileRoute("/app/business")({
   head: () => ({
@@ -96,6 +105,49 @@ function BusinessPage() {
     refresh();
   }
 
+  async function toggleDay(row: BusinessHoursRecord | undefined, open: boolean) {
+    if (!row) return;
+    const stored = (row.intervals as { start: string; end: string }[] | null)?.[0];
+    // Reopening never re-persists a stored interval that's already invalid
+    // (e.g. a legacy {"start":"23:59","end":"00:00"} row) — that would
+    // immediately fail the same validation a fresh write to this row now
+    // goes through, leaving the day stuck closed. Falling back to the
+    // known-good default instead means reopening always succeeds, and the
+    // row is then editable again via the two time inputs below.
+    const safeInterval =
+      stored && !describeInvalidInterval(stored) ? stored : DEFAULT_HOURS_INTERVAL;
+    const { error } = await supabase
+      .from("business_hours")
+      .update({ is_closed: !open, intervals: open ? [safeInterval] : [] })
+      .eq("id", row.id);
+    if (error) {
+      toast.error(describeBusinessHoursWriteError(error) ?? error.message);
+      return;
+    }
+    refresh();
+  }
+
+  async function saveInterval(
+    row: BusinessHoursRecord | undefined,
+    interval: { start: string; end: string },
+  ) {
+    if (!row) return;
+    const validationError = describeInvalidInterval(interval);
+    if (validationError) {
+      toast.error(validationError);
+      return;
+    }
+    const { error } = await supabase
+      .from("business_hours")
+      .update({ intervals: [interval] })
+      .eq("id", row.id);
+    if (error) {
+      toast.error(describeBusinessHoursWriteError(error) ?? error.message);
+      return;
+    }
+    refresh();
+  }
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -155,76 +207,14 @@ function BusinessPage() {
             <ul className="divide-y divide-border">
               {DAYS.map((day, i) => {
                 const row = hours?.find((h) => h.day_of_week === i);
-                // Canonical shape is {start, end} — matching
-                // calendar-service.server.ts's BusinessHoursInterval (the
-                // AI booking/availability engine's own contract). Fixed a
-                // pre-existing mismatch here: this editor used to write
-                // {from, to}, which the availability engine never read,
-                // silently breaking slot generation for any business that
-                // configured hours through this tab.
-                const interval = (row?.intervals as { start: string; end: string }[] | null)?.[0];
                 return (
-                  <li key={day} className="flex flex-wrap items-center gap-3 py-2.5">
-                    <span className="w-28 text-sm font-medium">{day}</span>
-                    <Switch
-                      checked={!row?.is_closed}
-                      onCheckedChange={async (open) => {
-                        if (!row) return;
-                        const nextInterval = interval ?? { start: "09:00", end: "19:00" };
-                        if (open) {
-                          const validationError = describeInvalidInterval(nextInterval);
-                          if (validationError) {
-                            toast.error(validationError);
-                            return;
-                          }
-                        }
-                        const { error } = await supabase
-                          .from("business_hours")
-                          .update({ is_closed: !open, intervals: open ? [nextInterval] : [] })
-                          .eq("id", row.id);
-                        if (error) {
-                          toast.error(describeBusinessHoursWriteError(error) ?? error.message);
-                          return;
-                        }
-                        refresh();
-                      }}
-                    />
-                    {row?.is_closed ? (
-                      <span className="text-xs text-muted-foreground">Closed</span>
-                    ) : (
-                      <div className="flex items-center gap-2">
-                        {(["start", "end"] as const).map((key) => (
-                          <Input
-                            key={key}
-                            type="time"
-                            className="h-8 w-[120px]"
-                            value={interval?.[key] ?? (key === "start" ? "09:00" : "19:00")}
-                            onChange={async (e) => {
-                              if (!row) return;
-                              const base = interval ?? { start: "09:00", end: "19:00" };
-                              const nextInterval = { ...base, [key]: e.target.value };
-                              const validationError = describeInvalidInterval(nextInterval);
-                              if (validationError) {
-                                toast.error(validationError);
-                                return;
-                              }
-                              const { error } = await supabase
-                                .from("business_hours")
-                                .update({ intervals: [nextInterval] })
-                                .eq("id", row.id);
-                              if (error) {
-                                toast.error(
-                                  describeBusinessHoursWriteError(error) ?? error.message,
-                                );
-                                return;
-                              }
-                              refresh();
-                            }}
-                          />
-                        ))}
-                      </div>
-                    )}
-                  </li>
+                  <HoursRow
+                    key={day}
+                    day={day}
+                    row={row}
+                    onToggle={(open) => void toggleDay(row, open)}
+                    onSaveInterval={(interval) => void saveInterval(row, interval)}
+                  />
                 );
               })}
             </ul>
@@ -292,6 +282,80 @@ function BusinessPage() {
         </TabsContent>
       </Tabs>
     </div>
+  );
+}
+
+/**
+ * One weekday's hours row. Owns a local draft of {start, end} so a staff
+ * member can retype BOTH fields before either one is persisted — the
+ * previous per-keystroke-submits-one-field behavior meant a legacy-invalid
+ * stored interval (production has rows shaped exactly {"start":"23:59",
+ * "end":"00:00"}) could never be fixed through this editor: editing start
+ * alone always re-submits it against the still-"00:00" end (nothing is
+ * less than "00:00"), and editing end alone always re-submits it against
+ * the still-"23:59" start (nothing is greater than "23:59") — so neither
+ * single-field edit could ever pass validation. Buffering both fields
+ * locally and committing once, on blur of the pair (not of either input
+ * individually), lets the two edits land together in one validated write.
+ */
+function HoursRow({
+  day,
+  row,
+  onToggle,
+  onSaveInterval,
+}: {
+  day: string;
+  row: BusinessHoursRecord | undefined;
+  onToggle: (open: boolean) => void;
+  onSaveInterval: (interval: { start: string; end: string }) => void;
+}) {
+  const stored = (row?.intervals as { start: string; end: string }[] | null)?.[0];
+  const [draft, setDraft] = useState(stored ?? DEFAULT_HOURS_INTERVAL);
+
+  useEffect(() => {
+    setDraft(stored ?? DEFAULT_HOURS_INTERVAL);
+    // stored is a new object literal every render (derived from
+    // row?.intervals?.[0]) — depending on its primitive fields instead of
+    // the object itself is intentional, not a missed dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stored?.start, stored?.end]);
+
+  function commit() {
+    if (stored && draft.start === stored.start && draft.end === stored.end) return;
+    onSaveInterval(draft);
+  }
+
+  function handleGroupBlur(e: React.FocusEvent<HTMLDivElement>) {
+    // Tabbing from the start input to the end input (or back) moves focus
+    // to a sibling inside this same group — not a real "done editing" —
+    // so only commit once focus actually leaves the pair.
+    if (e.relatedTarget instanceof Node && e.currentTarget.contains(e.relatedTarget)) return;
+    commit();
+  }
+
+  return (
+    <li className="flex flex-wrap items-center gap-3 py-2.5">
+      <span className="w-28 text-sm font-medium">{day}</span>
+      <Switch checked={!row?.is_closed} onCheckedChange={onToggle} />
+      {row?.is_closed ? (
+        <span className="text-xs text-muted-foreground">Closed</span>
+      ) : (
+        <div className="flex items-center gap-2" onBlur={handleGroupBlur}>
+          <Input
+            type="time"
+            className="h-8 w-[120px]"
+            value={draft.start}
+            onChange={(e) => setDraft((d) => ({ ...d, start: e.target.value }))}
+          />
+          <Input
+            type="time"
+            className="h-8 w-[120px]"
+            value={draft.end}
+            onChange={(e) => setDraft((d) => ({ ...d, end: e.target.value }))}
+          />
+        </div>
+      )}
+    </li>
   );
 }
 

@@ -50,6 +50,11 @@
 --     requires it — so this tightens a previously-silent "missing isOpen
 --     treated as close" gap into an explicit rejection, without changing
 --     behavior for any current caller).
+--   - On UPDATE (never INSERT, which has no prior row to compare against),
+--     re-validation only runs when the closed-flag or intervals actually
+--     changed from their stored value. An update to any other column on a
+--     row whose existing intervals are already invalid (legacy data) is
+--     never blocked by that pre-existing, unrelated problem.
 CREATE OR REPLACE FUNCTION public.validate_business_hours_interval_shape()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -57,6 +62,7 @@ SET search_path = public
 AS $$
 DECLARE
   v_closed BOOLEAN;
+  v_old_closed BOOLEAN;
   v_elem JSONB;
   v_start TEXT;
   v_end TEXT;
@@ -83,6 +89,28 @@ BEGIN
     v_closed := NEW.is_closed;
   ELSE
     v_closed := NEW.is_full_day_closure;
+  END IF;
+
+  -- On UPDATE only (there is no OLD row on INSERT, so this never applies
+  -- there — every INSERT of an open row is always fully validated below),
+  -- skip re-validation entirely when neither the closed-flag nor
+  -- intervals actually changed from their prior value. Without this, any
+  -- future update that touches an unrelated column on a row whose
+  -- EXISTING intervals are already invalid (legacy data written before
+  -- this trigger existed, e.g. production's {"start":"23:59","end":
+  -- "00:00"} rows) would be rejected for a reason that has nothing to do
+  -- with what the caller was actually trying to change. An update that
+  -- DOES touch either field is still fully validated, exactly as before.
+  IF TG_OP = 'UPDATE' THEN
+    IF TG_TABLE_NAME = 'business_hours' THEN
+      v_old_closed := OLD.is_closed;
+    ELSE
+      v_old_closed := OLD.is_full_day_closure;
+    END IF;
+    IF v_closed IS NOT DISTINCT FROM v_old_closed
+       AND NEW.intervals IS NOT DISTINCT FROM OLD.intervals THEN
+      RETURN NEW;
+    END IF;
   END IF;
 
   -- Closed / full-day-closure rows are never inspected — whatever

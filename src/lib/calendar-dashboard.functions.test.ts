@@ -272,15 +272,14 @@ describe("business-hours interval validation wiring", () => {
     assert.ok(activeBookingIdx > -1 && translateIdx > -1 && activeBookingIdx < translateIdx);
   });
 
-  test("getCalendarDayView computes scheduleConfigWarning scoped to this date's weekday and override, and returns it", () => {
+  test("getCalendarDayView computes scheduleConfigWarning via selectScheduleConfigWarning, scoped to this date's weekday and override, and returns it", () => {
     const fnStart = code.indexOf("export const getCalendarDayView");
     const fnEnd = code.indexOf("const setWeeklyHoursInputSchema");
     const fnBody = code.slice(fnStart, fnEnd);
     assert.match(
       fnBody,
-      /describeInvalidWeeklyDay\(weeklyHours\.find\(\(d\) => d\.dayOfWeek === dayOfWeek\)\)/,
+      /selectScheduleConfigWarning\(\s*weeklyHours\.find\(\(d\) => d\.dayOfWeek === dayOfWeek\),\s*override,\s*data\.dateIso,\s*\)/,
     );
-    assert.match(fnBody, /describeInvalidOverride\(override, data\.dateIso\)/);
     assert.match(fnBody, /scheduleConfigWarning,/);
   });
 });

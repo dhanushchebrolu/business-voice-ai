@@ -153,6 +153,32 @@ export function describeInvalidOverride(
   return null;
 }
 
+/**
+ * The single decision point for the dashboard's scheduleConfigWarning,
+ * extracted so it has its own direct, runtime-executable test coverage
+ * rather than only being exercised indirectly through getCalendarDayView.
+ *
+ * A full-day-closure override always wins outright over the recurring
+ * weekly hours (resolveEffectiveIntervals in calendar-service.server.ts:
+ * "if (override?.isFullDayClosure) return [];" — the weekly hours are
+ * never even consulted for this date). So when one is in effect, no
+ * weekly-hours warning is produced for this date, no matter whether that
+ * weekday's recurring hours happen to also be invalid: the closure alone
+ * already fully explains why the date shows no slots, and reporting the
+ * weekly-hours defect anyway would misattribute the reason. A PARTIAL
+ * override (not full-day) only layers on top of the weekly hours rather
+ * than replacing them, so the weekly-hours warning still applies in that
+ * case — only full-day closure suppresses it.
+ */
+export function selectScheduleConfigWarning(
+  weeklyDay: WeeklyDayLike | undefined,
+  override: OverrideLike | undefined,
+  dateIso: string,
+): string | null {
+  if (override?.isFullDayClosure) return null;
+  return describeInvalidWeeklyDay(weeklyDay) ?? describeInvalidOverride(override, dateIso);
+}
+
 const MAX_WARNED_KEYS = 500;
 
 /**

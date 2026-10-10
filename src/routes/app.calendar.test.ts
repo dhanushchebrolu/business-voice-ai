@@ -64,6 +64,39 @@ describe("app.calendar.tsx — business-hours interval validation (client-side g
   test("a day-specific scheduleConfigWarning from the server is rendered as a visible banner", () => {
     assert.match(src, /view\.scheduleConfigWarning/);
   });
+
+  test("reopening a weekday never re-persists an already-invalid stored interval — it falls back to a known-good default", () => {
+    const callSiteIdx = src.indexOf("onToggle={(open) => {");
+    const callSiteBody = src.slice(callSiteIdx, callSiteIdx + 600);
+    assert.match(
+      callSiteBody,
+      /const safeInterval =\s*\n?\s*stored && !describeInvalidInterval\(stored\) \? stored : DEFAULT_WEEKLY_INTERVAL;/,
+    );
+  });
+
+  test("WeeklyHoursRow buffers both start/end fields in local state and commits once on blur of the pair, not on every keystroke", () => {
+    const compStart = src.indexOf("function WeeklyHoursRow(");
+    const compBody = src.slice(compStart);
+    assert.match(compBody, /const \[draft, setDraft\] = useState/);
+    assert.match(compBody, /function handleGroupBlur/);
+    assert.match(compBody, /onBlur=\{handleGroupBlur\}/);
+    assert.match(
+      compBody,
+      /e\.relatedTarget instanceof Node && e\.currentTarget\.contains\(e\.relatedTarget\)/,
+    );
+    const inputsBlock = compBody.slice(
+      compBody.indexOf('<div className="flex items-center gap-2"'),
+    );
+    assert.doesNotMatch(inputsBlock, /onChange=\{\(e\) => onSaveInterval/);
+  });
+
+  test("an unchanged draft does not trigger a redundant save call", () => {
+    const compStart = src.indexOf("function WeeklyHoursRow(");
+    const compBody = src.slice(compStart);
+    const commitFnStart = compBody.indexOf("function commit(");
+    const commitFnBody = compBody.slice(commitFnStart, commitFnStart + 200);
+    assert.match(commitFnBody, /draft\.start === stored\.start && draft\.end === stored\.end/);
+  });
 });
 
 describe("app.calendar.tsx — the day-view query's error state is distinguished from its loading state", () => {

@@ -8,6 +8,7 @@ import {
   describeBusinessHoursWriteError,
   describeInvalidWeeklyDay,
   describeInvalidOverride,
+  selectScheduleConfigWarning,
   logInvalidBusinessHoursOnce,
   _resetWarnedKeysForTests,
 } from "./business-hours-validation.ts";
@@ -193,6 +194,73 @@ describe("describeInvalidOverride — dashboard diagnostic, specific to the affe
 
   test("no override at all is not flagged", () => {
     assert.equal(describeInvalidOverride(undefined, "2026-10-09"), null);
+  });
+});
+
+describe("selectScheduleConfigWarning — full-day-closure override must take precedence over a weekly-hours warning for that date", () => {
+  const INVALID_DAY = {
+    dayOfWeek: 1,
+    isClosed: false,
+    intervals: [{ start: "23:59", end: "00:00" }],
+  };
+  const VALID_DAY = {
+    dayOfWeek: 1,
+    isClosed: false,
+    intervals: [{ start: "09:00", end: "19:00" }],
+  };
+
+  test("a full-day-closure override suppresses the weekly-hours warning entirely, even when that weekday's hours are invalid", () => {
+    const warning = selectScheduleConfigWarning(
+      INVALID_DAY,
+      { isFullDayClosure: true, intervals: [] },
+      "2026-10-12",
+    );
+    assert.equal(
+      warning,
+      null,
+      "the closure already fully explains why this date has no slots — reporting the weekly-hours defect too would misattribute the reason",
+    );
+  });
+
+  test("no override at all still surfaces the weekly-hours warning", () => {
+    const warning = selectScheduleConfigWarning(INVALID_DAY, undefined, "2026-10-12");
+    assert.ok(warning);
+    assert.match(warning!, /Monday's weekly hours/);
+  });
+
+  test("a PARTIAL (non-full-day) override does NOT suppress the weekly-hours warning — it only layers on top of the weekly hours, never replaces them", () => {
+    const warning = selectScheduleConfigWarning(
+      INVALID_DAY,
+      { isFullDayClosure: false, intervals: [{ start: "10:00", end: "11:00" }] },
+      "2026-10-12",
+    );
+    assert.ok(warning);
+    assert.match(warning!, /Monday's weekly hours/);
+  });
+
+  test("valid weekly hours and a partial override with its own invalid interval still surfaces the override's warning", () => {
+    const warning = selectScheduleConfigWarning(
+      VALID_DAY,
+      { isFullDayClosure: false, intervals: [{ start: "23:59", end: "00:00" }] },
+      "2026-10-12",
+    );
+    assert.ok(warning);
+    assert.match(warning!, /override for 2026-10-12/);
+  });
+
+  test("valid weekly hours and no override problem produces no warning at all", () => {
+    assert.equal(selectScheduleConfigWarning(VALID_DAY, undefined, "2026-10-12"), null);
+  });
+
+  test("valid weekly hours with a full-day-closure override produces no warning (nothing is actually wrong)", () => {
+    assert.equal(
+      selectScheduleConfigWarning(
+        VALID_DAY,
+        { isFullDayClosure: true, intervals: [] },
+        "2026-10-12",
+      ),
+      null,
+    );
   });
 });
 

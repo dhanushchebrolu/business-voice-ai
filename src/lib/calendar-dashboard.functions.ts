@@ -16,8 +16,7 @@ import {
   describeInvalidIntervals,
   describeInvalidOverrideIntervals,
   describeBusinessHoursWriteError,
-  describeInvalidWeeklyDay,
-  describeInvalidOverride,
+  selectScheduleConfigWarning,
   logInvalidBusinessHoursOnce,
 } from "@/lib/calendar/business-hours-validation";
 
@@ -189,11 +188,16 @@ export const getCalendarDayView = createServerFn({ method: "GET" })
     // fail CLOSED everywhere else below — this only adds a visible,
     // day-specific explanation instead of leaving staff to wonder why a
     // day shows no slots. Scoped to the exact weekday/date this view is
-    // for, not a business-wide scan.
+    // for, not a business-wide scan. The precedence between the override
+    // and the weekly hours (a full-day closure suppresses the weekly-
+    // hours warning entirely) lives in selectScheduleConfigWarning itself,
+    // with its own direct test coverage.
     const dayOfWeek = dayOfWeekInTimezone(data.dateIso, business.timezone);
-    const scheduleConfigWarning =
-      describeInvalidWeeklyDay(weeklyHours.find((d) => d.dayOfWeek === dayOfWeek)) ??
-      describeInvalidOverride(override, data.dateIso);
+    const scheduleConfigWarning = selectScheduleConfigWarning(
+      weeklyHours.find((d) => d.dayOfWeek === dayOfWeek),
+      override,
+      data.dateIso,
+    );
 
     // Not awaited (pure, synchronous JS) — still wrapped because a
     // malformed business.timezone (e.g. not a real IANA zone) throws a

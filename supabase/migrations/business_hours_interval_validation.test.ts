@@ -7,17 +7,18 @@ import { dirname, join } from "node:path";
 /**
  * Source-scan coverage for the business_hours/business_hour_overrides
  * interval-validation trigger (see that migration's own header comment).
- * The actual semantics — closed-day bypass, array/object/key/format/
- * ordering checks, override isOpen requirement — were verified this
- * session against a real, disposable PostgreSQL 16 instance with 22
- * scripted scenarios (legacy-invalid row, valid interval, all-day
- * convention, equal times, empty array, closed day with garbage/null
- * content, non-array intervals, non-object elements, missing keys, wrong
- * field types, malformed HH:mm, an UPDATE that introduces a bad interval,
- * and the override-specific isOpen checks) — not reproducible here since
- * this suite runs without a live Postgres instance. This file instead
- * pins the SQL text's own invariants, independent of whether Postgres is
- * available when the suite runs.
+ * This pins the SQL text's own invariants independent of whether
+ * PostgreSQL happens to be available when this suite runs.
+ *
+ * The actual executable semantics — closed-row bypass, array/object/key/
+ * format/ordering checks, the override isOpen requirement, and (as of
+ * this file's sibling) the unrelated-update skip condition — are covered
+ * by business_hours_interval_validation.pg.test.ts, which creates a real,
+ * disposable PostgreSQL instance, loads this exact migration file, and
+ * runs genuine INSERT/UPDATE statements against it. That file supplements
+ * this one rather than replacing it: it skips itself (via t.skip, visibly
+ * reported, never silently) when no usable PostgreSQL installation is
+ * found, so this source-scan file is what still runs everywhere.
  */
 
 const migrationsDir = dirname(fileURLToPath(import.meta.url));
@@ -64,6 +65,33 @@ describe("validate_business_hours_interval_shape — structure", () => {
     // real Postgres: "record new has no field is_full_day_closure") must not
     // reappear.
     assert.doesNotMatch(fnBody, /v_closed := CASE/);
+  });
+
+  test("on UPDATE, skips re-validation when neither the closed-flag nor intervals changed from OLD — but only on UPDATE, never on INSERT", () => {
+    const sql = readSql();
+    const fnBody = sql.slice(
+      sql.indexOf("CREATE OR REPLACE FUNCTION public.validate_business_hours_interval_shape"),
+      sql.indexOf("CREATE TRIGGER trg_business_hours_validate_intervals"),
+    );
+    assert.match(fnBody, /IF TG_OP = 'UPDATE' THEN/);
+    assert.match(
+      fnBody,
+      /v_closed IS NOT DISTINCT FROM v_old_closed\s+AND NEW\.intervals IS NOT DISTINCT FROM OLD\.intervals THEN\s+RETURN NEW;/,
+    );
+    // OLD is unassigned on INSERT — referencing it outside an
+    // `IF TG_OP = 'UPDATE'` guard would error at runtime, so the OLD
+    // comparison must appear strictly after that guard opens, never
+    // unconditionally.
+    const tgOpIdx = fnBody.indexOf("IF TG_OP = 'UPDATE' THEN");
+    const oldRefIdx = fnBody.indexOf("OLD.is_closed");
+    assert.ok(tgOpIdx > -1 && oldRefIdx > -1 && tgOpIdx < oldRefIdx);
+  });
+
+  test("the unrelated-update skip check runs before the closed-row bypass, and the closed-row bypass is otherwise unchanged", () => {
+    const sql = readSql();
+    const skipCheckIdx = sql.indexOf("IF TG_OP = 'UPDATE' THEN");
+    const closedCheckIdx = sql.indexOf("IF v_closed THEN");
+    assert.ok(skipCheckIdx > -1 && closedCheckIdx > -1 && skipCheckIdx < closedCheckIdx);
   });
 
   test("returns early (skips all validation) whenever the row is closed, before any array/object/format check", () => {
