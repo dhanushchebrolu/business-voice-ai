@@ -28,7 +28,8 @@ export class BookingError extends Error {
     | "NOT_FOUND"
     | "INVALID_INPUT"
     | "SLOT_OUTSIDE_SCHEDULE"
-    | "NOT_RESCHEDULABLE";
+    | "NOT_RESCHEDULABLE"
+    | "PAYMENT_PENDING";
   constructor(message: string, code: BookingError["code"]) {
     super(message);
     this.code = code;
@@ -325,6 +326,12 @@ export async function rescheduleBooking(
   if (rpcError) {
     if (rpcError.message?.includes("BOOKING_NOT_FOUND")) {
       throw new BookingError("Booking not found.", "NOT_FOUND");
+    }
+    if (rpcError.message?.includes("BOOKING_PAYMENT_PENDING")) {
+      throw new BookingError(
+        "This booking has a pending payment and cannot be rescheduled until it is completed or cancelled.",
+        "PAYMENT_PENDING",
+      );
     }
     if (rpcError.message?.includes("BOOKING_NOT_RESCHEDULABLE")) {
       throw new BookingError("This booking can no longer be rescheduled.", "NOT_RESCHEDULABLE");

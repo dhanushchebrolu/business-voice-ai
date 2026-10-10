@@ -363,11 +363,12 @@ describe("processRazorpayPaymentWebhook — concurrent-capture race (two webhook
     // yet) — this is exactly the scenario the outer payment_webhook_events
     // (provider, event_id) dedupe does NOT catch, since Razorpay assigns a
     // distinct event_id to each event type even when they describe the
-    // same payment. The conditional `.neq("status", "CAPTURED")` update is
-    // what actually closes this race: the fake client's scripted response
-    // for this call simulates the "lost the race" outcome directly
-    // (maybeSingle() returns null), exactly as the real conditional UPDATE
-    // would when a concurrent writer already flipped the row first.
+    // same payment. The conditional `.in("status", ["CREATED", "PENDING"])`
+    // update is what actually closes this race: the fake client's scripted
+    // response for this call simulates the "lost the race" outcome
+    // directly (maybeSingle() returns null), exactly as the real
+    // conditional UPDATE would when a concurrent writer already flipped
+    // the row first.
     const { client, calls } = makeFakeSupabase([
       { table: "payment_webhook_events", op: "insert", result: { error: null } },
       {
@@ -379,7 +380,7 @@ describe("processRazorpayPaymentWebhook — concurrent-capture race (two webhook
       {
         table: "payment_requests",
         op: "update.select.maybeSingle",
-        result: { data: null, error: null }, // lost the race: 0 rows matched .neq("status","CAPTURED")
+        result: { data: null, error: null }, // lost the race: 0 rows matched .in("status",["CREATED","PENDING"])
       },
       { table: "payment_webhook_events", op: "update", result: { error: null } },
     ]);
@@ -435,6 +436,53 @@ describe("processRazorpayPaymentWebhook — never regresses an already-captured 
     assert.equal(result.outcome, "already_captured");
     const captureAttempt = calls.find((c) => c.table === "payment_requests" && c.op === "update");
     assert.equal(captureAttempt, undefined);
+  });
+
+  test("a late capture against a request already closed as EXPIRED or CANCELLED is rejected, not resurrected into CAPTURED (regression: the capture guard used to only exclude CAPTURED, letting this through)", async () => {
+    for (const closedStatus of ["EXPIRED", "CANCELLED"]) {
+      const closedRequest = { ...BASE_PAYMENT_REQUEST, status: closedStatus };
+      const { client, calls } = makeFakeSupabase([
+        { table: "payment_webhook_events", op: "insert", result: { error: null } },
+        {
+          table: "payment_requests",
+          op: "select.maybeSingle",
+          result: { data: closedRequest, error: null },
+        },
+        { table: "payment_webhook_events", op: "update", result: { error: null } },
+        {
+          table: "payment_requests",
+          op: "update.select.maybeSingle",
+          // The real conditional UPDATE's `.in("status", ["CREATED", "PENDING"])`
+          // matches zero rows for an EXPIRED/CANCELLED request — simulated here
+          // directly, matching the already-captured race-loser case exactly.
+          result: { data: null, error: null },
+        },
+        { table: "payment_webhook_events", op: "update", result: { error: null } },
+      ]);
+      const result = await processRazorpayPaymentWebhook(
+        client,
+        {
+          rawBody: razorpayLinkPaidPayload({
+            paymentLinkId: "plink_abc",
+            status: "paid",
+            amountPaid: 50000,
+            currency: "INR",
+            paymentId: "pay_late",
+          }),
+          eventId: `evt-late-capture-${closedStatus}`,
+        },
+        {},
+      );
+      assert.equal(
+        result.outcome,
+        "already_captured",
+        `a late capture against a ${closedStatus} request must be rejected, got outcome: ${result.outcome}`,
+      );
+      // No domain event, and no booking read/write — the request never
+      // transitioned, so there is nothing to confirm or notify about.
+      assert.ok(!calls.some((c) => c.table === "payment_domain_events"));
+      assert.ok(!calls.some((c) => c.table === "bookings"));
+    }
   });
 });
 

@@ -33,6 +33,17 @@ import {
  * update with the same lock-protected, single-transaction pattern — see
  * that migration's own header comment for the exact races this closes
  * (reschedule-vs-reschedule, reschedule-vs-closure, reschedule-vs-cancel).
+ *
+ * Also covers (added by the adversarial-review remediation pass):
+ * 20261010140000_reschedule_payment_pending_guard_and_cancel_closes_
+ * payment.sql — rescheduling a PENDING_PAYMENT booking is now rejected
+ * outright (BOOKING_PAYMENT_PENDING), and cancel_booking_atomic now
+ * closes any open payment_requests row for the booking it cancels in the
+ * same transaction. See that migration's own header comment for exactly
+ * why both were needed (a rescheduled payment hold became permanently
+ * invisible to the expiration sweep; a cancelled booking's payment
+ * request stayed payable and a late capture could still flip it to
+ * CAPTURED).
  */
 
 const migrationsDir = dirname(fileURLToPath(import.meta.url));
@@ -50,6 +61,13 @@ const IDEMPOTENCY_RACE_FIX_SQL = readFileSync(
 );
 const RESCHEDULE_AND_CANCEL_SQL = readFileSync(
   join(migrationsDir, "20261010130000_atomic_reschedule_and_cancel.sql"),
+  "utf8",
+);
+const PAYMENT_PENDING_GUARD_SQL = readFileSync(
+  join(
+    migrationsDir,
+    "20261010140000_reschedule_payment_pending_guard_and_cancel_closes_payment.sql",
+  ),
   "utf8",
 );
 
@@ -209,6 +227,35 @@ CREATE TABLE bookings (
 CREATE UNIQUE INDEX idx_bookings_no_exact_start_clash
   ON bookings (calendar_connection_id, start_at)
   WHERE status NOT IN ('CANCELLED', 'NO_SHOW') AND calendar_connection_id IS NOT NULL;
+
+-- Trimmed exactly like the other fixture tables: no FK to razorpay_
+-- connections (not needed by anything cancel_booking_atomic or the
+-- expiration sweep's own discovery query touch), but identical column
+-- names/types/status CHECK to the real table so real SQL runs unmodified.
+CREATE TABLE payment_requests (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  organization_id UUID NOT NULL,
+  business_id UUID NOT NULL,
+  booking_id UUID NOT NULL,
+  razorpay_connection_id UUID,
+  provider TEXT NOT NULL DEFAULT 'razorpay',
+  provider_order_id TEXT,
+  provider_payment_link_id TEXT,
+  provider_payment_id TEXT,
+  amount_minor_units INTEGER NOT NULL CHECK (amount_minor_units > 0),
+  currency TEXT NOT NULL DEFAULT 'INR',
+  status TEXT NOT NULL DEFAULT 'CREATED' CHECK (status IN (
+    'CREATED', 'PENDING', 'CAPTURED', 'FAILED', 'EXPIRED', 'CANCELLED'
+  )),
+  payment_link_url TEXT,
+  idempotency_key TEXT NOT NULL,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  last_error TEXT,
+  captured_at TIMESTAMPTZ,
+  expires_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 `;
 
 before(() => {
@@ -244,6 +291,11 @@ before(() => {
   const rescheduleCancelResult = execSql(RESCHEDULE_AND_CANCEL_SQL);
   if (rescheduleCancelResult.status !== 0) {
     setupFailure = `failed to load 20261010130000_atomic_reschedule_and_cancel.sql as committed: ${rescheduleCancelResult.stderr}`;
+    return;
+  }
+  const paymentPendingGuardResult = execSql(PAYMENT_PENDING_GUARD_SQL);
+  if (paymentPendingGuardResult.status !== 0) {
+    setupFailure = `failed to load 20261010140000_reschedule_payment_pending_guard_and_cancel_closes_payment.sql as committed: ${paymentPendingGuardResult.stderr}`;
     return;
   }
 });
@@ -1034,4 +1086,426 @@ SELECT (start_at = '2026-11-30T10:00:00+05:30'::timestamptz)::text || '|'
     const status = scalar(`SELECT status FROM bookings WHERE id = '${booking}';`);
     assert.equal(status, "CANCELLED", "the booking must remain CANCELLED, never resurrected");
   });
+});
+
+// ============================================================
+// Phase 2A — create_booking_atomic vs reschedule_booking_atomic
+// ============================================================
+
+describe("create_booking_atomic vs reschedule_booking_atomic — real PostgreSQL concurrency: cross-function double-booking prevention", () => {
+  pgTest(
+    "a brand-new booking creation racing a reschedule of a DIFFERENT booking into the same destination slot: exactly one wins, never both",
+    async () => {
+      let sawCreateWin = false;
+      let sawRescheduleWin = false;
+
+      for (let i = 0; i < 4; i++) {
+        const { businessId, connectionId, organizationId } = seedOpenBusiness();
+        const existingBooking = seedBooking({
+          organizationId,
+          businessId,
+          connectionId,
+          startIso: `2026-12-1${i}T09:00:00+05:30`,
+          endIso: `2026-12-1${i}T09:30:00+05:30`,
+        });
+
+        const destStart = `2026-12-1${i}T16:00:00+05:30`;
+        const destEnd = `2026-12-1${i}T16:30:00+05:30`;
+        const createSql = createBookingSql({
+          organizationId,
+          businessId,
+          connectionId,
+          startIso: destStart,
+          endIso: destEnd,
+        });
+        const rescheduleToSameSql = rescheduleSql({
+          organizationId,
+          bookingId: existingBooking,
+          newStartIso: destStart,
+          newEndIso: destEnd,
+        });
+
+        const [createResult, rescheduleResult] = await Promise.all([
+          execSqlAsync(createSql),
+          execSqlAsync(rescheduleToSameSql),
+        ]);
+
+        const succeeded = [createResult, rescheduleResult].filter((r) => r.status === 0);
+        const failed = [createResult, rescheduleResult].filter((r) => r.status !== 0);
+        assert.equal(
+          succeeded.length,
+          1,
+          `iteration ${i}: expected exactly one of create-vs-reschedule into the same destination to succeed, got ${succeeded.length}.\ncreate: status=${createResult.status} stderr=${createResult.stderr}\nreschedule: status=${rescheduleResult.status} stderr=${rescheduleResult.stderr}`,
+        );
+        assert.ok(
+          failed[0]!.stderr.includes("SLOT_NO_LONGER_AVAILABLE"),
+          `iteration ${i}: the loser must fail with SLOT_NO_LONGER_AVAILABLE, got: ${failed[0]!.stderr}`,
+        );
+        if (createResult.status === 0) sawCreateWin = true;
+        if (rescheduleResult.status === 0) sawRescheduleWin = true;
+
+        const count = scalar(
+          `SELECT count(*) FROM bookings WHERE calendar_connection_id = '${connectionId}' AND start_at = '${destStart}'::timestamptz AND status NOT IN ('CANCELLED','NO_SHOW');`,
+        );
+        assert.equal(
+          count,
+          "1",
+          `iteration ${i}: exactly one booking must occupy the destination slot, regardless of which side won`,
+        );
+      }
+
+      if (!sawCreateWin || !sawRescheduleWin) {
+        console.error(
+          `note: across 4 iterations, only the "${sawCreateWin ? "create" : "reschedule"}" side ever won — the mutual-exclusion invariant held every time, but genuine interleaving in both directions was not directly observed in this run.`,
+        );
+      }
+    },
+  );
+});
+
+// ============================================================
+// Phase 2B — cancel_booking_atomic vs cancel_booking_atomic
+// ============================================================
+
+describe("cancel_booking_atomic — real PostgreSQL concurrency: double-cancel", () => {
+  pgTest(
+    "two genuinely concurrent cancel calls for the SAME booking both resolve successfully (idempotent contract) and the final state is CANCELLED exactly once",
+    async () => {
+      for (let i = 0; i < 4; i++) {
+        const { businessId, connectionId, organizationId } = seedOpenBusiness();
+        const booking = seedBooking({
+          organizationId,
+          businessId,
+          connectionId,
+          startIso: `2026-12-2${i}T09:00:00+05:30`,
+          endIso: `2026-12-2${i}T09:30:00+05:30`,
+        });
+
+        const sql = cancelSql({
+          organizationId,
+          bookingId: booking,
+          reason: "double-cancel race test",
+        });
+        const [resultA, resultB] = await Promise.all([execSqlAsync(sql), execSqlAsync(sql)]);
+
+        assert.equal(resultA.status, 0, `iteration ${i}: cancel A must succeed: ${resultA.stderr}`);
+        assert.equal(
+          resultB.status,
+          0,
+          `iteration ${i}: cancel B must succeed too (idempotent contract — cancelling a booking that's already (being) cancelled is never an error): ${resultB.stderr}`,
+        );
+
+        const status = scalar(`SELECT status FROM bookings WHERE id = '${booking}';`);
+        assert.equal(status, "CANCELLED", `iteration ${i}: final state must be CANCELLED`);
+      }
+    },
+  );
+});
+
+// ============================================================
+// Phase 1 — payment-hold rescheduling guard + cancel closes payment_requests
+// ============================================================
+
+/** Creates a PENDING_PAYMENT hold via the real create_booking_atomic RPC (p_status/p_hold_expires_at), exactly as create_booking_payment_hold does, and returns its id. */
+function seedPendingPaymentBooking(args: {
+  organizationId: string;
+  businessId: string;
+  connectionId: string;
+  startIso: string;
+  endIso: string;
+  holdExpiresAtIso: string;
+}): string {
+  const key = `hold-${randomUUID()}`;
+  return scalar(
+    `\\pset tuples_only on
+SELECT (public.create_booking_atomic(
+  '${args.organizationId}', '${args.businessId}', '${args.connectionId}', NULL, NULL, NULL,
+  '${args.startIso}'::timestamptz, '${args.endIso}'::timestamptz, 'Asia/Kolkata',
+  'Test Customer', '+910000000000', 'test@example.com', 'voice',
+  '${key}', 'PENDING_PAYMENT', '${args.holdExpiresAtIso}'::timestamptz, NULL, NULL
+)).id;`,
+  );
+}
+
+function seedPaymentRequest(args: {
+  organizationId: string;
+  businessId: string;
+  bookingId: string;
+  status?: string;
+}): string {
+  return scalar(
+    `\\pset tuples_only on
+INSERT INTO payment_requests (organization_id, business_id, booking_id, amount_minor_units, currency, status, idempotency_key)
+VALUES ('${args.organizationId}', '${args.businessId}', '${args.bookingId}', 50000, 'INR', '${args.status ?? "PENDING"}', '${args.bookingId}')
+RETURNING id;`,
+  );
+}
+
+describe("reschedule_booking_atomic vs PENDING_PAYMENT — real PostgreSQL: payment-hold guard", () => {
+  pgTest(
+    "rescheduling a PENDING_PAYMENT booking is rejected (BOOKING_PAYMENT_PENDING), leaving status, slot, and hold_expires_at completely unchanged",
+    () => {
+      const { businessId, connectionId, organizationId } = seedOpenBusiness();
+      const holdExpiresAtIso = "2026-12-30T10:15:00+05:30";
+      const booking = seedPendingPaymentBooking({
+        organizationId,
+        businessId,
+        connectionId,
+        startIso: "2026-12-30T10:00:00+05:30",
+        endIso: "2026-12-30T10:15:00+05:30",
+        holdExpiresAtIso,
+      });
+
+      assertRejected(
+        rescheduleSql({
+          organizationId,
+          bookingId: booking,
+          newStartIso: "2026-12-30T14:00:00+05:30",
+          newEndIso: "2026-12-30T14:15:00+05:30",
+        }),
+        "BOOKING_PAYMENT_PENDING",
+        "rescheduling a pending-payment hold must be rejected outright, not silently succeed",
+      );
+
+      const row = scalar(
+        `\\pset tuples_only on
+SELECT status || '|'
+    || (start_at = '2026-12-30T10:00:00+05:30'::timestamptz)::text || '|'
+    || (end_at = '2026-12-30T10:15:00+05:30'::timestamptz)::text || '|'
+    || (hold_expires_at = '${holdExpiresAtIso}'::timestamptz)::text
+   FROM bookings WHERE id = '${booking}';`,
+      );
+      assert.equal(
+        row,
+        "PENDING_PAYMENT|true|true|true",
+        `the original status, slot, and hold_expires_at must all survive the rejected reschedule unchanged, got: ${row}`,
+      );
+    },
+  );
+
+  pgTest(
+    "the expiration sweep's own discovery condition (status = PENDING_PAYMENT AND hold_expires_at < now()) still finds a hold that was never rescheduled",
+    () => {
+      // This exercises the exact WHERE clause payment-expiration.server.ts's
+      // expirePendingPayments() uses against real PostgreSQL — proving the
+      // fix above actually matters: before it existed, a rescheduled hold's
+      // status became RESCHEDULED and this same query would never match it
+      // again. The TS function itself (its conditional-UPDATE race-safety
+      // against a concurrent capture webhook) is not re-driven here — it
+      // needs a SupabaseClient, not raw SQL — see payment-expiration.
+      // server.test.ts's own (mocked) coverage of that logic.
+      const { businessId, connectionId, organizationId } = seedOpenBusiness();
+      const booking = seedPendingPaymentBooking({
+        organizationId,
+        businessId,
+        connectionId,
+        startIso: "2026-12-31T10:00:00+05:30",
+        endIso: "2026-12-31T10:15:00+05:30",
+        holdExpiresAtIso: "2020-01-01T00:00:00Z", // already in the past
+      });
+
+      const found = scalar(
+        `SELECT count(*) FROM bookings WHERE id = '${booking}' AND status = 'PENDING_PAYMENT' AND hold_expires_at < now();`,
+      );
+      assert.equal(
+        found,
+        "1",
+        "a never-rescheduled, past-due hold must be discoverable by the sweep's query",
+      );
+    },
+  );
+});
+
+describe("cancel_booking_atomic vs payment_requests — real PostgreSQL: cancellation closes the open payment request", () => {
+  pgTest(
+    "cancelling a PENDING_PAYMENT booking closes its open (CREATED/PENDING) payment_requests row to CANCELLED, atomically with the booking cancel",
+    () => {
+      const { businessId, connectionId, organizationId } = seedOpenBusiness();
+      const booking = seedPendingPaymentBooking({
+        organizationId,
+        businessId,
+        connectionId,
+        startIso: "2027-01-02T10:00:00+05:30",
+        endIso: "2027-01-02T10:15:00+05:30",
+        holdExpiresAtIso: "2027-01-02T10:30:00+05:30",
+      });
+      const paymentRequestId = seedPaymentRequest({
+        organizationId,
+        businessId,
+        bookingId: booking,
+        status: "PENDING",
+      });
+
+      assertSucceeds(
+        cancelSql({ organizationId, bookingId: booking, reason: "customer requested" }),
+        "cancelling a pending-payment booking must succeed",
+      );
+
+      const bookingStatus = scalar(`SELECT status FROM bookings WHERE id = '${booking}';`);
+      assert.equal(bookingStatus, "CANCELLED");
+
+      const paymentStatus = scalar(
+        `SELECT status FROM payment_requests WHERE id = '${paymentRequestId}';`,
+      );
+      assert.equal(
+        paymentStatus,
+        "CANCELLED",
+        "the booking's open payment_requests row must be closed to CANCELLED in the same transaction as the booking cancel",
+      );
+    },
+  );
+
+  pgTest(
+    "cancelling a booking never regresses a payment_requests row that already reached a terminal state (CAPTURED, FAILED, or EXPIRED)",
+    () => {
+      for (const terminalStatus of ["CAPTURED", "FAILED", "EXPIRED"]) {
+        const { businessId, connectionId, organizationId } = seedOpenBusiness();
+        const booking = seedPendingPaymentBooking({
+          organizationId,
+          businessId,
+          connectionId,
+          startIso: "2027-01-03T10:00:00+05:30",
+          endIso: "2027-01-03T10:15:00+05:30",
+          holdExpiresAtIso: "2027-01-03T10:30:00+05:30",
+        });
+        const paymentRequestId = seedPaymentRequest({
+          organizationId,
+          businessId,
+          bookingId: booking,
+          status: terminalStatus,
+        });
+
+        assertSucceeds(
+          cancelSql({ organizationId, bookingId: booking }),
+          "cancel must still succeed",
+        );
+
+        const paymentStatus = scalar(
+          `SELECT status FROM payment_requests WHERE id = '${paymentRequestId}';`,
+        );
+        assert.equal(
+          paymentStatus,
+          terminalStatus,
+          `a payment_requests row already ${terminalStatus} must never be overwritten by a later booking cancellation`,
+        );
+      }
+    },
+  );
+
+  pgTest("cancelling a booking with no payment_requests row at all succeeds with no error", () => {
+    const { businessId, connectionId, organizationId } = seedOpenBusiness();
+    const booking = seedBooking({
+      organizationId,
+      businessId,
+      connectionId,
+      startIso: "2027-01-04T10:00:00+05:30",
+      endIso: "2027-01-04T10:15:00+05:30",
+    });
+    assertSucceeds(
+      cancelSql({ organizationId, bookingId: booking }),
+      "cancelling a booking with no associated payment_requests row must be a normal no-op for that table, not an error",
+    );
+    const status = scalar(`SELECT status FROM bookings WHERE id = '${booking}';`);
+    assert.equal(status, "CANCELLED");
+  });
+});
+
+describe("cancel_booking_atomic vs an already-expired hold — real PostgreSQL: cancel must not resurrect/overwrite PAYMENT_EXPIRED", () => {
+  pgTest(
+    "cancelling a booking the expiration sweep already moved to PAYMENT_EXPIRED is a no-op: status stays PAYMENT_EXPIRED (not overwritten to CANCELLED), and its already-EXPIRED payment_requests row is untouched",
+    () => {
+      // Simulates the exact race this guard closes: the sweep
+      // (payment-expiration.server.ts) transitions the booking and its
+      // payment_requests row first (PENDING_PAYMENT -> PAYMENT_EXPIRED,
+      // PENDING -> EXPIRED), then a stale dashboard view's cancel action
+      // (or a concurrently-running cancel_booking_atomic call) targets the
+      // same booking. Before this migration's third fix, cancel's only
+      // idempotency short-circuit was status = 'CANCELLED', so this would
+      // have silently overwritten PAYMENT_EXPIRED back to CANCELLED.
+      const { businessId, connectionId, organizationId } = seedOpenBusiness();
+      const booking = seedPendingPaymentBooking({
+        organizationId,
+        businessId,
+        connectionId,
+        startIso: "2027-01-05T10:00:00+05:30",
+        endIso: "2027-01-05T10:15:00+05:30",
+        holdExpiresAtIso: "2020-01-01T00:00:00Z",
+      });
+      const paymentRequestId = seedPaymentRequest({
+        organizationId,
+        businessId,
+        bookingId: booking,
+        status: "PENDING",
+      });
+
+      // Reproduce what expirePendingPayments() itself would have written.
+      assertSucceeds(
+        `UPDATE bookings SET status = 'PAYMENT_EXPIRED' WHERE id = '${booking}';`,
+        "simulated sweep booking update",
+      );
+      assertSucceeds(
+        `UPDATE payment_requests SET status = 'EXPIRED' WHERE id = '${paymentRequestId}';`,
+        "simulated sweep payment_requests update",
+      );
+
+      assertSucceeds(
+        cancelSql({ organizationId, bookingId: booking, reason: "late cancel attempt" }),
+        "cancelling an already-expired booking must succeed (idempotent no-op), not error",
+      );
+
+      const bookingStatus = scalar(`SELECT status FROM bookings WHERE id = '${booking}';`);
+      assert.equal(
+        bookingStatus,
+        "PAYMENT_EXPIRED",
+        "an already-PAYMENT_EXPIRED booking must never be overwritten to CANCELLED by a later cancel call",
+      );
+
+      const paymentStatus = scalar(
+        `SELECT status FROM payment_requests WHERE id = '${paymentRequestId}';`,
+      );
+      assert.equal(
+        paymentStatus,
+        "EXPIRED",
+        "the already-EXPIRED payment_requests row must be left untouched",
+      );
+
+      const notes = scalar(`SELECT coalesce(notes, '') FROM bookings WHERE id = '${booking}';`);
+      assert.equal(
+        notes,
+        "",
+        "a no-op cancel on an already-terminal booking must not append cancellation notes either",
+      );
+    },
+  );
+
+  pgTest(
+    "cancelling an already-PAYMENT_FAILED booking is likewise a no-op, matching the same terminal grouping used elsewhere in this file",
+    () => {
+      const { businessId, connectionId, organizationId } = seedOpenBusiness();
+      const booking = seedPendingPaymentBooking({
+        organizationId,
+        businessId,
+        connectionId,
+        startIso: "2027-01-06T10:00:00+05:30",
+        endIso: "2027-01-06T10:15:00+05:30",
+        holdExpiresAtIso: "2027-01-06T10:30:00+05:30",
+      });
+      assertSucceeds(
+        `UPDATE bookings SET status = 'PAYMENT_FAILED' WHERE id = '${booking}';`,
+        "simulated payment-failed transition",
+      );
+
+      assertSucceeds(
+        cancelSql({ organizationId, bookingId: booking }),
+        "cancelling an already-PAYMENT_FAILED booking must succeed",
+      );
+
+      const bookingStatus = scalar(`SELECT status FROM bookings WHERE id = '${booking}';`);
+      assert.equal(
+        bookingStatus,
+        "PAYMENT_FAILED",
+        "an already-PAYMENT_FAILED booking must never be overwritten to CANCELLED",
+      );
+    },
+  );
 });

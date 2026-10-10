@@ -272,22 +272,28 @@ export async function processRazorpayPaymentWebhook(
       return { outcome: "currency_mismatch" };
     }
 
-    // Conditional on NOT already CAPTURED (rather than an unconditional
-    // update): Razorpay fires more than one webhook event per underlying
-    // transaction (e.g. payment_link.paid and payment.captured/order.paid
-    // each carry their own event_id, so the outer payment_webhook_events
-    // dedupe does not catch them as literal duplicates), and two such
-    // deliveries for the same capture can be processed concurrently — both
-    // reading this row as still PENDING before either write commits. This
-    // guard makes only the first writer actually apply the CAPTURED
-    // transition; the loser below is treated as already_captured, so a
-    // PaymentCaptured domain event (and the calendar/WhatsApp/voice
-    // dispatch it triggers) is never recorded twice for one payment.
-    // Scoped to `<> CAPTURED` specifically (not the exact previously-read
-    // status) so this never interferes with the unrelated, legitimate race
-    // against the expiration sweep — that transition targets EXPIRED, not
-    // CAPTURED, and PAYMENT_CAPTURED_AFTER_EXPIRY already handles a booking
-    // that has since moved on.
+    // Conditional on the request still being open (CREATED/PENDING)
+    // rather than an unconditional update, for two reasons:
+    //   1. Razorpay fires more than one webhook event per underlying
+    //      transaction (e.g. payment_link.paid and payment.captured/
+    //      order.paid each carry their own event_id, so the outer
+    //      payment_webhook_events dedupe does not catch them as literal
+    //      duplicates), and two such deliveries for the same capture can
+    //      be processed concurrently — both reading this row as still
+    //      PENDING before either write commits. This guard makes only the
+    //      first writer actually apply the CAPTURED transition; the loser
+    //      below is treated as already_captured, so a PaymentCaptured
+    //      domain event (and the calendar/WhatsApp/voice dispatch it
+    //      triggers) is never recorded twice for one payment.
+    //   2. A request already closed as EXPIRED or CANCELLED (the booking
+    //      it belongs to was swept by the expiration cron, or cancelled —
+    //      see 20261010140000_reschedule_payment_pending_guard_and_cancel_
+    //      closes_payment.sql) must never be resurrected into CAPTURED by
+    //      a late-arriving capture notification for the same request —
+    //      matches the EXPIRED/CANCELLED branch below's own
+    //      `.in("status", ["CREATED", "PENDING"])` guard exactly, instead
+    //      of the narrower `<> CAPTURED` this used before, which let
+    //      exactly this through.
     const { data: capturedRow, error: captureError } = await supabaseAdmin
       .from("payment_requests")
       .update({
@@ -296,16 +302,19 @@ export async function processRazorpayPaymentWebhook(
         captured_at: new Date().toISOString(),
       })
       .eq("id", paymentRequest.id)
-      .neq("status", "CAPTURED")
+      .in("status", ["CREATED", "PENDING"])
       .select("id")
       .maybeSingle();
     if (captureError) throw captureError;
     if (!capturedRow) {
       // Lost the race to a concurrent webhook delivery for the same
-      // underlying transaction — the other delivery already completed
-      // this exact capture. Never double-record/double-dispatch.
+      // capture, OR the request was already closed as EXPIRED/CANCELLED
+      // (booking swept or cancelled) before this capture arrived — either
+      // way, this delivery must not apply. bookingStillHeld below still
+      // distinguishes the two for the domain-event payload/outcome.
       await markWebhookEvent(supabaseAdmin, input.eventId, {
-        error: "Payment was already captured by a concurrent webhook delivery.",
+        error:
+          "Payment was not captured: the request is no longer open (already captured, or closed as expired/cancelled).",
       });
       return { outcome: "already_captured" };
     }
