@@ -522,6 +522,167 @@ describe("createBooking — maps the RPC's authoritative schedule rejection", ()
   });
 });
 
+describe("createBooking — Google Calendar optional: no provider/calendarId given", () => {
+  test("confirms directly (CONFIRMED, no google_event_id), never calls provider.createEvent or provider.getBusyPeriods", async () => {
+    const { client, calls } = makeFakeSupabase([
+      { result: { data: { id: "contact-1" }, error: null } }, // contact upsert
+      {
+        result: {
+          data: {
+            id: "booking-1",
+            status: "CONFIRMED", // the RPC itself inserts CONFIRMED when p_status asked for it
+            start_at: BASE_INPUT.startIso,
+            end_at: BASE_INPUT.endIso,
+            timezone: "Asia/Kolkata",
+            google_event_id: null,
+            contact_id: "contact-1",
+          },
+          error: null,
+        },
+      }, // create_booking_atomic RPC
+    ]);
+    let getBusyPeriodsCalled = false;
+    let createEventCalled = false;
+    const provider = fakeProvider({
+      getBusyPeriods: async () => {
+        getBusyPeriodsCalled = true;
+        return [];
+      },
+      createEvent: async () => {
+        createEventCalled = true;
+        throw new Error("must not be called — no calendar connection was given");
+      },
+    });
+
+    const result = await createBooking(client, null, {
+      ...BASE_INPUT,
+      calendarConnectionId: undefined,
+      calendarId: undefined,
+    });
+
+    assert.equal(result.status, "CONFIRMED");
+    assert.equal(result.googleEventId, null);
+    assert.equal(getBusyPeriodsCalled, false, "no external calendar to recheck busy periods against");
+    assert.equal(createEventCalled, false, "no event should ever be created");
+    void provider; // confirms the function works even when a provider IS supplied but no connection id is (not exercised above — see the next test)
+
+    const rpcCall = calls.find((c) => c.table === "create_booking_atomic" && c.method === "rpc");
+    const payload = rpcCall!.args[0] as Record<string, unknown>;
+    assert.equal(payload["p_status"], "CONFIRMED", "no calendar to wait on -> insert directly as CONFIRMED");
+    assert.equal(payload["p_calendar_connection_id"], null);
+  });
+
+  test("a provider IS supplied but calendarId is not: still confirms directly, never calls the provider", async () => {
+    const { client } = makeFakeSupabase([
+      { result: { data: { id: "contact-1" }, error: null } },
+      {
+        result: {
+          data: {
+            id: "booking-2",
+            status: "CONFIRMED",
+            start_at: BASE_INPUT.startIso,
+            end_at: BASE_INPUT.endIso,
+            timezone: "Asia/Kolkata",
+            google_event_id: null,
+            contact_id: "contact-1",
+          },
+          error: null,
+        },
+      },
+    ]);
+    const provider = fakeProvider({
+      getBusyPeriods: async () => {
+        throw new Error("must not be called — no calendarId was given");
+      },
+    });
+
+    const result = await createBooking(client, provider, {
+      ...BASE_INPUT,
+      calendarConnectionId: undefined,
+      calendarId: undefined,
+    });
+    assert.equal(result.status, "CONFIRMED");
+  });
+});
+
+describe("rescheduleBooking — Google Calendar optional", () => {
+  test("a booking with no google_event_id succeeds with provider=null, no calendar call attempted", async () => {
+    const { client, calls } = makeFakeSupabase([
+      {
+        result: {
+          data: {
+            id: "booking-1",
+            organization_id: "org-1",
+            business_id: "biz-1",
+            calendar_connection_id: null,
+            service_id: null,
+            agent_config_id: null,
+            contact_id: null,
+            status: "RESCHEDULED",
+            start_at: "2026-09-26T10:30:00.000Z",
+            end_at: "2026-09-26T11:00:00.000Z",
+            timezone: "Asia/Kolkata",
+            customer_name: null,
+            customer_phone: null,
+            customer_email: null,
+            google_event_id: null,
+            source: "voice",
+            idempotency_key: null,
+            notes: null,
+            metadata: {},
+            hold_expires_at: null,
+            call_id: null,
+            created_at: "2026-01-01T00:00:00.000Z",
+            updated_at: "2026-01-01T00:00:00.000Z",
+          },
+          error: null,
+        },
+      },
+    ]);
+
+    const result = await rescheduleBooking(client, null, {
+      organizationId: "org-1",
+      bookingId: "booking-1",
+      calendarId: undefined,
+      newStartIso: "2026-09-26T10:30:00.000Z",
+      newEndIso: "2026-09-26T11:00:00.000Z",
+    });
+    assert.equal(result.status, "RESCHEDULED");
+    assert.equal(
+      calls.filter((c) => c.table === "bookings" && c.method === "update").length,
+      0,
+      "no reconciliation write should happen when there was never a calendar event to update",
+    );
+  });
+});
+
+describe("cancelBooking — Google Calendar optional", () => {
+  test("a booking with no google_event_id succeeds with provider=null, no calendar call attempted", async () => {
+    const { client } = makeFakeSupabase([
+      {
+        result: {
+          data: {
+            id: "booking-1",
+            status: "CANCELLED",
+            start_at: "2026-09-25T10:30:00.000Z",
+            end_at: "2026-09-25T11:00:00.000Z",
+            timezone: "Asia/Kolkata",
+            google_event_id: null,
+            contact_id: null,
+          },
+          error: null,
+        },
+      },
+    ]);
+    const result = await cancelBooking(client, null, {
+      organizationId: "org-1",
+      bookingId: "booking-1",
+      calendarId: undefined,
+    });
+    assert.equal(result.status, "CANCELLED");
+  });
+});
+
 describe("rescheduleBooking", () => {
   test("happy path: calls the atomic RPC, updates the Google event, returns RESCHEDULED", async () => {
     const { client, calls } = makeFakeSupabase([
@@ -997,6 +1158,38 @@ describe("createPaymentRequiredBooking", () => {
     assert.equal(args["p_idempotency_key"], "hold-key-1");
     assert.equal(args["p_contact_id"], "contact-1");
     assert.ok(args["p_hold_expires_at"], "a hold expiry must always be set");
+  });
+
+  test("works with no calendarConnectionId at all (Google Calendar optional) — passes p_calendar_connection_id: null", async () => {
+    const { client, calls } = makeFakeSupabase([
+      { result: { data: { id: "contact-1" }, error: null } },
+      {
+        result: {
+          data: {
+            id: "booking-2",
+            status: "PENDING_PAYMENT",
+            start_at: PAYMENT_HOLD_INPUT.startIso,
+            end_at: PAYMENT_HOLD_INPUT.endIso,
+            timezone: "Asia/Kolkata",
+            google_event_id: null,
+            contact_id: "contact-1",
+            hold_expires_at: "2026-09-25T10:45:00.000Z",
+            call_id: null,
+          },
+          error: null,
+        },
+      },
+    ]);
+
+    const result = await createPaymentRequiredBooking(client, {
+      ...PAYMENT_HOLD_INPUT,
+      calendarConnectionId: undefined,
+    });
+    assert.equal(result.status, "PENDING_PAYMENT");
+
+    const rpcCall = calls.find((c) => c.method === "rpc");
+    const args = rpcCall!.args[0] as Record<string, unknown>;
+    assert.equal(args["p_calendar_connection_id"], null);
   });
 
   test("rejects a start/end where end is not after start, without calling the database at all", async () => {

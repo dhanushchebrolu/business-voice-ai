@@ -195,61 +195,113 @@ describe("tenant/connection gating — after permission passes", () => {
     if (!result.success) assert.equal(result.error.code, "BUSINESS_NOT_FOUND");
   });
 
-  test("check_calendar_availability reports GOOGLE_AUTH_REQUIRED when no calendar is connected yet", async () => {
-    const { client } = makeFakeSupabase([
-      { result: { data: AGENT_ROW_ALL_PERMITTED, error: null } },
-      {
-        result: {
-          data: {
-            id: "biz-1",
-            organization_id: "org-1",
-            name: "ABC Clinic",
-            timezone: "Asia/Kolkata",
+  test("check_calendar_availability succeeds from ClickAI's own database alone when no calendar is connected yet (Google Calendar is optional, not required)", async () => {
+    const client = makeThenableFakeSupabase({
+      agent_configs: [{ result: { data: AGENT_ROW_ALL_PERMITTED, error: null } }],
+      businesses: [
+        {
+          result: {
+            data: {
+              id: "biz-1",
+              organization_id: "org-1",
+              name: "ABC Clinic",
+              timezone: "Asia/Kolkata",
+            },
+            error: null,
           },
-          error: null,
         },
-      },
-      { result: { data: null, error: null } }, // no connection row
-    ]);
+      ],
+      google_calendar_connections: [{ result: { data: null, error: null } }], // no connection row
+      business_hours: [
+        {
+          result: {
+            data: [
+              { day_of_week: 5, is_closed: false, intervals: [{ start: "09:00", end: "11:00" }] },
+            ],
+            error: null,
+          },
+        }, // 2026-11-20 is a Friday = day_of_week 5
+      ],
+      bookings: [{ result: { data: [], error: null } }],
+      business_hour_overrides: [{ result: { data: null, error: null } }],
+    });
     const result = await check_calendar_availability(client, {
       organizationId: "org-1",
       businessId: "biz-1",
-      dateIso: "2026-09-25",
+      dateIso: "2026-11-20",
       durationMinutes: 30,
     });
-    assert.equal(result.success, false);
-    if (!result.success) assert.equal(result.error.code, "GOOGLE_AUTH_REQUIRED");
+    assert.equal(result.success, true);
+    if (result.success) {
+      const starts = result.data.slots.map((s) => s.start);
+      // 09:00/09:30/10:00/10:30 IST — no Google provider is ever consulted
+      // (no connection row means there is nothing to consult), yet
+      // availability is still computed, not blocked.
+      assert.deepEqual(starts, [
+        "2026-11-20T03:30:00.000Z",
+        "2026-11-20T04:00:00.000Z",
+        "2026-11-20T04:30:00.000Z",
+        "2026-11-20T05:00:00.000Z",
+      ]);
+    }
   });
 
-  test("check_calendar_availability reports GOOGLE_AUTH_REQUIRED when the connection exists but is not CONNECTED (e.g. NEEDS_REAUTH)", async () => {
-    const { client } = makeFakeSupabase([
-      { result: { data: AGENT_ROW_ALL_PERMITTED, error: null } },
-      {
-        result: {
-          data: {
-            id: "biz-1",
-            organization_id: "org-1",
-            name: "ABC Clinic",
-            timezone: "Asia/Kolkata",
+  test("check_calendar_availability succeeds from ClickAI's own database alone when the connection exists but is not CONNECTED (e.g. NEEDS_REAUTH)", async () => {
+    const client = makeThenableFakeSupabase({
+      agent_configs: [{ result: { data: AGENT_ROW_ALL_PERMITTED, error: null } }],
+      businesses: [
+        {
+          result: {
+            data: {
+              id: "biz-1",
+              organization_id: "org-1",
+              name: "ABC Clinic",
+              timezone: "Asia/Kolkata",
+            },
+            error: null,
           },
-          error: null,
         },
-      },
-      {
-        result: {
-          data: { id: "conn-1", calendar_id: "clinic-cal", status: "NEEDS_REAUTH" },
-          error: null,
+      ],
+      google_calendar_connections: [
+        {
+          result: {
+            data: { id: "conn-1", calendar_id: "clinic-cal", status: "NEEDS_REAUTH" },
+            error: null,
+          },
         },
-      },
-    ]);
+      ],
+      business_hours: [
+        {
+          result: {
+            data: [
+              { day_of_week: 5, is_closed: false, intervals: [{ start: "09:00", end: "11:00" }] },
+            ],
+            error: null,
+          },
+        },
+      ],
+      bookings: [{ result: { data: [], error: null } }],
+      business_hour_overrides: [{ result: { data: null, error: null } }],
+    });
     const result = await check_calendar_availability(client, {
       organizationId: "org-1",
       businessId: "biz-1",
-      dateIso: "2026-09-25",
+      dateIso: "2026-11-20",
       durationMinutes: 30,
     });
-    assert.equal(result.success, false);
-    if (!result.success) assert.equal(result.error.code, "GOOGLE_AUTH_REQUIRED");
+    assert.equal(result.success, true);
+    if (result.success) {
+      const starts = result.data.slots.map((s) => s.start);
+      // A NEEDS_REAUTH connection is not usable, so it is treated exactly
+      // like no connection at all — the stale/broken Google link never
+      // blocks ClickAI's own availability from being computed.
+      assert.deepEqual(starts, [
+        "2026-11-20T03:30:00.000Z",
+        "2026-11-20T04:00:00.000Z",
+        "2026-11-20T04:30:00.000Z",
+        "2026-11-20T05:00:00.000Z",
+      ]);
+    }
   });
 });
 

@@ -70,8 +70,17 @@ export function fail<T>(code: string, message: string): ToolResult<T> {
 }
 
 export interface ResolvedContext {
-  connectionId: string;
-  calendarId: string;
+  /**
+   * Null when this business has no CONNECTED Google Calendar — ClickAI's
+   * own database-backed scheduling (business_hours + business_hour_
+   * overrides + bookings, via computeAvailability) is the authoritative
+   * source of truth either way; a connection is an optional convenience
+   * that also mirrors confirmed bookings into an external calendar. Never
+   * an error on its own — callers check for null, not an errorCode, to
+   * decide whether to skip the Google-specific parts of their own logic.
+   */
+  connectionId: string | null;
+  calendarId: string | null;
   timezone: string;
   businessName: string;
   businessHours: {
@@ -99,6 +108,10 @@ export async function resolveCalendarContext(
     };
   }
 
+  // Google Calendar is optional (see ResolvedContext's own doc comment) —
+  // no connection, or one that isn't CONNECTED/fully configured, is a
+  // normal, non-error state: every tool below falls back to ClickAI's own
+  // database-backed scheduling instead of failing.
   const { data: connection, error: connectionError } = await supabaseAdmin
     .from("google_calendar_connections")
     .select("id, calendar_id, status")
@@ -107,12 +120,9 @@ export async function resolveCalendarContext(
     .eq("provider", "google")
     .maybeSingle();
   if (connectionError) throw connectionError;
-  if (!connection || connection.status !== "CONNECTED" || !connection.calendar_id) {
-    return {
-      errorCode: "GOOGLE_AUTH_REQUIRED",
-      message: "This business has not connected a Google Calendar yet.",
-    };
-  }
+  const hasUsableConnection = Boolean(
+    connection && connection.status === "CONNECTED" && connection.calendar_id,
+  );
 
   const { data: hoursRows, error: hoursError } = await supabaseAdmin
     .from("business_hours")
@@ -145,8 +155,8 @@ export async function resolveCalendarContext(
   }
 
   return {
-    connectionId: connection.id,
-    calendarId: connection.calendar_id,
+    connectionId: hasUsableConnection ? connection!.id : null,
+    calendarId: hasUsableConnection ? connection!.calendar_id : null,
     timezone: business.timezone,
     businessName: business.name,
     businessHours,
@@ -244,11 +254,6 @@ export async function check_calendar_availability(
   if ("errorCode" in ctx) return fail(ctx.errorCode, ctx.message);
 
   try {
-    const { provider, calendarId } = await getCalendarProviderForConnection(
-      supabaseAdmin,
-      ctx.connectionId,
-    );
-
     // Timezone-correct business-day boundary (production bug: the naive
     // `${dateIso}T00:00:00.000Z`..`T23:59:59.999Z` window used here before
     // is only correct when the business timezone is literally UTC — for
@@ -262,12 +267,39 @@ export async function check_calendar_availability(
     );
     const dayStart = dayStartUtc.toISOString();
     const dayEnd = dayEndUtc.toISOString();
+
+    // Google Calendar is optional (see resolveCalendarContext's own doc
+    // comment) — with no connection, there is no external calendar to
+    // recheck, so googleBusyPeriods is simply empty; ClickAI's own
+    // bookings table (queried below, scoped by business_id — see why,
+    // not calendar_connection_id, in the comment on that query) remains
+    // fully authoritative either way.
+    const googleBusyPeriodsPromise =
+      ctx.connectionId && ctx.calendarId
+        ? getCalendarProviderForConnection(supabaseAdmin, ctx.connectionId).then(
+            ({ provider, calendarId }) =>
+              provider.getBusyPeriods({ calendarId, timeMinIso: dayStart, timeMaxIso: dayEnd }),
+          )
+        : Promise.resolve([]);
+
     const [googleBusyPeriods, existingBookingsRes, override] = await Promise.all([
-      provider.getBusyPeriods({ calendarId, timeMinIso: dayStart, timeMaxIso: dayEnd }),
+      googleBusyPeriodsPromise,
       supabaseAdmin
         .from("bookings")
+        // Scoped by business_id, not calendar_connection_id: this
+        // business's own schedule is what must never double-book,
+        // regardless of whether any particular row happens to carry a
+        // Google connection id — the identical reasoning (and the exact
+        // bug this closes) as the business_id-scoped overlap check added
+        // to create_booking_atomic/reschedule_booking_atomic in
+        // 20261010150000_business_scoped_overlap_and_default_duration.sql.
+        // Scoping this read by calendar_connection_id instead would mean
+        // `= NULL`, which never matches any row, so a business with no
+        // Google connection would see every one of its own existing
+        // bookings as "not busy" and the AI would offer already-booked
+        // slots as available.
         .select("start_at, end_at")
-        .eq("calendar_connection_id", ctx.connectionId)
+        .eq("business_id", input.businessId)
         .not("status", "in", "(CANCELLED,NO_SHOW)")
         .gte("start_at", dayStart)
         .lt("start_at", dayEnd),
@@ -326,15 +358,17 @@ export async function create_calendar_event(
   if ("errorCode" in ctx) return fail(ctx.errorCode, ctx.message);
 
   try {
-    const { provider, calendarId } = await getCalendarProviderForConnection(
-      supabaseAdmin,
-      ctx.connectionId,
-    );
-    const booking = await createBooking(supabaseAdmin, provider, {
+    // Google Calendar is optional — see resolveCalendarContext's own doc
+    // comment. createBooking() itself confirms directly with no external
+    // event when provider/calendarId are null.
+    const providerInfo = ctx.connectionId
+      ? await getCalendarProviderForConnection(supabaseAdmin, ctx.connectionId)
+      : null;
+    const booking = await createBooking(supabaseAdmin, providerInfo?.provider ?? null, {
       organizationId: input.organizationId,
       businessId: input.businessId,
       calendarConnectionId: ctx.connectionId,
-      calendarId,
+      calendarId: providerInfo?.calendarId ?? null,
       serviceId: input.serviceId ?? null,
       agentConfigId: input.agentConfigId ?? null,
       contactId: input.contactId ?? null,
@@ -379,14 +413,16 @@ export async function update_calendar_event(
   if ("errorCode" in ctx) return fail(ctx.errorCode, ctx.message);
 
   try {
-    const { provider, calendarId } = await getCalendarProviderForConnection(
-      supabaseAdmin,
-      ctx.connectionId,
-    );
-    const booking = await rescheduleBooking(supabaseAdmin, provider, {
+    // Google Calendar is optional — rescheduleBooking() itself only ever
+    // touches the calendar when the booking row it looked up actually has
+    // a google_event_id, so passing null here is always safe.
+    const providerInfo = ctx.connectionId
+      ? await getCalendarProviderForConnection(supabaseAdmin, ctx.connectionId)
+      : null;
+    const booking = await rescheduleBooking(supabaseAdmin, providerInfo?.provider ?? null, {
       organizationId: input.organizationId,
       bookingId: input.bookingId,
-      calendarId,
+      calendarId: providerInfo?.calendarId ?? null,
       newStartIso: input.newStartIso,
       newEndIso: input.newEndIso,
     });
@@ -419,14 +455,16 @@ export async function cancel_calendar_event(
   if ("errorCode" in ctx) return fail(ctx.errorCode, ctx.message);
 
   try {
-    const { provider, calendarId } = await getCalendarProviderForConnection(
-      supabaseAdmin,
-      ctx.connectionId,
-    );
-    const booking = await cancelBooking(supabaseAdmin, provider, {
+    // Google Calendar is optional — cancelBooking() itself only ever
+    // touches the calendar when the cancelled booking row actually has a
+    // google_event_id, so passing null here is always safe.
+    const providerInfo = ctx.connectionId
+      ? await getCalendarProviderForConnection(supabaseAdmin, ctx.connectionId)
+      : null;
+    const booking = await cancelBooking(supabaseAdmin, providerInfo?.provider ?? null, {
       organizationId: input.organizationId,
       bookingId: input.bookingId,
-      calendarId,
+      calendarId: providerInfo?.calendarId ?? null,
       reason: input.reason,
     });
     return { success: true, data: booking };

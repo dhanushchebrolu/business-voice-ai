@@ -104,8 +104,9 @@ async function resolveContactId(
 export interface CreateBookingInput {
   organizationId: string;
   businessId: string;
-  calendarConnectionId: string;
-  calendarId: string;
+  /** Optional — ClickAI's own database-backed scheduling (bookings + business_hours/business_hour_overrides) is the source of truth regardless. When present, a Google Calendar event is also created/kept in sync as a convenience; when absent, the booking is confirmed directly with no external event. */
+  calendarConnectionId?: string | null | undefined;
+  calendarId?: string | null | undefined;
   serviceId?: string | null;
   agentConfigId?: string | null;
   contactId?: string | null;
@@ -216,10 +217,21 @@ async function cleanupOrphanedEvent(
  * event already created for it is cleaned up via cleanupOrphanedEvent()
  * rather than left dangling — same pattern as payment-calendar-consumer.
  * server.ts's handlePaymentCapturedForCalendar().
+ *
+ * Google Calendar is optional: when `provider`/`input.calendarId` are not
+ * given (no connection for this business, or ClickAI's own database-backed
+ * scheduling is in use), the RPC inserts the booking directly as CONFIRMED
+ * — there is nothing external to wait on, so the PENDING_CONFIRMATION ->
+ * createEvent -> CONFIRMED staging below is simply skipped. The external-
+ * calendar busy-period recheck above it is skipped the same way (there is
+ * no external calendar to race against). Every concurrency guarantee
+ * (idempotency, schedule validation, business_id-scoped overlap
+ * protection) comes from create_booking_atomic itself and is identical
+ * either way.
  */
 export async function createBooking(
   supabaseAdmin: Client,
-  provider: CalendarProvider,
+  provider: CalendarProvider | null,
   input: CreateBookingInput,
 ): Promise<BookingRecord> {
   if (new Date(input.endIso).getTime() <= new Date(input.startIso).getTime()) {
@@ -244,21 +256,25 @@ export async function createBooking(
 
   const contactId = await resolveContactId(supabaseAdmin, input);
 
-  // External-calendar race check (see this function's own doc comment) —
-  // fetched fresh here, never reused from an earlier availability check.
-  const externalBusy = await provider.getBusyPeriods({
-    calendarId: input.calendarId,
-    timeMinIso: input.startIso,
-    timeMaxIso: input.endIso,
-  });
-  if (externalBusy.some((b) => intervalsOverlap(b.start, b.end, input.startIso, input.endIso))) {
-    throw new BookingError("That time slot is no longer available.", "SLOT_NO_LONGER_AVAILABLE");
+  const hasCalendar = Boolean(provider && input.calendarId);
+
+  if (provider && input.calendarId) {
+    // External-calendar race check (see this function's own doc comment) —
+    // fetched fresh here, never reused from an earlier availability check.
+    const externalBusy = await provider.getBusyPeriods({
+      calendarId: input.calendarId,
+      timeMinIso: input.startIso,
+      timeMaxIso: input.endIso,
+    });
+    if (externalBusy.some((b) => intervalsOverlap(b.start, b.end, input.startIso, input.endIso))) {
+      throw new BookingError("That time slot is no longer available.", "SLOT_NO_LONGER_AVAILABLE");
+    }
   }
 
   const { data: bookingRow, error: rpcError } = await supabaseAdmin.rpc("create_booking_atomic", {
     p_organization_id: input.organizationId,
     p_business_id: input.businessId,
-    p_calendar_connection_id: input.calendarConnectionId,
+    p_calendar_connection_id: input.calendarConnectionId ?? null,
     p_service_id: input.serviceId ?? null,
     p_agent_config_id: input.agentConfigId ?? null,
     p_contact_id: contactId,
@@ -270,7 +286,10 @@ export async function createBooking(
     p_customer_email: input.customerEmail ?? null,
     p_source: input.source,
     p_idempotency_key: input.idempotencyKey ?? null,
-    p_status: "PENDING_CONFIRMATION",
+    // No Google Calendar event to wait on -> confirm directly; otherwise
+    // stage through PENDING_CONFIRMATION until the event actually exists
+    // (see this function's own doc comment).
+    p_status: hasCalendar ? "PENDING_CONFIRMATION" : "CONFIRMED",
     p_hold_expires_at: null,
     p_call_id: null,
     p_notes: input.notes ?? null,
@@ -304,6 +323,14 @@ export async function createBooking(
   if (booking.status !== "PENDING_CONFIRMATION") {
     return toRecord(booking);
   }
+  // Reached only when hasCalendar was true above (that's the only way the
+  // RPC was asked for PENDING_CONFIRMATION instead of CONFIRMED), so
+  // provider/calendarId are guaranteed non-null here.
+  if (!provider || !input.calendarId) {
+    throw new Error("Internal error: booking staged for calendar confirmation with no calendar provider.");
+  }
+  const activeProvider = provider;
+  const activeCalendarId = input.calendarId;
 
   const title = `Appointment - ${input.customerName ?? "Customer"}`;
   const description = [
@@ -317,8 +344,8 @@ export async function createBooking(
 
   let event;
   try {
-    event = await provider.createEvent({
-      calendarId: input.calendarId,
+    event = await activeProvider.createEvent({
+      calendarId: activeCalendarId,
       title,
       description,
       startIso: input.startIso,
@@ -370,7 +397,7 @@ export async function createBooking(
   // already decided it; this function must never touch it again. What it
   // DOES own is the event it just created — clean that up so it never
   // becomes an untracked orphan on the calendar.
-  await cleanupOrphanedEvent(provider, input.calendarId, event.id, booking.id);
+  await cleanupOrphanedEvent(activeProvider, activeCalendarId, event.id, booking.id);
   if (confirmError) throw confirmError;
   // A clean, successful cleanup after losing the race still means this
   // call cannot return a confirmed booking — the caller asked to create
@@ -386,7 +413,8 @@ export async function createBooking(
 export interface RescheduleBookingInput {
   organizationId: string;
   bookingId: string;
-  calendarId: string;
+  /** Only needed if this booking actually has a google_event_id to update — read from the booking row itself, not required when the business has no Google Calendar connection. */
+  calendarId?: string | null | undefined;
   newStartIso: string;
   newEndIso: string;
 }
@@ -405,7 +433,7 @@ export interface RescheduleBookingInput {
  */
 export async function rescheduleBooking(
   supabaseAdmin: Client,
-  provider: CalendarProvider,
+  provider: CalendarProvider | null,
   input: RescheduleBookingInput,
 ): Promise<BookingRecord> {
   const { data: booking, error: rpcError } = await supabaseAdmin.rpc("reschedule_booking_atomic", {
@@ -439,7 +467,7 @@ export async function rescheduleBooking(
     throw rpcError;
   }
 
-  if (booking.google_event_id) {
+  if (booking.google_event_id && provider && input.calendarId) {
     try {
       await provider.updateEvent(input.calendarId, booking.google_event_id, {
         startIso: input.newStartIso,
@@ -471,6 +499,16 @@ export async function rescheduleBooking(
       }
       throw err;
     }
+  } else if (booking.google_event_id) {
+    // This booking does have a Google Calendar event, but the caller
+    // didn't supply a provider/calendarId to update it with — the DB
+    // reschedule still committed (it's the source of truth), but the
+    // external event is now stale at the old time. Not thrown as an error
+    // (the reschedule itself genuinely succeeded), but never silently
+    // dropped either.
+    console.warn("booking_service:reschedule_skipped_stale_calendar_event", {
+      bookingId: booking.id,
+    });
   }
 
   return toRecord(booking);
@@ -479,7 +517,8 @@ export async function rescheduleBooking(
 export interface CancelBookingInput {
   organizationId: string;
   bookingId: string;
-  calendarId: string;
+  /** Only needed if this booking actually has a google_event_id to delete — read from the booking row itself, not required when the business has no Google Calendar connection. */
+  calendarId?: string | null | undefined;
   reason?: string | undefined;
 }
 
@@ -502,7 +541,7 @@ export interface CancelBookingInput {
  */
 export async function cancelBooking(
   supabaseAdmin: Client,
-  provider: CalendarProvider,
+  provider: CalendarProvider | null,
   input: CancelBookingInput,
 ): Promise<BookingRecord> {
   const { data: cancelled, error: rpcError } = await supabaseAdmin.rpc("cancel_booking_atomic", {
@@ -517,7 +556,7 @@ export async function cancelBooking(
     throw rpcError;
   }
 
-  if (cancelled.google_event_id) {
+  if (cancelled.google_event_id && provider && input.calendarId) {
     try {
       await provider.deleteEvent(input.calendarId, cancelled.google_event_id);
     } catch (err) {
@@ -525,6 +564,11 @@ export async function cancelBooking(
       // state (no event) already holds.
       if (!(err instanceof CalendarProviderError && err.code === "CALENDAR_NOT_FOUND")) throw err;
     }
+  } else if (cancelled.google_event_id) {
+    // The booking is durably CANCELLED (the source of truth), but no
+    // provider/calendarId was supplied to delete its Google Calendar
+    // event — not thrown as an error, but never silently dropped.
+    console.warn("booking_service:cancel_skipped_stale_calendar_event", { bookingId: cancelled.id });
   }
 
   return toRecord(cancelled);
@@ -587,7 +631,8 @@ function toPaymentHoldRecord(row: {
 export interface CreatePaymentRequiredBookingInput {
   organizationId: string;
   businessId: string;
-  calendarConnectionId: string;
+  /** Optional — the deferred Google Calendar event (created by payment-calendar-consumer.server.ts on capture) is a convenience, not a requirement; the hold and its eventual confirmation are fully DB-backed either way. */
+  calendarConnectionId?: string | null | undefined;
   serviceId?: string | null;
   agentConfigId?: string | null;
   contactId?: string | null;
@@ -624,7 +669,7 @@ export async function createPaymentRequiredBooking(
   const { data, error } = await supabaseAdmin.rpc("create_booking_payment_hold", {
     p_organization_id: input.organizationId,
     p_business_id: input.businessId,
-    p_calendar_connection_id: input.calendarConnectionId,
+    p_calendar_connection_id: input.calendarConnectionId ?? null,
     p_service_id: input.serviceId ?? null,
     p_agent_config_id: input.agentConfigId ?? null,
     p_contact_id: contactId,

@@ -362,6 +362,7 @@ export type Database = {
           country: string | null;
           created_at: string;
           currency: string;
+          default_appointment_duration_minutes: number;
           description: string | null;
           email: string | null;
           facebook: string | null;
@@ -387,6 +388,7 @@ export type Database = {
           country?: string | null;
           created_at?: string;
           currency?: string;
+          default_appointment_duration_minutes?: number;
           description?: string | null;
           email?: string | null;
           facebook?: string | null;
@@ -412,6 +414,7 @@ export type Database = {
           country?: string | null;
           created_at?: string;
           currency?: string;
+          default_appointment_duration_minutes?: number;
           description?: string | null;
           email?: string | null;
           facebook?: string | null;
@@ -3920,7 +3923,7 @@ export type Database = {
         Args: {
           p_agent_config_id: string | null;
           p_business_id: string;
-          p_calendar_connection_id: string;
+          p_calendar_connection_id: string | null;
           p_call_id: string | null;
           p_contact_id: string | null;
           p_customer_email: string | null;

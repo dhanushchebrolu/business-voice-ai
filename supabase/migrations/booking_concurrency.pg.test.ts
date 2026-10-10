@@ -70,6 +70,10 @@ const PAYMENT_PENDING_GUARD_SQL = readFileSync(
   ),
   "utf8",
 );
+const BUSINESS_SCOPED_OVERLAP_SQL = readFileSync(
+  join(migrationsDir, "20261010150000_business_scoped_overlap_and_default_duration.sql"),
+  "utf8",
+);
 
 let cluster: Cluster | null = null;
 let execSql: (sql: string) => RunResult = () => {
@@ -296,6 +300,11 @@ before(() => {
   const paymentPendingGuardResult = execSql(PAYMENT_PENDING_GUARD_SQL);
   if (paymentPendingGuardResult.status !== 0) {
     setupFailure = `failed to load 20261010140000_reschedule_payment_pending_guard_and_cancel_closes_payment.sql as committed: ${paymentPendingGuardResult.stderr}`;
+    return;
+  }
+  const businessScopedOverlapResult = execSql(BUSINESS_SCOPED_OVERLAP_SQL);
+  if (businessScopedOverlapResult.status !== 0) {
+    setupFailure = `failed to load 20261010150000_business_scoped_overlap_and_default_duration.sql as committed: ${businessScopedOverlapResult.stderr}`;
     return;
   }
 });
@@ -1508,4 +1517,241 @@ describe("cancel_booking_atomic vs an already-expired hold — real PostgreSQL: 
       );
     },
   );
+});
+
+// ============================================================
+// 20261010150000 — business_id-scoped overlap fallback for
+// Google-Calendar-less bookings (calendar_connection_id IS NULL)
+// ============================================================
+
+/** Same as createBookingSql, but with calendar_connection_id explicitly NULL — the shape every booking takes once Google Calendar is optional. */
+function createBookingSqlNoConnection(args: {
+  organizationId: string;
+  businessId: string;
+  startIso: string;
+  endIso: string;
+  idempotencyKey?: string;
+}): string {
+  const key = args.idempotencyKey ? `'${args.idempotencyKey}'` : "NULL";
+  return `SELECT public.create_booking_atomic(
+    '${args.organizationId}', '${args.businessId}', NULL, NULL, NULL, NULL,
+    '${args.startIso}'::timestamptz, '${args.endIso}'::timestamptz, 'Asia/Kolkata',
+    'Test Customer', '+910000000000', 'test@example.com', 'voice',
+    ${key}, 'CONFIRMED', NULL, NULL, NULL
+  );`;
+}
+
+function createPaymentHoldSqlNoConnection(args: {
+  organizationId: string;
+  businessId: string;
+  startIso: string;
+  endIso: string;
+  holdExpiresAtIso: string;
+  idempotencyKey?: string;
+}): string {
+  const key = args.idempotencyKey ?? `hold-${randomUUID()}`;
+  return `SELECT public.create_booking_payment_hold(
+    '${args.organizationId}', '${args.businessId}', NULL, NULL, NULL, NULL,
+    '${args.startIso}'::timestamptz, '${args.endIso}'::timestamptz, 'Asia/Kolkata',
+    'Test Customer', '+910000000000', 'test@example.com', 'voice',
+    '${key}', '${args.holdExpiresAtIso}'::timestamptz, NULL
+  );`;
+}
+
+describe("create_booking_atomic — real PostgreSQL: business_id-scoped overlap protection without a Google Calendar connection", () => {
+  pgTest(
+    "sequential: a second NULL-connection booking overlapping an existing NULL-connection booking for the same business is rejected",
+    () => {
+      const { businessId, organizationId } = seedOpenBusiness();
+      assertSucceeds(
+        createBookingSqlNoConnection({
+          organizationId,
+          businessId,
+          startIso: "2027-02-01T10:00:00+05:30",
+          endIso: "2027-02-01T10:30:00+05:30",
+        }),
+        "first no-connection booking must succeed",
+      );
+      assertRejected(
+        createBookingSqlNoConnection({
+          organizationId,
+          businessId,
+          startIso: "2027-02-01T10:15:00+05:30",
+          endIso: "2027-02-01T10:45:00+05:30",
+        }),
+        "SLOT_NO_LONGER_AVAILABLE",
+        "an overlapping NULL-connection booking for the same business must be rejected — before this migration, " +
+          "calendar_connection_id = NULL never matched any row, so this overlap was never caught",
+      );
+    },
+  );
+
+  pgTest(
+    "a non-overlapping NULL-connection booking for the same business on the same day still succeeds",
+    () => {
+      const { businessId, organizationId } = seedOpenBusiness();
+      assertSucceeds(
+        createBookingSqlNoConnection({
+          organizationId,
+          businessId,
+          startIso: "2027-02-02T10:00:00+05:30",
+          endIso: "2027-02-02T10:30:00+05:30",
+        }),
+        "first booking must succeed",
+      );
+      assertSucceeds(
+        createBookingSqlNoConnection({
+          organizationId,
+          businessId,
+          startIso: "2027-02-02T10:30:00+05:30",
+          endIso: "2027-02-02T11:00:00+05:30",
+        }),
+        "a back-to-back, non-overlapping booking must still succeed",
+      );
+    },
+  );
+
+  pgTest(
+    "two genuinely concurrent NULL-connection requests for the SAME slot on the same business: exactly one succeeds",
+    async () => {
+      const { businessId, organizationId } = seedOpenBusiness();
+      const sql = createBookingSqlNoConnection({
+        organizationId,
+        businessId,
+        startIso: "2027-02-03T14:00:00+05:30",
+        endIso: "2027-02-03T14:30:00+05:30",
+      });
+      const [a, b] = await Promise.all([execSqlAsync(sql), execSqlAsync(sql)]);
+      const succeeded = [a, b].filter((r) => r.status === 0);
+      const rejected = [a, b].filter((r) => r.status !== 0);
+      assert.equal(succeeded.length, 1, "exactly one of the two concurrent callers must win");
+      assert.equal(rejected.length, 1, "exactly one of the two concurrent callers must lose");
+      assert.match(rejected[0]!.stderr, /SLOT_NO_LONGER_AVAILABLE/);
+
+      const activeCount = scalar(
+        `SELECT count(*) FROM bookings
+         WHERE business_id = '${businessId}'
+           AND start_at = '2027-02-03T14:00:00+05:30'::timestamptz
+           AND status NOT IN ('CANCELLED', 'NO_SHOW', 'PAYMENT_EXPIRED', 'PAYMENT_FAILED');`,
+      );
+      assert.equal(activeCount, "1", "exactly one active booking must exist for the contested slot");
+    },
+  );
+
+  pgTest(
+    "a NULL-connection booking still conflicts with a pre-existing booking that DOES have a calendar_connection_id, for the same business (business_id scoping subsumes the old connection-scoped check)",
+    () => {
+      const { businessId, connectionId, organizationId } = seedOpenBusiness();
+      assertSucceeds(
+        createBookingSql({
+          organizationId,
+          businessId,
+          connectionId,
+          startIso: "2027-02-04T09:00:00+05:30",
+          endIso: "2027-02-04T09:30:00+05:30",
+        }),
+        "the connection-having booking must succeed",
+      );
+      assertRejected(
+        createBookingSqlNoConnection({
+          organizationId,
+          businessId,
+          startIso: "2027-02-04T09:15:00+05:30",
+          endIso: "2027-02-04T09:45:00+05:30",
+        }),
+        "SLOT_NO_LONGER_AVAILABLE",
+        "a NULL-connection booking must still see a conflict against this business's existing connection-having booking",
+      );
+    },
+  );
+});
+
+describe("create_booking_payment_hold — real PostgreSQL: business_id-scoped overlap protection without a Google Calendar connection", () => {
+  pgTest(
+    "sequential: a second NULL-connection hold overlapping an existing NULL-connection hold for the same business is rejected",
+    () => {
+      const { businessId, organizationId } = seedOpenBusiness();
+      assertSucceeds(
+        createPaymentHoldSqlNoConnection({
+          organizationId,
+          businessId,
+          startIso: "2027-02-05T10:00:00+05:30",
+          endIso: "2027-02-05T10:30:00+05:30",
+          holdExpiresAtIso: "2027-02-05T10:15:00+05:30",
+        }),
+        "first no-connection hold must succeed",
+      );
+      assertRejected(
+        createPaymentHoldSqlNoConnection({
+          organizationId,
+          businessId,
+          startIso: "2027-02-05T10:15:00+05:30",
+          endIso: "2027-02-05T10:45:00+05:30",
+          holdExpiresAtIso: "2027-02-05T10:30:00+05:30",
+        }),
+        "SLOT_NO_LONGER_AVAILABLE",
+        "before this migration, create_booking_payment_hold's lock and overlap check both silently no-opped on a " +
+          "NULL connection id (STRICT-function NULL propagation), so this would previously have succeeded",
+      );
+    },
+  );
+
+  pgTest(
+    "two genuinely concurrent NULL-connection hold requests for OVERLAPPING slots (distinct idempotency keys, " +
+      "so this isolates slot-overlap protection from the separate, pre-existing idempotency-key race in this " +
+      "RPC's unlocked idempotency SELECT): exactly one succeeds",
+    async () => {
+      const { businessId, organizationId } = seedOpenBusiness();
+      const sqlA = createPaymentHoldSqlNoConnection({
+        organizationId,
+        businessId,
+        startIso: "2027-02-06T11:00:00+05:30",
+        endIso: "2027-02-06T11:30:00+05:30",
+        holdExpiresAtIso: "2027-02-06T11:15:00+05:30",
+      });
+      const sqlB = createPaymentHoldSqlNoConnection({
+        organizationId,
+        businessId,
+        startIso: "2027-02-06T11:15:00+05:30",
+        endIso: "2027-02-06T11:45:00+05:30",
+        holdExpiresAtIso: "2027-02-06T11:30:00+05:30",
+      });
+      const [a, b] = await Promise.all([execSqlAsync(sqlA), execSqlAsync(sqlB)]);
+      const succeeded = [a, b].filter((r) => r.status === 0);
+      const rejected = [a, b].filter((r) => r.status !== 0);
+      assert.equal(
+        succeeded.length,
+        1,
+        `exactly one of the two concurrent overlapping hold requests must win, got ${succeeded.length}.\nA: status=${a.status} stderr=${a.stderr}\nB: status=${b.status} stderr=${b.stderr}`,
+      );
+      assert.match(rejected[0]!.stderr, /SLOT_NO_LONGER_AVAILABLE/);
+    },
+  );
+});
+
+describe("businesses.default_appointment_duration_minutes — real PostgreSQL", () => {
+  pgTest("defaults to 30 for a newly created business, with no backfill needed for existing rows", () => {
+    const { businessId } = seedOpenBusiness();
+    const duration = scalar(
+      `SELECT default_appointment_duration_minutes FROM businesses WHERE id = '${businessId}';`,
+    );
+    assert.equal(duration, "30");
+  });
+
+  pgTest("is updatable, and rejects a non-positive value via its CHECK constraint", () => {
+    const { businessId } = seedOpenBusiness();
+    assertSucceeds(
+      `UPDATE businesses SET default_appointment_duration_minutes = 45 WHERE id = '${businessId}';`,
+      "a positive duration must be accepted",
+    );
+    const duration = scalar(
+      `SELECT default_appointment_duration_minutes FROM businesses WHERE id = '${businessId}';`,
+    );
+    assert.equal(duration, "45");
+    assertRejected(
+      `UPDATE businesses SET default_appointment_duration_minutes = 0 WHERE id = '${businessId}';`,
+      "default_appointment_duration_minutes",
+      "a non-positive duration must be rejected by the CHECK constraint",
+    );
+  });
 });
