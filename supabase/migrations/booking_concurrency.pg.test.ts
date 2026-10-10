@@ -1701,9 +1701,47 @@ describe("create_booking_payment_hold — real PostgreSQL: business_id-scoped ov
   );
 
   pgTest(
+    "two genuinely concurrent requests for the SAME exact slot (idempotency key) resolve to the SAME booking id, " +
+      "and never create two rows — create_booking_payment_hold used to delegate to create_booking_atomic (and so " +
+      "inherited its salt-2 idempotency lock for free); rewriting it as its own standalone body for the " +
+      "business_id-scoped overlap check above must not silently drop that protection",
+    async () => {
+      const { businessId, organizationId } = seedOpenBusiness();
+      const key = `hold-retry-${Math.random().toString(36).slice(2)}`;
+      const idSql = `\\pset tuples_only on
+SELECT (public.create_booking_payment_hold(
+  '${organizationId}', '${businessId}', NULL, NULL, NULL, NULL,
+  '2027-02-07T09:00:00+05:30'::timestamptz, '2027-02-07T09:30:00+05:30'::timestamptz, 'Asia/Kolkata',
+  'Test Customer', '+910000000000', 'test@example.com', 'voice',
+  '${key}', '2027-02-07T09:15:00+05:30'::timestamptz, NULL
+)).id;`;
+
+      const [resultA, resultB] = await Promise.all([execSqlAsync(idSql), execSqlAsync(idSql)]);
+      assert.equal(resultA.status, 0, `request A must succeed: ${resultA.stderr}`);
+      assert.equal(resultB.status, 0, `request B must succeed: ${resultB.stderr}`);
+
+      const idA = resultA.stdout.trim();
+      const idB = resultB.stdout.trim();
+      assert.ok(idA.length > 0, "request A must return a real booking id");
+      assert.equal(
+        idA,
+        idB,
+        `both concurrent retries with the same idempotency key must resolve to the SAME booking id — got A=${idA} B=${idB}`,
+      );
+
+      const count = scalar(`SELECT count(*) FROM bookings WHERE idempotency_key = '${key}';`);
+      assert.equal(
+        count,
+        "1",
+        "a retried hold request with the same idempotency key must never create a second row",
+      );
+    },
+  );
+
+  pgTest(
     "two genuinely concurrent NULL-connection hold requests for OVERLAPPING slots (distinct idempotency keys, " +
-      "so this isolates slot-overlap protection from the separate, pre-existing idempotency-key race in this " +
-      "RPC's unlocked idempotency SELECT): exactly one succeeds",
+      "so this isolates slot-overlap protection as its own concern from the idempotency-key behavior proven " +
+      "separately above): exactly one succeeds",
     async () => {
       const { businessId, organizationId } = seedOpenBusiness();
       const sqlA = createPaymentHoldSqlNoConnection({

@@ -6,18 +6,15 @@
 --    payment_hold, and reschedule_booking_atomic: every overlap/double-
 --    booking check in these three functions was scoped to
 --    `calendar_connection_id = <this booking's connection>`, guarded by
---    `IF p_calendar_connection_id IS NOT NULL THEN ... END IF` (or, in
---    create_booking_payment_hold's case, not even guarded — the lock and
---    WHERE clause both silently no-op on a NULL connection id, since
---    `pg_advisory_xact_lock` and `=` are both STRICT and NULL propagates
---    straight through). Either way, a booking with no Google Calendar
---    connection got ZERO double-booking protection: two concurrent
---    NULL-connection bookings for the same business/time-slot would both
---    succeed, because `calendar_connection_id = NULL` is never true in
---    SQL regardless of how many other NULL-connection bookings already
---    exist. This was always reachable for any business that uses the
---    AI/voice path without ever connecting Google Calendar; it becomes
---    the NORMAL case once Google Calendar is optional.
+--    `IF p_calendar_connection_id IS NOT NULL THEN ... END IF`. A booking
+--    with no Google Calendar connection got ZERO double-booking
+--    protection: two concurrent NULL-connection bookings for the same
+--    business/time-slot would both succeed, because `calendar_connection_
+--    id = NULL` is never true in SQL regardless of how many other
+--    NULL-connection bookings already exist. This was always reachable
+--    for any business that uses the AI/voice path without ever
+--    connecting Google Calendar; it becomes the NORMAL case once Google
+--    Calendar is optional.
 --
 --    Fixed by rescoping every overlap check from calendar_connection_id to
 --    business_id. This is not a weaker substitute — the rest of this
@@ -37,10 +34,26 @@
 --    present (it may still be useful for serializing Google Calendar API
 --    calls), but the overlap check itself no longer depends on it —
 --    serialization instead comes from the per-business advisory lock
---    (salt 1), which create_booking_atomic and reschedule_booking_atomic
---    already acquire earlier in the same transaction. create_booking_
---    payment_hold never acquired a business-level lock at all before this
---    migration; it now does, for the same reason.
+--    (salt 1).
+--
+--    create_booking_payment_hold specifically: before this migration it
+--    was a thin `LANGUAGE sql` wrapper that delegated entirely to
+--    create_booking_atomic (with p_status := 'PENDING_PAYMENT'), so it
+--    inherited that function's idempotency lock (salt 2, added by
+--    20261010120000_fix_idempotent_booking_retry_race.sql), business lock
+--    (salt 1), connection lock (salt 0), and overlap check for free.
+--    Rewriting it here as its own standalone plpgsql body — needed so its
+--    overlap check can be independently rescoped to business_id — had to
+--    explicitly re-acquire all three locks in the SAME order (2, then 1,
+--    then 0) to stay equivalent; the first draft of this migration missed
+--    the salt-2 idempotency lock, which would have silently reintroduced
+--    the exact race 20261010120000 fixed, scoped to just this function.
+--    That is fixed in the function body below, not left as a follow-up.
+--
+-- No deadlock risk from any of this: all three functions acquire salt 2,
+-- then salt 1, then salt 0, in that fixed order, and no function in this
+-- schema ever acquires them in a different order or acquires salt 2
+-- without also being on this same call path.
 --
 -- 2. businesses.default_appointment_duration_minutes: an owner-configurable
 --    fallback duration (minutes) used only by the dashboard's Appointment
@@ -173,6 +186,23 @@ DECLARE
   v_booking public.bookings;
 BEGIN
   IF p_idempotency_key IS NOT NULL THEN
+    -- This function used to be a thin SQL wrapper delegating entirely to
+    -- create_booking_atomic (20261009090000_atomic_booking_creation.sql),
+    -- so it inherited create_booking_atomic's own salt-2 idempotency lock
+    -- (added by 20261010120000_fix_idempotent_booking_retry_race.sql) for
+    -- free. Rewriting it as its own standalone body (this migration, for
+    -- the business_id-scoped overlap check below) would otherwise have
+    -- silently DROPPED that protection and reintroduced the exact race
+    -- 20261010120000 fixed, scoped to this one function — two concurrent
+    -- calls with the same (organization_id, idempotency_key) could both
+    -- pass this SELECT, both proceed, and the loser would raise
+    -- SLOT_NO_LONGER_AVAILABLE instead of getting its own original hold
+    -- back. This lock, acquired before the SELECT exactly like create_
+    -- booking_atomic's, closes that gap the same way.
+    PERFORM pg_advisory_xact_lock(
+      hashtextextended(p_organization_id::text || ':' || p_idempotency_key, 2)
+    );
+
     SELECT * INTO v_existing FROM public.bookings
       WHERE organization_id = p_organization_id AND idempotency_key = p_idempotency_key;
     IF FOUND THEN
@@ -180,11 +210,14 @@ BEGIN
     END IF;
   END IF;
 
-  -- NEW: this function never acquired a business-level lock before —
-  -- only the per-connection one below, which (per this migration's header)
-  -- silently did nothing for a NULL connection id. Added so the
-  -- business_id-scoped overlap check below is actually serialized against
-  -- concurrent callers, matching create_booking_atomic's own lock order.
+  -- Also new: this function never acquired a business-level lock of its
+  -- own before either — it only had the per-connection one below (via the
+  -- same delegation), which, per this migration's header, silently did
+  -- nothing for a NULL connection id. Added so the business_id-scoped
+  -- overlap check below is actually serialized against concurrent
+  -- callers, matching create_booking_atomic's own lock order (2, then 1,
+  -- then 0 — never acquired in any other order by any function in this
+  -- schema, so this introduces no new deadlock risk).
   PERFORM pg_advisory_xact_lock(hashtextextended(p_business_id::text, 1));
 
   IF p_calendar_connection_id IS NOT NULL THEN
