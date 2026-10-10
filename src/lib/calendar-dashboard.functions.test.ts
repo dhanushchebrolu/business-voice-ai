@@ -165,6 +165,44 @@ describe("day-view slot state reuses the one precedence resolver, never a second
       "fetch_bookings must not be nested inside an `if (connection)` block",
     );
   });
+
+  test("fetch_calendar_sync_conflicts is gated behind `connection ?` — a business with no Google Calendar connection can never have any conflict rows (calendar_sync_conflicts.calendar_connection_id is NOT NULL with a foreign key to google_calendar_connections), so this must not run unconditionally, and must not be in the FIRST Promise.all (before connectionRes is even known)", () => {
+    const stepIdx = code.indexOf('timedStep("fetch_calendar_sync_conflicts"');
+    assert.ok(stepIdx > -1, "expected a fetch_calendar_sync_conflicts step to still exist");
+    const guardIdx = code.lastIndexOf("connection\n        ? timedStep(", stepIdx);
+    assert.ok(
+      guardIdx > -1 && guardIdx < stepIdx && stepIdx - guardIdx < 200,
+      "fetch_calendar_sync_conflicts must be the ternary branch taken only when `connection` is truthy",
+    );
+    // Must be in the SECOND Promise.all (alongside fetch_bookings/
+    // fetch_external_calendar_events, which already runs after
+    // connectionRes resolves), never the first one (business_hours/
+    // business_hour_overrides/google_calendar_connection), which runs
+    // before connectionRes exists at all — fetching it there was the
+    // actual production bug ("Could not load this — step
+    // 'fetch_calendar_sync_conflicts' failed ... PGRST205"): it made a
+    // business with no Google Calendar connection fail its entire day
+    // view on a query that can only ever return rows if a connection
+    // exists in the first place.
+    const firstPromiseAllIdx = code.indexOf("Promise.all([");
+    const firstPromiseAllEnd = code.indexOf("]);", firstPromiseAllIdx);
+    assert.ok(
+      stepIdx > firstPromiseAllEnd,
+      "fetch_calendar_sync_conflicts must not be inside the first Promise.all",
+    );
+  });
+
+  test("a disconnected business (no google_calendar_connections row) never fails getCalendarDayView on fetch_calendar_sync_conflicts — that step is skipped entirely, not merely caught", () => {
+    const stepStart = code.indexOf('timedStep("fetch_calendar_sync_conflicts"');
+    const elseIdx = code.indexOf(": Promise.resolve({", stepStart);
+    const elseBlockEnd = code.indexOf("}),", elseIdx);
+    const elseBlock = code.slice(elseIdx, elseBlockEnd);
+    assert.match(
+      elseBlock,
+      /data: \[\]/,
+      'the no-connection branch must resolve synchronously to an empty list, never call .from("calendar_sync_conflicts") at all',
+    );
+  });
 });
 
 /**
@@ -228,14 +266,15 @@ describe("getCalendarDayView — every step is wrapped in structured diagnostics
     assert.doesNotMatch(handlerBody, /timedStep\(\s*"fetch_bookings_and_external_busy"/);
   });
 
-  test("the four schedule/sync-state queries run in parallel (one Promise.all of four timedSteps), not sequentially", () => {
+  test("the three schedule-state queries run in parallel (one Promise.all of three timedSteps), not sequentially — calendar_sync_conflicts is deliberately NOT one of them (see its own connection-gated test above)", () => {
     const handlerStart = code.indexOf("export const getCalendarDayView");
     const promiseAllIdx = code.indexOf("Promise.all([", handlerStart);
-    const block = code.slice(promiseAllIdx, promiseAllIdx + 2200);
+    const promiseAllEnd = code.indexOf("]);", promiseAllIdx);
+    const block = code.slice(promiseAllIdx, promiseAllEnd);
     assert.match(block, /timedStep\("fetch_business_hours"/);
     assert.match(block, /timedStep\("fetch_business_hour_overrides"/);
     assert.match(block, /timedStep\("fetch_google_calendar_connection"/);
-    assert.match(block, /timedStep\("fetch_calendar_sync_conflicts"/);
+    assert.doesNotMatch(block, /timedStep\("fetch_calendar_sync_conflicts"/);
   });
 
   test("resolveOrgContext checks the Supabase error field before falling back to 'No workspace found' — a real query failure must never be misreported as 'no workspace'", () => {

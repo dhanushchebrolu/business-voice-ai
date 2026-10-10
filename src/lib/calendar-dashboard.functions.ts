@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import type { Json } from "@/integrations/supabase/types";
 import {
   dayOfWeekInTimezone,
   businessDayUtcBounds,
@@ -113,19 +114,31 @@ export const getCalendarDayView = createServerFn({ method: "GET" })
       resolveBusiness(supabaseAdmin, organizationId, data.businessId),
     );
 
-    // Each of these four tables is queried by its own timedStep (run in
+    // Each of these three tables is queried by its own timedStep (run in
     // parallel, not sequentially — Promise.all below) rather than one
     // combined "fetch_schedule_and_sync_state" step: business_hours and
     // google_calendar_connections predate the hospital-calendar feature
     // and are read by several other pages too, while business_hour_
-    // overrides and calendar_sync_conflicts were introduced by, and are
-    // read ONLY by, this one feature (20261009100000_hospital_calendar_
-    // overrides_and_gcal_sync.sql) — a PGRST205 ("table not in schema
-    // cache") on one of the latter two, with every other calendar/booking
-    // page unaffected, is a materially different diagnosis (that one
-    // migration's tables specifically) than on one of the former two
-    // (something broader). A combined step name couldn't tell these apart.
-    const [hoursRes, overrideRes, connectionRes, conflictsRes] = await Promise.all([
+    // overrides was introduced by, and is read ONLY by, this one feature
+    // (20261009100000_hospital_calendar_overrides_and_gcal_sync.sql) — a
+    // PGRST205 ("table not in schema cache") on business_hour_overrides,
+    // with every other calendar/booking page unaffected, is a materially
+    // different diagnosis (that one migration's table specifically) than
+    // on one of the former two (something broader). A combined step name
+    // couldn't tell these apart.
+    //
+    // calendar_sync_conflicts (from the same migration) is deliberately
+    // NOT fetched here — see its own connection-gated fetch below, next to
+    // fetch_external_calendar_events. Its calendar_connection_id column is
+    // NOT NULL with a foreign key to google_calendar_connections, so a
+    // conflict row is structurally impossible without a connection row to
+    // reference — fetching it before connectionRes resolves (as this
+    // feature originally did) meant a business with no Google Calendar
+    // connected could fail its ENTIRE day view on this one query alone
+    // ("Could not load this — step 'fetch_calendar_sync_conflicts' failed
+    // ... table ... not in schema cache"), for data that can only ever be
+    // empty for that business regardless.
+    const [hoursRes, overrideRes, connectionRes] = await Promise.all([
       timedStep("fetch_business_hours", correlationId, LOG, async () => {
         const res = await supabaseAdmin
           .from("business_hours")
@@ -151,16 +164,6 @@ export const getCalendarDayView = createServerFn({ method: "GET" })
           .eq("business_id", data.businessId)
           .eq("provider", "google")
           .maybeSingle();
-        if (res.error) throw res.error;
-        return res;
-      }),
-      timedStep("fetch_calendar_sync_conflicts", correlationId, LOG, async () => {
-        const res = await supabaseAdmin
-          .from("calendar_sync_conflicts")
-          .select("id, booking_id, conflict_type, details, created_at")
-          .eq("business_id", data.businessId)
-          .eq("status", "OPEN")
-          .order("created_at", { ascending: false });
         if (res.error) throw res.error;
         return res;
       }),
@@ -219,7 +222,7 @@ export const getCalendarDayView = createServerFn({ method: "GET" })
     // closed in check_calendar_availability; see that function's own
     // comment in calendar-tools.server.ts). External Google events remain
     // genuinely connection-specific, so that fetch alone stays gated.
-    const [bookingsRes, externalRes] = await Promise.all([
+    const [bookingsRes, externalRes, conflictsRes] = await Promise.all([
       timedStep("fetch_bookings", correlationId, LOG, async () => {
         const res = await supabaseAdmin
           .from("bookings")
@@ -245,6 +248,34 @@ export const getCalendarDayView = createServerFn({ method: "GET" })
           })
         : Promise.resolve({
             data: [] as { start_at: string | null; end_at: string | null }[],
+            error: null,
+          }),
+      // Gated the same way as fetch_external_calendar_events, and for the
+      // same structural reason (see this function's own comment above the
+      // first Promise.all): calendar_sync_conflicts.calendar_connection_id
+      // is NOT NULL with a foreign key to google_calendar_connections, so
+      // a business with no connection row can never have any conflict
+      // rows — this is never an empty-list-on-error suppression, it's the
+      // schema's own guarantee that the query would return nothing anyway.
+      connection
+        ? timedStep("fetch_calendar_sync_conflicts", correlationId, LOG, async () => {
+            const res = await supabaseAdmin
+              .from("calendar_sync_conflicts")
+              .select("id, booking_id, conflict_type, details, created_at")
+              .eq("business_id", data.businessId)
+              .eq("status", "OPEN")
+              .order("created_at", { ascending: false });
+            if (res.error) throw res.error;
+            return res;
+          })
+        : Promise.resolve({
+            data: [] as {
+              id: string;
+              booking_id: string | null;
+              conflict_type: string;
+              details: Json;
+              created_at: string;
+            }[],
             error: null,
           }),
     ]);
