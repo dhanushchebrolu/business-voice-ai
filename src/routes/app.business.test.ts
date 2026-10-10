@@ -91,3 +91,51 @@ describe("app.business.tsx — Opening hours editor validates before writing dir
     assert.match(src, /describeBusinessHoursWriteError\(error\)/);
   });
 });
+
+describe("app.business.tsx — HoursRow has save-in-flight protection (last-writer-wins race fix)", () => {
+  test("BusinessPage tracks a per-day savingDay state and threads it into HoursRow as `disabled`", () => {
+    assert.match(src, /const \[savingDay, setSavingDay\] = useState<number \| null>\(null\);/);
+    const callSiteIdx = src.indexOf("<HoursRow");
+    const callSiteBody = src.slice(callSiteIdx, callSiteIdx + 300);
+    assert.match(callSiteBody, /disabled=\{savingDay === i\}/);
+  });
+
+  test("toggleDay and saveInterval both set/clear savingDay around their async write in a try/finally, and bail out if another save is already in flight", () => {
+    const toggleStart = src.indexOf("async function toggleDay(");
+    const toggleEnd = src.indexOf("\n  async function saveInterval(");
+    const toggleBody = src.slice(toggleStart, toggleEnd);
+    assert.match(toggleBody, /if \(savingDay !== null\) return;/);
+    assert.match(toggleBody, /setSavingDay\(dayIndex\);/);
+    assert.match(toggleBody, /finally \{\s*\n\s*setSavingDay\(null\);/);
+
+    const saveStart = src.indexOf("async function saveInterval(");
+    const saveEnd = src.indexOf("\n  return (", saveStart);
+    const saveBody = src.slice(saveStart, saveEnd);
+    assert.match(saveBody, /if \(savingDay !== null\) return;/);
+    assert.match(saveBody, /setSavingDay\(dayIndex\);/);
+    assert.match(saveBody, /finally \{\s*\n\s*setSavingDay\(null\);/);
+  });
+
+  test("HoursRow applies `disabled` to the Switch and both time inputs, so no further edit or toggle can be initiated mid-save", () => {
+    const compStart = src.indexOf("function HoursRow(");
+    const compBody = src.slice(compStart);
+    assert.match(compBody, /<Switch checked=\{!row\?\.is_closed\} disabled=\{disabled\}/);
+    const inputsBlock = compBody.slice(
+      compBody.indexOf('<div className="flex items-center gap-2"'),
+    );
+    const disabledInputCount = (inputsBlock.match(/disabled=\{disabled\}/g) ?? []).length;
+    assert.equal(disabledInputCount, 2, "both the start and end inputs must be disabled mid-save");
+  });
+
+  test("a failed write still clears savingDay (via finally), so the row is not left permanently disabled", () => {
+    const toggleStart = src.indexOf("async function toggleDay(");
+    const toggleEnd = src.indexOf("\n  async function saveInterval(");
+    const toggleBody = src.slice(toggleStart, toggleEnd);
+    const tryIdx = toggleBody.indexOf("try {");
+    const finallyIdx = toggleBody.indexOf("finally {");
+    assert.ok(
+      tryIdx > -1 && finallyIdx > tryIdx,
+      "the write must be inside try, with setSavingDay(null) in finally so an error still releases the lock",
+    );
+  });
+});

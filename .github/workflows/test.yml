@@ -1,0 +1,87 @@
+name: Test
+
+# Minimal, test-only CI. This workflow never builds a deployable artifact for
+# Cloudflare and never deploys anything — Cloudflare Workers Builds (see
+# DEPLOYMENT.md) remains the only thing that deploys this app, completely
+# independent of this file. `vite build` below is run only as a smoke check
+# that the bundle still compiles, with throwaway, non-secret placeholder
+# values for the two VITE_* build-time vars it requires.
+#
+# No repository-managed test workflow existed before this file (confirmed:
+# no .github/workflows directory at all) — the only prior automation was
+# Cloudflare Workers Builds running `vite build` on push, which never ran any
+# test. This is the smallest workflow that actually runs the project's real
+# PostgreSQL-backed regression tests, not just a source-text scan of them,
+# and treats an unexpected skip of those tests as a hard CI failure rather
+# than a silent pass.
+on:
+  push:
+    branches-ignore:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.11"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install PostgreSQL server
+        # The disposable-cluster regression tests (supabase/migrations/*.pg.test.ts)
+        # run their own initdb/pg_ctl-managed cluster — they need the server
+        # binaries on PATH, not a separately running Postgres service container.
+        run: |
+          set -eo pipefail
+          sudo apt-get update
+          sudo apt-get install -y postgresql
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npx eslint .
+
+      - name: PostgreSQL regression tests must not silently skip in CI
+        # PostgreSQL is installed in the step above, so these tests must
+        # actually execute here — an all-skipped result means CI itself is
+        # misconfigured (e.g. the install step above silently failed, or a
+        # future runner image drops the postgres package), not a legitimate
+        # "unavailable" environment. Separately from this, a genuinely
+        # broken migration under test still fails these tests outright
+        # (not a skip) — see business_hours_interval_validation.pg.test.ts's
+        # own skip-vs-fail handling and its harness self-test.
+        run: |
+          set -eo pipefail
+          node --experimental-strip-types --test \
+            supabase/migrations/business_hours_interval_validation.pg.test.ts \
+            supabase/migrations/business_hours_interval_validation.harness-selftest.pg.test.ts \
+            2>&1 | tee pg-test-output.log
+          skipped=$(grep -oP '(?<=^# skipped )\d+' pg-test-output.log | tail -1)
+          if [ "${skipped:-0}" -gt 0 ]; then
+            echo "::error::${skipped} PostgreSQL regression test(s) were skipped in CI. PostgreSQL is installed in this job, so a skip here means CI is misconfigured, not that the environment genuinely lacks PostgreSQL — failing rather than passing silently with no real database coverage."
+            exit 1
+          fi
+
+      - name: Full test suite
+        run: npm test
+
+      - name: Build
+        env:
+          VITE_SUPABASE_URL: "https://placeholder.supabase.co"
+          VITE_SUPABASE_PUBLISHABLE_KEY: "placeholder-ci-build-key"
+        run: npm run build

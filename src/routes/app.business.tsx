@@ -52,6 +52,7 @@ function BusinessPage() {
 
   const [profile, setProfile] = useState({ name: "", description: "", address: "", city: "", primary_phone: "", email: "", website: "" });
   const [saving, setSaving] = useState(false);
+  const [savingDay, setSavingDay] = useState<number | null>(null);
 
   useEffect(() => {
     if (business) {
@@ -105,8 +106,14 @@ function BusinessPage() {
     refresh();
   }
 
-  async function toggleDay(row: BusinessHoursRecord | undefined, open: boolean) {
+  async function toggleDay(dayIndex: number, row: BusinessHoursRecord | undefined, open: boolean) {
     if (!row) return;
+    // Guarded at the call site via `disabled={savingDay === i}` on HoursRow,
+    // but re-checked here too since onToggle/onSaveInterval are the two
+    // independent entry points into this row's save lifecycle and either
+    // one being reachable while the other is mid-flight would reintroduce
+    // the same last-writer-wins race this guard exists to close.
+    if (savingDay !== null) return;
     const stored = (row.intervals as { start: string; end: string }[] | null)?.[0];
     // Reopening never re-persists a stored interval that's already invalid
     // (e.g. a legacy {"start":"23:59","end":"00:00"} row) — that would
@@ -116,36 +123,48 @@ function BusinessPage() {
     // row is then editable again via the two time inputs below.
     const safeInterval =
       stored && !describeInvalidInterval(stored) ? stored : DEFAULT_HOURS_INTERVAL;
-    const { error } = await supabase
-      .from("business_hours")
-      .update({ is_closed: !open, intervals: open ? [safeInterval] : [] })
-      .eq("id", row.id);
-    if (error) {
-      toast.error(describeBusinessHoursWriteError(error) ?? error.message);
-      return;
+    setSavingDay(dayIndex);
+    try {
+      const { error } = await supabase
+        .from("business_hours")
+        .update({ is_closed: !open, intervals: open ? [safeInterval] : [] })
+        .eq("id", row.id);
+      if (error) {
+        toast.error(describeBusinessHoursWriteError(error) ?? error.message);
+        return;
+      }
+      refresh();
+    } finally {
+      setSavingDay(null);
     }
-    refresh();
   }
 
   async function saveInterval(
+    dayIndex: number,
     row: BusinessHoursRecord | undefined,
     interval: { start: string; end: string },
   ) {
     if (!row) return;
+    if (savingDay !== null) return;
     const validationError = describeInvalidInterval(interval);
     if (validationError) {
       toast.error(validationError);
       return;
     }
-    const { error } = await supabase
-      .from("business_hours")
-      .update({ intervals: [interval] })
-      .eq("id", row.id);
-    if (error) {
-      toast.error(describeBusinessHoursWriteError(error) ?? error.message);
-      return;
+    setSavingDay(dayIndex);
+    try {
+      const { error } = await supabase
+        .from("business_hours")
+        .update({ intervals: [interval] })
+        .eq("id", row.id);
+      if (error) {
+        toast.error(describeBusinessHoursWriteError(error) ?? error.message);
+        return;
+      }
+      refresh();
+    } finally {
+      setSavingDay(null);
     }
-    refresh();
   }
 
   return (
@@ -212,8 +231,9 @@ function BusinessPage() {
                     key={day}
                     day={day}
                     row={row}
-                    onToggle={(open) => void toggleDay(row, open)}
-                    onSaveInterval={(interval) => void saveInterval(row, interval)}
+                    disabled={savingDay === i}
+                    onToggle={(open) => void toggleDay(i, row, open)}
+                    onSaveInterval={(interval) => void saveInterval(i, row, interval)}
                   />
                 );
               })}
@@ -297,15 +317,25 @@ function BusinessPage() {
  * single-field edit could ever pass validation. Buffering both fields
  * locally and committing once, on blur of the pair (not of either input
  * individually), lets the two edits land together in one validated write.
+ *
+ * `disabled` is true for the duration of this row's own in-flight save
+ * (set by the parent around its toggleDay/saveInterval calls) and blocks
+ * both the Switch and both time inputs — mirroring WeeklyHoursRow in
+ * app.calendar.tsx. Without it, a second edit could be committed on this
+ * row before the first write's response comes back, and whichever
+ * response lands last would silently overwrite the other's result,
+ * regardless of which one the user actually intended to keep.
  */
 function HoursRow({
   day,
   row,
+  disabled,
   onToggle,
   onSaveInterval,
 }: {
   day: string;
   row: BusinessHoursRecord | undefined;
+  disabled: boolean;
   onToggle: (open: boolean) => void;
   onSaveInterval: (interval: { start: string; end: string }) => void;
 }) {
@@ -336,7 +366,7 @@ function HoursRow({
   return (
     <li className="flex flex-wrap items-center gap-3 py-2.5">
       <span className="w-28 text-sm font-medium">{day}</span>
-      <Switch checked={!row?.is_closed} onCheckedChange={onToggle} />
+      <Switch checked={!row?.is_closed} disabled={disabled} onCheckedChange={onToggle} />
       {row?.is_closed ? (
         <span className="text-xs text-muted-foreground">Closed</span>
       ) : (
@@ -344,12 +374,14 @@ function HoursRow({
           <Input
             type="time"
             className="h-8 w-[120px]"
+            disabled={disabled}
             value={draft.start}
             onChange={(e) => setDraft((d) => ({ ...d, start: e.target.value }))}
           />
           <Input
             type="time"
             className="h-8 w-[120px]"
+            disabled={disabled}
             value={draft.end}
             onChange={(e) => setDraft((d) => ({ ...d, end: e.target.value }))}
           />

@@ -124,6 +124,64 @@ describe("createEvent", () => {
   });
 });
 
+describe("updateEvent", () => {
+  test("PATCHes only the fields given, and maps the response back to a normalized event", async () => {
+    const { provider, calls } = makeProvider([
+      {
+        status: 200,
+        body: {
+          id: "google-event-1",
+          summary: "Appointment - Rahul (rescheduled)",
+          start: { dateTime: "2026-09-26T10:00:00+05:30" },
+          end: { dateTime: "2026-09-26T10:30:00+05:30" },
+          status: "confirmed",
+        },
+      },
+    ]);
+    const event = await provider.updateEvent("clinic-cal", "google-event-1", {
+      startIso: "2026-09-26T10:00:00+05:30",
+      endIso: "2026-09-26T10:30:00+05:30",
+      timezone: "Asia/Kolkata",
+    });
+    assert.equal(event.id, "google-event-1");
+    assert.equal(calls[0]!.method, "PATCH");
+    assert.match(calls[0]!.url, /\/calendars\/clinic-cal\/events\/google-event-1$/);
+    // Only start/end were given — title/description must not appear in the
+    // PATCH body at all (not even as null/undefined), since Google's PATCH
+    // semantics treat an included-but-empty field as "clear this field",
+    // not "leave it alone".
+    const body = calls[0]!.body as Record<string, unknown>;
+    assert.ok(!("summary" in body), "an omitted title must not be sent in the PATCH body");
+    assert.ok(
+      !("description" in body),
+      "an omitted description must not be sent in the PATCH body",
+    );
+    assert.deepEqual(body["start"], {
+      dateTime: "2026-09-26T10:00:00+05:30",
+      timeZone: "Asia/Kolkata",
+    });
+    assert.deepEqual(body["end"], {
+      dateTime: "2026-09-26T10:30:00+05:30",
+      timeZone: "Asia/Kolkata",
+    });
+  });
+
+  test("a 404 on update maps to CALENDAR_NOT_FOUND (the event was deleted on Google's side between read and write)", async () => {
+    const { provider } = makeProvider([{ status: 404, body: { error: { message: "Not Found" } } }]);
+    await assert.rejects(
+      () =>
+        provider.updateEvent("clinic-cal", "already-gone", {
+          startIso: "2026-09-26T10:00:00+05:30",
+        }),
+      (err: unknown) => {
+        assert.ok(err instanceof CalendarProviderError);
+        assert.equal(err.code, "CALENDAR_NOT_FOUND");
+        return true;
+      },
+    );
+  });
+});
+
 describe("deleteEvent / getEvent", () => {
   test("getEvent returns null (not a throw) when Google reports 404", async () => {
     const { provider } = makeProvider([{ status: 404, body: { error: { message: "Not Found" } } }]);

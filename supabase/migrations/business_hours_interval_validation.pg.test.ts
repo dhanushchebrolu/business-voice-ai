@@ -1,34 +1,43 @@
 import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, chmodSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  bootstrapCluster,
+  makeExecSql,
+  registerSignalCleanup,
+  teardownCluster,
+  type Cluster,
+  type RunResult,
+} from "./pg-test-cluster.ts";
 
 /**
  * Executable regression coverage for the business_hours/business_hour_
  * overrides interval-validation trigger, run against a REAL, disposable
- * PostgreSQL instance created and torn down by this file — not a source-
- * text scan. Supplements business_hours_interval_validation.test.ts
- * (which still pins the SQL's own structural invariants and runs even
- * where no PostgreSQL is available) rather than replacing it.
+ * PostgreSQL instance created and torn down by this file (via
+ * pg-test-cluster.ts) — not a source-text scan. Supplements
+ * business_hours_interval_validation.test.ts (which still pins the SQL's
+ * own structural invariants and runs even where no PostgreSQL is
+ * available) rather than replacing it.
  *
  * This never touches any shared or production database: it initializes
  * a brand-new cluster in a throwaway temp directory, communicates only
  * over a Unix-domain socket inside that same directory, and deletes
  * everything in `after()`.
  *
- * Environment detection: `initdb` refuses to run as root, so when this
- * process IS root (true in some sandboxed CI/dev containers) the suite
- * instead runs every psql/initdb/pg_ctl invocation as the unprivileged
- * `postgres` OS user via `su postgres -c '...'`, matching how this was
- * verified interactively during development. If neither a usable
- * PostgreSQL installation nor (when needed) a `postgres` OS user can be
- * found, every test below is explicitly SKIPPED via `t.skip(reason)` —
- * reported distinctly from pass/fail by the test runner — rather than
- * silently vanishing or being reported as a false pass.
+ * Skip vs. fail (the false-green bug this file previously had): if
+ * PostgreSQL genuinely cannot be stood up in this environment (missing
+ * binaries, no `postgres` OS user to de-escalate to as root, a failed
+ * initdb/pg_ctl start) every test below is explicitly SKIPPED via
+ * `t.skip(reason)`. But once the cluster is confirmed up and listening,
+ * PostgreSQL IS available — so if the committed trigger migration itself
+ * then fails to load, that is a real regression, and every test below
+ * FAILS instead (via `assert.fail`), never skips. See
+ * business_hours_interval_validation.harness-selftest.pg.test.ts for a
+ * standalone regression check proving this distinction holds, using a
+ * deliberately-broken fixture that never touches this committed
+ * migration file.
  */
 
 const migrationsDir = dirname(fileURLToPath(import.meta.url));
@@ -37,71 +46,28 @@ const TRIGGER_SQL = readFileSync(
   "utf8",
 );
 
-let workDir = "";
-let sockDir = "";
-let dataDir = "";
-let pgBinDir = "";
-let useSu = false;
+let cluster: Cluster | null = null;
+let execSql: (sql: string) => RunResult = () => {
+  throw new Error("execSql used before before() finished setting up the cluster");
+};
+let unregisterSignalCleanup: (() => void) | null = null;
+
+/** Genuine infrastructure unavailability (no PostgreSQL, no postgres OS user, cluster start failed) — a skip is correct for these. */
 let skipReason: string | null = null;
+/** PostgreSQL IS up and available, but SQL this file tried to load into it failed — this must FAIL the suite, never skip. */
+let setupFailure: string | null = null;
 
-function findPgBinDir(): string | null {
-  const candidates = [
-    "",
-    "/usr/lib/postgresql/17/bin/",
-    "/usr/lib/postgresql/16/bin/",
-    "/usr/lib/postgresql/15/bin/",
-    "/usr/lib/postgresql/14/bin/",
-    "/opt/homebrew/opt/postgresql@16/bin/",
-    "/usr/local/opt/postgresql@16/bin/",
-  ];
-  for (const dir of candidates) {
-    try {
-      execFileSync(`${dir}psql`, ["--version"], { stdio: "ignore" });
-      execFileSync(`${dir}initdb`, ["--version"], { stdio: "ignore" });
-      return dir;
-    } catch {
-      continue;
-    }
-  }
-  return null;
-}
-
-function isRoot(): boolean {
-  return typeof process.getuid === "function" && process.getuid() === 0;
-}
-
-function postgresUserExists(): boolean {
-  const result = spawnSync("id", ["postgres"], { stdio: "ignore" });
-  return result.status === 0;
-}
-
-/** Runs a shell command either directly, or as the `postgres` OS user when this process is root. */
-function runCmd(cmd: string, args: string[]): { status: number; stdout: string; stderr: string } {
-  const result = useSu
-    ? spawnSync("su", ["postgres", "-c", [cmd, ...args].join(" ")], { encoding: "utf8" })
-    : spawnSync(cmd, args, { encoding: "utf8" });
-  return { status: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
-}
-
-/** Pipes `sql` on stdin to psql against the disposable cluster. Returns the exit status and captured output. */
-function execSql(sql: string): { status: number; stdout: string; stderr: string } {
-  const args = ["-h", sockDir, "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-q", "-X", "-f", "-"];
-  const result = useSu
-    ? spawnSync("su", ["postgres", "-c", [`${pgBinDir}psql`, ...args].join(" ")], {
-        input: sql,
-        encoding: "utf8",
-      })
-    : spawnSync(`${pgBinDir}psql`, args, { input: sql, encoding: "utf8" });
-  return { status: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+function execSqlDynamic(sql: string): RunResult {
+  return execSql(sql);
 }
 
 function assertSucceeds(sql: string, message: string) {
-  const { status, stderr } = execSql(sql);
+  const { status, stderr } = execSqlDynamic(sql);
   assert.equal(status, 0, `${message}\nSQL:\n${sql}\nstderr:\n${stderr}`);
 }
 
 function assertRejected(sql: string, expectedSubstring: string, message: string) {
-  const { status, stderr } = execSql(sql);
+  const { status, stderr } = execSqlDynamic(sql);
   assert.notEqual(
     status,
     0,
@@ -114,7 +80,7 @@ function assertRejected(sql: string, expectedSubstring: string, message: string)
 }
 
 function scalar(sql: string): string {
-  const { status, stdout, stderr } = execSql(`\\pset tuples_only on\n${sql}`);
+  const { status, stdout, stderr } = execSqlDynamic(`\\pset tuples_only on\n${sql}`);
   assert.equal(status, 0, `query failed:\n${sql}\nstderr:\n${stderr}`);
   return stdout.trim();
 }
@@ -136,85 +102,34 @@ CREATE TABLE business_hour_overrides (
 `;
 
 before(() => {
-  const found = findPgBinDir();
-  if (!found) {
-    skipReason =
-      "no PostgreSQL installation (psql/initdb) found on PATH or in common install locations";
+  const result = bootstrapCluster();
+  if (!result.ok) {
+    skipReason = result.reason;
     return;
   }
-  pgBinDir = found;
+  cluster = result.cluster;
+  execSql = makeExecSql(cluster);
+  unregisterSignalCleanup = registerSignalCleanup(() => cluster);
 
-  if (isRoot()) {
-    if (!postgresUserExists()) {
-      skipReason = "running as root and no 'postgres' OS user exists to run initdb/psql as";
-      return;
-    }
-    useSu = true;
-  }
-
-  workDir = mkdtempSync(join(tmpdir(), "bhv-pg-test-"));
-  dataDir = join(workDir, "data");
-  sockDir = join(workDir, "sock");
-
-  // Created directly by this (possibly root) process, not via runCmd/su —
-  // the postgres OS user doesn't yet have any access to workDir at this
-  // point, so it couldn't create subdirectories here even if asked to.
-  // chmod + chown below hand the whole tree over before postgres touches
-  // anything in it.
-  mkdirSync(dataDir, { recursive: true });
-  mkdirSync(sockDir, { recursive: true });
-  chmodSync(workDir, 0o755);
-  if (useSu) {
-    const chownResult = spawnSync("chown", ["-R", "postgres:postgres", workDir], {
-      encoding: "utf8",
-    });
-    if (chownResult.status !== 0) {
-      skipReason = `could not chown the disposable cluster directory to postgres: ${chownResult.stderr}`;
-      return;
-    }
-  }
-
-  const initResult = runCmd(`${pgBinDir}initdb`, ["-D", dataDir, "--auth=trust", "-U", "postgres"]);
-  if (initResult.status !== 0) {
-    skipReason = `initdb failed: ${initResult.stderr}`;
-    return;
-  }
-
-  const startResult = runCmd(`${pgBinDir}pg_ctl`, [
-    "-D",
-    dataDir,
-    "-o",
-    `"-k ${sockDir} -h ''"`,
-    "-l",
-    join(workDir, "log.txt"),
-    "start",
-  ]);
-  if (startResult.status !== 0) {
-    skipReason = `pg_ctl start failed: ${startResult.stderr}`;
-    return;
-  }
-
+  // PostgreSQL is now definitively available — neither failure below is
+  // an infrastructure gap, so both are recorded as setupFailure (hard
+  // failure via pgTest()) rather than skipReason (skip).
   const schemaResult = execSql(MINIMAL_SCHEMA);
   if (schemaResult.status !== 0) {
-    skipReason = `failed to create the minimal test schema: ${schemaResult.stderr}`;
+    setupFailure = `failed to create the minimal test schema: ${schemaResult.stderr}`;
     return;
   }
 
   const triggerResult = execSql(TRIGGER_SQL);
   if (triggerResult.status !== 0) {
-    skipReason = `failed to load the trigger migration SQL as-committed: ${triggerResult.stderr}`;
+    setupFailure = `failed to load the trigger migration SQL as-committed: ${triggerResult.stderr}`;
     return;
   }
 });
 
 after(() => {
-  if (!workDir) return;
-  runCmd(`${pgBinDir}pg_ctl`, ["-D", dataDir, "stop", "-m", "immediate"]);
-  try {
-    rmSync(workDir, { recursive: true, force: true });
-  } catch {
-    // best effort — a leftover /tmp directory is not worth failing the suite over
-  }
+  unregisterSignalCleanup?.();
+  if (cluster) teardownCluster(cluster);
 });
 
 function pgTest(name: string, fn: () => void) {
@@ -222,6 +137,11 @@ function pgTest(name: string, fn: () => void) {
     if (skipReason) {
       t.skip(skipReason);
       return;
+    }
+    if (setupFailure) {
+      assert.fail(
+        `PostgreSQL is available, but setup SQL failed to load into the disposable cluster — this is a real failure, not a skip: ${setupFailure}`,
+      );
     }
     fn();
   });
@@ -241,6 +161,16 @@ describe("business_hours — real PostgreSQL: INSERT", () => {
       "the established all-day convention must be accepted",
     );
   });
+
+  pgTest(
+    "an open row with an empty intervals array is accepted ('open, nothing configured yet')",
+    () => {
+      assertSucceeds(
+        `INSERT INTO business_hours (is_closed, intervals) VALUES (false, '[]'::jsonb);`,
+        "an empty array on an open row is a real, distinct state, not an error",
+      );
+    },
+  );
 
   pgTest("a reversed interval (23:59 -> 00:00, the known legacy-invalid shape) is rejected", () => {
     assertRejected(
@@ -262,6 +192,136 @@ describe("business_hours — real PostgreSQL: INSERT", () => {
     assertSucceeds(
       `INSERT INTO business_hours (is_closed, intervals) VALUES (true, '[{"start":"23:59","end":"00:00"}]'::jsonb);`,
       "a closed row's intervals must never be validated, regardless of content",
+    );
+  });
+});
+
+describe("business_hours — real PostgreSQL: malformed JSON shapes (committed regression coverage)", () => {
+  pgTest("intervals as a JSON string (not an array) is rejected", () => {
+    assertRejected(
+      `INSERT INTO business_hours (is_closed, intervals) VALUES (false, '"not an array"'::jsonb);`,
+      "must be a JSON array (got string)",
+      "a non-array JSON string must be rejected with the correct observed type",
+    );
+  });
+
+  pgTest("intervals as a JSON number is rejected", () => {
+    assertRejected(
+      `INSERT INTO business_hours (is_closed, intervals) VALUES (false, '5'::jsonb);`,
+      "must be a JSON array (got number)",
+      "a bare JSON number must be rejected",
+    );
+  });
+
+  pgTest("intervals as a JSON object (not an array) is rejected", () => {
+    assertRejected(
+      `INSERT INTO business_hours (is_closed, intervals) VALUES (false, '{}'::jsonb);`,
+      "must be a JSON array (got object)",
+      "a bare JSON object must be rejected",
+    );
+  });
+
+  pgTest("intervals as the JSON literal null (distinct from SQL NULL) is rejected", () => {
+    assertRejected(
+      `INSERT INTO business_hours (is_closed, intervals) VALUES (false, 'null'::jsonb);`,
+      "must be a JSON array (got null)",
+      "the JSON null literal must still be rejected for an open row, unlike a true SQL NULL",
+    );
+  });
+
+  pgTest("intervals as a JSON boolean is rejected", () => {
+    assertRejected(
+      `INSERT INTO business_hours (is_closed, intervals) VALUES (false, 'true'::jsonb);`,
+      "must be a JSON array (got boolean)",
+      "a bare JSON boolean must be rejected",
+    );
+  });
+
+  pgTest("an array element that is a string (not an object) is rejected", () => {
+    assertRejected(
+      `INSERT INTO business_hours (is_closed, intervals) VALUES (false, '["not an object"]'::jsonb);`,
+      "interval 1 must be a JSON object (got string)",
+      "each array element must itself be a JSON object",
+    );
+  });
+
+  pgTest("an array element that is a number is rejected", () => {
+    assertRejected(
+      `INSERT INTO business_hours (is_closed, intervals) VALUES (false, '[5]'::jsonb);`,
+      "interval 1 must be a JSON object (got number)",
+      "a numeric array element must be rejected",
+    );
+  });
+
+  pgTest("an array element that is itself an array is rejected", () => {
+    assertRejected(
+      `INSERT INTO business_hours (is_closed, intervals) VALUES (false, '[[]]'::jsonb);`,
+      "interval 1 must be a JSON object (got array)",
+      "a nested-array element must be rejected",
+    );
+  });
+
+  pgTest("an array element that is the JSON literal null is rejected", () => {
+    assertRejected(
+      `INSERT INTO business_hours (is_closed, intervals) VALUES (false, '[null]'::jsonb);`,
+      "interval 1 must be a JSON object (got null)",
+      "a null array element must be rejected",
+    );
+  });
+
+  pgTest("an object missing the 'start' key entirely is rejected", () => {
+    assertRejected(
+      `INSERT INTO business_hours (is_closed, intervals) VALUES (false, '[{"end":"19:00"}]'::jsonb);`,
+      'interval 1 is missing a string "start"',
+      "a missing start key must be rejected",
+    );
+  });
+
+  pgTest("an object with 'start' as a non-string (number) is rejected", () => {
+    assertRejected(
+      `INSERT INTO business_hours (is_closed, intervals) VALUES (false, '[{"start":900,"end":"19:00"}]'::jsonb);`,
+      'interval 1 is missing a string "start"',
+      "a numeric start must be rejected the same way a missing one is",
+    );
+  });
+
+  pgTest("an object missing the 'end' key entirely is rejected", () => {
+    assertRejected(
+      `INSERT INTO business_hours (is_closed, intervals) VALUES (false, '[{"start":"09:00"}]'::jsonb);`,
+      'interval 1 is missing a string "end"',
+      "a missing end key must be rejected",
+    );
+  });
+
+  pgTest("an object with 'end' as a non-string (boolean) is rejected", () => {
+    assertRejected(
+      `INSERT INTO business_hours (is_closed, intervals) VALUES (false, '[{"start":"09:00","end":true}]'::jsonb);`,
+      'interval 1 is missing a string "end"',
+      "a boolean end must be rejected the same way a missing one is",
+    );
+  });
+
+  pgTest("a malformed start time (single-digit hour) is rejected", () => {
+    assertRejected(
+      `INSERT INTO business_hours (is_closed, intervals) VALUES (false, '[{"start":"9:00","end":"19:00"}]'::jsonb);`,
+      "interval 1 has a malformed start time",
+      "a non-zero-padded hour must be rejected",
+    );
+  });
+
+  pgTest("a malformed end time (out-of-range minutes) is rejected", () => {
+    assertRejected(
+      `INSERT INTO business_hours (is_closed, intervals) VALUES (false, '[{"start":"09:00","end":"19:60"}]'::jsonb);`,
+      "interval 1 has a malformed end time",
+      "an out-of-range minute value must be rejected",
+    );
+  });
+
+  pgTest("the second element's index is reported correctly when the first element is valid", () => {
+    assertRejected(
+      `INSERT INTO business_hours (is_closed, intervals) VALUES (false, '[{"start":"09:00","end":"12:00"},{"start":"20:00","end":"10:00"}]'::jsonb);`,
+      "interval 2 end",
+      "the 1-based index in the error must point at the actually-invalid element, not always the first",
     );
   });
 });
@@ -434,6 +494,14 @@ describe("business_hour_overrides — real PostgreSQL: INSERT", () => {
       `INSERT INTO business_hour_overrides (is_full_day_closure, intervals) VALUES (false, '[{"start":"10:00","end":"11:00"}]'::jsonb);`,
       "INVALID_BUSINESS_HOURS_INTERVAL",
       "a missing isOpen key must be rejected",
+    );
+  });
+
+  pgTest("an override interval with isOpen as a non-boolean (string) is rejected", () => {
+    assertRejected(
+      `INSERT INTO business_hour_overrides (is_full_day_closure, intervals) VALUES (false, '[{"start":"10:00","end":"11:00","isOpen":"true"}]'::jsonb);`,
+      'override interval 1 is missing a boolean "isOpen"',
+      "a string isOpen must be rejected the same way a missing one is",
     );
   });
 
