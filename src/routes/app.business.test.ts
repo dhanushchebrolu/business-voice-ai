@@ -90,6 +90,28 @@ describe("app.business.tsx — Opening hours editor validates before writing dir
   test("a rejected write (e.g. from the database trigger) is surfaced via toast, not silently ignored", () => {
     assert.match(src, /describeBusinessHoursWriteError\(error\)/);
   });
+
+  test("the Hours tab mounts the date-wise Appointment Slots section directly below the weekly editor, not as a separate tab", () => {
+    const tabsListIdx = src.indexOf("<TabsList>");
+    const tabsListEnd = src.indexOf("</TabsList>", tabsListIdx);
+    const tabsListBlock = src.slice(tabsListIdx, tabsListEnd);
+    // Only one Hours-related trigger — the feature must not add a second
+    // "Availability" or "Appointment Slots" tab alongside it.
+    assert.match(tabsListBlock, /<TabsTrigger value="hours">Hours<\/TabsTrigger>/);
+    assert.doesNotMatch(tabsListBlock, /Availability|Appointment Slots/);
+
+    const hoursTabIdx = src.indexOf('<TabsContent value="hours"');
+    const hoursTabEnd = src.indexOf('<TabsContent value="services"');
+    const hoursTabBody = src.slice(hoursTabIdx, hoursTabEnd);
+    const hoursRowIdx = hoursTabBody.indexOf("<HoursRow");
+    const appointmentSlotsIdx = hoursTabBody.indexOf("<AppointmentSlotsSection");
+    assert.ok(hoursRowIdx > -1 && appointmentSlotsIdx > -1);
+    assert.ok(
+      hoursRowIdx < appointmentSlotsIdx,
+      "the weekly editor must render before the Appointment Slots section",
+    );
+    assert.match(hoursTabBody, /<AppointmentSlotsSection businessId=\{business\.id\}\s*\/>/);
+  });
 });
 
 describe("app.business.tsx — HoursRow has save-in-flight protection (last-writer-wins race fix)", () => {

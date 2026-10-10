@@ -147,6 +147,24 @@ describe("day-view slot state reuses the one precedence resolver, never a second
   test("a slot already covered by a confirmed/pending booking is never reported as merely 'open', regardless of the override state", () => {
     assert.match(code, /overlapsBooking\s*\?\s*"booked"/);
   });
+
+  test("fetch_bookings is scoped by business_id, not calendar_connection_id, and runs unconditionally — a business with no Google Calendar connection must still see its own booked slots as booked, not as open", () => {
+    const fnStart = code.indexOf('timedStep("fetch_bookings"');
+    const fnEnd = code.indexOf("}),", fnStart);
+    const fnBody = code.slice(fnStart, fnEnd);
+    assert.match(fnBody, /\.eq\("business_id", data\.businessId\)/);
+    assert.doesNotMatch(fnBody, /calendar_connection_id/);
+    // Must not be gated behind `if (connection)` — the booking fetch itself
+    // sits in a Promise.all with no such guard around it, unlike the
+    // external-calendar-events fetch right after it (which legitimately
+    // stays connection-gated, since it has no meaning without one).
+    const guardIdx = code.lastIndexOf("if (connection)", fnStart);
+    const promiseAllIdx = code.lastIndexOf("Promise.all([", fnStart);
+    assert.ok(
+      guardIdx === -1 || guardIdx < promiseAllIdx,
+      "fetch_bookings must not be nested inside an `if (connection)` block",
+    );
+  });
 });
 
 /**

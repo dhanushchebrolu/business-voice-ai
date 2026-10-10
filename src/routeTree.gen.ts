@@ -47,7 +47,6 @@ import { Route as AppAgentRouteImport } from './routes/app.agent'
 import { Route as AppBillingRouteImport } from './routes/app.billing'
 import { Route as AppBookingsRouteImport } from './routes/app.bookings'
 import { Route as AppBusinessRouteImport } from './routes/app.business'
-import { Route as AppCalendarRouteImport } from './routes/app.calendar'
 import { Route as AppCallsRouteImport } from './routes/app.calls'
 import { Route as AppCampaignsRouteImport } from './routes/app.campaigns'
 import { Route as AppContactsRouteImport } from './routes/app.contacts'
@@ -271,11 +270,6 @@ const AppBusinessRoute = AppBusinessRouteImport.update({
   path: '/business',
   getParentRoute: () => AppRoute,
 } as any)
-const AppCalendarRoute = AppCalendarRouteImport.update({
-  id: '/calendar',
-  path: '/calendar',
-  getParentRoute: () => AppRoute,
-} as any)
 const AppCallsRoute = AppCallsRouteImport.update({
   id: '/calls',
   path: '/calls',
@@ -483,7 +477,6 @@ export interface FileRoutesByFullPath {
   '/app/billing': typeof AppBillingRoute
   '/app/bookings': typeof AppBookingsRoute
   '/app/business': typeof AppBusinessRoute
-  '/app/calendar': typeof AppCalendarRoute
   '/app/calls': typeof AppCallsRoute
   '/app/campaigns': typeof AppCampaignsRouteWithChildren
   '/app/contacts': typeof AppContactsRoute
@@ -551,7 +544,6 @@ export interface FileRoutesByTo {
   '/app/billing': typeof AppBillingRoute
   '/app/bookings': typeof AppBookingsRoute
   '/app/business': typeof AppBusinessRoute
-  '/app/calendar': typeof AppCalendarRoute
   '/app/calls': typeof AppCallsRoute
   '/app/campaigns': typeof AppCampaignsRouteWithChildren
   '/app/contacts': typeof AppContactsRoute
@@ -624,7 +616,6 @@ export interface FileRoutesById {
   '/app/billing': typeof AppBillingRoute
   '/app/bookings': typeof AppBookingsRoute
   '/app/business': typeof AppBusinessRoute
-  '/app/calendar': typeof AppCalendarRoute
   '/app/calls': typeof AppCallsRoute
   '/app/campaigns': typeof AppCampaignsRouteWithChildren
   '/app/contacts': typeof AppContactsRoute
@@ -698,7 +689,6 @@ export interface FileRouteTypes {
     | '/app/billing'
     | '/app/bookings'
     | '/app/business'
-    | '/app/calendar'
     | '/app/calls'
     | '/app/campaigns'
     | '/app/contacts'
@@ -766,7 +756,6 @@ export interface FileRouteTypes {
     | '/app/billing'
     | '/app/bookings'
     | '/app/business'
-    | '/app/calendar'
     | '/app/calls'
     | '/app/campaigns'
     | '/app/contacts'
@@ -838,7 +827,6 @@ export interface FileRouteTypes {
     | '/app/billing'
     | '/app/bookings'
     | '/app/business'
-    | '/app/calendar'
     | '/app/calls'
     | '/app/campaigns'
     | '/app/contacts'
@@ -1177,13 +1165,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppBusinessRouteImport
       parentRoute: typeof AppRoute
     }
-    '/app/calendar': {
-      id: '/app/calendar'
-      path: '/calendar'
-      fullPath: '/app/calendar'
-      preLoaderRoute: typeof AppCalendarRouteImport
-      parentRoute: typeof AppRoute
-    }
     '/app/calls': {
       id: '/app/calls'
       path: '/calls'
@@ -1488,7 +1469,6 @@ interface AppRouteChildren {
   AppBillingRoute: typeof AppBillingRoute
   AppBookingsRoute: typeof AppBookingsRoute
   AppBusinessRoute: typeof AppBusinessRoute
-  AppCalendarRoute: typeof AppCalendarRoute
   AppCallsRoute: typeof AppCallsRoute
   AppCampaignsRoute: typeof AppCampaignsRouteWithChildren
   AppContactsRoute: typeof AppContactsRoute
@@ -1508,7 +1488,6 @@ const AppRouteChildren: AppRouteChildren = {
   AppBillingRoute: AppBillingRoute,
   AppBookingsRoute: AppBookingsRoute,
   AppBusinessRoute: AppBusinessRoute,
-  AppCalendarRoute: AppCalendarRoute,
   AppCallsRoute: AppCallsRoute,
   AppCampaignsRoute: AppCampaignsRouteWithChildren,
   AppContactsRoute: AppContactsRoute,

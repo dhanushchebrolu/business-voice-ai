@@ -211,41 +211,45 @@ export const getCalendarDayView = createServerFn({ method: "GET" })
     );
     const connection = connectionRes.data;
 
-    let confirmedBookings: {
-      start_at: string;
-      end_at: string;
-      id: string;
-      customer_name: string | null;
-    }[] = [];
-    let externalBusy: { start_at: string | null; end_at: string | null }[] = [];
-    if (connection) {
-      const [bookingsRes, externalRes] = await Promise.all([
-        timedStep("fetch_bookings", correlationId, LOG, async () => {
-          const res = await supabaseAdmin
-            .from("bookings")
-            .select("id, start_at, end_at, customer_name")
-            .eq("calendar_connection_id", connection.id)
-            .not("status", "in", "(CANCELLED,NO_SHOW)")
-            .lt("start_at", dayEndUtc.toISOString())
-            .gt("end_at", dayStartUtc.toISOString());
-          if (res.error) throw res.error;
-          return res;
-        }),
-        timedStep("fetch_external_calendar_events", correlationId, LOG, async () => {
-          const res = await supabaseAdmin
-            .from("external_calendar_events")
-            .select("start_at, end_at")
-            .eq("calendar_connection_id", connection.id)
-            .neq("status", "cancelled")
-            .lt("start_at", dayEndUtc.toISOString())
-            .gt("end_at", dayStartUtc.toISOString());
-          if (res.error) throw res.error;
-          return res;
-        }),
-      ]);
-      confirmedBookings = bookingsRes.data ?? [];
-      externalBusy = externalRes.data ?? [];
-    }
+    // Bookings are fetched unconditionally and scoped by business_id, not
+    // calendar_connection_id — scoping by connection would mean `= NULL`
+    // for a business with no Google Calendar connected, which never
+    // matches any row, so this day view would show every one of that
+    // business's own confirmed bookings as "open" (same NULL-scoping bug
+    // closed in check_calendar_availability; see that function's own
+    // comment in calendar-tools.server.ts). External Google events remain
+    // genuinely connection-specific, so that fetch alone stays gated.
+    const [bookingsRes, externalRes] = await Promise.all([
+      timedStep("fetch_bookings", correlationId, LOG, async () => {
+        const res = await supabaseAdmin
+          .from("bookings")
+          .select("id, start_at, end_at, customer_name")
+          .eq("business_id", data.businessId)
+          .not("status", "in", "(CANCELLED,NO_SHOW)")
+          .lt("start_at", dayEndUtc.toISOString())
+          .gt("end_at", dayStartUtc.toISOString());
+        if (res.error) throw res.error;
+        return res;
+      }),
+      connection
+        ? timedStep("fetch_external_calendar_events", correlationId, LOG, async () => {
+            const res = await supabaseAdmin
+              .from("external_calendar_events")
+              .select("start_at, end_at")
+              .eq("calendar_connection_id", connection.id)
+              .neq("status", "cancelled")
+              .lt("start_at", dayEndUtc.toISOString())
+              .gt("end_at", dayStartUtc.toISOString());
+            if (res.error) throw res.error;
+            return res;
+          })
+        : Promise.resolve({
+            data: [] as { start_at: string | null; end_at: string | null }[],
+            error: null,
+          }),
+    ]);
+    const confirmedBookings = bookingsRes.data ?? [];
+    const externalBusy = externalRes.data ?? [];
 
     const openRanges = await timedStep("resolve_effective_open_ranges", correlationId, LOG, () =>
       Promise.resolve(

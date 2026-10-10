@@ -19,6 +19,7 @@ import {
   describeBusinessHoursWriteError,
 } from "@/lib/calendar/business-hours-validation";
 import { PageHeader, SectionCard, LoadingState } from "@/components/app/primitives";
+import { AppointmentSlotsSection } from "@/components/app/appointment-slots";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -32,7 +33,11 @@ export const Route = createFileRoute("/app/business")({
   head: () => ({
     meta: [
       { title: "Business profile — ClickAI" },
-      { name: "description", content: "Business information, hours, services, FAQs and rules that ground your AI receptionist." },
+      {
+        name: "description",
+        content:
+          "Business information, hours, services, FAQs and rules that ground your AI receptionist.",
+      },
       { name: "robots", content: "noindex" },
     ],
   }),
@@ -50,7 +55,15 @@ function BusinessPage() {
   const { data: rules } = useQuery(rulesQuery(business?.id));
   const { data: hours } = useQuery(hoursQuery(business?.id));
 
-  const [profile, setProfile] = useState({ name: "", description: "", address: "", city: "", primary_phone: "", email: "", website: "" });
+  const [profile, setProfile] = useState({
+    name: "",
+    description: "",
+    address: "",
+    city: "",
+    primary_phone: "",
+    email: "",
+    website: "",
+  });
   const [saving, setSaving] = useState(false);
   const [savingDay, setSavingDay] = useState<number | null>(null);
 
@@ -85,11 +98,16 @@ function BusinessPage() {
     refresh();
   }
 
-  async function addRow(table: "services" | "faqs" | "business_rules", values: Record<string, unknown>) {
+  async function addRow(
+    table: "services" | "faqs" | "business_rules",
+    values: Record<string, unknown>,
+  ) {
     if (!business) return;
-    const { error } = await supabase
-      .from(table)
-      .insert({ organization_id: business.organization_id, business_id: business.id, ...values } as never);
+    const { error } = await supabase.from(table).insert({
+      organization_id: business.organization_id,
+      business_id: business.id,
+      ...values,
+    } as never);
     if (error) {
       toast.error("Could not add that entry.");
       return;
@@ -195,34 +213,59 @@ function BusinessPage() {
           >
             <div className="grid gap-4 sm:grid-cols-2">
               <Field label="Business name">
-                <Input value={profile.name} onChange={(e) => setProfile({ ...profile, name: e.target.value })} />
+                <Input
+                  value={profile.name}
+                  onChange={(e) => setProfile({ ...profile, name: e.target.value })}
+                />
               </Field>
               <Field label="Primary phone">
-                <Input value={profile.primary_phone} onChange={(e) => setProfile({ ...profile, primary_phone: e.target.value })} />
+                <Input
+                  value={profile.primary_phone}
+                  onChange={(e) => setProfile({ ...profile, primary_phone: e.target.value })}
+                />
               </Field>
               <div className="sm:col-span-2">
                 <Field label="Description">
-                  <Textarea rows={5} value={profile.description} onChange={(e) => setProfile({ ...profile, description: e.target.value })} />
+                  <Textarea
+                    rows={5}
+                    value={profile.description}
+                    onChange={(e) => setProfile({ ...profile, description: e.target.value })}
+                  />
                 </Field>
               </div>
               <Field label="Address">
-                <Input value={profile.address} onChange={(e) => setProfile({ ...profile, address: e.target.value })} />
+                <Input
+                  value={profile.address}
+                  onChange={(e) => setProfile({ ...profile, address: e.target.value })}
+                />
               </Field>
               <Field label="City">
-                <Input value={profile.city} onChange={(e) => setProfile({ ...profile, city: e.target.value })} />
+                <Input
+                  value={profile.city}
+                  onChange={(e) => setProfile({ ...profile, city: e.target.value })}
+                />
               </Field>
               <Field label="Email">
-                <Input value={profile.email} onChange={(e) => setProfile({ ...profile, email: e.target.value })} />
+                <Input
+                  value={profile.email}
+                  onChange={(e) => setProfile({ ...profile, email: e.target.value })}
+                />
               </Field>
               <Field label="Website">
-                <Input value={profile.website} onChange={(e) => setProfile({ ...profile, website: e.target.value })} />
+                <Input
+                  value={profile.website}
+                  onChange={(e) => setProfile({ ...profile, website: e.target.value })}
+                />
               </Field>
             </div>
           </SectionCard>
         </TabsContent>
 
-        <TabsContent value="hours" className="mt-4">
-          <SectionCard title="Opening hours" description="The receptionist answers hour questions strictly from this table.">
+        <TabsContent value="hours" className="mt-4 space-y-6">
+          <SectionCard
+            title="Opening hours"
+            description="The receptionist answers hour questions strictly from this table."
+          >
             <ul className="divide-y divide-border">
               {DAYS.map((day, i) => {
                 const row = hours?.find((h) => h.day_of_week === i);
@@ -239,6 +282,8 @@ function BusinessPage() {
               })}
             </ul>
           </SectionCard>
+
+          <AppointmentSlotsSection businessId={business.id} />
         </TabsContent>
 
         <TabsContent value="services" className="mt-4">
@@ -253,7 +298,9 @@ function BusinessPage() {
             rows={(services ?? []).map((s) => ({
               id: s.id,
               primary: s.name,
-              secondary: [s.price ? `₹${s.price}` : null, s.description].filter(Boolean).join(" · "),
+              secondary: [s.price ? `₹${s.price}` : null, s.description]
+                .filter(Boolean)
+                .join(" · "),
             }))}
             onAdd={async (v) => {
               await addRow("services", {
@@ -274,11 +321,18 @@ function BusinessPage() {
             description="Answered verbatim in the caller's language."
             fields={[
               { key: "question", label: "Question", placeholder: "Do you accept walk-ins?" },
-              { key: "answer", label: "Answer", placeholder: "We prefer appointments but keep two walk-in slots daily." },
+              {
+                key: "answer",
+                label: "Answer",
+                placeholder: "We prefer appointments but keep two walk-in slots daily.",
+              },
             ]}
             rows={(faqs ?? []).map((f) => ({ id: f.id, primary: f.question, secondary: f.answer }))}
             onAdd={async (v) => {
-              await addRow("faqs", { question: String(v["question"]), answer: String(v["answer"]) });
+              await addRow("faqs", {
+                question: String(v["question"]),
+                answer: String(v["answer"]),
+              });
             }}
             onRemove={async (id) => {
               await removeRow("faqs", id);
@@ -290,10 +344,23 @@ function BusinessPage() {
           <ListEditor
             title="Rules and boundaries"
             description="Hard constraints the receptionist must follow on every call."
-            fields={[{ key: "rule", label: "Rule", placeholder: "Never give medical advice over the phone." }]}
-            rows={(rules ?? []).map((r) => ({ id: r.id, primary: r.rule, secondary: `Priority ${r.priority}` }))}
+            fields={[
+              {
+                key: "rule",
+                label: "Rule",
+                placeholder: "Never give medical advice over the phone.",
+              },
+            ]}
+            rows={(rules ?? []).map((r) => ({
+              id: r.id,
+              primary: r.rule,
+              secondary: `Priority ${r.priority}`,
+            }))}
             onAdd={async (v) => {
-              await addRow("business_rules", { rule: String(v["rule"]), priority: (rules?.length ?? 0) + 1 });
+              await addRow("business_rules", {
+                rule: String(v["rule"]),
+                priority: (rules?.length ?? 0) + 1,
+              });
             }}
             onRemove={async (id) => {
               await removeRow("business_rules", id);
@@ -423,14 +490,22 @@ function ListEditor({
           <li key={row.id} className="flex items-start justify-between gap-3 py-2.5">
             <div className="min-w-0">
               <p className="text-sm font-medium">{row.primary}</p>
-              {row.secondary ? <p className="text-xs text-muted-foreground">{row.secondary}</p> : null}
+              {row.secondary ? (
+                <p className="text-xs text-muted-foreground">{row.secondary}</p>
+              ) : null}
             </div>
-            <button onClick={() => onRemove(row.id)} aria-label="Delete" className="text-muted-foreground hover:text-destructive">
+            <button
+              onClick={() => onRemove(row.id)}
+              aria-label="Delete"
+              className="text-muted-foreground hover:text-destructive"
+            >
               <Trash2 className="size-3.5" />
             </button>
           </li>
         ))}
-        {!rows.length ? <li className="py-4 text-sm text-muted-foreground">Nothing added yet.</li> : null}
+        {!rows.length ? (
+          <li className="py-4 text-sm text-muted-foreground">Nothing added yet.</li>
+        ) : null}
       </ul>
 
       <div className="mt-4 grid gap-3 border-t border-border pt-4 sm:grid-cols-2">
