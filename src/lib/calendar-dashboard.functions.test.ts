@@ -203,6 +203,44 @@ describe("day-view slot state reuses the one precedence resolver, never a second
       'the no-connection branch must resolve synchronously to an empty list, never call .from("calendar_sync_conflicts") at all',
     );
   });
+
+  test("fetch_google_calendar_connection treats PGRST205 (table not in schema cache) as 'no connection', never as a fatal failure — Google Calendar is an optional, historical integration whose own table may genuinely not be provisioned on a given deployment", () => {
+    const stepStart = code.indexOf('timedStep("fetch_google_calendar_connection"');
+    const stepEnd = code.indexOf("\n      }),", stepStart);
+    const stepBody = code.slice(stepStart, stepEnd);
+    assert.match(
+      stepBody,
+      /if \(res\.error\.code === "PGRST205"\)/,
+      "must check the specific PGRST205 code, not react to res.error being truthy in general",
+    );
+    const pgrst205Idx = stepBody.indexOf('res.error.code === "PGRST205"');
+    const pgrst205Block = stepBody.slice(pgrst205Idx, pgrst205Idx + 400);
+    assert.match(
+      pgrst205Block,
+      /return \{ data: null, error: null \};/,
+      "PGRST205 must fall back to the same shape a legitimate 'no connection row' .maybeSingle() result has",
+    );
+  });
+
+  test("fetch_google_calendar_connection still throws every OTHER error unchanged — the PGRST205 carve-out must not widen into 'any error here means disconnected'", () => {
+    const stepStart = code.indexOf('timedStep("fetch_google_calendar_connection"');
+    const stepEnd = code.indexOf("\n      }),", stepStart);
+    const stepBody = code.slice(stepStart, stepEnd);
+    const pgrst205Idx = stepBody.indexOf('res.error.code === "PGRST205"');
+    const afterCarveOut = stepBody.slice(pgrst205Idx);
+    assert.match(
+      afterCarveOut,
+      /\n\s*}\n\s*throw res\.error;/,
+      "a non-PGRST205 error must still reach `throw res.error;` after the PGRST205 branch returns early",
+    );
+  });
+
+  test("the PGRST205 carve-out logs a warning server-side (never silent) so a genuinely missing table stays diagnosable, distinct from a real 'no connection configured' business", () => {
+    const stepStart = code.indexOf('timedStep("fetch_google_calendar_connection"');
+    const stepEnd = code.indexOf("\n      }),", stepStart);
+    const stepBody = code.slice(stepStart, stepEnd);
+    assert.match(stepBody, /console\.warn\(`\$\{LOG\}:google_calendar_connections_unavailable`/);
+  });
 });
 
 /**

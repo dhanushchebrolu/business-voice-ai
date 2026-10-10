@@ -164,7 +164,32 @@ export const getCalendarDayView = createServerFn({ method: "GET" })
           .eq("business_id", data.businessId)
           .eq("provider", "google")
           .maybeSingle();
-        if (res.error) throw res.error;
+        if (res.error) {
+          // Google Calendar is an optional, historical integration (see
+          // this function's own header comment on business_hours/
+          // google_calendar_connections "predating" this feature — that
+          // assumption does not hold on every deployment: a production
+          // environment where Google Calendar was never actually
+          // provisioned/rolled out has no reason to have this table at
+          // all). Unlike calendar_sync_conflicts/external_calendar_events
+          // above, THIS fetch cannot be gated on `connection` existing —
+          // it's the query that determines whether one does. So instead:
+          // PGRST205 specifically ("table not in schema cache" — the same
+          // code server-fn-diagnostics.ts's missingTableFromPgrst205
+          // already special-cases) is treated exactly like a legitimate
+          // "no connection row" result, never like a generic failure. Any
+          // OTHER error (RLS/permission failure, malformed query, network
+          // error) still throws unchanged below — this never widens to
+          // "any error here means disconnected."
+          if (res.error.code === "PGRST205") {
+            console.warn(`${LOG}:google_calendar_connections_unavailable`, {
+              correlationId,
+              businessId: data.businessId,
+            });
+            return { data: null, error: null };
+          }
+          throw res.error;
+        }
         return res;
       }),
     ]);
