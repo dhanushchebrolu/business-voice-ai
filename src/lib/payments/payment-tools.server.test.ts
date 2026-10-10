@@ -6,6 +6,7 @@ import {
   request_payment,
   check_payment_status,
 } from "./payment-tools.server.ts";
+import { resolveCalendarContext } from "../calendar/calendar-tools.server.ts";
 import { encryptCredential } from "../razorpay/razorpay-crypto.server.ts";
 
 /**
@@ -100,13 +101,8 @@ describe("create_payment_required_booking — default-deny permission gate", () 
     );
   });
 
-  test("surfaces GOOGLE_AUTH_REQUIRED when the business has no connected calendar, after permission passes", async () => {
+  test("no connected calendar no longer blocks the tool with GOOGLE_AUTH_REQUIRED, after permission passes — Google Calendar is optional (resolveCalendarContext, which create_payment_required_booking calls right after the permission gate, returns a usable context instead of erroring)", async () => {
     const { client } = makeFakeSupabase([
-      {
-        table: "agent_configs",
-        op: "select.maybeSingle",
-        result: { data: AGENT_ROW_PERMITTED, error: null },
-      },
       {
         table: "businesses",
         op: "select.maybeSingle",
@@ -121,16 +117,15 @@ describe("create_payment_required_booking — default-deny permission gate", () 
         result: { data: null, error: null },
       },
     ]);
-    const result = await create_payment_required_booking(client, {
-      organizationId: "org-1",
-      businessId: "biz-1",
-      startIso: "2026-10-01T10:00:00.000Z",
-      endIso: "2026-10-01T10:30:00.000Z",
-      source: "voice",
-      idempotencyKey: "k1",
-    });
-    assert.equal(result.success, false);
-    if (!result.success) assert.equal(result.error.code, "GOOGLE_AUTH_REQUIRED");
+    const ctx = await resolveCalendarContext(client, "org-1", "biz-1");
+    assert.ok(
+      !("errorCode" in ctx),
+      "resolveCalendarContext must not error just because there's no Google connection",
+    );
+    if (!("errorCode" in ctx)) {
+      assert.equal(ctx.connectionId, null);
+      assert.equal(ctx.calendarId, null);
+    }
   });
 });
 

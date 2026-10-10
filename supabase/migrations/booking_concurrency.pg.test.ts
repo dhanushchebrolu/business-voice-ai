@@ -1634,7 +1634,11 @@ describe("create_booking_atomic — real PostgreSQL: business_id-scoped overlap 
            AND start_at = '2027-02-03T14:00:00+05:30'::timestamptz
            AND status NOT IN ('CANCELLED', 'NO_SHOW', 'PAYMENT_EXPIRED', 'PAYMENT_FAILED');`,
       );
-      assert.equal(activeCount, "1", "exactly one active booking must exist for the contested slot");
+      assert.equal(
+        activeCount,
+        "1",
+        "exactly one active booking must exist for the contested slot",
+      );
     },
   );
 
@@ -1730,13 +1734,16 @@ describe("create_booking_payment_hold — real PostgreSQL: business_id-scoped ov
 });
 
 describe("businesses.default_appointment_duration_minutes — real PostgreSQL", () => {
-  pgTest("defaults to 30 for a newly created business, with no backfill needed for existing rows", () => {
-    const { businessId } = seedOpenBusiness();
-    const duration = scalar(
-      `SELECT default_appointment_duration_minutes FROM businesses WHERE id = '${businessId}';`,
-    );
-    assert.equal(duration, "30");
-  });
+  pgTest(
+    "defaults to 30 for a newly created business, with no backfill needed for existing rows",
+    () => {
+      const { businessId } = seedOpenBusiness();
+      const duration = scalar(
+        `SELECT default_appointment_duration_minutes FROM businesses WHERE id = '${businessId}';`,
+      );
+      assert.equal(duration, "30");
+    },
+  );
 
   pgTest("is updatable, and rejects a non-positive value via its CHECK constraint", () => {
     const { businessId } = seedOpenBusiness();
