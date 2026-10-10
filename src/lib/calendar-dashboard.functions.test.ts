@@ -241,6 +241,57 @@ describe("day-view slot state reuses the one precedence resolver, never a second
     const stepBody = code.slice(stepStart, stepEnd);
     assert.match(stepBody, /console\.warn\(`\$\{LOG\}:google_calendar_connections_unavailable`/);
   });
+
+  test("fetch_business_hour_overrides treats PGRST205 differently from fetch_google_calendar_connection — it must NOT silently pretend the date has no override; it must flip overridesUnavailable and log at error level, since overrides are native functionality, not an optional Google Calendar convenience", () => {
+    const stepStart = code.indexOf('timedStep("fetch_business_hour_overrides"');
+    const stepEnd = code.indexOf("\n      }),", stepStart);
+    const stepBody = code.slice(stepStart, stepEnd);
+    assert.match(
+      stepBody,
+      /if \(res\.error\.code === "PGRST205"\)/,
+      "must check the specific PGRST205 code, not react to res.error being truthy in general",
+    );
+    assert.match(
+      stepBody,
+      /console\.error\(`\$\{LOG\}:business_hour_overrides_table_missing`/,
+      "must log at error level (more severe than the google_calendar_connections warning) since this breaks native functionality",
+    );
+    assert.match(
+      stepBody,
+      /overridesUnavailable = true;/,
+      "must set the visible overridesUnavailable flag — the whole point is that the UI shows an honest warning, not a silent empty state",
+    );
+    const pgrst205Idx = stepBody.indexOf('res.error.code === "PGRST205"');
+    const pgrst205Block = stepBody.slice(pgrst205Idx, pgrst205Idx + 500);
+    assert.match(pgrst205Block, /return \{ data: null, error: null \};/);
+  });
+
+  test("fetch_business_hour_overrides still throws every OTHER error unchanged", () => {
+    const stepStart = code.indexOf('timedStep("fetch_business_hour_overrides"');
+    const stepEnd = code.indexOf("\n      }),", stepStart);
+    const stepBody = code.slice(stepStart, stepEnd);
+    const pgrst205Idx = stepBody.indexOf('res.error.code === "PGRST205"');
+    const afterCarveOut = stepBody.slice(pgrst205Idx);
+    assert.match(
+      afterCarveOut,
+      /\n\s*}\n\s*throw res\.error;/,
+      "a non-PGRST205 error must still reach `throw res.error;` after the PGRST205 branch returns early",
+    );
+  });
+
+  test("overridesUnavailable is declared before the first Promise.all (readable regardless of which branch runs) and returned from getCalendarDayView", () => {
+    const handlerStart = code.indexOf("export const getCalendarDayView");
+    const firstPromiseAllIdx = code.indexOf("Promise.all([", handlerStart);
+    const declIdx = code.indexOf("let overridesUnavailable = false;", handlerStart);
+    assert.ok(
+      declIdx > -1 && declIdx < firstPromiseAllIdx,
+      "overridesUnavailable must be declared before the first Promise.all, not inside it",
+    );
+    const returnIdx = code.indexOf("return {\n      role,", handlerStart);
+    assert.ok(returnIdx > -1, "expected to find getCalendarDayView's final return object");
+    const returnEnd = code.indexOf("\n    };", returnIdx);
+    assert.match(code.slice(returnIdx, returnEnd), /overridesUnavailable,/);
+  });
 });
 
 /**

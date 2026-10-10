@@ -138,6 +138,13 @@ export const getCalendarDayView = createServerFn({ method: "GET" })
     // ("Could not load this — step 'fetch_calendar_sync_conflicts' failed
     // ... table ... not in schema cache"), for data that can only ever be
     // empty for that business regardless.
+    // Set only when fetch_business_hour_overrides hits PGRST205 below —
+    // threaded into the response so the UI can show an honest, visible
+    // warning instead of silently rendering as if this date simply has no
+    // override. Declared here (not inside the Promise.all callback) so it
+    // can be read once every step below has resolved.
+    let overridesUnavailable = false;
+
     const [hoursRes, overrideRes, connectionRes] = await Promise.all([
       timedStep("fetch_business_hours", correlationId, LOG, async () => {
         const res = await supabaseAdmin
@@ -154,7 +161,31 @@ export const getCalendarDayView = createServerFn({ method: "GET" })
           .eq("business_id", data.businessId)
           .eq("override_date", data.dateIso)
           .maybeSingle();
-        if (res.error) throw res.error;
+        if (res.error) {
+          // Unlike google_calendar_connections, business_hour_overrides is
+          // NOT an optional Google-Calendar-only convenience — date-
+          // specific closures and exceptional availability are core,
+          // native functionality this feature exists to provide. A
+          // PGRST205 here must never be silently treated as "this date has
+          // no override" (that would hide real data a business owner may
+          // have configured, and would let staff create a NEW override
+          // that then silently fails to persist). So the page still LOADS
+          // — native weekly-hours-based slots and real bookings are
+          // computed below from entirely separate queries and are
+          // unaffected — but overridesUnavailable is set so the UI can
+          // show a loud, honest warning rather than quietly pretending
+          // overrides work. Any OTHER error still throws unchanged, exactly
+          // as before.
+          if (res.error.code === "PGRST205") {
+            console.error(`${LOG}:business_hour_overrides_table_missing`, {
+              correlationId,
+              businessId: data.businessId,
+            });
+            overridesUnavailable = true;
+            return { data: null, error: null };
+          }
+          throw res.error;
+        }
         return res;
       }),
       timedStep("fetch_google_calendar_connection", correlationId, LOG, async () => {
@@ -361,6 +392,7 @@ export const getCalendarDayView = createServerFn({ method: "GET" })
       role,
       business: { id: business.id, name: business.name, timezone: business.timezone },
       scheduleConfigWarning,
+      overridesUnavailable,
       weeklyHours,
       override: overrideRes.data
         ? {

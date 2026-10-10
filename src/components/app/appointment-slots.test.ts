@@ -78,3 +78,28 @@ describe("AppointmentSlotsSection — slot grid and overrides reuse the one prec
     assert.match(src, /view\.slots\.length === 0/);
   });
 });
+
+describe("AppointmentSlotsSection — overridesUnavailable renders a visible, honest warning, never a silent empty state", () => {
+  test("renders a banner when view.overridesUnavailable is true", () => {
+    assert.match(src, /view\.overridesUnavailable \? \(/);
+  });
+
+  test("the warning banner is placed near scheduleConfigWarning's own banner, using the same destructive styling convention", () => {
+    const scheduleWarningIdx = src.indexOf("view.scheduleConfigWarning ?");
+    const overridesWarningIdx = src.indexOf("view.overridesUnavailable ?");
+    assert.ok(scheduleWarningIdx > -1 && overridesWarningIdx > -1);
+    assert.ok(
+      overridesWarningIdx > scheduleWarningIdx,
+      "overridesUnavailable banner should render after scheduleConfigWarning's, matching this section's existing top-to-bottom warning order",
+    );
+    const block = src.slice(overridesWarningIdx, overridesWarningIdx + 500);
+    assert.match(block, /border-destructive\/30 bg-destructive\/8 .*text-destructive/s);
+  });
+
+  test("the banner tells the owner overrides cannot be loaded or saved, never claims the date simply has no override", () => {
+    const overridesWarningIdx = src.indexOf("view.overridesUnavailable ?");
+    const block = src.slice(overridesWarningIdx, overridesWarningIdx + 600);
+    assert.match(block, /could not be loaded/i);
+    assert.match(block, /cannot be saved/i);
+  });
+});

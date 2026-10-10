@@ -270,6 +270,16 @@ export function AppointmentSlotsSection({ businessId }: { businessId: string }) 
             </div>
           ) : null}
 
+          {view.overridesUnavailable ? (
+            <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/8 px-3 py-2 text-xs text-destructive">
+              <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+              Date-specific closures and exceptional availability could not be loaded for this date
+              — this deployment's database setup is incomplete. The slots below reflect only the
+              weekly schedule; any override already saved for this date is not shown, and new ones
+              cannot be saved until this is fixed. Contact your administrator.
+            </div>
+          ) : null}
+
           {view.pendingSync ? (
             <div className="flex items-center gap-2 rounded-md border border-warning/30 bg-warning/8 px-3 py-2 text-xs text-warning">
               <RefreshCw className="size-3.5" />
