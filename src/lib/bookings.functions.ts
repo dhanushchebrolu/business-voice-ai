@@ -198,16 +198,21 @@ export const cancelBookingManual = createServerFn({ method: "POST" })
     const { cancelBooking } = await import("@/lib/calendar/booking-service.server");
 
     if (!calendarId || !booking.calendar_connection_id) {
-      // No connected calendar (or it's since been removed) — cancel the
-      // ClickAI booking record without touching a Google event, since
-      // there's nothing left to delete provider-side.
-      const { supabaseAdmin: admin } = await import("@/integrations/supabase/client.server");
-      const { data: cancelled, error: cancelError } = await admin
-        .from("bookings")
-        .update({ status: "CANCELLED", notes: data.reason ? `Cancelled: ${data.reason}` : null })
-        .eq("id", data.bookingId)
-        .select("id, status, start_at, end_at, timezone, google_event_id, contact_id")
-        .single();
+      // No connected calendar (or it's since been removed) — nothing to
+      // delete provider-side, but still goes through cancel_booking_atomic
+      // (not a direct UPDATE) so this path gets the same row lock and
+      // idempotent/notes-preserving behavior as cancelBooking() below —
+      // a concurrent reschedule_booking_atomic on this exact booking must
+      // be serialized against this cancellation regardless of whether a
+      // calendar happens to be connected.
+      const { data: cancelled, error: cancelError } = await supabaseAdmin.rpc(
+        "cancel_booking_atomic",
+        {
+          p_organization_id: organizationId,
+          p_booking_id: data.bookingId,
+          p_reason: data.reason ?? null,
+        },
+      );
       if (cancelError) throw cancelError;
       return cancelled;
     }

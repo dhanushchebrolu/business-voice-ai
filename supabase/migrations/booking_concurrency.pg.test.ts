@@ -26,15 +26,13 @@ import {
  * concurrent psql child processes at it — not sequential calls, and not
  * a mock.
  *
- * Scope note on what this file does NOT cover: rescheduleBooking() in
- * src/lib/calendar/booking-service.server.ts does not call
- * create_booking_atomic — per that function's own doc comment (lines
- * 62-71), it does a direct JS-level check-then-update with no DB-level
- * lock, and reschedule-vs-closure / reschedule-vs-reschedule races are an
- * explicitly documented, out-of-scope residual gap. There is no DB-level
- * serialization primitive to exercise for that path, so this file does
- * not fabricate one; see the audit report for this as a confirmed,
- * untested gap rather than a tested invariant.
+ * Also covers (added when the idempotency race below was fixed):
+ * reschedule_booking_atomic and cancel_booking_atomic
+ * (20261010130000_atomic_reschedule_and_cancel.sql), which replaced
+ * rescheduleBooking()'s and cancelBooking()'s prior JS-level check-then-
+ * update with the same lock-protected, single-transaction pattern — see
+ * that migration's own header comment for the exact races this closes
+ * (reschedule-vs-reschedule, reschedule-vs-closure, reschedule-vs-cancel).
  */
 
 const migrationsDir = dirname(fileURLToPath(import.meta.url));
@@ -44,6 +42,14 @@ const ATOMIC_BOOKING_SQL = readFileSync(
 );
 const SCHEDULE_LOCKING_SQL = readFileSync(
   join(migrationsDir, "20261009120000_atomic_schedule_validation_and_locking.sql"),
+  "utf8",
+);
+const IDEMPOTENCY_RACE_FIX_SQL = readFileSync(
+  join(migrationsDir, "20261010120000_fix_idempotent_booking_retry_race.sql"),
+  "utf8",
+);
+const RESCHEDULE_AND_CANCEL_SQL = readFileSync(
+  join(migrationsDir, "20261010130000_atomic_reschedule_and_cancel.sql"),
   "utf8",
 );
 
@@ -230,6 +236,16 @@ before(() => {
     setupFailure = `failed to load 20261009120000_atomic_schedule_validation_and_locking.sql as committed: ${lockingResult.stderr}`;
     return;
   }
+  const idemFixResult = execSql(IDEMPOTENCY_RACE_FIX_SQL);
+  if (idemFixResult.status !== 0) {
+    setupFailure = `failed to load 20261010120000_fix_idempotent_booking_retry_race.sql as committed: ${idemFixResult.stderr}`;
+    return;
+  }
+  const rescheduleCancelResult = execSql(RESCHEDULE_AND_CANCEL_SQL);
+  if (rescheduleCancelResult.status !== 0) {
+    setupFailure = `failed to load 20261010130000_atomic_reschedule_and_cancel.sql as committed: ${rescheduleCancelResult.stderr}`;
+    return;
+  }
 });
 
 after(() => {
@@ -344,51 +360,156 @@ describe("create_booking_atomic — real PostgreSQL concurrency: overlapping dou
   );
 
   pgTest(
-    "two genuinely concurrent requests for the SAME exact slot (idempotency key) both resolve to the one booking",
-    async (t) => {
+    "two genuinely concurrent requests for the SAME exact slot (idempotency key) resolve to the SAME booking id (fixed by 20261010120000)",
+    async () => {
       const { businessId, connectionId, organizationId } = seedOpenBusiness();
       const key = `retry-${Math.random().toString(36).slice(2)}`;
-      const sql = createBookingSql({
-        organizationId,
-        businessId,
-        connectionId,
-        startIso: "2026-11-03T09:00:00+05:30",
-        endIso: "2026-11-03T09:30:00+05:30",
-        idempotencyKey: key,
-      });
+      // Selects just the returned row's `id` field (via Postgres composite
+      // field access) so the two concurrent callers' results can be
+      // compared directly, rather than the full row.
+      const idSql = `\\pset tuples_only on
+SELECT (public.create_booking_atomic(
+  '${organizationId}', '${businessId}', '${connectionId}', NULL, NULL, NULL,
+  '2026-11-03T09:00:00+05:30'::timestamptz, '2026-11-03T09:30:00+05:30'::timestamptz, 'Asia/Kolkata',
+  'Test Customer', '+910000000000', 'test@example.com', 'voice',
+  '${key}', 'CONFIRMED', NULL, NULL, NULL
+)).id;`;
 
-      const [resultA, resultB] = await Promise.all([execSqlAsync(sql), execSqlAsync(sql)]);
-      const succeeded = [resultA, resultB].filter((r) => r.status === 0);
+      const [resultA, resultB] = await Promise.all([execSqlAsync(idSql), execSqlAsync(idSql)]);
+      assert.equal(resultA.status, 0, `request A must succeed: ${resultA.stderr}`);
+      assert.equal(resultB.status, 0, `request B must succeed: ${resultB.stderr}`);
 
-      if (succeeded.length !== 2) {
-        // REAL BUG, found by this test, in already-shipped SQL — not
-        // something this remediation pass is authorized to fix (that
-        // would mean editing create_booking_atomic itself via a new
-        // migration, outside this pass's scope). create_booking_atomic's
-        // idempotency lookup (20261009090000_atomic_booking_creation.sql)
-        // runs BEFORE any advisory lock, so two truly concurrent retries
-        // with the same idempotency key can both miss it and both reach
-        // the per-connection lock + overlap check; the loser then sees
-        // the winner's own just-committed, self-overlapping row and gets
-        // SLOT_NO_LONGER_AVAILABLE instead of the idempotent return this
-        // check exists to guarantee. t.todo (not assert.fail/t.skip) so
-        // this is always visibly reported, never silently green, but
-        // doesn't block CI on a pre-existing issue outside this pass's
-        // authorized scope; a future migration that fixes the ordering
-        // (e.g. re-checking the idempotency key again once inside the
-        // connection lock, before the overlap check) will make this
-        // assertion pass and the todo become moot.
-        t.todo(
-          `KNOWN BUG in create_booking_atomic (found by this test, not fixed here — needs its own migration + sign-off): two concurrent retries with the same idempotency key do not both resolve to the one booking. A: status=${resultA.status} stderr=${resultA.stderr} | B: status=${resultB.status} stderr=${resultB.stderr}`,
-        );
-        return;
-      }
+      const idA = resultA.stdout.trim();
+      const idB = resultB.stdout.trim();
+      assert.ok(idA.length > 0, "request A must return a real booking id");
+      assert.equal(
+        idA,
+        idB,
+        `both concurrent retries with the same idempotency key must resolve to the SAME booking id — got A=${idA} B=${idB}`,
+      );
 
       const count = scalar(`SELECT count(*) FROM bookings WHERE idempotency_key = '${key}';`);
       assert.equal(
         count,
         "1",
         "a retried request with the same idempotency key must never create a second row",
+      );
+    },
+  );
+
+  pgTest(
+    "repeating the request AFTER it has already completed still returns the original booking (post-completion idempotent retry)",
+    async () => {
+      const { businessId, connectionId, organizationId } = seedOpenBusiness();
+      const key = `post-complete-${Math.random().toString(36).slice(2)}`;
+      const sql = createBookingSql({
+        organizationId,
+        businessId,
+        connectionId,
+        startIso: "2026-11-05T09:00:00+05:30",
+        endIso: "2026-11-05T09:30:00+05:30",
+        idempotencyKey: key,
+      });
+
+      assertSucceeds(sql, "first application must succeed");
+      const firstId = scalar(`SELECT id::text FROM bookings WHERE idempotency_key = '${key}';`);
+
+      // Sequential, after the first has fully committed — the established
+      // API contract (booking-service.server.ts's own pre-check comment)
+      // is that a retry after completion returns the existing booking,
+      // never a fresh row or an error.
+      assertSucceeds(sql, "a retry after completion must also succeed");
+      const secondId = scalar(`SELECT id::text FROM bookings WHERE idempotency_key = '${key}';`);
+      assert.equal(
+        secondId,
+        firstId,
+        "a post-completion retry must resolve to the original booking id",
+      );
+
+      const count = scalar(`SELECT count(*) FROM bookings WHERE idempotency_key = '${key}';`);
+      assert.equal(count, "1", "a post-completion retry must never create a second row");
+    },
+  );
+
+  pgTest(
+    "DIFFERENT idempotency keys competing for the same slot still enforce the overlap check (idempotency never bypasses conflict validation)",
+    async () => {
+      const { businessId, connectionId, organizationId } = seedOpenBusiness();
+      const sqlA = createBookingSql({
+        organizationId,
+        businessId,
+        connectionId,
+        startIso: "2026-11-06T09:00:00+05:30",
+        endIso: "2026-11-06T09:30:00+05:30",
+        idempotencyKey: `key-a-${Math.random().toString(36).slice(2)}`,
+      });
+      const sqlB = createBookingSql({
+        organizationId,
+        businessId,
+        connectionId,
+        startIso: "2026-11-06T09:00:00+05:30",
+        endIso: "2026-11-06T09:30:00+05:30",
+        idempotencyKey: `key-b-${Math.random().toString(36).slice(2)}`,
+      });
+
+      const [resultA, resultB] = await Promise.all([execSqlAsync(sqlA), execSqlAsync(sqlB)]);
+      const succeeded = [resultA, resultB].filter((r) => r.status === 0);
+      const failed = [resultA, resultB].filter((r) => r.status !== 0);
+      assert.equal(
+        succeeded.length,
+        1,
+        `exactly one of two different-key requests for the identical slot must succeed, got ${succeeded.length}`,
+      );
+      assert.ok(
+        failed[0]!.stderr.includes("SLOT_NO_LONGER_AVAILABLE"),
+        `the losing request must still fail with SLOT_NO_LONGER_AVAILABLE, got: ${failed[0]!.stderr}`,
+      );
+    },
+  );
+
+  pgTest(
+    "idempotency keys are scoped per-organization — the SAME key in a DIFFERENT organization is a distinct booking, never collapsed together",
+    async () => {
+      const {
+        businessId: businessA,
+        connectionId: connectionA,
+        organizationId: orgA,
+      } = seedOpenBusiness();
+      const {
+        businessId: businessB,
+        connectionId: connectionB,
+        organizationId: orgB,
+      } = seedOpenBusiness();
+      const sharedKey = `shared-${Math.random().toString(36).slice(2)}`;
+
+      assertSucceeds(
+        createBookingSql({
+          organizationId: orgA,
+          businessId: businessA,
+          connectionId: connectionA,
+          startIso: "2026-11-07T09:00:00+05:30",
+          endIso: "2026-11-07T09:30:00+05:30",
+          idempotencyKey: sharedKey,
+        }),
+        "org A's booking with this key must succeed",
+      );
+      assertSucceeds(
+        createBookingSql({
+          organizationId: orgB,
+          businessId: businessB,
+          connectionId: connectionB,
+          startIso: "2026-11-07T09:00:00+05:30",
+          endIso: "2026-11-07T09:30:00+05:30",
+          idempotencyKey: sharedKey,
+        }),
+        "org B's booking with the SAME key must independently succeed, not be treated as org A's retry",
+      );
+
+      const count = scalar(`SELECT count(*) FROM bookings WHERE idempotency_key = '${sharedKey}';`);
+      assert.equal(
+        count,
+        "2",
+        "the same idempotency key in two different organizations must produce two distinct rows",
       );
     },
   );
@@ -582,4 +703,335 @@ describe("validate_booking_schedule / business_effective_open_ranges — real Po
       );
     },
   );
+});
+
+/** Creates a booking via the real RPC (sequentially, not part of the race under test) and returns its id. */
+function seedBooking(args: {
+  organizationId: string;
+  businessId: string;
+  connectionId: string;
+  startIso: string;
+  endIso: string;
+}): string {
+  return scalar(
+    `\\pset tuples_only on
+SELECT (public.create_booking_atomic(
+  '${args.organizationId}', '${args.businessId}', '${args.connectionId}', NULL, NULL, NULL,
+  '${args.startIso}'::timestamptz, '${args.endIso}'::timestamptz, 'Asia/Kolkata',
+  'Test Customer', '+910000000000', 'test@example.com', 'voice',
+  NULL, 'CONFIRMED', NULL, NULL, NULL
+)).id;`,
+  );
+}
+
+function rescheduleSql(args: {
+  organizationId: string;
+  bookingId: string;
+  newStartIso: string;
+  newEndIso: string;
+}): string {
+  return `SELECT public.reschedule_booking_atomic(
+    '${args.organizationId}', '${args.bookingId}',
+    '${args.newStartIso}'::timestamptz, '${args.newEndIso}'::timestamptz
+  );`;
+}
+
+function cancelSql(args: { organizationId: string; bookingId: string; reason?: string }): string {
+  const reason = args.reason ? `'${args.reason}'` : "NULL";
+  return `SELECT public.cancel_booking_atomic('${args.organizationId}', '${args.bookingId}', ${reason});`;
+}
+
+describe("reschedule_booking_atomic — real PostgreSQL concurrency: double-booking and closure races", () => {
+  pgTest(
+    "two concurrent reschedules of DIFFERENT bookings into the SAME destination slot: exactly one succeeds",
+    async () => {
+      const { businessId, connectionId, organizationId } = seedOpenBusiness();
+      const bookingA = seedBooking({
+        organizationId,
+        businessId,
+        connectionId,
+        startIso: "2026-11-20T09:00:00+05:30",
+        endIso: "2026-11-20T09:30:00+05:30",
+      });
+      const bookingB = seedBooking({
+        organizationId,
+        businessId,
+        connectionId,
+        startIso: "2026-11-20T14:00:00+05:30",
+        endIso: "2026-11-20T14:30:00+05:30",
+      });
+
+      const destination = {
+        organizationId,
+        newStartIso: "2026-11-20T16:00:00+05:30",
+        newEndIso: "2026-11-20T16:30:00+05:30",
+      };
+      const [resultA, resultB] = await Promise.all([
+        execSqlAsync(rescheduleSql({ ...destination, bookingId: bookingA })),
+        execSqlAsync(rescheduleSql({ ...destination, bookingId: bookingB })),
+      ]);
+
+      const succeeded = [resultA, resultB].filter((r) => r.status === 0);
+      const failed = [resultA, resultB].filter((r) => r.status !== 0);
+      assert.equal(
+        succeeded.length,
+        1,
+        `expected exactly one concurrent reschedule into the same destination to succeed, got ${succeeded.length}.\nA: status=${resultA.status} stderr=${resultA.stderr}\nB: status=${resultB.status} stderr=${resultB.stderr}`,
+      );
+      assert.ok(
+        failed[0]!.stderr.includes("SLOT_NO_LONGER_AVAILABLE"),
+        `the losing reschedule must fail with SLOT_NO_LONGER_AVAILABLE, got: ${failed[0]!.stderr}`,
+      );
+
+      const count = scalar(
+        `SELECT count(*) FROM bookings WHERE calendar_connection_id = '${connectionId}' AND start_at = '2026-11-20T16:00:00+05:30'::timestamptz AND status NOT IN ('CANCELLED','NO_SHOW');`,
+      );
+      assert.equal(count, "1", "exactly one booking must actually occupy the destination slot");
+    },
+  );
+
+  pgTest(
+    "a reschedule and a full-day-closure override fired concurrently for the destination date never BOTH succeed",
+    async () => {
+      let sawRescheduleWin = false;
+      let sawClosureWin = false;
+
+      for (let i = 0; i < 6; i++) {
+        const { businessId, connectionId, organizationId } = seedOpenBusiness();
+        const booking = seedBooking({
+          organizationId,
+          businessId,
+          connectionId,
+          startIso: "2026-11-21T09:00:00+05:30",
+          endIso: "2026-11-21T09:30:00+05:30",
+        });
+        const dateIso = `2026-12-${String(15 + i).padStart(2, "0")}`;
+        const rescheduleCall = rescheduleSql({
+          organizationId,
+          bookingId: booking,
+          newStartIso: `${dateIso}T11:00:00+05:30`,
+          newEndIso: `${dateIso}T11:30:00+05:30`,
+        });
+        const closeSql = `SELECT public.apply_business_schedule_override(
+          '${organizationId}', '${businessId}', '${dateIso}'::date, true, '[]'::jsonb, 'test closure'
+        );`;
+
+        const [rescheduleResult, closeResult] = await Promise.all([
+          execSqlAsync(rescheduleCall),
+          execSqlAsync(closeSql),
+        ]);
+        const rescheduleOk = rescheduleResult.status === 0;
+        const closeOk = closeResult.status === 0;
+
+        assert.ok(
+          !(rescheduleOk && closeOk),
+          `iteration ${i}: both the reschedule AND the full-day closure succeeded — a rescheduled booking must never end up inside a closed period.\nreschedule: status=${rescheduleResult.status} stderr=${rescheduleResult.stderr}\nclosure: status=${closeResult.status} stderr=${closeResult.stderr}`,
+        );
+        assert.ok(
+          rescheduleOk || closeOk,
+          `iteration ${i}: both failed — exactly one of them should have won the race.\nreschedule: status=${rescheduleResult.status} stderr=${rescheduleResult.stderr}\nclosure: status=${closeResult.status} stderr=${closeResult.stderr}`,
+        );
+
+        if (rescheduleOk) {
+          sawRescheduleWin = true;
+          // The closure call targets a date with no booking YET from this
+          // business's other bookings, so it only fails here specifically
+          // because the booking being rescheduled landed there first.
+          assert.ok(
+            closeResult.stderr.includes("CANNOT_CLOSE_SLOT_WITH_ACTIVE_BOOKING"),
+            `when the reschedule wins, the closure must be rejected for the active-booking reason, got: ${closeResult.stderr}`,
+          );
+        } else {
+          sawClosureWin = true;
+          assert.ok(
+            rescheduleResult.stderr.includes("SLOT_OUTSIDE_SCHEDULE"),
+            `when the closure wins, the reschedule must be rejected as outside the now-closed schedule, got: ${rescheduleResult.stderr}`,
+          );
+        }
+      }
+
+      if (!sawRescheduleWin || !sawClosureWin) {
+        console.error(
+          `note: across 6 iterations, only the "${sawRescheduleWin ? "reschedule" : "closure"}" side ever won — the mutual-exclusion invariant held every time, but genuine interleaving in both directions was not directly observed in this run.`,
+        );
+      }
+    },
+  );
+
+  pgTest(
+    "a reschedule racing a cancellation of the SAME booking always ends CANCELLED, regardless of which wins",
+    async () => {
+      for (let i = 0; i < 4; i++) {
+        const { businessId, connectionId, organizationId } = seedOpenBusiness();
+        const booking = seedBooking({
+          organizationId,
+          businessId,
+          connectionId,
+          startIso: `2026-11-2${i}T09:00:00+05:30`,
+          endIso: `2026-11-2${i}T09:30:00+05:30`,
+        });
+
+        const [rescheduleResult, cancelResult] = await Promise.all([
+          execSqlAsync(
+            rescheduleSql({
+              organizationId,
+              bookingId: booking,
+              newStartIso: `2026-11-2${i}T15:00:00+05:30`,
+              newEndIso: `2026-11-2${i}T15:30:00+05:30`,
+            }),
+          ),
+          execSqlAsync(cancelSql({ organizationId, bookingId: booking, reason: "race test" })),
+        ]);
+
+        // cancel_booking_atomic never fails for an existing, owned booking
+        // (cancelling an already-cancelled one is a no-op success) — only
+        // reschedule can fail here, if cancel's row lock wins first.
+        assert.equal(
+          cancelResult.status,
+          0,
+          `iteration ${i}: cancel must always succeed: ${cancelResult.stderr}`,
+        );
+
+        const finalStatus = scalar(`SELECT status FROM bookings WHERE id = '${booking}';`);
+        assert.equal(
+          finalStatus,
+          "CANCELLED",
+          `iteration ${i}: the final state must be CANCELLED regardless of which operation's row lock won — got ${finalStatus}. reschedule status=${rescheduleResult.status} stderr=${rescheduleResult.stderr}`,
+        );
+      }
+    },
+  );
+
+  pgTest(
+    "a failed reschedule (destination outside business hours) leaves the original booking's slot and status completely unchanged",
+    () => {
+      const organizationId = randomUUID();
+      const businessId = scalar(
+        `INSERT INTO businesses (organization_id) VALUES ('${organizationId}') RETURNING id;`,
+      );
+      assertSucceeds(
+        `INSERT INTO business_hours (business_id, day_of_week, is_closed, intervals)
+         VALUES ('${businessId}', EXTRACT(DOW FROM '2026-11-30'::date)::smallint, false, '[{"start":"09:00","end":"17:00"}]'::jsonb);`,
+        "seed limited hours",
+      );
+      const connectionId = scalar(
+        `INSERT INTO google_calendar_connections (business_id) VALUES ('${businessId}') RETURNING id;`,
+      );
+      const booking = seedBooking({
+        organizationId,
+        businessId,
+        connectionId,
+        startIso: "2026-11-30T10:00:00+05:30",
+        endIso: "2026-11-30T10:30:00+05:30",
+      });
+
+      assertRejected(
+        rescheduleSql({
+          organizationId,
+          bookingId: booking,
+          newStartIso: "2026-11-30T20:00:00+05:30", // outside the 09:00-17:00 window
+          newEndIso: "2026-11-30T20:30:00+05:30",
+        }),
+        "SLOT_OUTSIDE_SCHEDULE",
+        "rescheduling to a time outside business hours must be rejected",
+      );
+
+      // Compare the actual instants/status rather than a serialized
+      // timestamp string — Postgres renders TIMESTAMPTZ in the session's
+      // own timezone (UTC here), not the zone the literal was written in,
+      // even though it's the identical instant either way.
+      const row = scalar(
+        `\\pset tuples_only on
+SELECT (start_at = '2026-11-30T10:00:00+05:30'::timestamptz)::text || '|'
+     || (end_at = '2026-11-30T10:30:00+05:30'::timestamptz)::text || '|' || status
+   FROM bookings WHERE id = '${booking}';`,
+      );
+      assert.equal(
+        row,
+        "true|true|CONFIRMED",
+        `a failed reschedule must leave the original slot and status completely unchanged, got: ${row}`,
+      );
+    },
+  );
+
+  pgTest(
+    "rescheduling or cancelling a booking belonging to a DIFFERENT organization is rejected (authorization boundary)",
+    () => {
+      const { businessId, connectionId, organizationId } = seedOpenBusiness();
+      const booking = seedBooking({
+        organizationId,
+        businessId,
+        connectionId,
+        startIso: "2026-12-01T09:00:00+05:30",
+        endIso: "2026-12-01T09:30:00+05:30",
+      });
+      const otherOrgId = randomUUID();
+
+      assertRejected(
+        rescheduleSql({
+          organizationId: otherOrgId,
+          bookingId: booking,
+          newStartIso: "2026-12-01T10:00:00+05:30",
+          newEndIso: "2026-12-01T10:30:00+05:30",
+        }),
+        "BOOKING_NOT_FOUND",
+        "rescheduling across an organization boundary must be rejected as not found, never leak existence",
+      );
+      assertRejected(
+        cancelSql({ organizationId: otherOrgId, bookingId: booking }),
+        "BOOKING_NOT_FOUND",
+        "cancelling across an organization boundary must be rejected as not found",
+      );
+
+      const status = scalar(`SELECT status FROM bookings WHERE id = '${booking}';`);
+      assert.equal(
+        status,
+        "CONFIRMED",
+        "the booking must be completely unaffected by the rejected cross-org attempts",
+      );
+    },
+  );
+
+  pgTest("cancelling an already-cancelled booking is idempotent, not an error", () => {
+    const { businessId, connectionId, organizationId } = seedOpenBusiness();
+    const booking = seedBooking({
+      organizationId,
+      businessId,
+      connectionId,
+      startIso: "2026-12-02T09:00:00+05:30",
+      endIso: "2026-12-02T09:30:00+05:30",
+    });
+
+    assertSucceeds(cancelSql({ organizationId, bookingId: booking }), "first cancel must succeed");
+    assertSucceeds(
+      cancelSql({ organizationId, bookingId: booking }),
+      "cancelling an already-cancelled booking must succeed idempotently, not error",
+    );
+    const status = scalar(`SELECT status FROM bookings WHERE id = '${booking}';`);
+    assert.equal(status, "CANCELLED");
+  });
+
+  pgTest("a cancelled booking can never be resurrected by a subsequent reschedule attempt", () => {
+    const { businessId, connectionId, organizationId } = seedOpenBusiness();
+    const booking = seedBooking({
+      organizationId,
+      businessId,
+      connectionId,
+      startIso: "2026-12-03T09:00:00+05:30",
+      endIso: "2026-12-03T09:30:00+05:30",
+    });
+    assertSucceeds(cancelSql({ organizationId, bookingId: booking }), "cancel first");
+    assertRejected(
+      rescheduleSql({
+        organizationId,
+        bookingId: booking,
+        newStartIso: "2026-12-03T14:00:00+05:30",
+        newEndIso: "2026-12-03T14:30:00+05:30",
+      }),
+      "BOOKING_NOT_RESCHEDULABLE",
+      "a cancelled booking must never be reschedulable back into an active state",
+    );
+    const status = scalar(`SELECT status FROM bookings WHERE id = '${booking}';`);
+    assert.equal(status, "CANCELLED", "the booking must remain CANCELLED, never resurrected");
+  });
 });

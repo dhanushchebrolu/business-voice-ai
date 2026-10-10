@@ -11,7 +11,6 @@ import {
   type CreatePaymentRequiredBookingInput,
 } from "./booking-service.server.ts";
 import { CalendarProviderError, type CalendarProvider } from "./calendar-provider.ts";
-import { _resetWarnedKeysForTests } from "./business-hours-validation.ts";
 
 /**
  * Generic scripted fake Supabase client: every terminal call (maybeSingle/
@@ -116,26 +115,6 @@ function fakeProvider(overrides: Partial<CalendarProvider> = {}): CalendarProvid
     ...overrides,
   };
 }
-
-/**
- * assertSlotWithinSchedule's two reads (business_hours day row, then
- * business_hour_overrides for the date) — scripted here as "wide open, no
- * override". Only still needed for rescheduleBooking's own tests below;
- * createBooking()/createPaymentRequiredBooking() no longer call
- * assertSlotWithinSchedule at all (schedule validation moved into
- * create_booking_atomic's own SQL transaction — see
- * 20261009120000_atomic_schedule_validation_and_locking.sql and
- * booking-service.server.ts's own doc comments).
- */
-const OPEN_SCHEDULE_CALLS = [
-  {
-    result: {
-      data: { is_closed: false, intervals: [{ start: "00:00", end: "23:59" }] },
-      error: null,
-    },
-  },
-  { result: { data: null, error: null } },
-];
 
 const BASE_INPUT: CreateBookingInput = {
   organizationId: "org-1",
@@ -385,8 +364,8 @@ describe("createBooking — maps the RPC's authoritative schedule rejection", ()
 });
 
 describe("rescheduleBooking", () => {
-  test("happy path: re-checks availability, updates the Google event, marks RESCHEDULED", async () => {
-    const { client } = makeFakeSupabase([
+  test("happy path: calls the atomic RPC, updates the Google event, returns RESCHEDULED", async () => {
+    const { client, calls } = makeFakeSupabase([
       {
         result: {
           data: {
@@ -394,29 +373,29 @@ describe("rescheduleBooking", () => {
             organization_id: "org-1",
             business_id: "biz-1",
             calendar_connection_id: "conn-1",
-            google_event_id: "google-event-1",
-            timezone: "Asia/Kolkata",
-            status: "CONFIRMED",
-          },
-          error: null,
-        },
-      }, // load booking
-      ...OPEN_SCHEDULE_CALLS,
-      { result: { data: null, error: null } }, // conflict check
-      {
-        result: {
-          data: {
-            id: "booking-1",
+            service_id: null,
+            agent_config_id: null,
+            contact_id: null,
             status: "RESCHEDULED",
             start_at: "2026-09-26T10:30:00.000Z",
             end_at: "2026-09-26T11:00:00.000Z",
             timezone: "Asia/Kolkata",
+            customer_name: null,
+            customer_phone: null,
+            customer_email: null,
             google_event_id: "google-event-1",
-            contact_id: null,
+            source: "voice",
+            idempotency_key: null,
+            notes: null,
+            metadata: {},
+            hold_expires_at: null,
+            call_id: null,
+            created_at: "2026-01-01T00:00:00.000Z",
+            updated_at: "2026-01-01T00:00:00.000Z",
           },
           error: null,
         },
-      }, // update
+      }, // reschedule_booking_atomic RPC
     ]);
     let updatedEvent = false;
     const provider = fakeProvider({
@@ -442,23 +421,21 @@ describe("rescheduleBooking", () => {
     });
     assert.equal(result.status, "RESCHEDULED");
     assert.equal(updatedEvent, true);
+    // Exactly one DB call (the atomic RPC) — no separate JS-level reads or
+    // checks remain; the whole thing is one database round trip.
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.table, "reschedule_booking_atomic");
+    assert.deepEqual(calls[0]!.args[0], {
+      p_organization_id: "org-1",
+      p_booking_id: "booking-1",
+      p_new_start_at: "2026-09-26T10:30:00.000Z",
+      p_new_end_at: "2026-09-26T11:00:00.000Z",
+    });
   });
 
-  test("refuses to reschedule a booking belonging to a different organization", async () => {
+  test("maps the RPC's BOOKING_NOT_FOUND (nonexistent id or cross-org access) to a BookingError NOT_FOUND", async () => {
     const { client } = makeFakeSupabase([
-      {
-        result: {
-          data: {
-            id: "booking-1",
-            organization_id: "org-OTHER",
-            calendar_connection_id: "conn-1",
-            google_event_id: null,
-            timezone: "Asia/Kolkata",
-            status: "CONFIRMED",
-          },
-          error: null,
-        },
-      },
+      { result: { data: null, error: new Error("BOOKING_NOT_FOUND") } },
     ]);
     const provider = fakeProvider();
     await assert.rejects(
@@ -478,24 +455,31 @@ describe("rescheduleBooking", () => {
     );
   });
 
-  test("rejects a reschedule target that conflicts with another active booking", async () => {
+  test("maps the RPC's BOOKING_NOT_RESCHEDULABLE (e.g. already cancelled) to a BookingError NOT_RESCHEDULABLE", async () => {
     const { client } = makeFakeSupabase([
-      {
-        result: {
-          data: {
-            id: "booking-1",
-            organization_id: "org-1",
-            business_id: "biz-1",
-            calendar_connection_id: "conn-1",
-            google_event_id: "google-event-1",
-            timezone: "Asia/Kolkata",
-            status: "CONFIRMED",
-          },
-          error: null,
-        },
+      { result: { data: null, error: new Error("BOOKING_NOT_RESCHEDULABLE") } },
+    ]);
+    const provider = fakeProvider();
+    await assert.rejects(
+      () =>
+        rescheduleBooking(client, provider, {
+          organizationId: "org-1",
+          bookingId: "booking-1",
+          calendarId: "c",
+          newStartIso: "2026-09-26T10:30:00.000Z",
+          newEndIso: "2026-09-26T11:00:00.000Z",
+        }),
+      (err: unknown) => {
+        assert.ok(err instanceof BookingError);
+        assert.equal(err.code, "NOT_RESCHEDULABLE");
+        return true;
       },
-      ...OPEN_SCHEDULE_CALLS,
-      { result: { data: [{ id: "other-booking" }], error: null } },
+    );
+  });
+
+  test("maps the RPC's SLOT_NO_LONGER_AVAILABLE (destination conflicts with another active booking) to the same error as before", async () => {
+    const { client } = makeFakeSupabase([
+      { result: { data: null, error: new Error("SLOT_NO_LONGER_AVAILABLE") } },
     ]);
     const provider = fakeProvider();
     await assert.rejects(
@@ -514,22 +498,74 @@ describe("rescheduleBooking", () => {
       },
     );
   });
-});
 
-describe("cancelBooking", () => {
-  test("happy path: deletes the Google event and marks CANCELLED", async () => {
+  test("maps the RPC's SLOT_OUTSIDE_SCHEDULE (destination outside hours, or inside a closure) to the same error as before", async () => {
     const { client } = makeFakeSupabase([
+      { result: { data: null, error: new Error("SLOT_OUTSIDE_SCHEDULE") } },
+    ]);
+    const provider = fakeProvider();
+    await assert.rejects(
+      () =>
+        rescheduleBooking(client, provider, {
+          organizationId: "org-1",
+          bookingId: "booking-1",
+          calendarId: "c",
+          newStartIso: "2026-09-26T10:30:00.000Z",
+          newEndIso: "2026-09-26T11:00:00.000Z",
+        }),
+      (err: unknown) => {
+        assert.ok(err instanceof BookingError);
+        assert.equal(err.code, "SLOT_OUTSIDE_SCHEDULE");
+        return true;
+      },
+    );
+  });
+
+  test("reconciliation: the DB reschedule succeeds but the Google update fails -> marked CALENDAR_SYNC_FAILED, error still propagates", async () => {
+    const { client, calls } = makeFakeSupabase([
       {
         result: {
           data: {
             id: "booking-1",
-            organization_id: "org-1",
+            status: "RESCHEDULED",
+            start_at: "2026-09-26T10:30:00.000Z",
+            end_at: "2026-09-26T11:00:00.000Z",
+            timezone: "Asia/Kolkata",
             google_event_id: "google-event-1",
-            notes: null,
+            contact_id: null,
           },
           error: null,
         },
+      }, // reschedule_booking_atomic RPC (already committed in the DB)
+      { result: { data: null, error: null } }, // the reconciling .update() to CALENDAR_SYNC_FAILED
+    ]);
+    const provider = fakeProvider({
+      updateEvent: async () => {
+        throw new CalendarProviderError("CALENDAR_UNAVAILABLE", "Google is temporarily down.");
       },
+    });
+
+    await assert.rejects(() =>
+      rescheduleBooking(client, provider, {
+        organizationId: "org-1",
+        bookingId: "booking-1",
+        calendarId: "clinic-cal",
+        newStartIso: "2026-09-26T10:30:00.000Z",
+        newEndIso: "2026-09-26T11:00:00.000Z",
+      }),
+    );
+    const reconcileCall = calls.find((c) => c.table === "bookings" && c.method === "update");
+    assert.ok(reconcileCall, "expected a reconciling update() call to CALENDAR_SYNC_FAILED");
+    assert.deepEqual(reconcileCall!.args[0], {
+      status: "CALENDAR_SYNC_FAILED",
+      metadata: { calendar_sync_error: "Google is temporarily down." },
+    });
+  });
+});
+
+describe("cancelBooking", () => {
+  test("happy path: calls the atomic RPC, then deletes the Google event using the RPC's own returned id", async () => {
+    const { client, calls } = makeFakeSupabase([
       {
         result: {
           data: {
@@ -543,7 +579,7 @@ describe("cancelBooking", () => {
           },
           error: null,
         },
-      },
+      }, // cancel_booking_atomic RPC
     ]);
     let deleted = false;
     const provider = fakeProvider({
@@ -559,21 +595,17 @@ describe("cancelBooking", () => {
     });
     assert.equal(result.status, "CANCELLED");
     assert.equal(deleted, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.table, "cancel_booking_atomic");
+    assert.deepEqual(calls[0]!.args[0], {
+      p_organization_id: "org-1",
+      p_booking_id: "booking-1",
+      p_reason: null,
+    });
   });
 
   test("cancelling a booking whose Google event is already gone still succeeds (idempotent)", async () => {
     const { client } = makeFakeSupabase([
-      {
-        result: {
-          data: {
-            id: "booking-1",
-            organization_id: "org-1",
-            google_event_id: "google-event-1",
-            notes: null,
-          },
-          error: null,
-        },
-      },
       {
         result: {
           data: {
@@ -605,19 +637,9 @@ describe("cancelBooking", () => {
     assert.equal(result.status, "CANCELLED");
   });
 
-  test("refuses to cancel a booking belonging to a different organization", async () => {
+  test("refuses to cancel a booking belonging to a different organization (maps BOOKING_NOT_FOUND)", async () => {
     const { client } = makeFakeSupabase([
-      {
-        result: {
-          data: {
-            id: "booking-1",
-            organization_id: "org-OTHER",
-            google_event_id: null,
-            notes: null,
-          },
-          error: null,
-        },
-      },
+      { result: { data: null, error: new Error("BOOKING_NOT_FOUND") } },
     ]);
     const provider = fakeProvider();
     await assert.rejects(
@@ -633,6 +655,37 @@ describe("cancelBooking", () => {
         return true;
       },
     );
+  });
+
+  test("a booking with no Google event never calls deleteEvent", async () => {
+    const { client } = makeFakeSupabase([
+      {
+        result: {
+          data: {
+            id: "booking-1",
+            status: "CANCELLED",
+            start_at: "s",
+            end_at: "e",
+            timezone: "Asia/Kolkata",
+            google_event_id: null,
+            contact_id: null,
+          },
+          error: null,
+        },
+      },
+    ]);
+    let deleteCalled = false;
+    const provider = fakeProvider({
+      deleteEvent: async () => {
+        deleteCalled = true;
+      },
+    });
+    await cancelBooking(client, provider, {
+      organizationId: "org-1",
+      bookingId: "booking-1",
+      calendarId: "c",
+    });
+    assert.equal(deleteCalled, false);
   });
 });
 
@@ -786,75 +839,5 @@ describe("createPaymentRequiredBooking", () => {
       { result: { data: null, error: { message: "connection reset" } } },
     ]);
     await assert.rejects(() => createPaymentRequiredBooking(client, PAYMENT_HOLD_INPUT));
-  });
-});
-
-describe("rescheduleBooking — legacy-invalid business_hours row (production has a business with 7 rows shaped this way)", () => {
-  test("still rejects with the same caller-facing SLOT_OUTSIDE_SCHEDULE error — fail-closed is unchanged — and logs a diagnostic once", async () => {
-    _resetWarnedKeysForTests();
-    const calls: unknown[][] = [];
-    const originalWarn = console.warn;
-    console.warn = (...args: unknown[]) => calls.push(args);
-
-    const { client } = makeFakeSupabase([
-      {
-        result: {
-          data: {
-            id: "booking-1",
-            organization_id: "org-1",
-            business_id: "biz-1",
-            calendar_connection_id: "conn-1",
-            google_event_id: "google-event-1",
-            timezone: "Asia/Kolkata",
-            status: "CONFIRMED",
-          },
-          error: null,
-        },
-      }, // load booking
-      {
-        result: {
-          data: { is_closed: false, intervals: [{ start: "23:59", end: "00:00" }] },
-          error: null,
-        },
-      }, // business_hours — the known legacy-invalid shape
-      { result: { data: null, error: null } }, // no override
-    ]);
-    const provider = fakeProvider();
-
-    try {
-      await assert.rejects(
-        () =>
-          rescheduleBooking(client, provider, {
-            organizationId: "org-1",
-            bookingId: "booking-1",
-            calendarId: "clinic-cal",
-            newStartIso: "2026-09-26T10:30:00.000Z",
-            newEndIso: "2026-09-26T11:00:00.000Z",
-          }),
-        (err: unknown) => {
-          assert.ok(err instanceof BookingError);
-          assert.equal(err.code, "SLOT_OUTSIDE_SCHEDULE");
-          // The patient/caller-facing message must stay exactly what it was
-          // before this change — the diagnostic is server-log-only.
-          assert.equal(err.message, "That time is outside the hospital's working schedule.");
-          return true;
-        },
-      );
-    } finally {
-      console.warn = originalWarn;
-    }
-
-    assert.equal(
-      calls.length,
-      1,
-      "expected exactly one diagnostic log, not zero and not one per internal check",
-    );
-    const [, details] = calls[0]!;
-    // 2026-09-26 (the reschedule's new date, Asia/Kolkata) is a Saturday.
-    assert.deepEqual(details, {
-      businessId: "biz-1",
-      dayOfWeek: 6,
-      intervals: [{ start: "23:59", end: "00:00" }],
-    });
   });
 });

@@ -56,7 +56,7 @@ jobs:
       - name: Lint
         run: npx eslint .
 
-      - name: PostgreSQL regression tests must not silently skip in CI
+      - name: PostgreSQL regression tests must not silently skip or todo in CI
         # PostgreSQL is installed in the step above, so these tests must
         # actually execute here — an all-skipped result means CI itself is
         # misconfigured (e.g. the install step above silently failed, or a
@@ -64,16 +64,28 @@ jobs:
         # "unavailable" environment. Separately from this, a genuinely
         # broken migration under test still fails these tests outright
         # (not a skip) — see business_hours_interval_validation.pg.test.ts's
-        # own skip-vs-fail handling and its harness self-test.
+        # own skip-vs-fail handling and its harness self-test. A nonzero
+        # `todo` count is treated the same way: these files have no
+        # legitimate reason to mark a real-PostgreSQL regression as todo
+        # (the one case that briefly did — a concurrent-idempotency race —
+        # was fixed by 20261010120000, not left as a permanent todo), so a
+        # todo appearing here means a future change quietly downgraded a
+        # real failure instead of fixing it.
         run: |
           set -eo pipefail
           node --experimental-strip-types --test \
             supabase/migrations/business_hours_interval_validation.pg.test.ts \
             supabase/migrations/business_hours_interval_validation.harness-selftest.pg.test.ts \
+            supabase/migrations/booking_concurrency.pg.test.ts \
             2>&1 | tee pg-test-output.log
           skipped=$(grep -oP '(?<=^# skipped )\d+' pg-test-output.log | tail -1)
+          todo=$(grep -oP '(?<=^# todo )\d+' pg-test-output.log | tail -1)
           if [ "${skipped:-0}" -gt 0 ]; then
             echo "::error::${skipped} PostgreSQL regression test(s) were skipped in CI. PostgreSQL is installed in this job, so a skip here means CI is misconfigured, not that the environment genuinely lacks PostgreSQL — failing rather than passing silently with no real database coverage."
+            exit 1
+          fi
+          if [ "${todo:-0}" -gt 0 ]; then
+            echo "::error::${todo} PostgreSQL regression test(s) reported todo. These real-database regression tests have no legitimate reason to use todo as a way to keep CI green — failing so a real issue can't be silently downgraded."
             exit 1
           fi
 

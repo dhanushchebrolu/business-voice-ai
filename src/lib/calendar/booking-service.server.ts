@@ -19,137 +19,19 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import type { CalendarProvider } from "./calendar-provider.ts";
 import { CalendarProviderError } from "./calendar-provider.ts";
-import {
-  resolveEffectiveOpenRangesUtc,
-  type BusinessHoursDay,
-  type BusinessHourOverride,
-} from "./calendar-service.server.ts";
-import { dayOfWeekInTimezone, localDateIsoInTimezone } from "./timezone.ts";
-import {
-  describeInvalidWeeklyDay,
-  describeInvalidOverride,
-  logInvalidBusinessHoursOnce,
-} from "./business-hours-validation.ts";
 
 type Client = SupabaseClient<Database>;
 
 export class BookingError extends Error {
-  code: "SLOT_NO_LONGER_AVAILABLE" | "NOT_FOUND" | "INVALID_INPUT" | "SLOT_OUTSIDE_SCHEDULE";
+  code:
+    | "SLOT_NO_LONGER_AVAILABLE"
+    | "NOT_FOUND"
+    | "INVALID_INPUT"
+    | "SLOT_OUTSIDE_SCHEDULE"
+    | "NOT_RESCHEDULABLE";
   constructor(message: string, code: BookingError["code"]) {
     super(message);
     this.code = code;
-  }
-}
-
-/**
- * Re-validates that [startIso, endIso) actually falls within the hospital's
- * working schedule for that date — full-day closures and date-specific
- * open/close overrides included — using the exact same precedence
- * resolution computeAvailability uses to decide what to OFFER
- * (resolveEffectiveOpenRangesUtc).
- *
- * As of 20261009120000_atomic_schedule_validation_and_locking.sql, this is
- * NO LONGER called from createBooking() or createPaymentRequiredBooking()
- * below — the staff-closes-a-slot-vs-AI-books-it race that a JS-level
- * pre-check here could never fully close (a separate database round-trip
- * from the atomic insert) is now closed by moving the same precedence
- * resolution INSIDE create_booking_atomic's own transaction
- * (validate_booking_schedule, under the same per-business advisory lock
- * every schedule-mutating operation now takes). That SQL-side check is
- * authoritative for both of those entry points; this JS function would
- * only ever be a redundant, driftable second implementation for them.
- *
- * rescheduleBooking() below does NOT go through create_booking_atomic (it
- * updates an existing row via its own direct conflict check), so it still
- * calls this function as a pre-check — reschedule-vs-closure races are a
- * known, documented, OUT-OF-SCOPE residual gap for this function, carried
- * over unchanged from before: staff closing the slot in the exact instant
- * between this check and reschedule's own update can still slip through.
- * Closing that would mean giving reschedule the same atomic treatment
- * create_booking_atomic now has — not done here since it wasn't part of
- * the race this change was scoped to fix (voice/manual/payment-hold
- * booking CREATION vs. schedule mutation).
- */
-async function assertSlotWithinSchedule(
-  supabaseAdmin: Client,
-  businessId: string,
-  timezone: string,
-  startIso: string,
-  endIso: string,
-): Promise<void> {
-  const dateIso = localDateIsoInTimezone(new Date(startIso), timezone);
-  const dayOfWeek = dayOfWeekInTimezone(dateIso, timezone);
-
-  const [hoursRes, overrideRes] = await Promise.all([
-    supabaseAdmin
-      .from("business_hours")
-      .select("is_closed, intervals")
-      .eq("business_id", businessId)
-      .eq("day_of_week", dayOfWeek)
-      .maybeSingle(),
-    supabaseAdmin
-      .from("business_hour_overrides")
-      .select("is_full_day_closure, intervals")
-      .eq("business_id", businessId)
-      .eq("override_date", dateIso)
-      .maybeSingle(),
-  ]);
-  if (hoursRes.error) throw hoursRes.error;
-  if (overrideRes.error) throw overrideRes.error;
-
-  const businessHours: BusinessHoursDay[] = hoursRes.data
-    ? [
-        {
-          dayOfWeek,
-          isClosed: hoursRes.data.is_closed,
-          intervals: (hoursRes.data.intervals as unknown as { start: string; end: string }[]) ?? [],
-        },
-      ]
-    : [];
-  const override: BusinessHourOverride | undefined = overrideRes.data
-    ? {
-        isFullDayClosure: overrideRes.data.is_full_day_closure,
-        intervals:
-          (overrideRes.data.intervals as unknown as {
-            start: string;
-            end: string;
-            isOpen: boolean;
-          }[]) ?? [],
-      }
-    : undefined;
-
-  // Fail-closed behavior for a legacy-invalid row is already guaranteed
-  // by resolveEffectiveOpenRangesUtc's own range filtering (a reversed
-  // pair can never match a real booking) — this only adds a visible,
-  // deduplicated server-side trace instead of leaving "rejected every
-  // time, no explanation" as the only symptom. The caller/patient-facing
-  // BookingError message below is unchanged either way.
-  const weeklyWarning = describeInvalidWeeklyDay(businessHours[0]);
-  if (weeklyWarning) {
-    logInvalidBusinessHoursOnce(`${businessId}:weekly:${dayOfWeek}`, {
-      businessId,
-      dayOfWeek,
-      intervals: businessHours[0]?.intervals,
-    });
-  }
-  const overrideWarning = describeInvalidOverride(override, dateIso);
-  if (overrideWarning) {
-    logInvalidBusinessHoursOnce(`${businessId}:override:${dateIso}`, {
-      businessId,
-      dateIso,
-      intervals: override?.intervals,
-    });
-  }
-
-  const openRanges = resolveEffectiveOpenRangesUtc(dateIso, timezone, businessHours, override);
-  const start = new Date(startIso).getTime();
-  const end = new Date(endIso).getTime();
-  const within = openRanges.some((r) => start >= r.start.getTime() && end <= r.end.getTime());
-  if (!within) {
-    throw new BookingError(
-      "That time is outside the hospital's working schedule.",
-      "SLOT_OUTSIDE_SCHEDULE",
-    );
   }
 }
 
@@ -417,63 +299,70 @@ export interface RescheduleBookingInput {
   newEndIso: string;
 }
 
+/**
+ * Concurrency: the whole read-check-write sequence (row lock, schedule
+ * re-validation, per-calendar-connection overlap re-check, update) runs
+ * inside ONE Postgres transaction via the reschedule_booking_atomic RPC
+ * (20261010130000_atomic_reschedule_and_cancel.sql) — the same per-business
+ * and per-calendar-connection advisory locks create_booking_atomic uses, in
+ * the same order, so a reschedule can never interleave with a new booking,
+ * a staff schedule closure, another reschedule of a different booking into
+ * the same slot, or a concurrent cancellation of this exact booking. See
+ * that migration's own header comment for the specific races this closes;
+ * this function no longer does any of that checking itself.
+ */
 export async function rescheduleBooking(
   supabaseAdmin: Client,
   provider: CalendarProvider,
   input: RescheduleBookingInput,
 ): Promise<BookingRecord> {
-  const { data: booking, error } = await supabaseAdmin
-    .from("bookings")
-    .select(
-      "id, organization_id, business_id, calendar_connection_id, google_event_id, timezone, status",
-    )
-    .eq("id", input.bookingId)
-    .maybeSingle();
-  if (error) throw error;
-  if (!booking || booking.organization_id !== input.organizationId) {
-    throw new BookingError("Booking not found.", "NOT_FOUND");
-  }
-
-  await assertSlotWithinSchedule(
-    supabaseAdmin,
-    booking.business_id,
-    booking.timezone,
-    input.newStartIso,
-    input.newEndIso,
-  );
-
-  if (booking.calendar_connection_id) {
-    const { data: conflicting, error: conflictError } = await supabaseAdmin
-      .from("bookings")
-      .select("id")
-      .eq("calendar_connection_id", booking.calendar_connection_id)
-      .neq("id", input.bookingId)
-      .not("status", "in", "(CANCELLED,NO_SHOW)")
-      .lt("start_at", input.newEndIso)
-      .gt("end_at", input.newStartIso)
-      .limit(1);
-    if (conflictError) throw conflictError;
-    if (conflicting && conflicting.length > 0) {
+  const { data: booking, error: rpcError } = await supabaseAdmin.rpc("reschedule_booking_atomic", {
+    p_organization_id: input.organizationId,
+    p_booking_id: input.bookingId,
+    p_new_start_at: input.newStartIso,
+    p_new_end_at: input.newEndIso,
+  });
+  if (rpcError) {
+    if (rpcError.message?.includes("BOOKING_NOT_FOUND")) {
+      throw new BookingError("Booking not found.", "NOT_FOUND");
+    }
+    if (rpcError.message?.includes("BOOKING_NOT_RESCHEDULABLE")) {
+      throw new BookingError("This booking can no longer be rescheduled.", "NOT_RESCHEDULABLE");
+    }
+    if (rpcError.message?.includes("SLOT_NO_LONGER_AVAILABLE")) {
       throw new BookingError("That time slot is no longer available.", "SLOT_NO_LONGER_AVAILABLE");
     }
+    if (rpcError.message?.includes("SLOT_OUTSIDE_SCHEDULE")) {
+      throw new BookingError(
+        "That time is outside the hospital's working schedule.",
+        "SLOT_OUTSIDE_SCHEDULE",
+      );
+    }
+    throw rpcError;
   }
 
   if (booking.google_event_id) {
-    await provider.updateEvent(input.calendarId, booking.google_event_id, {
-      startIso: input.newStartIso,
-      endIso: input.newEndIso,
-      timezone: booking.timezone,
-    });
+    try {
+      await provider.updateEvent(input.calendarId, booking.google_event_id, {
+        startIso: input.newStartIso,
+        endIso: input.newEndIso,
+        timezone: booking.timezone,
+      });
+    } catch (err) {
+      // The reschedule already committed in the database — reconcile
+      // rather than silently lose track of the mismatch (same policy as
+      // createBooking()'s own CALENDAR_SYNC_FAILED handling below).
+      const message =
+        err instanceof CalendarProviderError ? err.message : "Failed to update the calendar event.";
+      await supabaseAdmin
+        .from("bookings")
+        .update({ status: "CALENDAR_SYNC_FAILED", metadata: { calendar_sync_error: message } })
+        .eq("id", booking.id);
+      throw err;
+    }
   }
 
-  const { data: updated, error: updateError } = await supabaseAdmin
-    .from("bookings")
-    .update({ start_at: input.newStartIso, end_at: input.newEndIso, status: "RESCHEDULED" })
-    .eq("id", input.bookingId)
-    .select("id, status, start_at, end_at, timezone, google_event_id, contact_id")
-    .single();
-  if (updateError) throw updateError;
-  return toRecord(updated);
+  return toRecord(booking);
 }
 
 export interface CancelBookingInput {
@@ -483,24 +372,43 @@ export interface CancelBookingInput {
   reason?: string | undefined;
 }
 
+/**
+ * Concurrency: cancel_booking_atomic (20261010130000_atomic_reschedule_and_
+ * cancel.sql) takes a `SELECT ... FOR UPDATE` row lock on the booking
+ * before reading or changing anything, so it's correctly serialized against
+ * a concurrent reschedule_booking_atomic on the same row — whichever
+ * reaches the lock first determines what the other sees. Cancelling an
+ * already-cancelled booking is idempotent (returns the existing row, not
+ * an error).
+ *
+ * Ordering: the DB-level cancel runs FIRST, then the Google event is
+ * deleted using the google_event_id the RPC's own locked read returned —
+ * not a separately-read, potentially-stale value. If the booking is
+ * already durably CANCELLED and the Google deletion fails, that failure
+ * is reported to the caller but the booking's own state is never left
+ * ambiguous (unlike deleting the event first, which could succeed while
+ * the subsequent DB update failed, silently orphaning the calendar side).
+ */
 export async function cancelBooking(
   supabaseAdmin: Client,
   provider: CalendarProvider,
   input: CancelBookingInput,
 ): Promise<BookingRecord> {
-  const { data: booking, error } = await supabaseAdmin
-    .from("bookings")
-    .select("id, organization_id, google_event_id, notes")
-    .eq("id", input.bookingId)
-    .maybeSingle();
-  if (error) throw error;
-  if (!booking || booking.organization_id !== input.organizationId) {
-    throw new BookingError("Booking not found.", "NOT_FOUND");
+  const { data: cancelled, error: rpcError } = await supabaseAdmin.rpc("cancel_booking_atomic", {
+    p_organization_id: input.organizationId,
+    p_booking_id: input.bookingId,
+    p_reason: input.reason ?? null,
+  });
+  if (rpcError) {
+    if (rpcError.message?.includes("BOOKING_NOT_FOUND")) {
+      throw new BookingError("Booking not found.", "NOT_FOUND");
+    }
+    throw rpcError;
   }
 
-  if (booking.google_event_id) {
+  if (cancelled.google_event_id) {
     try {
-      await provider.deleteEvent(input.calendarId, booking.google_event_id);
+      await provider.deleteEvent(input.calendarId, cancelled.google_event_id);
     } catch (err) {
       // Deleting an already-gone event is not a failure — the desired end
       // state (no event) already holds.
@@ -508,17 +416,6 @@ export async function cancelBooking(
     }
   }
 
-  const notes = input.reason
-    ? [booking.notes, `Cancelled: ${input.reason}`].filter(Boolean).join("\n")
-    : booking.notes;
-
-  const { data: cancelled, error: updateError } = await supabaseAdmin
-    .from("bookings")
-    .update({ status: "CANCELLED", notes })
-    .eq("id", input.bookingId)
-    .select("id, status, start_at, end_at, timezone, google_event_id, contact_id")
-    .single();
-  if (updateError) throw updateError;
   return toRecord(cancelled);
 }
 
