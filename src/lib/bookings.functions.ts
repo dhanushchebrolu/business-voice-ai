@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import type { CalendarProvider } from "@/lib/calendar/calendar-provider";
 
 /**
  * Dashboard-facing booking management (spec section 42's "basic booking
@@ -71,6 +72,11 @@ export const createBookingManual = createServerFn({ method: "POST" })
       throw new Error("That business does not belong to your workspace.");
     }
 
+    // Google Calendar is optional (same pattern as calendar-tools.server.ts's
+    // resolveCalendarContext) — no connection, or one that isn't
+    // CONNECTED/fully configured, is a normal, non-error state: the booking
+    // is still created and confirmed directly against ClickAI's own
+    // database, just with no mirrored external calendar event.
     const { data: connection, error: connectionError } = await supabaseAdmin
       .from("google_calendar_connections")
       .select("id, calendar_id, status")
@@ -79,22 +85,25 @@ export const createBookingManual = createServerFn({ method: "POST" })
       .eq("provider", "google")
       .maybeSingle();
     if (connectionError) throw connectionError;
-    if (!connection || connection.status !== "CONNECTED" || !connection.calendar_id) {
-      throw new Error("Connect a Google Calendar for this business before creating bookings.");
-    }
-
-    const { getCalendarProviderForConnection } =
-      await import("@/lib/google-calendar/google-calendar-connection.server");
-    const { provider, calendarId } = await getCalendarProviderForConnection(
-      supabaseAdmin,
-      connection.id,
+    const hasUsableConnection = Boolean(
+      connection && connection.status === "CONNECTED" && connection.calendar_id,
     );
+
+    let provider: CalendarProvider | null = null;
+    let calendarId: string | null = null;
+    if (hasUsableConnection) {
+      const { getCalendarProviderForConnection } =
+        await import("@/lib/google-calendar/google-calendar-connection.server");
+      const providerInfo = await getCalendarProviderForConnection(supabaseAdmin, connection!.id);
+      provider = providerInfo.provider;
+      calendarId = providerInfo.calendarId;
+    }
 
     const { createBooking } = await import("@/lib/calendar/booking-service.server");
     const booking = await createBooking(supabaseAdmin, provider, {
       organizationId,
       businessId: data.businessId,
-      calendarConnectionId: connection.id,
+      calendarConnectionId: hasUsableConnection ? connection!.id : null,
       calendarId,
       serviceId: data.serviceId ?? null,
       customerName: data.customerName,
@@ -132,25 +141,31 @@ export const rescheduleBookingManual = createServerFn({ method: "POST" })
     if (!booking || booking.organization_id !== organizationId) {
       throw new Error("Booking not found.");
     }
-    if (!booking.calendar_connection_id) {
-      throw new Error("This booking has no connected calendar to reschedule against.");
+
+    // Google Calendar is optional (same pattern as createBookingManual
+    // above) — a booking with no connected calendar (or one since removed)
+    // is still reschedulable; rescheduleBooking() itself confirms directly
+    // against the database and simply skips the external event update.
+    let provider: CalendarProvider | null = null;
+    let calendarId: string | null = null;
+    if (booking.calendar_connection_id) {
+      const { data: connection, error: connectionError } = await supabaseAdmin
+        .from("google_calendar_connections")
+        .select("calendar_id")
+        .eq("id", booking.calendar_connection_id)
+        .maybeSingle();
+      if (connectionError) throw connectionError;
+      if (connection?.calendar_id) {
+        const { getCalendarProviderForConnection } =
+          await import("@/lib/google-calendar/google-calendar-connection.server");
+        const providerInfo = await getCalendarProviderForConnection(
+          supabaseAdmin,
+          booking.calendar_connection_id,
+        );
+        provider = providerInfo.provider;
+        calendarId = providerInfo.calendarId;
+      }
     }
-
-    const { data: connection, error: connectionError } = await supabaseAdmin
-      .from("google_calendar_connections")
-      .select("calendar_id")
-      .eq("id", booking.calendar_connection_id)
-      .maybeSingle();
-    if (connectionError) throw connectionError;
-    if (!connection?.calendar_id)
-      throw new Error("This booking's calendar connection is no longer configured.");
-
-    const { getCalendarProviderForConnection } =
-      await import("@/lib/google-calendar/google-calendar-connection.server");
-    const { provider, calendarId } = await getCalendarProviderForConnection(
-      supabaseAdmin,
-      booking.calendar_connection_id,
-    );
 
     const { rescheduleBooking } = await import("@/lib/calendar/booking-service.server");
     return rescheduleBooking(supabaseAdmin, provider, {

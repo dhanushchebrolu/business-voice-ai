@@ -54,3 +54,33 @@ describe("calendar writes go through the tested booking-service core, not ad-hoc
     assert.doesNotMatch(code, /google_event_id:\s*["'`]/);
   });
 });
+
+describe("Google Calendar is optional for dashboard-created/-managed bookings, never a hard requirement", () => {
+  test("createBookingManual never throws a 'Connect a Google Calendar' error — it computes hasUsableConnection and proceeds either way", () => {
+    assert.doesNotMatch(code, /Connect a Google Calendar for this business/);
+    const fnStart = code.indexOf("export const createBookingManual");
+    const fnEnd = code.indexOf("\nconst rescheduleInputSchema");
+    const fnBody = code.slice(fnStart, fnEnd);
+    assert.match(fnBody, /const hasUsableConnection = Boolean\(/);
+    assert.match(fnBody, /createBooking\(supabaseAdmin, provider, \{/);
+    assert.match(fnBody, /calendarConnectionId: hasUsableConnection \? connection!\.id : null/);
+  });
+
+  test("rescheduleBookingManual never throws for a booking with no connected calendar — it passes provider/calendarId as null instead", () => {
+    assert.doesNotMatch(code, /This booking has no connected calendar to reschedule against/);
+    const fnStart = code.indexOf("export const rescheduleBookingManual");
+    const fnEnd = code.indexOf("\nconst cancelInputSchema");
+    const fnBody = code.slice(fnStart, fnEnd);
+    assert.match(fnBody, /let provider: CalendarProvider \| null = null;/);
+    assert.match(fnBody, /let calendarId: string \| null = null;/);
+    assert.match(fnBody, /if \(booking\.calendar_connection_id\) \{/);
+    assert.match(fnBody, /rescheduleBooking\(supabaseAdmin, provider, \{/);
+  });
+
+  test("cancelBookingManual already handled the no-connection case via cancel_booking_atomic before this fix, and still does", () => {
+    const fnStart = code.indexOf("export const cancelBookingManual");
+    const fnBody = code.slice(fnStart);
+    assert.match(fnBody, /if \(!calendarId \|\| !booking\.calendar_connection_id\) \{/);
+    assert.match(fnBody, /"cancel_booking_atomic"/);
+  });
+});
