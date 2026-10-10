@@ -228,3 +228,59 @@ describe("getCalendarDayView — every step is wrapped in structured diagnostics
     assert.match(fnBody, /if \(error\) throw error;/);
   });
 });
+
+describe("business-hours interval validation wiring", () => {
+  test("setWeeklyHours validates intervals before calling the RPC, only when the day is not closed", () => {
+    const fnStart = code.indexOf("export const setWeeklyHours");
+    const fnEnd = code.indexOf("export const applyDailyOverride");
+    const fnBody = code.slice(fnStart, fnEnd);
+    const guardIdx = fnBody.indexOf("if (!data.isClosed)");
+    const validateIdx = fnBody.indexOf("describeInvalidIntervals(data.intervals)");
+    const rpcIdx = fnBody.indexOf('supabaseAdmin.rpc("set_business_weekly_hours"');
+    assert.ok(guardIdx > -1 && validateIdx > -1 && rpcIdx > -1);
+    assert.ok(
+      guardIdx < validateIdx && validateIdx < rpcIdx,
+      "validation must run inside the !isClosed guard, before the RPC call",
+    );
+    assert.match(fnBody, /if \(validationError\) throw new Error\(validationError\);/);
+  });
+
+  test("setWeeklyHours translates a trigger rejection into a friendly message instead of the raw Postgres error", () => {
+    const fnStart = code.indexOf("export const setWeeklyHours");
+    const fnEnd = code.indexOf("export const applyDailyOverride");
+    const fnBody = code.slice(fnStart, fnEnd);
+    assert.match(fnBody, /describeBusinessHoursWriteError\(error\)/);
+  });
+
+  test("applyDailyOverride validates override intervals before calling the RPC, only when not a full-day closure", () => {
+    const fnStart = code.indexOf("export const applyDailyOverride");
+    const fnEnd = code.indexOf("const resolveConflictInputSchema");
+    const fnBody = code.slice(fnStart, fnEnd);
+    const guardIdx = fnBody.indexOf("if (!data.isFullDayClosure)");
+    const validateIdx = fnBody.indexOf("describeInvalidOverrideIntervals(data.intervals)");
+    const rpcIdx = fnBody.indexOf('supabaseAdmin.rpc("apply_business_schedule_override"');
+    assert.ok(guardIdx > -1 && validateIdx > -1 && rpcIdx > -1);
+    assert.ok(guardIdx < validateIdx && validateIdx < rpcIdx);
+  });
+
+  test("applyDailyOverride still maps CANNOT_CLOSE_SLOT_WITH_ACTIVE_BOOKING before falling back to describeBusinessHoursWriteError", () => {
+    const fnStart = code.indexOf("export const applyDailyOverride");
+    const fnEnd = code.indexOf("const resolveConflictInputSchema");
+    const fnBody = code.slice(fnStart, fnEnd);
+    const activeBookingIdx = fnBody.indexOf("CANNOT_CLOSE_SLOT_WITH_ACTIVE_BOOKING");
+    const translateIdx = fnBody.indexOf("describeBusinessHoursWriteError(error)");
+    assert.ok(activeBookingIdx > -1 && translateIdx > -1 && activeBookingIdx < translateIdx);
+  });
+
+  test("getCalendarDayView computes scheduleConfigWarning scoped to this date's weekday and override, and returns it", () => {
+    const fnStart = code.indexOf("export const getCalendarDayView");
+    const fnEnd = code.indexOf("const setWeeklyHoursInputSchema");
+    const fnBody = code.slice(fnStart, fnEnd);
+    assert.match(
+      fnBody,
+      /describeInvalidWeeklyDay\(weeklyHours\.find\(\(d\) => d\.dayOfWeek === dayOfWeek\)\)/,
+    );
+    assert.match(fnBody, /describeInvalidOverride\(override, data\.dateIso\)/);
+    assert.match(fnBody, /scheduleConfigWarning,/);
+  });
+});

@@ -7,6 +7,10 @@ import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { workspaceQuery } from "@/lib/workspace";
 import { BUSINESS_TYPES, getBusinessType, DAYS } from "@/lib/business-types";
+import {
+  describeInvalidInterval,
+  describeBusinessHoursWriteError,
+} from "@/lib/calendar/business-hours-validation";
 import { LANGUAGES, VOICES } from "@/lib/voices";
 import { Logo } from "@/components/app/primitives";
 import { Button } from "@/components/ui/button";
@@ -71,6 +75,13 @@ function Onboarding() {
       toast.error("Add your business name and a description of at least 40 characters.");
       return;
     }
+    if (step === 2 && openDays.length > 0) {
+      const validationError = describeInvalidInterval({ start: openTime, end: closeTime });
+      if (validationError) {
+        toast.error(validationError);
+        return;
+      }
+    }
     setStep((s) => Math.min(STEPS.length - 1, s + 1));
   }
 
@@ -109,7 +120,9 @@ function Onboarding() {
         // write.
         intervals: openDays.includes(day) ? [{ start: openTime, end: closeTime }] : [],
       }));
-      await supabase.from("business_hours").insert(hours);
+      const { error: hoursError } = await supabase.from("business_hours").insert(hours);
+      if (hoursError)
+        throw new Error(describeBusinessHoursWriteError(hoursError) ?? hoursError.message);
 
       const services = items
         .filter((i) => i.name.trim())

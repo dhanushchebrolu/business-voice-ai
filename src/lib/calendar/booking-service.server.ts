@@ -25,6 +25,11 @@ import {
   type BusinessHourOverride,
 } from "./calendar-service.server.ts";
 import { dayOfWeekInTimezone, localDateIsoInTimezone } from "./timezone.ts";
+import {
+  describeInvalidWeeklyDay,
+  describeInvalidOverride,
+  logInvalidBusinessHoursOnce,
+} from "./business-hours-validation.ts";
 
 type Client = SupabaseClient<Database>;
 
@@ -112,6 +117,29 @@ async function assertSlotWithinSchedule(
           }[]) ?? [],
       }
     : undefined;
+
+  // Fail-closed behavior for a legacy-invalid row is already guaranteed
+  // by resolveEffectiveOpenRangesUtc's own range filtering (a reversed
+  // pair can never match a real booking) — this only adds a visible,
+  // deduplicated server-side trace instead of leaving "rejected every
+  // time, no explanation" as the only symptom. The caller/patient-facing
+  // BookingError message below is unchanged either way.
+  const weeklyWarning = describeInvalidWeeklyDay(businessHours[0]);
+  if (weeklyWarning) {
+    logInvalidBusinessHoursOnce(`${businessId}:weekly:${dayOfWeek}`, {
+      businessId,
+      dayOfWeek,
+      intervals: businessHours[0]?.intervals,
+    });
+  }
+  const overrideWarning = describeInvalidOverride(override, dateIso);
+  if (overrideWarning) {
+    logInvalidBusinessHoursOnce(`${businessId}:override:${dateIso}`, {
+      businessId,
+      dateIso,
+      intervals: override?.intervals,
+    });
+  }
 
   const openRanges = resolveEffectiveOpenRangesUtc(dateIso, timezone, businessHours, override);
   const start = new Date(startIso).getTime();

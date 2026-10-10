@@ -7,8 +7,11 @@ import {
   update_calendar_event,
   cancel_calendar_event,
   get_calendar_event,
+  resolveCalendarContext,
+  resolveOverrideForDate,
 } from "./calendar-tools.server.ts";
 import { encryptCredential } from "../google-calendar/google-calendar-crypto.server.ts";
+import { _resetWarnedKeysForTests } from "./business-hours-validation.ts";
 
 /**
  * These tests target the tenant/permission gating every tool must apply
@@ -456,5 +459,188 @@ describe("get_calendar_event", () => {
     });
     assert.equal(result.success, false);
     if (!result.success) assert.equal(result.error.code, "TOOL_NOT_PERMITTED");
+  });
+});
+
+/** Supports both .maybeSingle() and a direct await on the filter chain (business_hours's own fetch is awaited without .maybeSingle()). */
+function makeFakeAdmin(responses: Record<string, unknown>) {
+  function chain(table: string) {
+    const builder = {
+      eq: () => builder,
+      maybeSingle: () => Promise.resolve(responses[table]),
+      then: (onFulfilled: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown) =>
+        Promise.resolve(responses[table]).then(onFulfilled, onRejected),
+    };
+    return builder;
+  }
+  return { from: (table: string) => ({ select: () => chain(table) }) } as never;
+}
+
+describe("legacy-invalid business_hours/business_hour_overrides rows — fail closed with a diagnostic, never silently available", () => {
+  beforeEach(() => {
+    _resetWarnedKeysForTests();
+  });
+
+  test("resolveCalendarContext still returns normally (fail-closed stays the caller's job, not this function's) for a business with a reversed weekly interval, but logs a diagnostic once", async () => {
+    const calls: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => calls.push(args);
+    try {
+      const admin = makeFakeAdmin({
+        businesses: {
+          data: {
+            id: "biz-1",
+            organization_id: "org-1",
+            name: "Test Clinic",
+            timezone: "Asia/Kolkata",
+          },
+          error: null,
+        },
+        google_calendar_connections: {
+          data: { id: "conn-1", calendar_id: "cal-1", status: "CONNECTED" },
+          error: null,
+        },
+        business_hours: {
+          data: [
+            { day_of_week: 1, is_closed: false, intervals: [{ start: "23:59", end: "00:00" }] },
+          ],
+          error: null,
+        },
+      });
+      const result = await resolveCalendarContext(admin, "org-1", "biz-1");
+      assert.ok(
+        !("errorCode" in result),
+        "a legacy-invalid row must not surface as a BUSINESS_NOT_FOUND-style error",
+      );
+      if (!("errorCode" in result)) {
+        assert.deepEqual(result.businessHours[0]!.intervals, [{ start: "23:59", end: "00:00" }]);
+      }
+    } finally {
+      console.warn = originalWarn;
+    }
+    assert.equal(calls.length, 1, "expected exactly one diagnostic log for the one invalid day");
+    const [, details] = calls[0]!;
+    assert.deepEqual(details, {
+      businessId: "biz-1",
+      dayOfWeek: 1,
+      intervals: [{ start: "23:59", end: "00:00" }],
+    });
+  });
+
+  test("resolveCalendarContext logs the diagnostic only once across repeated calls for the same business+day", async () => {
+    const calls: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => calls.push(args);
+    try {
+      const admin = makeFakeAdmin({
+        businesses: {
+          data: {
+            id: "biz-1",
+            organization_id: "org-1",
+            name: "Test Clinic",
+            timezone: "Asia/Kolkata",
+          },
+          error: null,
+        },
+        google_calendar_connections: {
+          data: { id: "conn-1", calendar_id: "cal-1", status: "CONNECTED" },
+          error: null,
+        },
+        business_hours: {
+          data: [
+            { day_of_week: 1, is_closed: false, intervals: [{ start: "23:59", end: "00:00" }] },
+          ],
+          error: null,
+        },
+      });
+      await resolveCalendarContext(admin, "org-1", "biz-1");
+      await resolveCalendarContext(admin, "org-1", "biz-1");
+      await resolveCalendarContext(admin, "org-1", "biz-1");
+    } finally {
+      console.warn = originalWarn;
+    }
+    assert.equal(calls.length, 1, "repeated lookups for the same business+day must not re-log");
+  });
+
+  test("a valid business_hours row never logs a diagnostic", async () => {
+    const calls: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => calls.push(args);
+    try {
+      const admin = makeFakeAdmin({
+        businesses: {
+          data: {
+            id: "biz-1",
+            organization_id: "org-1",
+            name: "Test Clinic",
+            timezone: "Asia/Kolkata",
+          },
+          error: null,
+        },
+        google_calendar_connections: {
+          data: { id: "conn-1", calendar_id: "cal-1", status: "CONNECTED" },
+          error: null,
+        },
+        business_hours: {
+          data: [
+            { day_of_week: 1, is_closed: false, intervals: [{ start: "09:00", end: "19:00" }] },
+          ],
+          error: null,
+        },
+      });
+      await resolveCalendarContext(admin, "org-1", "biz-1");
+    } finally {
+      console.warn = originalWarn;
+    }
+    assert.equal(calls.length, 0);
+  });
+
+  test("resolveOverrideForDate logs a date-specific diagnostic for a reversed override interval, without changing its returned value", async () => {
+    const calls: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => calls.push(args);
+    try {
+      const admin = makeFakeAdmin({
+        business_hour_overrides: {
+          data: {
+            is_full_day_closure: false,
+            intervals: [{ start: "23:59", end: "00:00", isOpen: true }],
+          },
+          error: null,
+        },
+      });
+      const override = await resolveOverrideForDate(admin, "biz-1", "2026-10-09");
+      assert.deepEqual(override, {
+        isFullDayClosure: false,
+        intervals: [{ start: "23:59", end: "00:00", isOpen: true }],
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+    assert.equal(calls.length, 1);
+    const [, details] = calls[0]!;
+    assert.deepEqual(details, {
+      businessId: "biz-1",
+      dateIso: "2026-10-09",
+      intervals: [{ start: "23:59", end: "00:00", isOpen: true }],
+    });
+  });
+
+  test("a full-day-closure override never logs, regardless of its stored intervals", async () => {
+    const calls: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => calls.push(args);
+    try {
+      const admin = makeFakeAdmin({
+        business_hour_overrides: {
+          data: { is_full_day_closure: true, intervals: [{ start: "23:59", end: "00:00" }] },
+          error: null,
+        },
+      });
+      await resolveOverrideForDate(admin, "biz-1", "2026-10-09");
+    } finally {
+      console.warn = originalWarn;
+    }
+    assert.equal(calls.length, 0);
   });
 });

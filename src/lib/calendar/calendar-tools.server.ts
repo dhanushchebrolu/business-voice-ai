@@ -44,6 +44,11 @@ import {
   GoogleCalendarConnectionError,
 } from "../google-calendar/google-calendar-connection.server.ts";
 import { CalendarProviderError } from "./calendar-provider.ts";
+import {
+  describeInvalidWeeklyDay,
+  describeInvalidOverride,
+  logInvalidBusinessHoursOnce,
+} from "./business-hours-validation.ts";
 
 type Client = SupabaseClient<Database>;
 
@@ -115,16 +120,36 @@ export async function resolveCalendarContext(
     .eq("business_id", businessId);
   if (hoursError) throw hoursError;
 
+  const businessHours = (hoursRows ?? []).map((r) => ({
+    dayOfWeek: r.day_of_week,
+    isClosed: r.is_closed,
+    intervals: (r.intervals as unknown as { start: string; end: string }[]) ?? [],
+  }));
+
+  // Fail-closed behavior for a legacy-invalid row (e.g. a reversed
+  // {"start":"23:59","end":"00:00"} pair) is already guaranteed by
+  // computeAvailability's own range filtering — this only adds a visible,
+  // deduplicated server-side trace so the AI voice agent's "no slots" for
+  // such a business is diagnosable, not indistinguishable from a normal
+  // fully-closed day. No patient data is ever included — only schema
+  // identifiers and the offending interval's own HH:mm strings.
+  for (const day of businessHours) {
+    const warning = describeInvalidWeeklyDay(day);
+    if (warning) {
+      logInvalidBusinessHoursOnce(`${businessId}:weekly:${day.dayOfWeek}`, {
+        businessId,
+        dayOfWeek: day.dayOfWeek,
+        intervals: day.intervals,
+      });
+    }
+  }
+
   return {
     connectionId: connection.id,
     calendarId: connection.calendar_id,
     timezone: business.timezone,
     businessName: business.name,
-    businessHours: (hoursRows ?? []).map((r) => ({
-      dayOfWeek: r.day_of_week,
-      isClosed: r.is_closed,
-      intervals: (r.intervals as unknown as { start: string; end: string }[]) ?? [],
-    })),
+    businessHours,
   };
 }
 
@@ -152,11 +177,22 @@ export async function resolveOverrideForDate(
     .maybeSingle();
   if (error) throw error;
   if (!data) return undefined;
-  return {
+  const override = {
     isFullDayClosure: data.is_full_day_closure,
     intervals:
       (data.intervals as unknown as { start: string; end: string; isOpen: boolean }[]) ?? [],
   };
+
+  const warning = describeInvalidOverride(override, dateIso);
+  if (warning) {
+    logInvalidBusinessHoursOnce(`${businessId}:override:${dateIso}`, {
+      businessId,
+      dateIso,
+      intervals: override.intervals,
+    });
+  }
+
+  return override;
 }
 
 export async function assertToolPermission(

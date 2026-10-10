@@ -11,6 +11,7 @@ import {
   type CreatePaymentRequiredBookingInput,
 } from "./booking-service.server.ts";
 import { CalendarProviderError, type CalendarProvider } from "./calendar-provider.ts";
+import { _resetWarnedKeysForTests } from "./business-hours-validation.ts";
 
 /**
  * Generic scripted fake Supabase client: every terminal call (maybeSingle/
@@ -785,5 +786,75 @@ describe("createPaymentRequiredBooking", () => {
       { result: { data: null, error: { message: "connection reset" } } },
     ]);
     await assert.rejects(() => createPaymentRequiredBooking(client, PAYMENT_HOLD_INPUT));
+  });
+});
+
+describe("rescheduleBooking — legacy-invalid business_hours row (production has a business with 7 rows shaped this way)", () => {
+  test("still rejects with the same caller-facing SLOT_OUTSIDE_SCHEDULE error — fail-closed is unchanged — and logs a diagnostic once", async () => {
+    _resetWarnedKeysForTests();
+    const calls: unknown[][] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => calls.push(args);
+
+    const { client } = makeFakeSupabase([
+      {
+        result: {
+          data: {
+            id: "booking-1",
+            organization_id: "org-1",
+            business_id: "biz-1",
+            calendar_connection_id: "conn-1",
+            google_event_id: "google-event-1",
+            timezone: "Asia/Kolkata",
+            status: "CONFIRMED",
+          },
+          error: null,
+        },
+      }, // load booking
+      {
+        result: {
+          data: { is_closed: false, intervals: [{ start: "23:59", end: "00:00" }] },
+          error: null,
+        },
+      }, // business_hours — the known legacy-invalid shape
+      { result: { data: null, error: null } }, // no override
+    ]);
+    const provider = fakeProvider();
+
+    try {
+      await assert.rejects(
+        () =>
+          rescheduleBooking(client, provider, {
+            organizationId: "org-1",
+            bookingId: "booking-1",
+            calendarId: "clinic-cal",
+            newStartIso: "2026-09-26T10:30:00.000Z",
+            newEndIso: "2026-09-26T11:00:00.000Z",
+          }),
+        (err: unknown) => {
+          assert.ok(err instanceof BookingError);
+          assert.equal(err.code, "SLOT_OUTSIDE_SCHEDULE");
+          // The patient/caller-facing message must stay exactly what it was
+          // before this change — the diagnostic is server-log-only.
+          assert.equal(err.message, "That time is outside the hospital's working schedule.");
+          return true;
+        },
+      );
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    assert.equal(
+      calls.length,
+      1,
+      "expected exactly one diagnostic log, not zero and not one per internal check",
+    );
+    const [, details] = calls[0]!;
+    // 2026-09-26 (the reschedule's new date, Asia/Kolkata) is a Saturday.
+    assert.deepEqual(details, {
+      businessId: "biz-1",
+      dayOfWeek: 6,
+      intervals: [{ start: "23:59", end: "00:00" }],
+    });
   });
 });

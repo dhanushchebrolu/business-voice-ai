@@ -8,6 +8,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { workspaceQuery } from "@/lib/workspace";
 import { DAYS } from "@/lib/business-types";
 import { utcToLocalHHmm } from "@/lib/calendar/timezone";
+import { describeInvalidInterval } from "@/lib/calendar/business-hours-validation";
 import {
   getCalendarDayView,
   setWeeklyHours,
@@ -270,6 +271,15 @@ function CalendarPage() {
     intervals: { start: string; end: string }[],
   ) {
     if (!businessId) return;
+    if (!isClosed) {
+      for (const interval of intervals) {
+        const validationError = describeInvalidInterval(interval);
+        if (validationError) {
+          toast.error(validationError);
+          return;
+        }
+      }
+    }
     setSavingAction(`weekly-${dow}`);
     try {
       await setWeeklyHoursFn({ data: { businessId, dayOfWeek: dow, isClosed, intervals } });
@@ -350,6 +360,13 @@ function CalendarPage() {
           <LoadingState label="Loading day view" />
         ) : (
           <div className="space-y-5">
+            {view.scheduleConfigWarning ? (
+              <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/8 px-3 py-2 text-xs text-destructive">
+                <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+                {view.scheduleConfigWarning}
+              </div>
+            ) : null}
+
             {view.pendingSync ? (
               <div className="flex items-center gap-2 rounded-md border border-warning/30 bg-warning/8 px-3 py-2 text-xs text-warning">
                 <RefreshCw className="size-3.5" />

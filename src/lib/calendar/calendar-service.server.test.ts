@@ -1,6 +1,10 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { computeAvailability, type ComputeAvailabilityInput } from "./calendar-service.server.ts";
+import {
+  computeAvailability,
+  resolveEffectiveOpenRangesUtc,
+  type ComputeAvailabilityInput,
+} from "./calendar-service.server.ts";
 
 const FRIDAY = 5; // 2026-09-25 is a Friday
 const BASE: Omit<ComputeAvailabilityInput, "dateIso" | "timezone"> = {
@@ -316,5 +320,64 @@ describe("computeAvailability — daily override precedence", () => {
     assert.ok(
       withExistingBooking.some((s) => s.start === "2026-09-25T09:00:00.000Z"), // 14:30 IST — still offered
     );
+  });
+});
+
+describe("computeAvailability / resolveEffectiveOpenRangesUtc — legacy-invalid interval regression (production has a business with 7 rows shaped this way)", () => {
+  test("a reversed {start:'23:59', end:'00:00'} weekly interval produces zero slots, never a false 'open all day'", () => {
+    const slots = computeAvailability({
+      ...BASE,
+      dateIso: "2026-09-25",
+      timezone: "Asia/Kolkata",
+      businessHours: [
+        { dayOfWeek: FRIDAY, isClosed: false, intervals: [{ start: "23:59", end: "00:00" }] },
+      ],
+    });
+    assert.deepEqual(slots, []);
+  });
+
+  test("the same reversed interval also fails closed via resolveEffectiveOpenRangesUtc (the function booking-time revalidation calls)", () => {
+    const ranges = resolveEffectiveOpenRangesUtc(
+      "2026-09-25",
+      "Asia/Kolkata",
+      [{ dayOfWeek: FRIDAY, isClosed: false, intervals: [{ start: "23:59", end: "00:00" }] }],
+      undefined,
+    );
+    // No real [start,end) booking window can ever fall inside a range whose
+    // own end precedes its start — confirmed here rather than merely
+    // asserted, since this is the exact function booking-service.server.ts
+    // checks "start >= r.start && end <= r.end" against.
+    for (const range of ranges) {
+      assert.ok(
+        range.end.getTime() <= range.start.getTime(),
+        "if a backwards range survives at all, it must stay backwards/unmatchable, never silently reinterpreted as forward",
+      );
+    }
+  });
+
+  test("a weekly day with NO override still fails closed for a reversed interval (merge path, not just the empty-override-intervals path)", () => {
+    const slots = computeAvailability({
+      ...BASE,
+      dateIso: "2026-09-25",
+      timezone: "Asia/Kolkata",
+      businessHours: [
+        { dayOfWeek: FRIDAY, isClosed: false, intervals: [{ start: "23:59", end: "00:00" }] },
+      ],
+      override: undefined,
+    });
+    assert.deepEqual(slots, []);
+  });
+
+  test("an override that exists but has empty intervals does not resurrect a reversed weekly interval as bookable", () => {
+    const slots = computeAvailability({
+      ...BASE,
+      dateIso: "2026-09-25",
+      timezone: "Asia/Kolkata",
+      businessHours: [
+        { dayOfWeek: FRIDAY, isClosed: false, intervals: [{ start: "23:59", end: "00:00" }] },
+      ],
+      override: { isFullDayClosure: false, intervals: [] },
+    });
+    assert.deepEqual(slots, []);
   });
 });

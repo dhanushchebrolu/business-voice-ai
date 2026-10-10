@@ -12,6 +12,14 @@ import {
   type BusinessHourOverride,
 } from "@/lib/calendar/calendar-service.server";
 import { newCorrelationId, timedStep } from "@/lib/observability/server-fn-diagnostics";
+import {
+  describeInvalidIntervals,
+  describeInvalidOverrideIntervals,
+  describeBusinessHoursWriteError,
+  describeInvalidWeeklyDay,
+  describeInvalidOverride,
+  logInvalidBusinessHoursOnce,
+} from "@/lib/calendar/business-hours-validation";
 
 /**
  * Hospital dashboard calendar — day view + weekly-hours + daily-override
@@ -176,6 +184,17 @@ export const getCalendarDayView = createServerFn({ method: "GET" })
         }
       : undefined;
 
+    // Legacy-invalid rows (e.g. a {"start":"23:59","end":"00:00"} pair
+    // written before the business-hours interval trigger existed) already
+    // fail CLOSED everywhere else below — this only adds a visible,
+    // day-specific explanation instead of leaving staff to wonder why a
+    // day shows no slots. Scoped to the exact weekday/date this view is
+    // for, not a business-wide scan.
+    const dayOfWeek = dayOfWeekInTimezone(data.dateIso, business.timezone);
+    const scheduleConfigWarning =
+      describeInvalidWeeklyDay(weeklyHours.find((d) => d.dayOfWeek === dayOfWeek)) ??
+      describeInvalidOverride(override, data.dateIso);
+
     // Not awaited (pure, synchronous JS) — still wrapped because a
     // malformed business.timezone (e.g. not a real IANA zone) throws a
     // RangeError here, and this step name is what tells that case apart
@@ -277,6 +296,7 @@ export const getCalendarDayView = createServerFn({ method: "GET" })
     return {
       role,
       business: { id: business.id, name: business.name, timezone: business.timezone },
+      scheduleConfigWarning,
       weeklyHours,
       override: overrideRes.data
         ? {
@@ -321,6 +341,15 @@ export const setWeeklyHours = createServerFn({ method: "POST" })
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     await resolveBusiness(supabaseAdmin, organizationId, data.businessId);
 
+    // Mirrors the database trigger's own rule exactly (see that
+    // migration's header comment): a closed day's intervals are never
+    // inspected (the RPC itself overwrites them to [] below regardless),
+    // so this check only runs when the day claims to be open.
+    if (!data.isClosed) {
+      const validationError = describeInvalidIntervals(data.intervals);
+      if (validationError) throw new Error(validationError);
+    }
+
     const { error } = await supabaseAdmin.rpc("set_business_weekly_hours", {
       p_organization_id: organizationId,
       p_business_id: data.businessId,
@@ -328,7 +357,10 @@ export const setWeeklyHours = createServerFn({ method: "POST" })
       p_is_closed: data.isClosed,
       p_intervals: data.isClosed ? [] : data.intervals,
     });
-    if (error) throw error;
+    if (error) {
+      const translated = describeBusinessHoursWriteError(error);
+      throw translated ? new Error(translated) : error;
+    }
     return { ok: true };
   });
 
@@ -376,6 +408,14 @@ export const applyDailyOverride = createServerFn({ method: "POST" })
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const business = await resolveBusiness(supabaseAdmin, organizationId, data.businessId);
 
+    // Same rule as setWeeklyHours above, for override intervals — skipped
+    // entirely for a full-day closure (the RPC overwrites intervals to []
+    // in that case regardless of what was sent).
+    if (!data.isFullDayClosure) {
+      const validationError = describeInvalidOverrideIntervals(data.intervals);
+      if (validationError) throw new Error(validationError);
+    }
+
     const { error } = await supabaseAdmin.rpc("apply_business_schedule_override", {
       p_organization_id: organizationId,
       p_business_id: data.businessId,
@@ -390,7 +430,8 @@ export const applyDailyOverride = createServerFn({ method: "POST" })
           "This would close a slot that already has an active booking. Cancel or reschedule that booking first.",
         );
       }
-      throw error;
+      const translated = describeBusinessHoursWriteError(error);
+      throw translated ? new Error(translated) : error;
     }
     return { ok: true, timezone: business.timezone };
   });

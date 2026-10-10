@@ -48,6 +48,24 @@ describe("app.calendar.tsx — workspace loading/error/empty are distinguished, 
   });
 });
 
+describe("app.calendar.tsx — business-hours interval validation (client-side guard before the server-function write)", () => {
+  test("saveWeeklyDay validates every open-day interval before calling setWeeklyHoursFn, and skips the call on failure", () => {
+    const fnStart = src.indexOf("async function saveWeeklyDay(");
+    const fnEnd = src.indexOf("\n  }", src.indexOf("setWeeklyHoursFn({"));
+    const fnBody = src.slice(fnStart, fnEnd);
+    const guardIdx = fnBody.indexOf("if (!isClosed)");
+    const validateIdx = fnBody.indexOf("describeInvalidInterval(interval)");
+    const callIdx = fnBody.indexOf("setWeeklyHoursFn({");
+    assert.ok(guardIdx > -1 && validateIdx > -1 && callIdx > -1);
+    assert.ok(guardIdx < validateIdx && validateIdx < callIdx);
+    assert.match(fnBody, /toast\.error\(validationError\);\s*\n\s*return;/);
+  });
+
+  test("a day-specific scheduleConfigWarning from the server is rendered as a visible banner", () => {
+    assert.match(src, /view\.scheduleConfigWarning/);
+  });
+});
+
 describe("app.calendar.tsx — the day-view query's error state is distinguished from its loading state", () => {
   test("destructures isError/error/refetch from the day-view query", () => {
     assert.match(

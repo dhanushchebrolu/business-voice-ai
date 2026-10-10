@@ -7,6 +7,10 @@ import { useAuth } from "@/hooks/useAuth";
 import { supabase } from "@/integrations/supabase/client";
 import { workspaceQuery, servicesQuery, faqsQuery, rulesQuery, hoursQuery } from "@/lib/workspace";
 import { getBusinessType, DAYS } from "@/lib/business-types";
+import {
+  describeInvalidInterval,
+  describeBusinessHoursWriteError,
+} from "@/lib/calendar/business-hours-validation";
 import { PageHeader, SectionCard, LoadingState } from "@/components/app/primitives";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -166,10 +170,22 @@ function BusinessPage() {
                       checked={!row?.is_closed}
                       onCheckedChange={async (open) => {
                         if (!row) return;
-                        await supabase
+                        const nextInterval = interval ?? { start: "09:00", end: "19:00" };
+                        if (open) {
+                          const validationError = describeInvalidInterval(nextInterval);
+                          if (validationError) {
+                            toast.error(validationError);
+                            return;
+                          }
+                        }
+                        const { error } = await supabase
                           .from("business_hours")
-                          .update({ is_closed: !open, intervals: open ? [interval ?? { start: "09:00", end: "19:00" }] : [] })
+                          .update({ is_closed: !open, intervals: open ? [nextInterval] : [] })
                           .eq("id", row.id);
+                        if (error) {
+                          toast.error(describeBusinessHoursWriteError(error) ?? error.message);
+                          return;
+                        }
                         refresh();
                       }}
                     />
@@ -186,10 +202,22 @@ function BusinessPage() {
                             onChange={async (e) => {
                               if (!row) return;
                               const base = interval ?? { start: "09:00", end: "19:00" };
-                              await supabase
+                              const nextInterval = { ...base, [key]: e.target.value };
+                              const validationError = describeInvalidInterval(nextInterval);
+                              if (validationError) {
+                                toast.error(validationError);
+                                return;
+                              }
+                              const { error } = await supabase
                                 .from("business_hours")
-                                .update({ intervals: [{ ...base, [key]: e.target.value }] })
+                                .update({ intervals: [nextInterval] })
                                 .eq("id", row.id);
+                              if (error) {
+                                toast.error(
+                                  describeBusinessHoursWriteError(error) ?? error.message,
+                                );
+                                return;
+                              }
                               refresh();
                             }}
                           />
