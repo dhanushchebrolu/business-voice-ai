@@ -60,6 +60,14 @@ function makeFakeSupabase(script: { result: unknown }[]) {
       limit: (...a: unknown[]) => Promise.resolve(consume(table, "limit", ...a)),
       maybeSingle: () => Promise.resolve(consume(table, "maybeSingle")),
       single: () => Promise.resolve(consume(table, "single")),
+      // The real supabase-js builder is itself awaitable at any point, no
+      // terminal .single()/.maybeSingle()/.limit() required — e.g. a
+      // guarded confirm UPDATE in this codebase is written as
+      // `.update(p).eq("id", x).eq("status", y).select("id, ...")` and
+      // then destructured directly with `await`. This makes the fake the
+      // same way, consuming the next scripted response.
+      then: (onFulfilled: (v: unknown) => unknown, onRejected?: (r: unknown) => unknown) =>
+        Promise.resolve(consume(table, "then")).then(onFulfilled, onRejected),
     };
     return self;
   }
@@ -150,15 +158,17 @@ describe("createBooking", () => {
       }, // create_booking_atomic RPC
       {
         result: {
-          data: {
-            id: "booking-1",
-            status: "CONFIRMED",
-            start_at: BASE_INPUT.startIso,
-            end_at: BASE_INPUT.endIso,
-            timezone: "Asia/Kolkata",
-            google_event_id: "google-event-1",
-            contact_id: "contact-1",
-          },
+          data: [
+            {
+              id: "booking-1",
+              status: "CONFIRMED",
+              start_at: BASE_INPUT.startIso,
+              end_at: BASE_INPUT.endIso,
+              timezone: "Asia/Kolkata",
+              google_event_id: "google-event-1",
+              contact_id: "contact-1",
+            },
+          ],
           error: null,
         },
       }, // confirm update
@@ -302,7 +312,7 @@ describe("createBooking", () => {
           error: null,
         },
       }, // create_booking_atomic RPC
-      { result: { error: null } }, // reconciliation update (no .single() chained on this path in the real code — see below)
+      { result: { data: [{ id: "booking-1" }], error: null } }, // reconciliation update
     ]);
     const provider = fakeProvider({
       createEvent: async () => {
@@ -324,6 +334,155 @@ describe("createBooking", () => {
     );
     assert.ok(reconcileUpdate, "expected a CALENDAR_SYNC_FAILED reconciliation update");
   });
+});
+
+/** Polls (microtask/macrotask ticks only, no real delay) until `predicate()` is true. */
+async function waitUntil(predicate: () => boolean, maxTicks = 200): Promise<void> {
+  for (let i = 0; i < maxTicks; i++) {
+    if (predicate()) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error("test bug: waitUntil exceeded maxTicks without predicate becoming true");
+}
+
+describe("createBooking — the confirmation race (regression)", () => {
+  test(
+    "a concurrent cancellation that lands while the Google Calendar event is still being created: " +
+      "the booking is never revived to CONFIRMED and the now-orphaned event is deleted",
+    async () => {
+      const { client, calls } = makeFakeSupabase([
+        { result: { data: { id: "contact-1" }, error: null } }, // contact upsert
+        {
+          result: {
+            data: {
+              id: "booking-1",
+              status: "PENDING_CONFIRMATION",
+              start_at: BASE_INPUT.startIso,
+              end_at: BASE_INPUT.endIso,
+              timezone: "Asia/Kolkata",
+              google_event_id: null,
+              contact_id: "contact-1",
+            },
+            error: null,
+          },
+        }, // create_booking_atomic RPC
+        // The confirm UPDATE's own `.eq("status", "PENDING_CONFIRMATION")`
+        // guard matches zero rows — standing in for a concurrent
+        // cancel_booking_atomic call having already cancelled this exact
+        // booking while the paused createEvent() call below was in flight.
+        { result: { data: [], error: null } },
+      ]);
+
+      let createEventCalled = false;
+      let resolveGate!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        resolveGate = resolve;
+      });
+      const deleteEventCalls: { calendarId: string; eventId: string }[] = [];
+      const provider = fakeProvider({
+        createEvent: async (input) => {
+          createEventCalled = true;
+          await gate;
+          return {
+            id: "google-event-99",
+            title: input.title,
+            description: input.description,
+            start: input.startIso,
+            end: input.endIso,
+            status: "confirmed",
+          };
+        },
+        deleteEvent: async (calendarId, eventId) => {
+          deleteEventCalls.push({ calendarId, eventId });
+        },
+      });
+
+      const resultPromise = createBooking(client, provider, BASE_INPUT);
+      await waitUntil(() => createEventCalled);
+      resolveGate();
+
+      await assert.rejects(
+        resultPromise,
+        /cancelled before its calendar event could be confirmed/i,
+      );
+
+      assert.deepEqual(deleteEventCalls, [
+        { calendarId: BASE_INPUT.calendarId, eventId: "google-event-99" },
+      ]);
+
+      const bookingUpdateCalls = calls.filter(
+        (c) => c.table === "bookings" && c.method === "update",
+      );
+      assert.equal(
+        bookingUpdateCalls.length,
+        1,
+        "exactly one guarded confirm UPDATE must have been attempted — never a second write reviving the booking",
+      );
+      const eqCalls = calls.filter((c) => c.table === "bookings" && c.method === "eq");
+      assert.ok(
+        eqCalls.some((c) => c.args[0] === "status" && c.args[1] === "PENDING_CONFIRMATION"),
+        'expected the confirm UPDATE to include .eq("status", "PENDING_CONFIRMATION")',
+      );
+    },
+  );
+
+  test(
+    "a concurrent race combined with a cleanup failure: the error is surfaced for reconciliation " +
+      "and the booking is never revived",
+    async () => {
+      const { client, calls } = makeFakeSupabase([
+        { result: { data: { id: "contact-1" }, error: null } },
+        {
+          result: {
+            data: {
+              id: "booking-1",
+              status: "PENDING_CONFIRMATION",
+              start_at: BASE_INPUT.startIso,
+              end_at: BASE_INPUT.endIso,
+              timezone: "Asia/Kolkata",
+              google_event_id: null,
+              contact_id: "contact-1",
+            },
+            error: null,
+          },
+        },
+        { result: { data: [], error: null } },
+      ]);
+
+      const provider = fakeProvider({
+        createEvent: async (input) => ({
+          id: "google-event-99",
+          title: input.title,
+          description: input.description,
+          start: input.startIso,
+          end: input.endIso,
+          status: "confirmed",
+        }),
+        deleteEvent: async () => {
+          throw new CalendarProviderError(
+            "CALENDAR_ACCESS_DENIED",
+            "ClickAI no longer has permission to access this Google Calendar.",
+          );
+        },
+      });
+
+      await assert.rejects(createBooking(client, provider, BASE_INPUT), (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, /lost the confirmation race/i);
+        assert.match(err.message, /manual.*reconciliation/i);
+        return true;
+      });
+
+      const bookingUpdateCalls = calls.filter(
+        (c) => c.table === "bookings" && c.method === "update",
+      );
+      assert.equal(
+        bookingUpdateCalls.length,
+        1,
+        "the failed cleanup must never fall back to writing anything else onto the booking row",
+      );
+    },
+  );
 });
 
 /**
@@ -537,7 +696,7 @@ describe("rescheduleBooking", () => {
           error: null,
         },
       }, // reschedule_booking_atomic RPC (already committed in the DB)
-      { result: { data: null, error: null } }, // the reconciling .update() to CALENDAR_SYNC_FAILED
+      { result: { data: [{ id: "booking-1" }], error: null } }, // the reconciling .update() to CALENDAR_SYNC_FAILED
     ]);
     const provider = fakeProvider({
       updateEvent: async () => {
@@ -560,7 +719,62 @@ describe("rescheduleBooking", () => {
       status: "CALENDAR_SYNC_FAILED",
       metadata: { calendar_sync_error: "Google is temporarily down." },
     });
+    const eqCalls = calls.filter((c) => c.table === "bookings" && c.method === "eq");
+    assert.ok(
+      eqCalls.some((c) => c.args[0] === "status" && c.args[1] === "RESCHEDULED"),
+      'expected the reconciling CALENDAR_SYNC_FAILED update to include .eq("status", "RESCHEDULED")',
+    );
   });
+
+  test(
+    "a concurrent cancellation that lands while the Google Calendar updateEvent() call is in flight: " +
+      "the booking is left CANCELLED, not overwritten to CALENDAR_SYNC_FAILED",
+    async () => {
+      const { client, calls } = makeFakeSupabase([
+        {
+          result: {
+            data: {
+              id: "booking-1",
+              status: "RESCHEDULED",
+              start_at: "2026-09-26T10:30:00.000Z",
+              end_at: "2026-09-26T11:00:00.000Z",
+              timezone: "Asia/Kolkata",
+              google_event_id: "google-event-1",
+              contact_id: null,
+            },
+            error: null,
+          },
+        }, // reschedule_booking_atomic RPC (already committed in the DB)
+        // The guarded CALENDAR_SYNC_FAILED write's own
+        // `.eq("status", "RESCHEDULED")` matches zero rows — standing in
+        // for a concurrent cancel_booking_atomic call having already
+        // cancelled this exact booking while updateEvent() was in flight.
+        { result: { data: [], error: null } },
+      ]);
+      const provider = fakeProvider({
+        updateEvent: async () => {
+          throw new CalendarProviderError("CALENDAR_UNAVAILABLE", "Google is temporarily down.");
+        },
+      });
+
+      await assert.rejects(() =>
+        rescheduleBooking(client, provider, {
+          organizationId: "org-1",
+          bookingId: "booking-1",
+          calendarId: "clinic-cal",
+          newStartIso: "2026-09-26T10:30:00.000Z",
+          newEndIso: "2026-09-26T11:00:00.000Z",
+        }),
+      );
+
+      const updateCalls = calls.filter((c) => c.table === "bookings" && c.method === "update");
+      assert.equal(
+        updateCalls.length,
+        1,
+        "exactly one guarded CALENDAR_SYNC_FAILED attempt must have been made — the lost race must never produce a second write",
+      );
+    },
+  );
 });
 
 describe("cancelBooking", () => {

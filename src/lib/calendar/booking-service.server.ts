@@ -130,6 +130,45 @@ function intervalsOverlap(aStart: string, aEnd: string, bStart: string, bEnd: st
 }
 
 /**
+ * Deletes a calendar event this exact call just created, after losing the
+ * race to confirm the booking it belongs to (same pattern/rationale as
+ * payment-calendar-consumer.server.ts's own cleanupOrphanedEvent — see
+ * createBooking()'s doc comment below for the specific race this closes).
+ * Ownership/identity are verified by construction: `eventId`/`calendarId`
+ * are exactly what this same invocation's own createEvent() call just
+ * used, never a separately-read value. "Already gone" (CALENDAR_NOT_FOUND)
+ * is treated as success, matching cancelBooking()'s own convention a few
+ * lines down. Any other cleanup failure is a genuine, possibly-permanent
+ * orphan: logged (message only, never a raw provider error/headers, which
+ * could carry tokens) and re-thrown so the caller sees a reconciliation
+ * failure rather than a silent success.
+ */
+async function cleanupOrphanedEvent(
+  provider: CalendarProvider,
+  calendarId: string,
+  eventId: string,
+  bookingId: string,
+): Promise<void> {
+  try {
+    await provider.deleteEvent(calendarId, eventId);
+  } catch (err) {
+    if (err instanceof CalendarProviderError && err.code === "CALENDAR_NOT_FOUND") return;
+    const cleanupMessage = err instanceof Error ? err.message : "Unknown calendar cleanup error.";
+    console.error("booking_service:orphaned_event_cleanup_failed", {
+      bookingId,
+      calendarId,
+      eventId,
+      cleanupError: cleanupMessage,
+    });
+    throw new Error(
+      `Booking ${bookingId} lost the confirmation race and its calendar event ${eventId} ` +
+        `(calendar ${calendarId}) could not be cleaned up: ${cleanupMessage}. Manual ` +
+        `reconciliation required — the booking itself was left untouched.`,
+    );
+  }
+}
+
+/**
  * Creates a booking. Sequence: insert the booking row first
  * (PENDING_CONFIRMATION), then create the Google event, then mark
  * CONFIRMED only once the event exists — never the reverse, which would
@@ -162,6 +201,21 @@ function intervalsOverlap(aStart: string, aEnd: string, bStart: string, bEnd: st
  * that recheck and the createEvent call a few lines later: closing that
  * completely would require Google itself to offer an atomic
  * check-and-create primitive, which it does not.
+ *
+ * A second, different race (found by staging-readiness review, fixed
+ * here): the confirm UPDATE after createEvent() used to be unconditional
+ * (`.eq("id", booking.id)` only). cancel_booking_atomic's own guard list
+ * does not exclude PENDING_CONFIRMATION, so a concurrent staff
+ * cancellation of this exact booking — landing while the Google Calendar
+ * API round trip above is in flight — used to be silently overwritten
+ * back to CONFIRMED once that round trip finished, reviving an
+ * already-cancelled booking with a freshly created (and now orphaned)
+ * calendar event. The confirm UPDATE below is now conditional on the
+ * booking still being PENDING_CONFIRMATION; a write that matches zero
+ * rows means the race was lost, not that confirmation succeeded, and the
+ * event already created for it is cleaned up via cleanupOrphanedEvent()
+ * rather than left dangling — same pattern as payment-calendar-consumer.
+ * server.ts's handlePaymentCapturedForCalendar().
  */
 export async function createBooking(
   supabaseAdmin: Client,
@@ -261,8 +315,9 @@ export async function createBooking(
     .filter(Boolean)
     .join("\n");
 
+  let event;
   try {
-    const event = await provider.createEvent({
+    event = await provider.createEvent({
       calendarId: input.calendarId,
       title,
       description,
@@ -270,26 +325,62 @@ export async function createBooking(
       endIso: input.endIso,
       timezone: input.timezone,
     });
-    const { data: confirmed, error: confirmError } = await supabaseAdmin
-      .from("bookings")
-      .update({ status: "CONFIRMED", google_event_id: event.id })
-      .eq("id", booking.id)
-      .select("id, status, start_at, end_at, timezone, google_event_id, contact_id")
-      .single();
-    if (confirmError) throw confirmError;
-    return toRecord(confirmed);
   } catch (err) {
     // Reconciliation (spec section 69): the booking already exists and
     // must not be silently lost. Mark it CALENDAR_SYNC_FAILED rather than
-    // leaving it PENDING_CONFIRMATION forever or deleting it.
+    // leaving it PENDING_CONFIRMATION forever or deleting it — but only if
+    // the booking is still the one we created: guarded so a booking a
+    // concurrent cancellation already moved off PENDING_CONFIRMATION in
+    // this same window is never overwritten into a misleading "sync
+    // failed" state. No event was ever created here, so there's nothing
+    // to clean up calendar-side.
     const message =
       err instanceof CalendarProviderError ? err.message : "Failed to create the calendar event.";
-    await supabaseAdmin
+    const { data: failedRows, error: failError } = await supabaseAdmin
       .from("bookings")
       .update({ status: "CALENDAR_SYNC_FAILED", metadata: { calendar_sync_error: message } })
-      .eq("id", booking.id);
+      .eq("id", booking.id)
+      .eq("status", "PENDING_CONFIRMATION")
+      .select("id");
+    if (failError) throw failError;
+    if (!failedRows || failedRows.length === 0) {
+      console.warn("booking_service:lost_race_before_event_creation", { bookingId: booking.id });
+    }
     throw err;
   }
+
+  // The event now exists provider-side. From here on, every outcome must
+  // either durably link it to this booking (CONFIRMED) or clean it up —
+  // never leave it created with nothing in our own DB referencing it.
+  const { data: confirmedRows, error: confirmError } = await supabaseAdmin
+    .from("bookings")
+    .update({ status: "CONFIRMED", google_event_id: event.id })
+    .eq("id", booking.id)
+    .eq("status", "PENDING_CONFIRMATION")
+    .select("id, status, start_at, end_at, timezone, google_event_id, contact_id");
+
+  if (!confirmError && confirmedRows && confirmedRows.length > 0) {
+    return toRecord(confirmedRows[0]!);
+  }
+
+  // Either a genuine DB error on the UPDATE itself, or we lost the race: a
+  // concurrent cancellation moved the booking off PENDING_CONFIRMATION
+  // between the RPC's own PENDING_CONFIRMATION result and this UPDATE.
+  // Either way, the booking's own status belongs to whichever process
+  // already decided it; this function must never touch it again. What it
+  // DOES own is the event it just created — clean that up so it never
+  // becomes an untracked orphan on the calendar.
+  await cleanupOrphanedEvent(provider, input.calendarId, event.id, booking.id);
+  if (confirmError) throw confirmError;
+  // A clean, successful cleanup after losing the race still means this
+  // call cannot return a confirmed booking — the caller asked to create
+  // one and it was cancelled out from under it. None of BookingError's
+  // existing codes describe this (it isn't an availability/input/payment
+  // problem), so this is a plain Error, same convention this module
+  // already uses for its other non-BookingError edge cases; callers that
+  // only branch on BookingError already fall back safely for any other
+  // thrown error (see calendar-tools.server.ts's mapToolError).
+  throw new Error("This booking was cancelled before its calendar event could be confirmed.");
 }
 
 export interface RescheduleBookingInput {
@@ -358,13 +449,26 @@ export async function rescheduleBooking(
     } catch (err) {
       // The reschedule already committed in the database — reconcile
       // rather than silently lose track of the mismatch (same policy as
-      // createBooking()'s own CALENDAR_SYNC_FAILED handling below).
+      // createBooking()'s own CALENDAR_SYNC_FAILED handling below). Guarded
+      // on the booking still being RESCHEDULED (the exact status the RPC
+      // above just set): a concurrent cancel_booking_atomic call on this
+      // same booking, landing while the Google Calendar updateEvent() round
+      // trip is in flight, must never have its CANCELLED result overwritten
+      // back into a misleading "sync failed" state.
       const message =
         err instanceof CalendarProviderError ? err.message : "Failed to update the calendar event.";
-      await supabaseAdmin
+      const { data: failedRows, error: failError } = await supabaseAdmin
         .from("bookings")
         .update({ status: "CALENDAR_SYNC_FAILED", metadata: { calendar_sync_error: message } })
-        .eq("id", booking.id);
+        .eq("id", booking.id)
+        .eq("status", "RESCHEDULED")
+        .select("id");
+      if (failError) throw failError;
+      if (!failedRows || failedRows.length === 0) {
+        console.warn("booking_service:reschedule_lost_race_before_sync_failed_write", {
+          bookingId: booking.id,
+        });
+      }
       throw err;
     }
   }
