@@ -25,6 +25,14 @@ export const Route = createFileRoute("/admin/settings")({
   component: AdminSettings,
 });
 
+// supabase/config.toml's project_id — the Supabase project this repo is
+// linked to. Not a secret (a project ref is a public identifier, visible
+// in any request to it); comparing it against what the deployed Worker's
+// SUPABASE_URL actually resolves to (readiness.supabaseSchema.projectRef)
+// is a safe way to confirm the Worker is pointed at the intended project
+// without ever reading or printing SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY.
+const EXPECTED_SUPABASE_PROJECT_REF = "eorazvlmqwunmhwviocn";
+
 const NUMERIC_SETTINGS: {
   key: string;
   label: string;
@@ -300,6 +308,46 @@ function AdminSettings() {
                   connection
                 </li>
                 <li>{readiness.sarvamMappedAgentCount} agent(s) mapped to a Sarvam app</li>
+              </ul>
+            </div>
+            <div>
+              <p className="mb-2 text-xs font-medium uppercase text-muted-foreground">
+                Database schema
+              </p>
+              <ul className="space-y-1 text-sm text-muted-foreground">
+                <li className="flex items-center justify-between gap-3">
+                  <span>Supabase project ref</span>
+                  <span className="font-mono text-xs">
+                    {readiness.supabaseSchema.projectRef ?? "unknown (SUPABASE_URL unset)"}
+                    {readiness.supabaseSchema.projectRef &&
+                    readiness.supabaseSchema.projectRef !== EXPECTED_SUPABASE_PROJECT_REF
+                      ? ` (expected ${EXPECTED_SUPABASE_PROJECT_REF})`
+                      : ""}
+                  </span>
+                </li>
+                <li className="flex items-center justify-between gap-3">
+                  <span>public.bookings reachable via PostgREST</span>
+                  <StatusPill
+                    tone={readiness.supabaseSchema.bookingsTableReachable ? "live" : "error"}
+                  >
+                    {readiness.supabaseSchema.bookingsTableReachable
+                      ? "Reachable"
+                      : (readiness.supabaseSchema.bookingsTableErrorCode ?? "Error")}
+                  </StatusPill>
+                </li>
+                {!readiness.supabaseSchema.bookingsTableReachable && (
+                  <li className="text-xs">
+                    {readiness.supabaseSchema.bookingsTableErrorMessage}
+                    {readiness.supabaseSchema.bookingsTableErrorCode === "PGRST205" && (
+                      <>
+                        {" — "}
+                        if the project ref above matches, this means the bookings migration was
+                        never applied here or PostgREST's schema cache needs a reload; it does not
+                        by itself tell you which.
+                      </>
+                    )}
+                  </li>
+                )}
               </ul>
             </div>
             <div className="border-t border-border pt-3">
