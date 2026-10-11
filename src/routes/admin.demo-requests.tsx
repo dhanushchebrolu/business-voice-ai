@@ -31,7 +31,7 @@ import {
 
 export const Route = createFileRoute("/admin/demo-requests")({
   head: () => ({
-    meta: [{ title: "Demo requests — Klyro Control" }],
+    meta: [{ title: "Demo requests — ClickAI Control" }],
   }),
   component: AdminDemoRequests,
 });

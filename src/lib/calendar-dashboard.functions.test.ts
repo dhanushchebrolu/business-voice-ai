@@ -166,6 +166,33 @@ describe("day-view slot state reuses the one precedence resolver, never a second
     );
   });
 
+  test("fetch_bookings has no PGRST205 (or any other) carve-out — unlike business_hour_overrides/google_calendar_connections, a missing/uncached bookings table must always throw, never be silently treated as 'no bookings'", () => {
+    // Production regression this guards against: "Could not load this —
+    // step 'fetch_bookings' failed (table 'public.bookings' not in schema
+    // cache, code PGRST205, ref ...)." Unlike google_calendar_connections
+    // (an optional, historical integration) and business_hour_overrides
+    // (core, but with a loud-warning fallback the UI can still render
+    // around), bookings has no legitimate "doesn't exist yet" state once a
+    // business has been provisioned — it's the table every confirmed
+    // appointment lives in. A PGRST205 here means the deployment's schema
+    // is missing required migrations or PostgREST's cache is stale, and
+    // treating that as "zero bookings" would silently show open slots that
+    // are actually taken, letting the voice agent/dashboard double-book.
+    const fnStart = code.indexOf('timedStep("fetch_bookings"');
+    const fnEnd = code.indexOf("}),", fnStart);
+    const fnBody = code.slice(fnStart, fnEnd);
+    assert.doesNotMatch(
+      fnBody,
+      /PGRST205/,
+      "fetch_bookings must never special-case PGRST205 — a schema-cache/missing-table failure on this core table must surface as a real, loud error",
+    );
+    assert.match(
+      fnBody,
+      /if \(res\.error\) throw res\.error;/,
+      "fetch_bookings must unconditionally throw any query error, including PGRST205 (table not in schema cache)",
+    );
+  });
+
   test("fetch_calendar_sync_conflicts is gated behind `connection ?` — a business with no Google Calendar connection can never have any conflict rows (calendar_sync_conflicts.calendar_connection_id is NOT NULL with a foreign key to google_calendar_connections), so this must not run unconditionally, and must not be in the FIRST Promise.all (before connectionRes is even known)", () => {
     const stepIdx = code.indexOf('timedStep("fetch_calendar_sync_conflicts"');
     assert.ok(stepIdx > -1, "expected a fetch_calendar_sync_conflicts step to still exist");
