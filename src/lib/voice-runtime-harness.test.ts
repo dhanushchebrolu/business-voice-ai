@@ -88,6 +88,23 @@ function newCallId(): string {
   return `harness-call-${crypto.randomUUID()}`;
 }
 
+/**
+ * "Tomorrow" in the SAME UTC terms the real runtime resolves it in (this
+ * harness uses the real system clock throughout — "resolveBusinessTimezone
+ * falls back to UTC with no real DB in this harness", per BOOKING_START_ISO's
+ * own comment — never a mocked/frozen one). A handful of tests below
+ * exercise the caller literally saying "tomorrow" and need to assert
+ * against whatever date that resolves to on the day the suite actually
+ * runs — they used to hardcode that date as a string ("2026-10-09"), which
+ * is only correct on the one day it was written against and silently rots
+ * on every other day (exactly the class of failure this helper replaces).
+ */
+function tomorrowIso(): string {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
 describe("1. Session creation", () => {
   test("startRuntimeSession returns a handle that reaches 'listening' after connecting and greeting", async () => {
     const h = createHarness();
@@ -1222,7 +1239,7 @@ describe("26. Calendar availability check (production incident: the agent went s
     await drain(40);
 
     const availabilityCall = h.tools.calls.find((c) => c.name === "check_calendar_availability");
-    assert.equal(availabilityCall?.input["dateIso"], "2026-10-09");
+    assert.equal(availabilityCall?.input["dateIso"], tomorrowIso());
     assert.equal(typeof availabilityCall?.input["durationMinutes"], "number");
 
     await terminateRuntimeSession(callId, "test cleanup");
@@ -1733,20 +1750,21 @@ describe("27. Open and approximate-period availability requests (production inci
     await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
     makeTtsFlushCatchUp(h.tts)();
 
+    const tomorrow = tomorrowIso();
     h.tools.setNextResult("check_calendar_availability", {
       content: JSON.stringify({
         success: true,
-        data: { slots: [{ start: "2026-10-09T09:00:00.000Z", end: "2026-10-09T09:30:00.000Z" }] },
+        data: { slots: [{ start: `${tomorrow}T09:00:00.000Z`, end: `${tomorrow}T09:30:00.000Z` }] },
       }),
     });
-    h.llm.setNextReply(openAvailabilityReply({ preferred_date: "2026-10-09" }));
+    h.llm.setNextReply(openAvailabilityReply({ preferred_date: tomorrow }));
     h.llm.setDelay(0);
 
     h.stt.speakUtterance("What times are available tomorrow?");
     await drain(40);
 
     const availabilityCall = h.tools.calls.find((c) => c.name === "check_calendar_availability");
-    assert.equal(availabilityCall?.input["dateIso"], "2026-10-09");
+    assert.equal(availabilityCall?.input["dateIso"], tomorrow);
 
     await terminateRuntimeSession(callId, "test cleanup");
   });
@@ -2926,7 +2944,7 @@ describe("33. State-aware acknowledgements (Fix #2 — deterministic, state-driv
 
     const spokenBefore = h.tts.sentTexts.length;
     h.llm.setNextReply(
-      'What time works for you?\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":null,"email":null,"preferred_date":"2026-10-09","preferred_time":null,"preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
+      `What time works for you?\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":null,"email":null,"preferred_date":"${tomorrowIso()}","preferred_time":null,"preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>`,
     );
     h.stt.emit({
       type: "final_transcript",
@@ -3375,16 +3393,19 @@ describe("35. Phone/email are never truncated end-to-end, even when the model's 
     // known, this is now fully decidable before the LLM is even called
     // (see tryEarlyDeterministicDispatch): an explicit booking
     // confirmation plus an explicit date/time against an already-complete
-    // slot. The real resolved "tomorrow" (2026-10-09, one day after this
-    // suite's real run date) is what actually gets requested — never the
-    // marker's own date — so the queued slot below is for that real date,
-    // not BOOKING_START_ISO's 2026-10-08. No marker reply is queued for
-    // this turn: the LLM is never consulted for it at all.
+    // slot. The real resolved "tomorrow" (tomorrowIso(), computed fresh
+    // against whatever day this suite actually runs) is what actually gets
+    // requested — never the marker's own date — so the queued slot below
+    // is for that real date, not BOOKING_START_ISO's 2026-10-08. No marker
+    // reply is queued for this turn: the LLM is never consulted for it at
+    // all.
     h.tools.setNextResult("check_calendar_availability", {
       content: JSON.stringify({
         success: true,
         data: {
-          slots: [{ start: "2026-10-09T15:00:00.000Z", end: "2026-10-09T15:30:00.000Z" }],
+          slots: [
+            { start: `${tomorrowIso()}T15:00:00.000Z`, end: `${tomorrowIso()}T15:30:00.000Z` },
+          ],
         },
       }),
     });
@@ -3428,13 +3449,15 @@ describe("35. Phone/email are never truncated end-to-end, even when the model's 
 
     // Same as the phone test above: this turn is now fully decidable
     // before the LLM is called, against the REAL resolved "tomorrow"
-    // (2026-10-09) — never the marker's own date, which is never
+    // (tomorrowIso()) — never the marker's own date, which is never
     // consulted for this turn at all.
     h.tools.setNextResult("check_calendar_availability", {
       content: JSON.stringify({
         success: true,
         data: {
-          slots: [{ start: "2026-10-09T15:00:00.000Z", end: "2026-10-09T15:30:00.000Z" }],
+          slots: [
+            { start: `${tomorrowIso()}T15:00:00.000Z`, end: `${tomorrowIso()}T15:30:00.000Z` },
+          ],
         },
       }),
     });

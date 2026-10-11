@@ -303,6 +303,109 @@ describe("tenant/connection gating — after permission passes", () => {
       ]);
     }
   });
+
+  test("check_calendar_availability succeeds from ClickAI's own database alone when google_calendar_connections itself is unavailable (PGRST205 — table not in schema cache on this deployment), the exact production regression this test guards against: resolveCalendarContext used to throw here, uncaught by check_calendar_availability's own try/catch, misdiagnosed upstream as an LLM error and giving the caller a generic fallback instead of a real availability answer", async () => {
+    const client = makeThenableFakeSupabase({
+      agent_configs: [{ result: { data: AGENT_ROW_ALL_PERMITTED, error: null } }],
+      businesses: [
+        {
+          result: {
+            data: {
+              id: "biz-1",
+              organization_id: "org-1",
+              name: "ABC Clinic",
+              timezone: "Asia/Kolkata",
+            },
+            error: null,
+          },
+        },
+      ],
+      google_calendar_connections: [
+        {
+          result: {
+            data: null,
+            error: {
+              code: "PGRST205",
+              message:
+                "Could not find the table 'public.google_calendar_connections' in the schema cache",
+            },
+          },
+        },
+      ],
+      business_hours: [
+        {
+          result: {
+            data: [
+              { day_of_week: 5, is_closed: false, intervals: [{ start: "09:00", end: "11:00" }] },
+            ],
+            error: null,
+          },
+        },
+      ],
+      bookings: [{ result: { data: [], error: null } }],
+      business_hour_overrides: [{ result: { data: null, error: null } }],
+    });
+    const result = await check_calendar_availability(client, {
+      organizationId: "org-1",
+      businessId: "biz-1",
+      dateIso: "2026-11-20",
+      durationMinutes: 30,
+    });
+    assert.equal(result.success, true);
+    if (result.success) {
+      const starts = result.data.slots.map((s) => s.start);
+      assert.deepEqual(starts, [
+        "2026-11-20T03:30:00.000Z",
+        "2026-11-20T04:00:00.000Z",
+        "2026-11-20T04:30:00.000Z",
+        "2026-11-20T05:00:00.000Z",
+      ]);
+    }
+  });
+
+  test("resolveCalendarContext still throws every OTHER error on the google_calendar_connections query unchanged — the PGRST205 carve-out must not widen into 'any connection-lookup error means no connection'", async () => {
+    const client = makeThenableFakeSupabase({
+      agent_configs: [{ result: { data: AGENT_ROW_ALL_PERMITTED, error: null } }],
+      businesses: [
+        {
+          result: {
+            data: {
+              id: "biz-1",
+              organization_id: "org-1",
+              name: "ABC Clinic",
+              timezone: "Asia/Kolkata",
+            },
+            error: null,
+          },
+        },
+      ],
+      google_calendar_connections: [
+        {
+          result: {
+            data: null,
+            error: {
+              code: "42501",
+              message: "permission denied for table google_calendar_connections",
+            },
+          },
+        },
+      ],
+    });
+    await assert.rejects(
+      () =>
+        check_calendar_availability(client, {
+          organizationId: "org-1",
+          businessId: "biz-1",
+          dateIso: "2026-11-20",
+          durationMinutes: 30,
+        }),
+      (err: unknown) => {
+        assert.equal((err as { code?: string }).code, "42501");
+        assert.match((err as { message: string }).message, /permission denied/);
+        return true;
+      },
+    );
+  });
 });
 
 const CRYPTO_KEY = "GOOGLE_CALENDAR_CREDENTIAL_ENCRYPTION_KEY";

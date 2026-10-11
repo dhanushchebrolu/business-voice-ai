@@ -119,7 +119,43 @@ export async function resolveCalendarContext(
     .eq("business_id", businessId)
     .eq("provider", "google")
     .maybeSingle();
-  if (connectionError) throw connectionError;
+  // PGRST205 ("table not in schema cache") on this one query must not
+  // throw past this function — it is the single biggest reachability gap
+  // found reviewing this deployment: resolveCalendarContext is called,
+  // with NO enclosing try/catch around the call itself, by every voice
+  // tool (check_calendar_availability, create_calendar_event,
+  // update_calendar_event, cancel_calendar_event) and by
+  // create_payment_required_booking. A thrown error here propagates
+  // uncaught through executeAiTool -> executeToolViaRegistry ->
+  // attemptAvailabilityCheck/attemptBooking's own
+  // `.catch(timeoutToolResult)` in voice-runtime.server.ts, which
+  // explicitly RETHROWS anything that is not a ToolTimeoutError (see its
+  // own doc comment — "this must never mask a genuine bug as a
+  // timeout"), all the way up to handleUserUtterance's top-level catch.
+  // That catch DOES still speak an honest, non-fabricating fallback
+  // ("something went wrong on my end") rather than going silent — but it
+  // logs the failure as `llm_unexpected_error`/`llm_error`, misdiagnosing
+  // a database/schema problem as an LLM problem, and gives the caller the
+  // generic fallback instead of the specific, better calendarErrorFacts/
+  // calendarErrorFallback messaging ("the calendar isn't connected right
+  // now... someone will follow up") this codebase already has for
+  // structured tool failures — and it means every single availability
+  // check or booking attempt for the rest of the call fails identically,
+  // not just one unlucky turn. Exactly the same carve-out already applied
+  // to calendar-dashboard.functions.ts's fetch_google_calendar_connection
+  // (same table, same optional-feature reasoning) — never a broad
+  // try/catch, and any OTHER error (RLS/permission failure, malformed
+  // query, network error) still throws unchanged below.
+  if (connectionError) {
+    if (connectionError.code === "PGRST205") {
+      console.warn("calendar_tools:google_calendar_connections_unavailable", {
+        organizationId,
+        businessId,
+      });
+    } else {
+      throw connectionError;
+    }
+  }
   const hasUsableConnection = Boolean(
     connection && connection.status === "CONNECTED" && connection.calendar_id,
   );
