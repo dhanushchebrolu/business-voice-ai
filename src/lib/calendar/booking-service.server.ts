@@ -19,6 +19,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import type { CalendarProvider } from "./calendar-provider.ts";
 import { CalendarProviderError } from "./calendar-provider.ts";
+import { normalizePhoneNumber } from "../phone-number.ts";
 
 type Client = SupabaseClient<Database>;
 
@@ -29,7 +30,8 @@ export class BookingError extends Error {
     | "INVALID_INPUT"
     | "SLOT_OUTSIDE_SCHEDULE"
     | "NOT_RESCHEDULABLE"
-    | "PAYMENT_PENDING";
+    | "PAYMENT_PENDING"
+    | "INVALID_PHONE";
   constructor(message: string, code: BookingError["code"]) {
     super(message);
     this.code = code;
@@ -64,6 +66,34 @@ function toRecord(row: {
     googleEventId: row.google_event_id,
     contactId: row.contact_id,
   };
+}
+
+/**
+ * Normalizes the customer's phone to E.164 before it reaches the database.
+ * contacts.phone is CHECK-constrained to E.164, and resolveContactId below
+ * upserts into it before the booking RPC runs — a raw "9876543210" (how the
+ * voice runtime and the AI tool path both used to pass a spoken number)
+ * failed that constraint, so the whole booking aborted and nothing was
+ * written. A national-format number is only interpreted using the
+ * business's own country (`phoneCountry`, from businesses.country) — never
+ * a blind +91. A number that cannot be normalized is rejected up front as
+ * INVALID_PHONE (a targeted, recoverable error the caller can be asked to
+ * fix) rather than as an opaque database error. Absent stays absent.
+ */
+function normalizePhoneInput<
+  T extends { customerPhone?: string | undefined; phoneCountry?: string | null | undefined },
+>(input: T): T {
+  if (input.customerPhone === undefined) return input;
+  const result = normalizePhoneNumber(input.customerPhone, input.phoneCountry);
+  if (!result.ok) {
+    throw new BookingError(
+      result.reason === "country_code_required"
+        ? "Please give the phone number with its country code."
+        : "That phone number doesn't look valid.",
+      "INVALID_PHONE",
+    );
+  }
+  return { ...input, customerPhone: result.e164 };
 }
 
 async function resolveContactId(
@@ -120,6 +150,8 @@ export interface CreateBookingInput {
   idempotencyKey?: string | undefined;
   notes?: string | undefined;
   businessName: string; // for the Google event description
+  /** The business's country (businesses.country) — how a phone number given without a country code is interpreted. Unknown means only international-format numbers are accepted. */
+  phoneCountry?: string | null | undefined;
 }
 
 /** Proper interval overlap — see calendar-service.server.ts's own `overlaps` for why this, not an exact-start comparison. */
@@ -232,11 +264,12 @@ async function cleanupOrphanedEvent(
 export async function createBooking(
   supabaseAdmin: Client,
   provider: CalendarProvider | null,
-  input: CreateBookingInput,
+  rawInput: CreateBookingInput,
 ): Promise<BookingRecord> {
-  if (new Date(input.endIso).getTime() <= new Date(input.startIso).getTime()) {
+  if (new Date(rawInput.endIso).getTime() <= new Date(rawInput.startIso).getTime()) {
     throw new BookingError("End time must be after start time.", "INVALID_INPUT");
   }
+  const input = normalizePhoneInput(rawInput);
 
   // Cheap early-out for the common "retried after already succeeding" case
   // — avoids the external busy-period fetch and contact upsert below for
@@ -327,7 +360,9 @@ export async function createBooking(
   // RPC was asked for PENDING_CONFIRMATION instead of CONFIRMED), so
   // provider/calendarId are guaranteed non-null here.
   if (!provider || !input.calendarId) {
-    throw new Error("Internal error: booking staged for calendar confirmation with no calendar provider.");
+    throw new Error(
+      "Internal error: booking staged for calendar confirmation with no calendar provider.",
+    );
   }
   const activeProvider = provider;
   const activeCalendarId = input.calendarId;
@@ -368,12 +403,24 @@ export async function createBooking(
       .update({ status: "CALENDAR_SYNC_FAILED", metadata: { calendar_sync_error: message } })
       .eq("id", booking.id)
       .eq("status", "PENDING_CONFIRMATION")
-      .select("id");
+      .select("id, status, start_at, end_at, timezone, google_event_id, contact_id");
     if (failError) throw failError;
     if (!failedRows || failedRows.length === 0) {
+      // A concurrent cancellation moved the booking first — it is not
+      // this caller's booking any more, so this is a genuine failure.
       console.warn("booking_service:lost_race_before_event_creation", { bookingId: booking.id });
+      throw err;
     }
-    throw err;
+    // The booking IS saved in ClickAI (the source of truth for the slot,
+    // which it now occupies) — only the Google Calendar mirror failed.
+    // Reporting this as a failed booking would be false (the caller would
+    // be told "it didn't work" while the slot stays taken), and reporting
+    // it as CONFIRMED would hide the sync failure from staff. It is
+    // returned with its real CALENDAR_SYNC_FAILED status (visible on the
+    // Bookings dashboard, with metadata.calendar_sync_error) so each caller
+    // decides how to describe it — see booking-outcome.ts.
+    console.warn("booking_service:calendar_sync_failed_booking_saved", { bookingId: booking.id });
+    return toRecord(failedRows[0]!);
   }
 
   // The event now exists provider-side. From here on, every outcome must
@@ -568,7 +615,9 @@ export async function cancelBooking(
     // The booking is durably CANCELLED (the source of truth), but no
     // provider/calendarId was supplied to delete its Google Calendar
     // event — not thrown as an error, but never silently dropped.
-    console.warn("booking_service:cancel_skipped_stale_calendar_event", { bookingId: cancelled.id });
+    console.warn("booking_service:cancel_skipped_stale_calendar_event", {
+      bookingId: cancelled.id,
+    });
   }
 
   return toRecord(cancelled);
@@ -649,17 +698,20 @@ export interface CreatePaymentRequiredBookingInput {
   holdDurationMinutes?: number;
   /** The live voice call this hold was created from, if any — lets a later PaymentCaptured event find the right in-progress call to notify. */
   callId?: string | undefined;
+  /** See CreateBookingInput.phoneCountry. */
+  phoneCountry?: string | null | undefined;
 }
 
 const DEFAULT_HOLD_DURATION_MINUTES = 15;
 
 export async function createPaymentRequiredBooking(
   supabaseAdmin: Client,
-  input: CreatePaymentRequiredBookingInput,
+  rawInput: CreatePaymentRequiredBookingInput,
 ): Promise<PaymentHoldRecord> {
-  if (new Date(input.endIso).getTime() <= new Date(input.startIso).getTime()) {
+  if (new Date(rawInput.endIso).getTime() <= new Date(rawInput.startIso).getTime()) {
     throw new BookingError("End time must be after start time.", "INVALID_INPUT");
   }
+  const input = normalizePhoneInput(rawInput);
 
   const contactId = await resolveContactId(supabaseAdmin, input);
   const holdExpiresAt = new Date(

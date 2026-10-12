@@ -84,6 +84,8 @@ import { resolveGenerateReplyWithTools } from "./llm-provider.server.ts";
 import { SUPPORTED_VOICE_LANGUAGES, type AgentSnapshot } from "./agent-instructions.ts";
 import type { ClaudeTool } from "./claude.server.ts";
 import { zonedWallTimeToUtc, dayOfWeekInTimezone } from "./calendar/timezone.ts";
+import { normalizeCallerId, normalizePhoneNumber, phoneLastFour } from "./phone-number.ts";
+import { classifyBookingStatus, type BookingOutcome } from "./calendar/booking-outcome.ts";
 
 /**
  * Whether `code` is in the TTS/LLM common supported set (SUPPORTED_VOICE_LANGUAGES
@@ -267,7 +269,34 @@ export interface AppointmentState {
    * tool result, never model-proposed.
    */
   selectedSlot: { start: string; end: string } | null;
+  /**
+   * Where `phone` came from: "caller_id" (the caller agreed to use the
+   * number they're calling from — see CallerIdChoice) or "caller_provided"
+   * (spoken by the caller). Runtime-owned, never model-proposed. A
+   * caller-approved caller-ID number can only be replaced by a valid number
+   * the caller explicitly gives as a phone number (see mergeAppointmentState).
+   */
+  phoneSource: "caller_id" | "caller_provided" | null;
+  /** Progress of the "may I use the number you're calling from?" question — see resolveCallerIdAnswer. Runtime-owned. */
+  callerIdChoice: CallerIdChoice;
+  /** Set when the caller gave something that could not be normalized to a valid phone number (or the booking layer rejected it as INVALID_PHONE) — drives a targeted "please repeat just your phone number" clarification instead of restarting collection. Runtime-owned. */
+  phoneIssue: "invalid" | "country_code_required" | null;
 }
+
+/**
+ * "unavailable": no usable caller ID (withheld, malformed, or not provided by
+ * the telephony webhook) — the agent asks for a number normally.
+ * "not_offered": caller ID is usable but the caller hasn't been asked yet.
+ * "offered": the agent asked whether to use it; the next caller turn is read
+ * as the answer. "clarifying": the answer was ambiguous and one short
+ * clarification was asked. "accepted"/"declined": settled.
+ */
+export type CallerIdChoice =
+  "unavailable" | "not_offered" | "offered" | "clarifying" | "accepted" | "declined";
+
+/** The exact question asked when a usable caller ID is available and the caller's phone number is needed. */
+export const CALLER_ID_QUESTION =
+  "May I use the phone number you're calling from for your appointment, or would you prefer to provide a different number?";
 
 export function emptyAppointmentState(): AppointmentState {
   return {
@@ -282,6 +311,9 @@ export function emptyAppointmentState(): AppointmentState {
     bookingStatus: "collecting",
     availabilityStatus: "unknown",
     selectedSlot: null,
+    phoneSource: null,
+    callerIdChoice: "unavailable",
+    phoneIssue: null,
   };
 }
 
@@ -295,6 +327,31 @@ export interface StartRuntimeSessionInput {
   snapshotAgent: AgentSnapshot["agent"];
   businessName: string;
   bridge: AudioMediaBridge;
+  /**
+   * The inbound caller's number exactly as the telephony provider's signed
+   * webhook reported it (Vobiz/Exotel `From`, via NormalizedCallEvent.
+   * fromE164) — trusted call metadata, never anything transcribed from the
+   * caller's speech. Optional: absent for outbound calls, older callers of
+   * this function, and withheld numbers. Normalized/validated once at
+   * session start (normalizeCallerId); never logged in full.
+   */
+  callerNumber?: string | null;
+  /**
+   * The business's country (businesses.country, read live at call start) —
+   * how a phone number given WITHOUT a country code is interpreted (see
+   * phone-number.ts). Unknown/absent means only international-format
+   * numbers are accepted; national numbers are never guessed.
+   */
+  businessCountry?: string | null;
+  /**
+   * Ends the PSTN call through the telephony provider's own hang-up API
+   * (e.g. Vobiz's DELETE /Call/{call_uuid}/) — supplied by the provider's
+   * Durable Object, never serialized. Used after a closing message has
+   * fully played. Absent when the provider has no documented hang-up API;
+   * closing the media bridge (terminateRuntimeSession) is then the only
+   * way the runtime can end the call.
+   */
+  requestProviderHangup?: () => Promise<void>;
 }
 
 export interface RuntimeSessionHandle {
@@ -438,6 +495,20 @@ export const defaultRuntimeDeps: RuntimeDeps = {
 
 interface Session {
   handle: RuntimeSessionHandle;
+  /** The caller's number from trusted call metadata, normalized to E.164 — null when unavailable/withheld/invalid. See StartRuntimeSessionInput.callerNumber. */
+  callerId: string | null;
+  /**
+   * Estimated wall-clock time (ms) at which the telephony provider finishes
+   * PLAYING the outbound audio already handed to the bridge — each frame
+   * forwarded in onTtsEvent's "audio" case extends it by that frame's own
+   * duration. A TTS "flushed" event only means Sarvam finished sending audio
+   * to us, not that the caller has heard it; waitForFinalAudio uses this so
+   * a closing message is not cut off by an immediate disconnect. Reset to 0
+   * whenever the outbound buffer is cleared (barge-in).
+   */
+  outboundPlayoutEndsAt: number;
+  /** "awaiting_anything_else": a booking was confirmed and the agent asked whether there's anything else — a closing reply ("no, that's all", "bye") or continued silence ends the call cleanly. "ending": the farewell is being spoken. */
+  callCompletion: "none" | "awaiting_anything_else" | "ending";
   input: StartRuntimeSessionInput;
   deps: RuntimeDeps;
   turns: ConversationTurn[];
@@ -711,7 +782,12 @@ function armSilenceTimer(session: Session) {
       });
       return;
     }
-    if (session.silencePromptSent) void endDueToSilence(session);
+    // After a confirmed booking the conversation is complete — continued
+    // silence ends the call with a farewell instead of "are you still
+    // there?" (which would re-open a finished conversation).
+    if (session.callCompletion === "awaiting_anything_else") {
+      void endConversationGracefully(session, armedGeneration, "post_booking_silence");
+    } else if (session.silencePromptSent) void endDueToSilence(session);
     else void speakSilencePrompt(session);
   }, delay);
 }
@@ -772,7 +848,198 @@ async function endDueToSilence(session: Session) {
   } catch (err) {
     log("silence_goodbye_failed", session, { message: (err as Error).message });
   }
+  // Let the goodbye actually play before disconnecting (bounded — see
+  // waitForFinalAudio); terminating right after speak() returned used to
+  // cut it off, since speak() only hands text to TTS.
+  await waitForFinalAudio(session);
+  await requestProviderHangup(session, "caller_silence_timeout");
   await terminateRuntimeSession(session.input.callId, "caller_silence_timeout");
+}
+
+/** Bound on the provider hang-up request — a slow provider API must not keep a finished call's session alive. */
+const PROVIDER_HANGUP_TIMEOUT_MS = 5_000;
+
+/**
+ * Asks the telephony provider to end the PSTN call (see
+ * StartRuntimeSessionInput.requestProviderHangup) — only ever after the
+ * closing message has finished playing. Never throws: a failure or timeout
+ * is logged and the caller of this function still terminates the session,
+ * which closes the media bridge as the fallback.
+ */
+async function requestProviderHangup(session: Session, reason: string): Promise<void> {
+  const hangup = session.input.requestProviderHangup;
+  if (!hangup) {
+    log("provider_hangup_unavailable", session, { reason });
+    return;
+  }
+  try {
+    await withToolDeadline(PROVIDER_HANGUP_TIMEOUT_MS, hangup());
+    log("provider_hangup_requested", session, { reason });
+  } catch (err) {
+    log("provider_hangup_failed", session, { reason, message: (err as Error).message });
+  }
+}
+
+/** Asked after every confirmed booking — see Session.callCompletion. */
+const ANYTHING_ELSE_QUESTION = "Is there anything else I can help you with?";
+
+/**
+ * Upper bound on how long a closing message may hold the call open waiting
+ * for its audio to finish — a TTS stream that never reports "flushed" (or a
+ * playout estimate that's wrong) must never keep a finished call alive.
+ */
+const FINAL_AUDIO_MAX_WAIT_MS = 15_000;
+/** Extra margin after the estimated playout end, for provider-side jitter buffering. */
+const FINAL_AUDIO_PLAYOUT_GRACE_MS = 400;
+const FINAL_AUDIO_POLL_MS = 100;
+
+/**
+ * Resolves once the last thing spoken has actually finished playing to the
+ * caller: Sarvam has delivered every chunk (no TTS audio in flight) AND the
+ * estimated provider-side playout of every frame already forwarded has
+ * elapsed (Session.outboundPlayoutEndsAt), plus a small grace. Bounded by
+ * FINAL_AUDIO_MAX_WAIT_MS; returns immediately if the session is already
+ * ending (the caller hung up first).
+ */
+async function waitForFinalAudio(session: Session): Promise<void> {
+  const startedAt = Date.now();
+  for (;;) {
+    const state = stateOf(session);
+    if (state === "ending" || state === "ended" || state === "failed") return;
+    const now = Date.now();
+    if (
+      !ttsAudioInFlight(session) &&
+      now >= session.outboundPlayoutEndsAt + FINAL_AUDIO_PLAYOUT_GRACE_MS
+    ) {
+      log("final_audio_finished", session, { waited_ms: now - startedAt });
+      return;
+    }
+    if (now - startedAt >= FINAL_AUDIO_MAX_WAIT_MS) {
+      log("final_audio_wait_timed_out", session, {
+        waited_ms: now - startedAt,
+        tts_audio_in_flight: ttsAudioInFlight(session),
+      });
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, FINAL_AUDIO_POLL_MS));
+  }
+}
+
+/**
+ * Ends a completed conversation: speaks a short farewell, waits for it to
+ * finish playing (waitForFinalAudio), then terminates the session — which
+ * closes the media bridge and, with it, the provider call. If the caller
+ * starts speaking over the farewell (barge-in bumps session.generation),
+ * the hangup is cancelled and their new turn is handled normally — the
+ * existing stale-turn protection, not a forced disconnect, wins.
+ */
+async function endConversationGracefully(
+  session: Session,
+  generation: number,
+  reason: string,
+): Promise<void> {
+  if (session.callCompletion === "ending") return;
+  const state = stateOf(session);
+  if (state === "ending" || state === "ended" || state === "failed") return;
+  session.callCompletion = "ending";
+  clearSilenceTimer(session);
+  clearPaymentWaitTimer(session);
+  const farewell = `Thank you for calling ${session.input.businessName}. Goodbye!`;
+  log("conversation_closing", session, { reason });
+  session.turns.push({ role: "assistant", text: farewell, at: new Date().toISOString() });
+  try {
+    await speak(session, farewell);
+  } catch (err) {
+    log("farewell_failed", session, { message: (err as Error).message });
+  }
+  await waitForFinalAudio(session);
+  if (session.generation !== generation) {
+    log("conversation_close_cancelled_by_caller", session, { reason });
+    session.callCompletion = "none";
+    return;
+  }
+  await requestProviderHangup(session, reason);
+  await terminateRuntimeSession(session.input.callId, reason);
+}
+
+/** Spoken when a turn ran a tool but produced no reply text at all. */
+const TOOL_TURN_FALLBACK =
+  "I'm sorry, I couldn't finish that just now. Could you please say that again?";
+
+/** The deterministic sentence for a book_appointment outcome on the native tool-calling path. */
+function toolBookingOutcomeSentence(outcome: BookingOutcome): string {
+  switch (outcome) {
+    case "confirmed":
+      return `Your appointment is confirmed. ${ANYTHING_ELSE_QUESTION}`;
+    case "saved_calendar_sync_failed":
+      return `Your appointment request is saved, and our team will confirm it with you shortly. ${ANYTHING_ELSE_QUESTION}`;
+    case "pending":
+      return "I've passed on your request, but it isn't confirmed yet. Our team will confirm it with you shortly.";
+    default:
+      return "I'm sorry, I wasn't able to complete that booking. Someone will follow up to confirm.";
+  }
+}
+
+/** A reply that tells the caller the appointment is done ("booked", "confirmed", "all set") — and not a negated form like "isn't confirmed yet". */
+function claimsBookingSuccess(reply: string): boolean {
+  return (
+    /\b(booked|confirmed|all set|scheduled)\b/i.test(reply) &&
+    !/\b(not|isn't|wasn't|unable|couldn't|can't|cannot)\b/i.test(reply)
+  );
+}
+
+/** Any appointment detail is known — the call is in a booking conversation. */
+function appointmentInProgress(s: AppointmentState): boolean {
+  return Boolean(s.service || s.customerName || s.preferredDate || s.phone);
+}
+
+/**
+ * Deterministic, targeted follow-ups (English replies only) for the cases
+ * where the model's own reply would otherwise restart collection, re-ask
+ * details already given, or — worst — claim a booking that never happened:
+ *
+ * - the caller asked to book (ready_to_book) but a required detail is still
+ *   missing: ask for exactly that one detail (nextMissingDetailQuestion);
+ * - the number the caller just gave can't be used: ask only for the number;
+ * - the answer to CALLER_ID_QUESTION was ambiguous: one short clarification;
+ * - the caller wants a different number but hasn't said it yet: ask for it.
+ *
+ * Otherwise the model's reply is returned unchanged.
+ */
+function applyTargetedClarification(
+  session: Session,
+  reply: string,
+  callerIntent: CallerIntentSignals,
+  callerIdAnswer: ReturnType<typeof resolveCallerIdAnswer>,
+): string {
+  const state = session.appointmentState;
+  let reason: string | null = null;
+  let question: string | null = null;
+  if (state.bookingStatus === "ready_to_book" && !appointmentStateIsComplete(state)) {
+    question = nextMissingDetailQuestion(state);
+    reason = "booking_missing_detail";
+  } else if (
+    !state.phone &&
+    state.phoneIssue !== null &&
+    (callerIntent.phone || callerIdAnswer?.phoneIssue)
+  ) {
+    question = phoneIssueQuestion(state.phoneIssue);
+    reason =
+      state.phoneIssue === "country_code_required" ? "phone_needs_country_code" : "invalid_phone";
+  } else if (callerIdAnswer?.callerIdChoice === "clarifying") {
+    question = "Just to confirm, shall I use the number you're calling from?";
+    reason = "caller_id_answer_ambiguous";
+  } else if (
+    callerIdAnswer?.callerIdChoice === "declined" &&
+    !callerIdAnswer.phone &&
+    !callerIdAnswer.phoneIssue
+  ) {
+    question = "Of course. What number would you like me to use?";
+    reason = "caller_id_declined";
+  }
+  if (!question) return reply;
+  log("targeted_clarification", session, { reason });
+  return question;
 }
 
 /**
@@ -1067,6 +1334,10 @@ export function mergeAppointmentState(
     preferredDate?: string | null;
     preferredTime?: string | null;
     phone?: string | null;
+    /** The caller's turn explicitly talked about a phone/mobile/contact number (PHONE_CONTEXT_PATTERN) — required before a digit run may replace a caller-approved caller-ID number. */
+    phoneMentioned?: boolean;
+    /** The business's country, for interpreting a number given without a country code — see StartRuntimeSessionInput.businessCountry. */
+    phoneCountry?: string | null;
     email?: string | null;
     service?: string | null;
   },
@@ -1100,6 +1371,40 @@ export function mergeAppointmentState(
     preferredDate !== current.preferredDate ||
     preferredTime !== current.preferredTime ||
     preferredPeriod !== current.preferredPeriod;
+  // Phone: only ever stored as E.164 (contacts.phone's own CHECK constraint
+  // — see phone-number.ts; a raw "9876543210" here is exactly what made
+  // every voice booking fail at the contact upsert). Same priority as
+  // before (this turn's extraction, then sticky current, then the marker
+  // only to fill a gap), plus three guards: an extraction that can't be
+  // normalized never overwrites anything and instead flags a targeted
+  // re-ask (phoneIssue) when no number is known yet; an empty/invalid
+  // marker value never overwrites anything; and a number the caller
+  // approved from caller ID is only replaced when this turn explicitly
+  // talks about a phone number (a stray digit run elsewhere in speech is
+  // not a correction).
+  const phoneCountry = extracted?.phoneCountry ?? null;
+  const extractedResult = extracted?.phone
+    ? normalizePhoneNumber(extracted.phone, phoneCountry)
+    : null;
+  const extractedPhone = extractedResult?.ok ? extractedResult.e164 : null;
+  const markerResult = normalizePhoneNumber(proposedSafe.phone, phoneCountry);
+  const markerPhone = markerResult.ok ? markerResult.e164 : null;
+  const callerApprovedLocked =
+    current.phoneSource === "caller_id" && current.phone !== null && !extracted?.phoneMentioned;
+  let phone = current.phone;
+  let phoneSource = current.phoneSource;
+  let phoneIssue = current.phoneIssue;
+  if (extractedPhone && !callerApprovedLocked) {
+    if (extractedPhone !== current.phone) phoneSource = "caller_provided";
+    phone = extractedPhone;
+    phoneIssue = null;
+  } else if (!current.phone && extractedResult && !extractedResult.ok) {
+    phoneIssue = extractedResult.reason;
+  } else if (!current.phone && markerPhone) {
+    phone = markerPhone;
+    phoneSource = "caller_provided";
+    phoneIssue = null;
+  }
   return {
     service: proposedSafe.service ?? extracted?.service ?? current.service,
     customerName: proposedSafe.customerName ?? current.customerName,
@@ -1114,7 +1419,7 @@ export function mergeAppointmentState(
     // call. Only this exact turn's raw extraction is allowed to move it —
     // the marker only ever fills the gap on the very first turn before any
     // extraction has happened yet.
-    phone: extracted?.phone ?? current.phone ?? proposedSafe.phone ?? null,
+    phone,
     email: extracted?.email ?? current.email ?? proposedSafe.email ?? null,
     preferredDate,
     preferredTime,
@@ -1135,6 +1440,9 @@ export function mergeAppointmentState(
     bookingStatus: proposedSafe.bookingStatus ?? "collecting",
     availabilityStatus: slotChanged ? "unknown" : current.availabilityStatus,
     selectedSlot: slotChanged ? null : current.selectedSlot,
+    phoneSource,
+    callerIdChoice: current.callerIdChoice,
+    phoneIssue,
   };
 }
 
@@ -1175,11 +1483,20 @@ function appointmentSlotIsKnown(s: AppointmentState): boolean {
 }
 
 /** Renders the runtime-owned appointment state into a system message the LLM can read as ground truth, instead of relying on it re-deriving the same facts from (possibly truncated) conversation history. Returns null when nothing is known yet, so a fresh call's messages array isn't padded with an all-null block. */
-function describeKnownAppointmentState(s: AppointmentState): string | null {
+function describeKnownAppointmentState(
+  s: AppointmentState,
+  callerIdLastFour: string | null = null,
+): string | null {
   const known: string[] = [];
   if (s.service) known.push(`service: ${s.service}`);
   if (s.customerName) known.push(`customer name: ${s.customerName}`);
-  if (s.phone) known.push(`phone: ${s.phone}`);
+  if (s.phone && s.phoneSource === "caller_id") {
+    known.push(
+      `phone: confirmed — the caller agreed to use the number they're calling from (ending in ${phoneLastFour(s.phone)}). Never ask for a phone number again.`,
+    );
+  } else if (s.phone) {
+    known.push(`phone: ${s.phone}`);
+  }
   if (s.email) known.push(`email: ${s.email}`);
   if (s.preferredDate) known.push(`preferred date: ${s.preferredDate}`);
   if (s.preferredTime) known.push(`preferred time: ${s.preferredTime}`);
@@ -1198,8 +1515,44 @@ function describeKnownAppointmentState(s: AppointmentState): string | null {
       `availability: the requested time is NOT available — if the caller accepts an alternative you offered, update preferred_time to match it`,
     );
   }
-  if (!known.length) return null;
-  return `CURRENT APPOINTMENT STATE (already confirmed by the caller — do not ask for these again):\n${known.join("\n")}`;
+  const phoneGuidance = describePhoneGuidance(s, callerIdLastFour);
+  if (!known.length && !phoneGuidance) return null;
+  const sections: string[] = [];
+  if (known.length) {
+    sections.push(
+      `CURRENT APPOINTMENT STATE (already confirmed by the caller — do not ask for these again):\n${known.join("\n")}`,
+    );
+  }
+  if (phoneGuidance) sections.push(`PHONE NUMBER: ${phoneGuidance}`);
+  return sections.join("\n\n");
+}
+
+/** How the agent should obtain the caller's phone number, given what's already settled — null once a number is known (nothing to guide). See CallerIdChoice. */
+function describePhoneGuidance(
+  s: AppointmentState,
+  callerIdLastFour: string | null,
+): string | null {
+  if (s.phone) return null;
+  if (s.phoneIssue === "invalid") {
+    return "the number the caller gave could not be understood as a complete, valid phone number. Ask ONLY for their phone number again (digit by digit) — do not re-ask any other detail.";
+  }
+  if (s.phoneIssue === "country_code_required") {
+    return "the caller gave a number without a country code, and this business's country doesn't say how to read it. Ask ONLY for their phone number again, including the country code — do not re-ask any other detail.";
+  }
+  switch (s.callerIdChoice) {
+    case "not_offered":
+      return callerIdLastFour
+        ? `not collected yet. The caller's own number is available from caller ID (ending in ${callerIdLastFour}). When you need their phone number, ask exactly: "${CALLER_ID_QUESTION}" Never ask them to say a number unless they choose a different one.`
+        : null;
+    case "offered":
+      return `you asked whether to use the number they're calling from — wait for their answer.`;
+    case "clarifying":
+      return `the caller's answer about using the number they're calling from was unclear. Ask once, briefly: "Just to confirm, shall I use the number you're calling from?"`;
+    case "declined":
+      return "the caller wants to use a different number — ask them for it.";
+    default:
+      return null;
+  }
 }
 
 /**
@@ -1241,6 +1594,8 @@ export interface CallerIntentSignals {
   reminderRequested: boolean;
   /** A phone number the caller just spoke, as the raw digit string — see extractPhoneNumber's own doc comment for why this is extracted independently of the marker rather than trusting the model to copy/recall it correctly. Null when no digit run long enough to plausibly be a phone number appears. */
   phone: string | null;
+  /** The caller explicitly talked about a phone/mobile/contact number this turn ("my number is…", "use this number instead") — see mergeAppointmentState's caller-ID guard. */
+  phoneMentioned: boolean;
   /** An email address the caller just spoke, normalized to lowercase "local@domain.tld" — handles both a symbolic email and the common spoken form STT sometimes transcribes verbatim ("dhanush56 at gmail dot com"). Null when neither shape appears. */
   email: string | null;
 }
@@ -1439,8 +1794,181 @@ export function parseCallerIntentFromText(text: string): CallerIntentSignals {
     bookingConfirmed,
     reminderRequested,
     phone,
+    phoneMentioned: PHONE_CONTEXT_PATTERN.test(text),
     email,
   };
+}
+
+const PHONE_CONTEXT_PATTERN = /\b(phone|mobile|cell|contact|whats ?app)\b|\bnumber\b/i;
+
+// Answers to CALLER_ID_QUESTION. "Different" wins over an affirmative word
+// in the same sentence ("yes, but use a different number").
+const CALLER_ID_DIFFERENT_PATTERN =
+  /\b(different|another|other|new|separate)\s+(number|one|phone|mobile)\b|\b(no|nope|nah)\b(?!\s+problem)|\bdon'?t use\b|\bnot (that|this) (one|number)\b/i;
+// Hedges are never an answer, even when they contain an affirmative word
+// ("I'm not sure" contains "sure").
+const CALLER_ID_HEDGE_PATTERN =
+  /\b(not sure|unsure|not certain|don'?t know|no idea|maybe|i guess|which number|what number)\b/i;
+const CALLER_ID_ACCEPT_PATTERN =
+  /\b(yes|yeah|yep|yup|sure|ok(ay)?|of course|please do|go ahead|that'?s fine|that works|fine|correct|right|use (it|that|this)|same (number|one)|this number|that number|calling from|no problem)\b/i;
+
+/**
+ * Interprets the caller's turn as an answer to CALLER_ID_QUESTION — only
+ * while that question is pending (callerIdChoice "offered"/"clarifying")
+ * and no number is known yet. Returns the state fields to apply, or null
+ * when this turn isn't such an answer. Pure and directly unit-tested.
+ *
+ * - A number spoken in the answer is always taken as the caller's choice
+ *   (normalized; an invalid one flags a targeted re-ask instead).
+ * - An affirmative answer selects the trusted caller-ID number — the caller
+ *   is never asked to repeat it.
+ * - A "different number" answer moves on to asking for that number.
+ * - Anything else gets exactly one short clarification, then falls back to
+ *   asking for a number normally (never an endless loop).
+ */
+export function resolveCallerIdAnswer(
+  text: string,
+  state: Pick<AppointmentState, "phone" | "callerIdChoice">,
+  callerId: string | null,
+  phoneCountry: string | null = null,
+):
+  | (Pick<AppointmentState, "callerIdChoice"> &
+      Partial<Pick<AppointmentState, "phone" | "phoneSource" | "phoneIssue">>)
+  | null {
+  if (state.phone || !callerId) return null;
+  if (state.callerIdChoice !== "offered" && state.callerIdChoice !== "clarifying") return null;
+  const spoken = extractPhoneNumber(text);
+  if (spoken) {
+    const normalized = normalizePhoneNumber(spoken, phoneCountry);
+    return normalized.ok
+      ? {
+          callerIdChoice: "declined",
+          phone: normalized.e164,
+          phoneSource: "caller_provided",
+          phoneIssue: null,
+        }
+      : { callerIdChoice: "declined", phoneIssue: normalized.reason };
+  }
+  const hedged = CALLER_ID_HEDGE_PATTERN.test(text);
+  if (!hedged && CALLER_ID_DIFFERENT_PATTERN.test(text)) return { callerIdChoice: "declined" };
+  if (!hedged && CALLER_ID_ACCEPT_PATTERN.test(text)) {
+    return {
+      callerIdChoice: "accepted",
+      phone: callerId,
+      phoneSource: "caller_id",
+      phoneIssue: null,
+    };
+  }
+  return { callerIdChoice: state.callerIdChoice === "offered" ? "clarifying" : "declined" };
+}
+
+// A reply sentence asking the caller for a phone number.
+const PHONE_REQUEST_SENTENCE_PATTERN =
+  /\b(phone|mobile|contact|cell)(\s+number)?\b|\byour number\b/i;
+const QUESTION_SHAPE_PATTERN =
+  /\?|\b(may i|can i|could i|could you|can you|please (share|provide|tell|give))\b|\bwhat(?:'?s| is)\b/i;
+
+/**
+ * When caller ID is usable and the caller hasn't been asked about it yet,
+ * guarantees the phone number is requested via CALLER_ID_QUESTION rather
+ * than "what's your phone number?" — the model's own wording is replaced
+ * sentence-by-sentence (only the phone-request sentence; everything else
+ * it said is kept). `offered` is true when the reply now carries the
+ * question, so the caller's next turn is read as its answer.
+ */
+export function applyCallerIdOffer(
+  reply: string,
+  state: Pick<AppointmentState, "phone" | "callerIdChoice">,
+): { reply: string; offered: boolean } {
+  if (state.phone || state.callerIdChoice !== "not_offered") return { reply, offered: false };
+  if (/calling from/i.test(reply)) return { reply, offered: true };
+  const sentences = reply.match(/[^.!?]+[.!?]*\s*/g) ?? [reply];
+  let replaced = false;
+  const rewritten = sentences.map((sentence) => {
+    if (
+      !replaced &&
+      PHONE_REQUEST_SENTENCE_PATTERN.test(sentence) &&
+      QUESTION_SHAPE_PATTERN.test(sentence)
+    ) {
+      replaced = true;
+      return `${CALLER_ID_QUESTION} `;
+    }
+    return PHONE_REQUEST_SENTENCE_PATTERN.test(sentence) && QUESTION_SHAPE_PATTERN.test(sentence)
+      ? ""
+      : sentence;
+  });
+  return replaced ? { reply: rewritten.join("").trim(), offered: true } : { reply, offered: false };
+}
+
+/**
+ * The single detail still missing before a booking can be attempted, asked
+ * as one targeted question (English) — the alternative to the model
+ * restarting the whole collection. Null when nothing is missing. The phone
+ * question uses CALLER_ID_QUESTION whenever caller ID is usable and the
+ * caller hasn't answered it yet.
+ */
+const INVALID_PHONE_QUESTION =
+  "Sorry, I didn't catch a complete phone number. Could you please say your phone number again, digit by digit?";
+const COUNTRY_CODE_PHONE_QUESTION =
+  "Could you please say your phone number again, including the country code?";
+
+/** The targeted re-ask for a phone number that couldn't be used. */
+function phoneIssueQuestion(issue: "invalid" | "country_code_required"): string {
+  return issue === "country_code_required" ? COUNTRY_CODE_PHONE_QUESTION : INVALID_PHONE_QUESTION;
+}
+
+export function nextMissingDetailQuestion(s: AppointmentState): string | null {
+  if (!s.service) return "Which service would you like to book?";
+  if (!s.customerName) return "May I have your name for the appointment?";
+  if (!s.preferredDate) return "Which date would you like to come in?";
+  if (!s.preferredTime && !s.wantsNextAvailable) return "What time would you prefer?";
+  if (!s.phone) {
+    if (s.phoneIssue) return phoneIssueQuestion(s.phoneIssue);
+    if (s.callerIdChoice === "not_offered") return CALLER_ID_QUESTION;
+    if (s.callerIdChoice === "offered" || s.callerIdChoice === "clarifying") {
+      return "Just to confirm, shall I use the number you're calling from?";
+    }
+    return "What's the best phone number to reach you?";
+  }
+  return null;
+}
+
+const GOODBYE_PATTERN = /\b(good ?bye|bye( bye)?)\b/i;
+const NOTHING_ELSE_PATTERN =
+  /^\W*(no|nope|nah|no thanks?|no thank you|thanks?|thank you( so much| very much)?|that'?s (all|it|everything)|nothing( else)?|i'?m (good|fine|all set)|all good)\b|\b(nothing else|that'?s all|that'?s it|that'?s everything|no,? thanks?|no,? thank you)\b/i;
+
+// "Thanks — can I also ask about prices?" is a new question, not a goodbye.
+const CONTINUATION_PATTERN =
+  /\?|\b(also|another|one more|what|how|when|where|why|can (i|you)|could (i|you)|i (want|need|would like)|book|reschedule|cancel)\b/i;
+
+/**
+ * Whether the caller is ending the conversation: an explicit goodbye at any
+ * point, or — only right after a confirmed booking, when the agent asked
+ * "anything else?" — a plain "no"/"that's all"/"thank you". Never true when
+ * the same turn also carries a new booking request (a date, time, or
+ * availability question), so "no, actually can I also book Friday?" is
+ * handled as a request, not a hangup.
+ */
+export function isClosingUtterance(
+  text: string,
+  awaitingAnythingElse: boolean,
+  intent: Pick<
+    CallerIntentSignals,
+    "availabilityRequested" | "explicitTime" | "relativeDate" | "weekday"
+  >,
+): boolean {
+  if (
+    intent.availabilityRequested ||
+    intent.explicitTime ||
+    intent.relativeDate ||
+    intent.weekday
+  ) {
+    return false;
+  }
+  if (GOODBYE_PATTERN.test(text)) return true;
+  return (
+    awaitingAnythingElse && NOTHING_ELSE_PATTERN.test(text) && !CONTINUATION_PATTERN.test(text)
+  );
 }
 
 /** Resolves "today"/"tomorrow" to an actual YYYY-MM-DD in the business's own timezone — noon-anchored (zonedWallTimeToUtc) before adding 24h for "tomorrow", the same DST-transition-safe technique calendar/timezone.ts's own dayOfWeekInTimezone uses, rather than naive UTC day arithmetic (never the server's own local time, never UTC). */
@@ -1671,7 +2199,14 @@ async function speak(
 async function getReply(
   session: Session,
   messages: ChatMessage[],
-): Promise<{ reply: string; enteredPaymentWait: boolean; usedToolCalling: boolean }> {
+): Promise<{
+  reply: string;
+  enteredPaymentWait: boolean;
+  usedToolCalling: boolean;
+  bookedViaTool: boolean;
+  /** book_appointment's real outcome on the tool-calling path this turn, if it ran. */
+  toolBookingOutcome: BookingOutcome | null;
+}> {
   const { generateReplyWithTools, resolveAvailableTools, executeTool } = session.deps;
   if (generateReplyWithTools && resolveAvailableTools && executeTool) {
     const tools = await resolveAvailableTools(
@@ -1685,9 +2220,22 @@ async function getReply(
         agentConfigId: session.input.agentConfigId,
         callId: session.input.callId,
       };
-      const result = await generateReplyWithTools(messages, tools, (name, input) =>
-        executeTool(name, input, toolCtx),
-      );
+      // Record book_appointment's REAL outcome (the stored booking's status)
+      // as it passes through — toolCalls only carries name/isError, and the
+      // model's own wording must never be the only evidence of a booking.
+      let bookingOutcome: BookingOutcome | null = null;
+      const result = await generateReplyWithTools(messages, tools, async (name, input) => {
+        const toolResult = await executeTool(name, input, toolCtx);
+        if (name === "book_appointment") {
+          const parsed = safeJsonParse(toolResult.content);
+          const reported = parsed?.["bookingOutcome"];
+          bookingOutcome =
+            !toolResult.isError && typeof reported === "string"
+              ? (reported as BookingOutcome)
+              : "not_booked";
+        }
+        return toolResult;
+      });
       if (result.toolCalls.length) {
         log("tool_calls_executed", session, {
           tools: result.toolCalls.map((t) => ({ name: t.name, is_error: t.isError })),
@@ -1699,11 +2247,24 @@ async function getReply(
       const enteredPaymentWait = result.toolCalls.some(
         (t) => t.name === "request_payment" && !t.isError,
       );
-      return { reply: result.reply, enteredPaymentWait, usedToolCalling: true };
+      const outcome = bookingOutcome as BookingOutcome | null;
+      return {
+        reply: result.reply,
+        enteredPaymentWait,
+        usedToolCalling: true,
+        bookedViaTool: outcome === "confirmed" || outcome === "saved_calendar_sync_failed",
+        toolBookingOutcome: outcome,
+      };
     }
   }
   const { reply } = await session.deps.generateReply(messages);
-  return { reply, enteredPaymentWait: false, usedToolCalling: false };
+  return {
+    reply,
+    enteredPaymentWait: false,
+    usedToolCalling: false,
+    bookedViaTool: false,
+    toolBookingOutcome: null,
+  };
 }
 
 /** Absolute last-resort appointment length — used only when the business's own configured default (businesses.default_appointment_duration_minutes, resolved per-call in resolveBookingContext) genuinely could not be read, e.g. the DB lookup itself failed. Never the primary fallback; see matchService's own doc comment. */
@@ -2176,6 +2737,19 @@ async function composeHonestBookingReply(
       ]),
     );
     const spoken = reply.trim();
+    // An empty phrasing reply must never become silence after a real tool
+    // result — the caller would hear nothing and the call would sit idle
+    // until the silence prompt. The canned, already-honest fallback says
+    // the same facts.
+    if (!spoken) {
+      log("booking_reply_composition_empty", session);
+      namedLog("voice:final_response", session, {
+        latency_ms: Date.now() - startedAt,
+        replyLength: localFallback.length,
+        fellBackToCannedReply: true,
+      });
+      return localFallback;
+    }
     namedLog("voice:final_response", session, {
       latency_ms: Date.now() - startedAt,
       replyLength: spoken.length,
@@ -2301,6 +2875,20 @@ function formatSlotTime24h(isoUtc: string, timeZone: string): string {
     }).format(new Date(isoUtc));
   } catch {
     return isoUtc;
+  }
+}
+
+/** The business-local calendar date ("YYYY-MM-DD") of a UTC instant — null if the timezone/instant can't be formatted. */
+function formatSlotDateLocal(isoUtc: string, timeZone: string): string | null {
+  try {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(new Date(isoUtc));
+  } catch {
+    return null;
   }
 }
 
@@ -2739,18 +3327,12 @@ async function attemptBooking(
     return { spoken: "", state };
   }
 
-  const startIso = targetSlot.start;
-  const endIso = targetSlot.end;
   // The REAL time being booked — for an exact-time request this equals
   // what the caller already said; for "next available" it's the actual
-  // resolved slot. bookedLocalTime (human-readable, spoken to the caller)
-  // and bookedTime24h (24-hour "HH:mm", the shape preferredTime is
-  // documented to hold and zonedWallTimeToUtc expects back) are kept
-  // separate so a later "that slot" reference can still be re-resolved
-  // correctly — storing the 12-hour spoken form in preferredTime would
-  // silently break that.
-  const bookedLocalTime = formatSlotTimeLocal(startIso, timezone);
-  const bookedTime24h = formatSlotTime24h(startIso, timezone);
+  // resolved slot. What gets spoken and stored afterwards comes from the
+  // persisted booking itself (see confirmedStartIso below).
+  const startIso = targetSlot.start;
+  const endIso = targetSlot.end;
 
   namedLog("calendar_tool:start", session, {
     tool: "book_appointment",
@@ -2794,6 +3376,26 @@ async function attemptBooking(
       code: errorCode ?? "UNKNOWN",
       latency_ms: bookingLatencyMs,
     });
+    // The booking layer rejected the phone number itself — everything else
+    // the caller gave is still valid, so ask ONLY for the number again
+    // rather than declining the whole booking or restarting collection.
+    if (errorCode === "INVALID_PHONE") {
+      return {
+        spoken: await composeHonestBookingReply(
+          session,
+          "The booking was NOT made because the caller's phone number is not a valid, complete number. Do not say it was booked. Apologize briefly and ask ONLY for their phone number again, digit by digit. Do not ask for anything else.",
+          "I'm sorry, I couldn't use that phone number. Could you please tell me your phone number again, digit by digit?",
+        ),
+        state: {
+          ...state,
+          phone: null,
+          phoneSource: null,
+          phoneIssue: "invalid",
+          callerIdChoice: state.callerIdChoice === "accepted" ? "declined" : state.callerIdChoice,
+          bookingStatus: "collecting",
+        },
+      };
+    }
     return {
       spoken: await composeHonestBookingReply(
         session,
@@ -2808,14 +3410,103 @@ async function attemptBooking(
     };
   }
 
-  log("booking_attempt_succeeded", session);
+  // The persisted booking is the source of truth for what gets confirmed:
+  // an idempotent retry returns the ALREADY-created row (never a second
+  // one), so its own start time is what the caller is told.
+  const bookedData = (bookingResult?.["data"] ?? {}) as {
+    id?: unknown;
+    startAt?: unknown;
+    status?: unknown;
+  };
+  // What the STORED booking says — never just "the tool call succeeded".
+  // A result with no recognizable status is treated as not booked.
+  const outcome: BookingOutcome =
+    typeof bookingResult?.["bookingOutcome"] === "string"
+      ? (bookingResult["bookingOutcome"] as BookingOutcome)
+      : classifyBookingStatus(typeof bookedData.status === "string" ? bookedData.status : null);
+  const confirmedStartIso = typeof bookedData.startAt === "string" ? bookedData.startAt : startIso;
+  // confirmedLocalTime is spoken; bookedTime24h (24-hour "HH:mm", the shape
+  // preferredTime is documented to hold and zonedWallTimeToUtc expects back)
+  // is stored, so a later "that slot" reference still re-resolves correctly.
+  const confirmedLocalTime = formatSlotTimeLocal(confirmedStartIso, timezone);
+  const bookedTime24h = formatSlotTime24h(confirmedStartIso, timezone);
+  const confirmedDateLabel = spokenDateLabel(
+    formatSlotDateLocal(confirmedStartIso, timezone) ?? state.preferredDate,
+    timezone,
+  );
+  const bookingId = typeof bookedData.id === "string" ? bookedData.id : null;
+  const what = state.service ?? "appointment";
+  const businessName = session.input.businessName;
+  const englishReply =
+    resolveResponseLanguage(
+      session.detectedLanguage,
+      session.input.snapshotAgent.primary_language,
+    ) === "en-IN";
+
+  if (outcome !== "confirmed") {
+    log("booking_attempt_not_confirmed", session, { booking_id: bookingId, outcome });
+    namedLog("calendar_tool:completed", session, { tool: "book_appointment", outcome });
+    if (outcome === "saved_calendar_sync_failed") {
+      // Saved in ClickAI and holding the slot, but its Google Calendar event
+      // failed (CALENDAR_SYNC_FAILED, flagged for staff on the dashboard) —
+      // accurate both ways: not "it failed", and not "confirmed".
+      const savedText = `Your ${what} request at ${businessName} for ${confirmedDateLabel} at ${confirmedLocalTime} is saved, and our team will confirm it with you shortly. ${ANYTHING_ELSE_QUESTION}`;
+      let saved = englishReply
+        ? savedText
+        : await composeHonestBookingReply(
+            session,
+            `The appointment request (${what} at ${businessName} on ${confirmedDateLabel} at ${confirmedLocalTime}) is SAVED, but it is NOT confirmed yet — the team will confirm it with the caller shortly. Say exactly that; do not say it is confirmed or booked. Then ask whether there is anything else you can help with.`,
+            savedText,
+          );
+      if (!/anything else/i.test(saved)) saved = `${saved} ${ANYTHING_ELSE_QUESTION}`;
+      return {
+        spoken: saved,
+        state: {
+          ...state,
+          preferredTime: bookedTime24h,
+          wantsNextAvailable: false,
+          bookingStatus: "booked",
+          availabilityStatus: "unknown",
+          selectedSlot: null,
+        },
+      };
+    }
+    const notConfirmedText =
+      outcome === "pending"
+        ? `I've passed on your request for ${confirmedDateLabel} at ${confirmedLocalTime}, but it isn't confirmed yet. Our team will confirm it with you shortly.`
+        : "I'm sorry, I wasn't able to complete that booking. Someone will follow up to confirm.";
+    return {
+      spoken: englishReply
+        ? notConfirmedText
+        : await composeHonestBookingReply(
+            session,
+            outcome === "pending"
+              ? "The appointment request was received but is NOT confirmed yet; the team will confirm it shortly. Do not say it is booked or confirmed."
+              : "The booking was NOT completed. Apologize briefly and say someone will follow up. Do not say it was booked.",
+            notConfirmedText,
+          ),
+      state: { ...state, bookingStatus: "unavailable" },
+    };
+  }
+
+  log("booking_attempt_succeeded", session, { booking_id: bookingId });
   namedLog("calendar_tool:completed", session, { tool: "book_appointment" });
+  const plainConfirmation = `You're all set — your ${what} at ${businessName} is confirmed for ${confirmedDateLabel} at ${confirmedLocalTime}. ${ANYTHING_ELSE_QUESTION}`;
+  // English: spoken verbatim — the confirmation must state the real
+  // service, business, date and time every time, and a second model round
+  // trip here only added dead air after the booking had already succeeded.
+  // Other languages are phrased by the model from the same facts.
+  let confirmation = englishReply
+    ? plainConfirmation
+    : await composeHonestBookingReply(
+        session,
+        `The booking succeeded and is confirmed in the system: ${what} at ${businessName} for ${state.customerName ?? "the caller"} on ${confirmedDateLabel} at ${confirmedLocalTime}. Confirm the service, date and time in one short sentence, then ask whether there is anything else you can help with.`,
+        plainConfirmation,
+      );
+  if (!/anything else/i.test(confirmation))
+    confirmation = `${confirmation} ${ANYTHING_ELSE_QUESTION}`;
   return {
-    spoken: await composeHonestBookingReply(
-      session,
-      `The booking succeeded: ${state.service ?? "the appointment"} for ${state.customerName ?? "the caller"} on ${state.preferredDate} at ${bookedLocalTime}. Confirm this briefly.`,
-      `You're all set — ${state.service ?? "the appointment"} is booked for ${state.customerName ?? "you"} on ${state.preferredDate} at ${bookedLocalTime}.`,
-    ),
+    spoken: confirmation,
     state: {
       ...state,
       // The REAL booked time, even for a "next available" request where
@@ -3016,6 +3707,8 @@ async function tryEarlyDeterministicDispatch(
     preferredDate: extractedDate,
     preferredTime: dateTimeIsAmbiguous ? null : callerIntent.explicitTime,
     phone: callerIntent.phone,
+    phoneMentioned: callerIntent.phoneMentioned,
+    phoneCountry: session.input.businessCountry ?? null,
     email: callerIntent.email,
     service: matchedServiceName,
   });
@@ -3146,6 +3839,25 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
   // than threaded through — it's a pure, cheap regex pass, and threading
   // it would only save that.
   const callerIntent = parseCallerIntentFromText(text);
+  // The answer to CALLER_ID_QUESTION, when it's pending — applied before
+  // anything else reads appointment state this turn, so the early
+  // deterministic dispatch, the model's grounding message, and the booking
+  // attempt all see the caller's choice (and never ask for the number
+  // again once it's settled). See resolveCallerIdAnswer.
+  const callerIdAnswer = resolveCallerIdAnswer(
+    text,
+    session.appointmentState,
+    session.callerId,
+    session.input.businessCountry ?? null,
+  );
+  if (callerIdAnswer) {
+    session.appointmentState = { ...session.appointmentState, ...callerIdAnswer };
+    log("caller_id_answer", session, {
+      choice: callerIdAnswer.callerIdChoice,
+      phone_selected: Boolean(callerIdAnswer.phone),
+      phone_issue: callerIdAnswer.phoneIssue ?? null,
+    });
+  }
   // Captured HERE — not reused from enqueueUserUtterance's fast-phase
   // read — because this turn's place in utteranceQueue means a PREVIOUS
   // turn's slow-phase work (e.g. a booking/availability outcome) may have
@@ -3177,12 +3889,24 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
   const requestStarted = Date.now();
   const llmRequestAt = requestStarted;
 
+  // The caller is wrapping up ("bye", or "no, that's all" right after a
+  // confirmed booking) — a deterministic farewell, then a clean hangup once
+  // it has finished playing. No LLM round trip, so nothing can re-open the
+  // conversation or repeat the confirmation question.
+  if (isClosingUtterance(text, session.callCompletion === "awaiting_anything_else", callerIntent)) {
+    await endConversationGracefully(session, generation, "caller_closed_conversation");
+    return;
+  }
+
   // The runtime's own ground truth for what the caller has already
   // confirmed — see AppointmentState's own doc comment. Built from state
   // BEFORE this turn, so the model is told what's already known without
   // depending on it still being visible in the (bounded)
   // CONVERSATION_HISTORY_TURNS window.
-  const knownAppointmentState = describeKnownAppointmentState(session.appointmentState);
+  const knownAppointmentState = describeKnownAppointmentState(
+    session.appointmentState,
+    session.callerId ? phoneLastFour(session.callerId) : null,
+  );
   const messages: ChatMessage[] = [
     { role: "system", content: session.input.instructions },
     ...(knownAppointmentState
@@ -3236,6 +3960,10 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
           );
       let reply: string;
       let enteredPaymentWait = false;
+      let toolDispatched = early.dispatched;
+      let usedToolCallingThisTurn = false;
+      let bookedViaTool = false;
+      let toolBookingOutcome: BookingOutcome | null = null;
       if (early.dispatched) {
         if (isCancelled() || generation !== session.generation || early.spoken === null) {
           log("llm_response_discarded_stale", session, { early: true });
@@ -3247,8 +3975,13 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
           reply: rawReply,
           enteredPaymentWait: epw,
           usedToolCalling,
+          bookedViaTool: booked,
+          toolBookingOutcome: outcome,
         } = await getReply(session, messages);
         enteredPaymentWait = epw;
+        usedToolCallingThisTurn = usedToolCalling;
+        bookedViaTool = booked;
+        toolBookingOutcome = outcome;
         const llmCompletedAt = Date.now();
         if (session.currentTurn) session.currentTurn.llmCompletedAt = llmCompletedAt;
         log("llm_completed", session, {
@@ -3265,13 +3998,6 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
           log("llm_response_discarded_stale", session);
           return;
         }
-        if (!rawReply) {
-          log("llm_empty_reply", session);
-          setState(session, "listening");
-          armSilenceTimer(session);
-          return;
-        }
-
         // The marker-based deterministic backstop below exists only for the
         // plain-conversational Sarvam path (no native tool-calling — see
         // parseCallerIntentFromText's own doc comment). When this turn went
@@ -3328,6 +4054,8 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
               preferredDate: extractedDate,
               preferredTime: callerIntent.reminderRequested ? null : callerIntent.explicitTime,
               phone: callerIntent.phone,
+              phoneMentioned: callerIntent.phoneMentioned,
+              phoneCountry: session.input.businessCountry ?? null,
               email: callerIntent.email,
               service: matchedServiceName,
             },
@@ -3444,6 +4172,7 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
           // response, which is the direct cause of the reported "goes silent
           // when checking availability" production incident.
           if (willAttemptBooking || willCheckAvailability) {
+            toolDispatched = true;
             const dispatched = await dispatchDeterministicTool(
               session,
               willAttemptBooking,
@@ -3460,11 +4189,68 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
         }
       }
 
+      const isEnglish =
+        resolveResponseLanguage(
+          session.detectedLanguage,
+          session.input.snapshotAgent.primary_language,
+        ) === "en-IN";
+      if (isEnglish && !toolDispatched && !usedToolCallingThisTurn) {
+        reply = applyTargetedClarification(session, reply, callerIntent, callerIdAnswer);
+      }
+
+      // Native tool-calling path: the model's own words must agree with the
+      // stored booking. A reply claiming a booking the outcome doesn't
+      // support is replaced with the deterministic outcome sentence.
+      if (
+        isEnglish &&
+        toolBookingOutcome !== null &&
+        toolBookingOutcome !== "confirmed" &&
+        claimsBookingSuccess(reply)
+      ) {
+        log("tool_reply_overclaimed_booking", session, { outcome: toolBookingOutcome });
+        reply = toolBookingOutcomeSentence(toolBookingOutcome);
+      }
+
       if (!reply) {
-        log("llm_empty_reply", session);
-        setState(session, "listening");
-        armSilenceTimer(session);
-        return;
+        log("llm_empty_reply", session, {
+          after_tool: toolDispatched || usedToolCallingThisTurn,
+        });
+        // An empty reply must never become silence after a tool call: the
+        // caller gets the real outcome (if a booking ran) or a short,
+        // honest retry prompt. Mid-booking without a tool call, ask for the
+        // one detail still needed; otherwise keep the previous behavior.
+        const fallbackQuestion =
+          toolBookingOutcome !== null
+            ? toolBookingOutcomeSentence(toolBookingOutcome)
+            : toolDispatched || usedToolCallingThisTurn
+              ? TOOL_TURN_FALLBACK
+              : isEnglish && appointmentInProgress(session.appointmentState)
+                ? nextMissingDetailQuestion(session.appointmentState)
+                : null;
+        if (!fallbackQuestion) {
+          setState(session, "listening");
+          armSilenceTimer(session);
+          return;
+        }
+        reply = fallbackQuestion;
+      }
+
+      // Caller ID is usable and the phone number is being requested for the
+      // first time — make sure it's asked as CALLER_ID_QUESTION (English
+      // replies only; the question itself is English), and mark it offered
+      // so the caller's next turn is read as the answer.
+      if (isEnglish) {
+        const offer = applyCallerIdOffer(reply, session.appointmentState);
+        if (offer.offered) {
+          reply = offer.reply;
+          session.appointmentState = { ...session.appointmentState, callerIdChoice: "offered" };
+        }
+      }
+
+      // A confirmed booking from the native tool-calling path gets the same
+      // closing question the deterministic path's confirmation carries.
+      if (bookedViaTool && !/anything else/i.test(reply)) {
+        reply = `${reply} ${ANYTHING_ELSE_QUESTION}`;
       }
 
       // Deterministic, code-level — never LLM-composed — so this is never
@@ -3494,6 +4280,18 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
 
       session.turns.push({ role: "assistant", text: reply, at: new Date().toISOString() });
       await speak(session, reply);
+      // A booking was really confirmed this turn (deterministic path:
+      // attemptBooking reported "booked"; tool-calling path: book_appointment
+      // succeeded) and the caller was asked whether there's anything else —
+      // from here a closing reply or continued silence ends the call cleanly
+      // (see isClosingUtterance / armSilenceTimer) instead of looping on
+      // "are you still there?".
+      if (
+        (toolDispatched && session.appointmentState.bookingStatus === "booked") ||
+        bookedViaTool
+      ) {
+        session.callCompletion = "awaiting_anything_else";
+      }
       if (generation === session.generation) {
         if (enteredPaymentWait) {
           setState(session, "waiting_on_payment");
@@ -3590,6 +4388,7 @@ function onSttEvent(session: Session, event: SttEvent) {
         const oldGeneration = session.generation;
         session.generation++;
         session.input.bridge.clearOutboundBuffer();
+        session.outboundPlayoutEndsAt = 0;
         session.tts?.flush();
         setState(session, "interrupted");
         log("interruption", session, { audioStillPlaying });
@@ -3801,6 +4600,19 @@ function onTtsEvent(session: Session, event: TtsEvent, connectionId: number) {
       session.ttsBytesInFlight += event.data.length;
       const frame: AudioFrame = { data: event.data, timestampMs: Date.now() - session.startedAt };
       session.input.bridge.sendOutboundFrame(frame);
+      // Playout estimate for waitForFinalAudio: the provider plays frames in
+      // real time, so each one extends "audio still playing" by its own
+      // duration (8-bit mu-law/a-law = 1 byte/sample, linear16 = 2).
+      {
+        const format = session.input.bridge.outboundFormat;
+        const bytesPerSample =
+          format.encoding === "linear16" ? 2 : format.encoding === "opus" ? 0 : 1;
+        if (bytesPerSample > 0 && format.sampleRateHz > 0) {
+          const frameMs = (event.data.length / bytesPerSample / format.sampleRateHz) * 1000;
+          session.outboundPlayoutEndsAt =
+            Math.max(Date.now(), session.outboundPlayoutEndsAt) + frameMs;
+        }
+      }
       break;
     }
     case "error":
@@ -3927,8 +4739,12 @@ export async function startRuntimeSession(
     state: "created",
     terminate: async (reason: string) => terminateRuntimeSession(input.callId, reason),
   };
+  const callerId = normalizeCallerId(input.callerNumber, input.businessCountry ?? null);
   const session: Session = {
     handle,
+    callerId,
+    outboundPlayoutEndsAt: 0,
+    callCompletion: "none",
     input,
     deps,
     turns: [],
@@ -3955,7 +4771,10 @@ export async function startRuntimeSession(
     utteranceQueue: Promise.resolve(),
     immediateAckQueue: Promise.resolve(),
     cachedServices: null,
-    appointmentState: emptyAppointmentState(),
+    appointmentState: {
+      ...emptyAppointmentState(),
+      callerIdChoice: callerId ? "not_offered" : "unavailable",
+    },
     ttsLanguage: input.snapshotAgent.primary_language,
     currentTurnTranscriptFinalAt: null,
     currentTurnFirstAudioLogged: false,
@@ -3970,7 +4789,13 @@ export async function startRuntimeSession(
     activeTtsConnectionId: 0,
   };
   activeSessions.set(input.callId, session);
-  log("runtime_started", session);
+  // Presence only — never the number itself (see this file's logging rule
+  // in log()'s own doc comment). "provided" distinguishes a webhook that
+  // sent nothing from one that sent a withheld/malformed value.
+  log("runtime_started", session, {
+    caller_id_provided: Boolean(input.callerNumber),
+    caller_id_usable: Boolean(callerId),
+  });
 
   input.bridge.onClose((reason) => {
     log("bridge_closed", session, { reason });
@@ -4258,6 +5083,7 @@ export async function injectPaymentEvent(
   if (state === "greeting" || state === "speaking" || state === "thinking") {
     try {
       session.input.bridge.clearOutboundBuffer();
+      session.outboundPlayoutEndsAt = 0;
       session.tts?.flush();
     } catch {
       /* best-effort */

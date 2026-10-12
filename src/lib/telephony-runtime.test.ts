@@ -217,3 +217,83 @@ describe("terminateAgentRuntime never throws out into its caller", () => {
     assert.match(fnBody, /catch \(err\)/);
   });
 });
+
+describe("Caller ID reaches the voice runtime (trusted webhook `From`, never speech)", () => {
+  const telephonyDir = join(dirname(fileURLToPath(import.meta.url)), "telephony");
+  const exotelDoSrc = readFileSync(
+    join(telephonyDir, "call-session-durable-object.server.ts"),
+    "utf8",
+  );
+  const vobizDoSrc = readFileSync(
+    join(telephonyDir, "vobiz-call-session-durable-object.server.ts"),
+    "utf8",
+  );
+  const webhookSrc = readFileSync(
+    join(
+      dirname(fileURLToPath(import.meta.url)),
+      "..",
+      "routes",
+      "api",
+      "public",
+      "webhooks",
+      "telephony.ts",
+    ),
+    "utf8",
+  );
+
+  test("the Durable Object RPC body and the in-process fallback both carry callerE164 as callerNumber", () => {
+    const rpcStart = runtimeSrc.indexOf("const rpcInput: StartRuntimeRpcInput = {");
+    const rpcBlock = runtimeSrc.slice(rpcStart, runtimeSrc.indexOf("};", rpcStart));
+    assert.match(rpcBlock, /callerNumber: input\.callerE164/);
+    const fallbackStart = runtimeSrc.indexOf("const handle = await startRuntimeSession({");
+    const fallbackBlock = runtimeSrc.slice(fallbackStart, runtimeSrc.indexOf("});", fallbackStart));
+    assert.match(fallbackBlock, /callerNumber: input\.callerE164/);
+  });
+
+  test("both providers' Durable Objects hand the RPC's callerNumber to startRuntimeSession", () => {
+    for (const src of [exotelDoSrc, vobizDoSrc]) {
+      const start = src.indexOf("const handle = await startRuntimeSession({");
+      const block = src.slice(start, src.indexOf("});", start));
+      assert.match(block, /callerNumber: body\.callerNumber \?\? null/);
+    }
+  });
+
+  test("the webhook passes the provider's own From (stored caller_number as fallback), never a transcript", () => {
+    const occurrences = [...webhookSrc.matchAll(/callerE164: ([^,\n]+)/g)].map((m) => m[1]);
+    assert.ok(occurrences.length >= 2);
+    for (const expr of occurrences) assert.match(expr!, /^event\.fromE164/);
+  });
+
+  test("the business country is read live from the business row and reaches the runtime on every path", () => {
+    assert.match(runtimeSrc, /\.from\("businesses"\)\s*\.select\("country"\)/);
+    const rpcStart = runtimeSrc.indexOf("const rpcInput: StartRuntimeRpcInput = {");
+    assert.match(
+      runtimeSrc.slice(rpcStart, runtimeSrc.indexOf("};", rpcStart)),
+      /businessCountry,/,
+    );
+    const fallbackStart = runtimeSrc.indexOf("const handle = await startRuntimeSession({");
+    assert.match(
+      runtimeSrc.slice(fallbackStart, runtimeSrc.indexOf("});\n", fallbackStart)),
+      /businessCountry,/,
+    );
+    for (const src of [exotelDoSrc, vobizDoSrc]) {
+      const start = src.indexOf("const handle = await startRuntimeSession({");
+      assert.match(
+        src.slice(start, src.indexOf("});\n", start)),
+        /businessCountry: body\.businessCountry \?\? null/,
+      );
+    }
+  });
+
+  test("Vobiz sessions end the PSTN call through Vobiz's hang-up API; Exotel (no documented API here) does not claim to", () => {
+    const vobizStart = vobizDoSrc.indexOf("const handle = await startRuntimeSession({");
+    const vobizBlock = vobizDoSrc.slice(vobizStart, vobizDoSrc.indexOf("});\n", vobizStart));
+    assert.match(vobizBlock, /requestProviderHangup: async \(\) =>/);
+    assert.match(vobizBlock, /adapter\.hangupCall\(body\.providerCallId\)/);
+    const exotelStart = exotelDoSrc.indexOf("const handle = await startRuntimeSession({");
+    assert.doesNotMatch(
+      exotelDoSrc.slice(exotelStart, exotelDoSrc.indexOf("});\n", exotelStart)),
+      /requestProviderHangup/,
+    );
+  });
+});

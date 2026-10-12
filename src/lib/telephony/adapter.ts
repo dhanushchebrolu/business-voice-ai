@@ -172,6 +172,16 @@ export interface TelephonyProviderAdapter {
    * never as a crash. See ./audio-bridge.ts.
    */
   openMediaBridge?(providerCallId: string): Promise<AudioMediaBridge | null>;
+
+  /**
+   * Ends a live call on the provider's side (the caller hears the call
+   * drop). Optional: only implemented where the provider's hang-up API is
+   * documented. Without it, closing the media bridge is the only way the
+   * runtime can end a call, and whether that drops the PSTN leg depends on
+   * the provider's own stream semantics. Resolves when the provider has
+   * accepted the hang-up (or reports the call already gone).
+   */
+  hangupCall?(providerCallId: string): Promise<void>;
 }
 
 export class TelephonyAdapterError extends Error {

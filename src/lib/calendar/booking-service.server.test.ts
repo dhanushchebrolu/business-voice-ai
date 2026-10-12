@@ -312,7 +312,22 @@ describe("createBooking", () => {
           error: null,
         },
       }, // create_booking_atomic RPC
-      { result: { data: [{ id: "booking-1" }], error: null } }, // reconciliation update
+      {
+        result: {
+          data: [
+            {
+              id: "booking-1",
+              status: "CALENDAR_SYNC_FAILED",
+              start_at: BASE_INPUT.startIso,
+              end_at: BASE_INPUT.endIso,
+              timezone: "Asia/Kolkata",
+              google_event_id: null,
+              contact_id: "contact-1",
+            },
+          ],
+          error: null,
+        },
+      }, // reconciliation update
     ]);
     const provider = fakeProvider({
       createEvent: async () => {
@@ -324,7 +339,13 @@ describe("createBooking", () => {
       },
     });
 
-    await assert.rejects(() => createBooking(client, provider, BASE_INPUT), CalendarProviderError);
+    // The booking is saved and holds the slot — it is returned with its real
+    // CALENDAR_SYNC_FAILED status (never reported as a failed booking, and
+    // never as CONFIRMED).
+    const result = await createBooking(client, provider, BASE_INPUT);
+    assert.equal(result.id, "booking-1");
+    assert.equal(result.status, "CALENDAR_SYNC_FAILED");
+    assert.equal(result.googleEventId, null);
 
     const reconcileUpdate = calls.find(
       (c) =>
@@ -333,6 +354,38 @@ describe("createBooking", () => {
         (c.args[0] as Record<string, unknown>)["status"] === "CALENDAR_SYNC_FAILED",
     );
     assert.ok(reconcileUpdate, "expected a CALENDAR_SYNC_FAILED reconciliation update");
+    assert.deepEqual(
+      (reconcileUpdate!.args[0] as Record<string, unknown>)["metadata"],
+      { calendar_sync_error: "Google Calendar is temporarily unavailable." },
+      "the sync failure is recorded for staff",
+    );
+  });
+
+  test("reconciliation lost to a concurrent cancellation: the Google failure still propagates — nothing is reported as saved", async () => {
+    const { client } = makeFakeSupabase([
+      { result: { data: { id: "contact-1" }, error: null } }, // contact upsert
+      {
+        result: {
+          data: {
+            id: "booking-1",
+            status: "PENDING_CONFIRMATION",
+            start_at: BASE_INPUT.startIso,
+            end_at: BASE_INPUT.endIso,
+            timezone: "Asia/Kolkata",
+            google_event_id: null,
+            contact_id: "contact-1",
+          },
+          error: null,
+        },
+      },
+      { result: { data: [], error: null } }, // guarded update matched nothing
+    ]);
+    const provider = fakeProvider({
+      createEvent: async () => {
+        throw new CalendarProviderError("CALENDAR_UNAVAILABLE", "Unavailable.", true);
+      },
+    });
+    await assert.rejects(() => createBooking(client, provider, BASE_INPUT), CalendarProviderError);
   });
 });
 
@@ -562,13 +615,21 @@ describe("createBooking — Google Calendar optional: no provider/calendarId giv
 
     assert.equal(result.status, "CONFIRMED");
     assert.equal(result.googleEventId, null);
-    assert.equal(getBusyPeriodsCalled, false, "no external calendar to recheck busy periods against");
+    assert.equal(
+      getBusyPeriodsCalled,
+      false,
+      "no external calendar to recheck busy periods against",
+    );
     assert.equal(createEventCalled, false, "no event should ever be created");
     void provider; // confirms the function works even when a provider IS supplied but no connection id is (not exercised above — see the next test)
 
     const rpcCall = calls.find((c) => c.table === "create_booking_atomic" && c.method === "rpc");
     const payload = rpcCall!.args[0] as Record<string, unknown>;
-    assert.equal(payload["p_status"], "CONFIRMED", "no calendar to wait on -> insert directly as CONFIRMED");
+    assert.equal(
+      payload["p_status"],
+      "CONFIRMED",
+      "no calendar to wait on -> insert directly as CONFIRMED",
+    );
     assert.equal(payload["p_calendar_connection_id"], null);
   });
 
@@ -1246,5 +1307,128 @@ describe("createPaymentRequiredBooking", () => {
       { result: { data: null, error: { message: "connection reset" } } },
     ]);
     await assert.rejects(() => createPaymentRequiredBooking(client, PAYMENT_HOLD_INPUT));
+  });
+});
+
+/**
+ * Root cause of the Smile Dental incident: the voice runtime passed the
+ * caller's spoken number as raw digits ("9876543210"). resolveContactId
+ * upserts it into contacts.phone, which is CHECK-constrained to E.164
+ * (contacts_phone_e164), so the upsert failed and the booking RPC never ran
+ * — nothing was persisted and the tool reported a generic failure.
+ */
+describe("phone normalization — contacts.phone's E.164 CHECK can no longer abort a booking", () => {
+  const E164 = /^\+[1-9]\d{6,14}$/;
+  const confirmedRow = {
+    id: "booking-1",
+    status: "CONFIRMED",
+    start_at: "2026-10-12T13:00:00.000Z",
+    end_at: "2026-10-12T13:30:00.000Z",
+    timezone: "Asia/Kolkata",
+    google_event_id: null,
+    contact_id: "contact-1",
+  };
+
+  test("a spoken 10-digit number is upserted and booked as E.164 — exactly one RPC insert", async () => {
+    const { client, calls } = makeFakeSupabase([
+      { result: { data: null, error: null } }, // idempotency pre-check: none yet
+      { result: { data: { id: "contact-1" }, error: null } }, // contact upsert
+      { result: { data: confirmedRow, error: null } }, // create_booking_atomic
+    ]);
+    const result = await createBooking(client, null, {
+      ...BASE_INPUT,
+      calendarConnectionId: undefined,
+      calendarId: undefined,
+      customerPhone: "9876543210",
+      phoneCountry: "IN",
+      startIso: confirmedRow.start_at,
+      endIso: confirmedRow.end_at,
+      idempotencyKey: "voice:call-1:2026-10-12T13:00:00.000Z:2026-10-12T13:30:00.000Z",
+    });
+    assert.equal(result.id, "booking-1");
+    assert.equal(result.status, "CONFIRMED");
+
+    const upsert = calls.find((c) => c.table === "contacts" && c.method === "upsert");
+    const contact = upsert!.args[0] as Record<string, unknown>;
+    assert.equal(contact["phone"], "+919876543210");
+    assert.match(String(contact["phone"]), E164);
+
+    const rpcCalls = calls.filter((c) => c.method === "rpc");
+    assert.equal(rpcCalls.length, 1);
+    const args = rpcCalls[0]!.args[0] as Record<string, unknown>;
+    assert.equal(args["p_customer_phone"], "+919876543210");
+    assert.equal(args["p_status"], "CONFIRMED");
+  });
+
+  test("an un-normalizable number is rejected as INVALID_PHONE before any database call", async () => {
+    const { client, calls } = makeFakeSupabase([]);
+    await assert.rejects(
+      createBooking(client, null, { ...BASE_INPUT, customerPhone: "12345 678" }),
+      (err: unknown) => err instanceof BookingError && err.code === "INVALID_PHONE",
+    );
+    assert.equal(calls.length, 0);
+  });
+
+  test("a retried booking (same idempotency key) returns the existing booking — no contact upsert, no second insert", async () => {
+    const { client, calls } = makeFakeSupabase([
+      { result: { data: confirmedRow, error: null } }, // idempotency pre-check finds it
+    ]);
+    const result = await createBooking(client, null, {
+      ...BASE_INPUT,
+      calendarConnectionId: undefined,
+      calendarId: undefined,
+      customerPhone: "9876543210",
+      phoneCountry: "IN",
+      idempotencyKey: "voice:call-1:a:b",
+    });
+    assert.equal(result.id, "booking-1");
+    assert.equal(calls.filter((c) => c.method === "rpc").length, 0);
+    assert.equal(calls.filter((c) => c.method === "upsert").length, 0);
+  });
+
+  test("payment-required holds: an already-E.164 number reaches the RPC unchanged", async () => {
+    const { client, calls } = makeFakeSupabase([
+      { result: { data: { id: "contact-1" }, error: null } },
+      {
+        result: {
+          data: {
+            ...confirmedRow,
+            status: "PENDING_PAYMENT",
+            hold_expires_at: "2026-10-12T12:45:00.000Z",
+            call_id: null,
+          },
+          error: null,
+        },
+      },
+    ]);
+    const result = await createPaymentRequiredBooking(client, PAYMENT_HOLD_INPUT);
+    assert.equal(result.status, "PENDING_PAYMENT");
+    const args = calls.find((c) => c.method === "rpc")!.args[0] as Record<string, unknown>;
+    assert.equal(args["p_customer_phone"], PAYMENT_HOLD_INPUT.customerPhone);
+    assert.equal(calls.find((c) => c.method === "rpc")!.table, "create_booking_payment_hold");
+  });
+
+  test("payment-required holds: a spoken 10-digit number no longer aborts the hold", async () => {
+    const { client, calls } = makeFakeSupabase([
+      { result: { data: { id: "contact-1" }, error: null } },
+      {
+        result: {
+          data: {
+            ...confirmedRow,
+            status: "PENDING_PAYMENT",
+            hold_expires_at: null,
+            call_id: null,
+          },
+          error: null,
+        },
+      },
+    ]);
+    await createPaymentRequiredBooking(client, {
+      ...PAYMENT_HOLD_INPUT,
+      customerPhone: "9876543210",
+      phoneCountry: "IN",
+    });
+    const contact = calls.find((c) => c.method === "upsert")!.args[0] as Record<string, unknown>;
+    assert.equal(contact["phone"], "+919876543210");
   });
 });

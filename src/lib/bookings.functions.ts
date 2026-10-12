@@ -64,7 +64,7 @@ export const createBookingManual = createServerFn({ method: "POST" })
 
     const { data: business, error: businessError } = await supabaseAdmin
       .from("businesses")
-      .select("id, organization_id, name, timezone")
+      .select("id, organization_id, name, timezone, country")
       .eq("id", data.businessId)
       .maybeSingle();
     if (businessError) throw businessError;
@@ -115,6 +115,7 @@ export const createBookingManual = createServerFn({ method: "POST" })
       source: "manual",
       notes: data.notes,
       businessName: business.name,
+      phoneCountry: business.country,
     });
     return booking;
   });

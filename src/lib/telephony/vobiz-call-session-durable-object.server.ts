@@ -108,6 +108,10 @@ export interface VobizStartRuntimeRpcInput {
   snapshotAgent: StartRuntimeSessionInput["snapshotAgent"];
   businessName: string;
   providerCallId: string;
+  /** The inbound caller's number from the provider's signed webhook (NormalizedCallEvent.fromE164) — passed through to StartRuntimeSessionInput.callerNumber, which validates it. Optional so an older in-flight RPC body without it still parses. */
+  callerNumber?: string | null;
+  /** businesses.country, read live at call start — see StartRuntimeSessionInput.businessCountry. */
+  businessCountry?: string | null;
   timeoutMs?: number;
 }
 
@@ -493,6 +497,17 @@ export class VobizCallSessionDurableObject {
       snapshotAgent: body.snapshotAgent,
       businessName: body.businessName,
       bridge,
+      callerNumber: body.callerNumber ?? null,
+      businessCountry: body.businessCountry ?? null,
+      // Vobiz documents a live-call hang-up API, so a completed
+      // conversation ends the PSTN call explicitly rather than relying on
+      // the stream closing.
+      requestProviderHangup: async () => {
+        const { getTelephonyAdapter } = await import("../telephony.server.ts");
+        const adapter = getTelephonyAdapter("vobiz");
+        if (!adapter?.hangupCall) throw new Error("Vobiz adapter is not configured.");
+        await adapter.hangupCall(body.providerCallId);
+      },
     });
 
     console.info("vobiz_call_session_do:start_runtime_completed", {

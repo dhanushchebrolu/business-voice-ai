@@ -56,6 +56,8 @@ function baseInput(
     snapshotAgent: minimalAgent,
     businessName: "Test Business",
     bridge,
+    // An Indian business: a caller's bare 10-digit mobile is read as +91.
+    businessCountry: "IN",
   };
 }
 
@@ -531,6 +533,15 @@ describe("10. Silence timeout", () => {
 
     flushCatchUp(); // the prompt's own audio has now fully played out too
     t.mock.timers.tick(10_000); // SILENCE_HANGUP_MS
+    await drain();
+
+    // The goodbye has been handed to TTS but its audio hasn't been
+    // delivered yet — hanging up now would cut it off.
+    assert.match(h.tts.sentTexts.join(" "), /end the call/i);
+    assert.equal(h.bridge.closed, false, "must not disconnect while the goodbye is still playing");
+
+    flushCatchUp(); // the goodbye's audio has fully played out
+    t.mock.timers.tick(1_000);
     await drain();
 
     assert.equal(h.bridge.closed, true, "the call must actually end, not just log a warning");
@@ -1841,10 +1852,11 @@ describe("28. 'Book me at the next available time' (no exact time given)", () =>
     // (Fix #1/#4) before falling through to getReply when it doesn't
     // apply — one more microtask hop than before, on top of this test's
     // already-tight two-sequential-tool-calls-plus-two-LLM-calls budget.
-    await drain(24);
+    await drain(60);
 
-    const factsMessage = h.llm.calls.at(-1)?.find((m) => m.role === "user");
-    assert.match(factsMessage?.content ?? "", /9:15\s*AM/i);
+    // English confirmations are spoken verbatim (no phrasing-model round
+    // trip), so the real booked time must be in what the caller hears.
+    assert.match(h.tts.sentTexts.join(" "), /9:15\s*AM/i);
 
     await terminateRuntimeSession(callId, "test cleanup");
   });
@@ -2114,8 +2126,8 @@ describe("30. Conversation state regression — the exact real-call sequence (pr
     );
     assert.equal(
       bookingCall?.input["customerPhone"],
-      "9999999999",
-      "phone must have been preserved across every turn",
+      "+919999999999",
+      "phone must have been preserved across every turn (normalized to E.164 for contacts.phone)",
     );
     assert.equal(
       bookingCall?.input["startIso"],
@@ -3423,8 +3435,8 @@ describe("35. Phone/email are never truncated end-to-end, even when the model's 
     assert.ok(bookingCall, "the booking must actually execute");
     assert.equal(
       bookingCall?.input["customerPhone"],
-      "7906903099",
-      "the full extracted phone must reach the real booking call, not the marker's truncated copy",
+      "+917906903099",
+      "the full extracted phone (as E.164) must reach the real booking call, not the marker's truncated copy",
     );
 
     await terminateRuntimeSession(callId, "test cleanup");

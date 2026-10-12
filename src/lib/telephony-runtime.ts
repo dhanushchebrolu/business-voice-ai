@@ -124,6 +124,17 @@ export async function routeToAgentRuntime(
       .limit(1)
       .maybeSingle();
 
+    // How a phone number given without a country code is read (see
+    // phone-number.ts) — the live business row, not a possibly-older
+    // published agent snapshot. Null (international numbers only) if unset
+    // or unreadable; never a guessed default.
+    const { data: businessRow } = await supabaseAdmin
+      .from("businesses")
+      .select("country")
+      .eq("id", businessId)
+      .maybeSingle();
+    const businessCountry = businessRow?.country ?? null;
+
     let instructions: string;
     let agentSnapshotAgent: import("./agent-instructions").AgentSnapshot["agent"];
     let agentVersion: number | null;
@@ -178,6 +189,10 @@ export async function routeToAgentRuntime(
       snapshotAgent: agentSnapshotAgent,
       businessName,
       providerCallId: input.providerCallId,
+      // Trusted inbound caller ID (the provider's own signed webhook `From`)
+      // — the voice runtime offers it as the appointment contact number.
+      callerNumber: input.callerE164,
+      businessCountry,
     };
 
     // Production path: the media bridge and the Sarvam voice runtime both
@@ -260,6 +275,13 @@ export async function routeToAgentRuntime(
       snapshotAgent: agentSnapshotAgent,
       businessName,
       bridge,
+      callerNumber: input.callerE164,
+      businessCountry,
+      ...(adapter.hangupCall && input.providerCallId
+        ? {
+            requestProviderHangup: () => adapter.hangupCall!(input.providerCallId!),
+          }
+        : {}),
     });
 
     return {

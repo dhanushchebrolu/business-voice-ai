@@ -35,6 +35,7 @@ import {
   request_payment,
   check_payment_status,
 } from "./payments/payment-tools.server.ts";
+import { classifyBookingStatus } from "./calendar/booking-outcome.ts";
 
 type Client = SupabaseClient<Database>;
 
@@ -127,7 +128,7 @@ const TOOL_REGISTRY: Record<string, ToolDefinition> = {
     schema: {
       name: "book_appointment",
       description:
-        "Actually create a confirmed appointment booking (a real Google Calendar event) — not a payment-required hold. Only call this once you have checked availability and have the caller's name, phone number, and a confirmed start/end time. Returns the real booking result; never tell the caller it's booked before this succeeds.",
+        'Actually create an appointment booking — not a payment-required hold. Only call this once you have checked availability and have the caller\'s name, phone number, and a confirmed start/end time. Returns the real stored booking and a bookingOutcome: tell the caller it is confirmed ONLY when bookingOutcome is "confirmed"; "saved_calendar_sync_failed" means it is saved and the team will confirm it; "pending" means it is not confirmed yet. Never tell the caller it\'s booked before this succeeds.',
       input_schema: {
         type: "object",
         properties: {
@@ -168,7 +169,27 @@ const TOOL_REGISTRY: Record<string, ToolDefinition> = {
         idempotencyKey,
         notes: str(input, "notes"),
       });
-      return asToolOutput(result);
+      if (!result.success) return asToolOutput(result);
+      // The stored row's status — not merely "the call didn't throw" — is
+      // what says whether the caller has an appointment. An idempotent
+      // retry can return an earlier attempt that has since been cancelled.
+      const bookingOutcome = classifyBookingStatus(result.data.status);
+      if (bookingOutcome === "not_booked") {
+        return {
+          content: JSON.stringify({
+            success: false,
+            error: {
+              code: "BOOKING_NOT_ACTIVE",
+              message: "That booking is no longer active, so nothing is booked.",
+            },
+          }),
+          isError: true,
+        };
+      }
+      return {
+        content: JSON.stringify({ success: true, bookingOutcome, data: result.data }),
+        isError: false,
+      };
     },
   },
 

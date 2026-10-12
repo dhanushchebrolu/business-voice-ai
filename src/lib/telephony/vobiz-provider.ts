@@ -270,6 +270,30 @@ export class VobizTelephonyAdapter implements TelephonyProviderAdapter {
     };
   }
 
+  /**
+   * Vobiz's documented "Hang Up a Call" API:
+   * DELETE {base}/Account/{auth_id}/Call/{call_uuid}/ with the X-Auth-ID /
+   * X-Auth-Token headers — terminates the live call immediately. 404 means
+   * the call has already ended, which is the outcome being asked for.
+   */
+  async hangupCall(providerCallId: string): Promise<void> {
+    let res: Response;
+    try {
+      res = await fetch(
+        `${this.baseUrl()}/Account/${this.config.authId}/Call/${encodeURIComponent(providerCallId)}/`,
+        { method: "DELETE", headers: this.authHeaders() },
+      );
+    } catch {
+      throw new TelephonyAdapterError("Could not reach Vobiz to hang up the call.", 503);
+    }
+    if (!res.ok && res.status !== 404) {
+      throw new TelephonyAdapterError(
+        `Vobiz could not hang up the call (${res.status}).`,
+        res.status,
+      );
+    }
+  }
+
   async releaseNumber(providerNumberId: string): Promise<void> {
     let res: Response;
     try {

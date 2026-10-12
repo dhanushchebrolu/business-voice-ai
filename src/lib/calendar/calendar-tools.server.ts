@@ -83,6 +83,8 @@ export interface ResolvedContext {
   calendarId: string | null;
   timezone: string;
   businessName: string;
+  /** businesses.country — how a phone number given without a country code is interpreted (see phone-number.ts). Null when not set. */
+  country: string | null;
   businessHours: {
     dayOfWeek: number;
     isClosed: boolean;
@@ -97,7 +99,7 @@ export async function resolveCalendarContext(
 ): Promise<ResolvedContext | { errorCode: string; message: string }> {
   const { data: business, error: businessError } = await supabaseAdmin
     .from("businesses")
-    .select("id, organization_id, name, timezone")
+    .select("id, organization_id, name, timezone, country")
     .eq("id", businessId)
     .maybeSingle();
   if (businessError) throw businessError;
@@ -195,6 +197,7 @@ export async function resolveCalendarContext(
     calendarId: hasUsableConnection ? connection!.calendar_id : null,
     timezone: business.timezone,
     businessName: business.name,
+    country: business.country ?? null,
     businessHours,
   };
 }
@@ -418,6 +421,7 @@ export async function create_calendar_event(
       idempotencyKey: input.idempotencyKey,
       notes: input.notes,
       businessName: ctx.businessName,
+      phoneCountry: ctx.country,
     });
     return { success: true, data: booking };
   } catch (err) {

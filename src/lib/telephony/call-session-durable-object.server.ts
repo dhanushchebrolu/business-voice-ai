@@ -117,6 +117,10 @@ export interface StartRuntimeRpcInput {
   snapshotAgent: StartRuntimeSessionInput["snapshotAgent"];
   businessName: string;
   providerCallId: string;
+  /** The inbound caller's number from the provider's signed webhook (NormalizedCallEvent.fromE164) — passed through to StartRuntimeSessionInput.callerNumber, which validates it. Optional so an older in-flight RPC body without it still parses. */
+  callerNumber?: string | null;
+  /** businesses.country, read live at call start — see StartRuntimeSessionInput.businessCountry. */
+  businessCountry?: string | null;
   timeoutMs?: number;
 }
 
@@ -469,6 +473,8 @@ export class CallSessionDurableObject {
       snapshotAgent: body.snapshotAgent,
       businessName: body.businessName,
       bridge,
+      callerNumber: body.callerNumber ?? null,
+      businessCountry: body.businessCountry ?? null,
     });
 
     console.info("call_session_do:start_runtime_completed", {

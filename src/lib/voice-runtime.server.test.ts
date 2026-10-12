@@ -802,12 +802,12 @@ describe("mergeAppointmentState — extracted date/time is a backstop, never an 
       const result = mergeAppointmentState(
         emptyAppointmentState(),
         { phone: "7900" },
-        { phone: "7906903099" },
+        { phone: "7906903099", phoneCountry: "IN" },
       );
       assert.equal(
         result.phone,
-        "7906903099",
-        "the raw extracted digits must win over the model's own (truncated) copy",
+        "+917906903099",
+        "the extracted digits (normalized to E.164 for contacts.phone) must win over the model's own (truncated) copy",
       );
     });
 
@@ -824,9 +824,9 @@ describe("mergeAppointmentState — extracted date/time is a backstop, never an 
       const result = mergeAppointmentState(
         emptyAppointmentState(),
         { phone: "9999999999", email: "dhanush@example.com" },
-        {},
+        { phoneCountry: "IN" },
       );
-      assert.equal(result.phone, "9999999999");
+      assert.equal(result.phone, "+919999999999");
       assert.equal(result.email, "dhanush@example.com");
     });
 
@@ -834,12 +834,16 @@ describe("mergeAppointmentState — extracted date/time is a backstop, never an 
       const afterTurn1 = mergeAppointmentState(
         emptyAppointmentState(),
         {},
-        { phone: "7906903099", email: "chdhnsh56@gmail.com" },
+        { phone: "7906903099", email: "chdhnsh56@gmail.com", phoneCountry: "IN" },
       );
-      assert.equal(afterTurn1.phone, "7906903099");
+      assert.equal(afterTurn1.phone, "+917906903099");
 
       const afterTurn2 = mergeAppointmentState(afterTurn1, { service: "teeth cleaning" });
-      assert.equal(afterTurn2.phone, "7906903099", "must not be dropped/truncated on a later turn");
+      assert.equal(
+        afterTurn2.phone,
+        "+917906903099",
+        "must not be dropped/truncated on a later turn",
+      );
       assert.equal(afterTurn2.email, "chdhnsh56@gmail.com");
     });
 
@@ -847,9 +851,9 @@ describe("mergeAppointmentState — extracted date/time is a backstop, never an 
       const result = mergeAppointmentState(
         emptyAppointmentState(),
         { phone: null, email: null },
-        { phone: "7906903099", email: "chdhnsh56@gmail.com" },
+        { phone: "7906903099", email: "chdhnsh56@gmail.com", phoneCountry: "IN" },
       );
-      assert.equal(result.phone, "7906903099");
+      assert.equal(result.phone, "+917906903099");
       assert.equal(result.email, "chdhnsh56@gmail.com");
     });
   });
@@ -1270,11 +1274,14 @@ describe("silence/timeout handling — wiring", () => {
     assert.match(src, /case "speech_end":[\s\S]{0,600}armSilenceTimer\(session\);/);
   });
 
-  test("all four handleUserUtterance exit paths (empty raw reply, empty after marker/booking, reply spoken, LLM error) re-arm before returning to LISTENING", () => {
+  // An empty raw reply now flows into the same empty-reply exit as an
+  // empty-after-marker/booking reply (which asks for the next missing
+  // booking detail instead of going silent), so there are three exits.
+  test("all three handleUserUtterance exit paths (empty reply — raw or after marker/booking, reply spoken, LLM error) re-arm before returning to LISTENING", () => {
     const fnStart = src.indexOf("async function handleUserUtterance(");
     const fnBody = src.slice(fnStart, src.indexOf("\n}\n", fnStart));
     const armOccurrences = [...fnBody.matchAll(/armSilenceTimer\(session\);/g)];
-    assert.equal(armOccurrences.length, 4);
+    assert.equal(armOccurrences.length, 3);
   });
 
   /**

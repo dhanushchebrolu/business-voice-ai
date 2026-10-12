@@ -419,3 +419,58 @@ describe("openMediaBridge: honest 'no live audio path yet' when Vobiz's WS conne
     assert.equal(bridge, null);
   });
 });
+
+describe("hangupCall: Vobiz's documented live-call hang-up API", () => {
+  async function withFetch(
+    respond: (url: string, init?: RequestInit) => Response,
+    run: () => Promise<void>,
+  ): Promise<{ url: string; init: RequestInit | undefined }[]> {
+    const calls: { url: string; init: RequestInit | undefined }[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return respond(String(url), init);
+    }) as typeof fetch;
+    try {
+      await run();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    return calls;
+  }
+
+  test("sends DELETE /Account/{auth_id}/Call/{call_uuid}/ with the X-Auth headers", async () => {
+    const adapter = new VobizTelephonyAdapter(config);
+    const calls = await withFetch(
+      () => new Response(null, { status: 204 }),
+      () => adapter.hangupCall("call-uuid-1"),
+    );
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.url, "https://api.vobiz.ai/api/v1/Account/AUTH123/Call/call-uuid-1/");
+    assert.equal(calls[0]!.init?.method, "DELETE");
+    const headers = calls[0]!.init?.headers as Record<string, string>;
+    assert.equal(headers["X-Auth-ID"], "AUTH123");
+    assert.equal(headers["X-Auth-Token"], "secret-token");
+  });
+
+  test("a call that has already ended (404) is treated as hung up", async () => {
+    const adapter = new VobizTelephonyAdapter(config);
+    await withFetch(
+      () => new Response("not found", { status: 404 }),
+      () => adapter.hangupCall("gone"),
+    );
+  });
+
+  test("any other failure is reported, never swallowed", async () => {
+    const adapter = new VobizTelephonyAdapter(config);
+    await withFetch(
+      () => new Response("boom", { status: 500 }),
+      async () => {
+        await assert.rejects(
+          adapter.hangupCall("call-uuid-1"),
+          /could not hang up the call \(500\)/,
+        );
+      },
+    );
+  });
+});

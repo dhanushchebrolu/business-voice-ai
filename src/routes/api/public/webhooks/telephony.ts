@@ -598,6 +598,7 @@ async function applyCallEvent(
     id: string;
     status: string;
     organization_id: string;
+    caller_number?: string | null;
     direction: string;
     answered_at: string | null;
     phone_number_id: string | null;
@@ -731,7 +732,9 @@ async function applyCallEvent(
           agentConfigId: phoneNumber.agent_config_id,
           phoneNumberId: phoneNumber.id,
           destinationE164: phoneNumber.e164,
-          callerE164: event.fromE164 ?? null,
+          // A later status callback may omit From — fall back to the number
+          // recorded from this call's first (signed) webhook event.
+          callerE164: event.fromE164 ?? call.caller_number ?? null,
           direction: "inbound",
           provider: call.provider,
           providerCallId: call.provider_call_id,

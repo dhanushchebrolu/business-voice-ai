@@ -108,6 +108,7 @@ export async function create_payment_required_booking(
       source: input.source,
       idempotencyKey: input.idempotencyKey,
       callId: input.callId,
+      phoneCountry: ctx.country,
     });
     return { success: true, data: hold };
   } catch (err) {
