@@ -20,10 +20,7 @@ const SLOW_REQUEST_MS = 3_000;
 
 function safeOperationLabel(input: RequestInfo | URL): string {
   try {
-    const raw =
-      typeof input === "string" || input instanceof URL
-        ? input
-        : input.url;
+    const raw = typeof input === "string" || input instanceof URL ? input : input.url;
 
     return new URL(raw).pathname;
   } catch {
@@ -45,11 +42,13 @@ export async function fetchWithTiming(
     const durationMs = Date.now() - startedAt;
 
     if (!response.ok) {
-      let errorDetails: {
-        code?: string;
-        message?: string;
-        hint?: string;
-      } | string;
+      let errorDetails:
+        | {
+            code?: string;
+            message?: string;
+            hint?: string;
+          }
+        | string;
 
       try {
         const body = (await response.clone().json()) as {
@@ -87,8 +86,7 @@ export async function fetchWithTiming(
     const durationMs = Date.now() - startedAt;
 
     const isAbort =
-      err instanceof Error &&
-      (err.name === "AbortError" || err.name === "TimeoutError");
+      err instanceof Error && (err.name === "AbortError" || err.name === "TimeoutError");
 
     console.error(`${label}:${isAbort ? "timeout" : "network_error"}`, {
       correlationId,

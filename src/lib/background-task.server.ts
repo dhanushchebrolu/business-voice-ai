@@ -49,7 +49,12 @@ export function runInBackground(
   logEvent: string,
 ): void {
   const guarded = promise.catch((err: unknown) => {
-    console.error(logEvent, err instanceof Error ? { name: err.name, message: err.message, stack: err.stack } : { error: String(err) });
+    console.error(
+      logEvent,
+      err instanceof Error
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : { error: String(err) },
+    );
   });
   waitUntil?.(guarded);
 }
