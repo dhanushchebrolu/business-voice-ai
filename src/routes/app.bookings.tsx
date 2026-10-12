@@ -41,6 +41,7 @@ import {
   cancelBookingManual,
   rescheduleBookingManual,
 } from "@/lib/bookings.functions";
+import { retryBookingCalendarSyncManual } from "@/lib/booking-calendar-sync.functions";
 
 /**
  * Minimal, extensible upcoming-appointments list (spec section 42: "don't
@@ -99,10 +100,26 @@ function BookingsPage() {
   const queryClient = useQueryClient();
   const cancelFn = useServerFn(cancelBookingManual);
   const rescheduleFn = useServerFn(rescheduleBookingManual);
+  const retrySyncFn = useServerFn(retryBookingCalendarSyncManual);
+  const [retryingSyncId, setRetryingSyncId] = useState<string | null>(null);
   const { data: bookings, isLoading, isError, error, refetch } = useQuery(bookingsQuery);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [reschedulingId, setReschedulingId] = useState<string | null>(null);
   const [newStartLocal, setNewStartLocal] = useState("");
+
+  async function handleRetryCalendarSync(bookingId: string) {
+    setRetryingSyncId(bookingId);
+    try {
+      const result = await retrySyncFn({ data: { bookingId } });
+      if (result.outcome === "confirmed") toast.success(result.message);
+      else toast.error(result.message);
+      await queryClient.invalidateQueries({ queryKey: ["bookings"] });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't retry the calendar sync.");
+    } finally {
+      setRetryingSyncId(null);
+    }
+  }
 
   async function handleCancel(bookingId: string) {
     setCancellingId(bookingId);
@@ -192,6 +209,20 @@ function BookingsPage() {
                     <StatusPill tone={STATUS_TONE[booking.status] ?? "idle"}>
                       {booking.status.replace(/_/g, " ")}
                     </StatusPill>
+                    {booking.status === "CALENDAR_SYNC_FAILED" &&
+                      new Date(booking.start_at).getTime() > Date.now() && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={retryingSyncId === booking.id}
+                          onClick={() => handleRetryCalendarSync(booking.id)}
+                        >
+                          {retryingSyncId === booking.id ? (
+                            <Loader2 className="mr-1.5 size-4 animate-spin" />
+                          ) : null}
+                          Retry calendar sync
+                        </Button>
+                      )}
                     {cancellable && (
                       <Dialog
                         onOpenChange={(open) => {

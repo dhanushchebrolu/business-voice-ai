@@ -23,6 +23,7 @@ export class GoogleOAuthError extends Error {
 const AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 const USERINFO_ENDPOINT = "https://www.googleapis.com/oauth2/v2/userinfo";
+const REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke";
 const DEFAULT_TIMEOUT_MS = 15_000;
 
 export interface TokenSet {
@@ -203,4 +204,36 @@ export async function fetchGoogleAccountInfo(
   if (!data.id)
     throw new GoogleOAuthError("Google's account info response was missing an id.", 502);
   return { googleAccountId: data.id, email: data.email };
+}
+
+/**
+ * Revokes ClickAI's Google grant (the refresh token and every access token
+ * minted from it). Used on disconnect and when a connection is re-pointed
+ * at a different Google account. Best-effort by contract: Google answers
+ * 400 invalid_token for a grant that is already revoked/expired, which is
+ * the desired end state, so that is reported as `alreadyInvalid` rather
+ * than an error. Never throws and never includes the token in its result.
+ */
+export async function revokeGoogleToken(
+  token: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ ok: boolean; alreadyInvalid: boolean; status: number | null }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+  try {
+    const res = await fetchImpl(REVOKE_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ token }).toString(),
+      signal: controller.signal,
+    });
+    if (res.ok) return { ok: true, alreadyInvalid: false, status: res.status };
+    const body = (await res.json().catch(() => ({}))) as { error?: string };
+    const alreadyInvalid = res.status === 400 && body.error === "invalid_token";
+    return { ok: alreadyInvalid, alreadyInvalid, status: res.status };
+  } catch {
+    return { ok: false, alreadyInvalid: false, status: null };
+  } finally {
+    clearTimeout(timer);
+  }
 }

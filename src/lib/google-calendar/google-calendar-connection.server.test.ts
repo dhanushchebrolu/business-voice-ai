@@ -66,10 +66,26 @@ function makeFakeSupabase(script: { table: string; op: string; result: unknown }
           };
         },
         update(payload: unknown) {
-          return {
-            eq: (col: string, val: unknown) =>
-              Promise.resolve(next(table, "update", payload, { [col]: val })),
+          // Chainable (eq/not/select) and awaited once, like PostgREST's builder.
+          const updateFilters: Record<string, unknown> = {};
+          const query = {
+            eq(col: string, val: unknown) {
+              updateFilters[col] = val;
+              return query;
+            },
+            not(col: string, op: string, val: unknown) {
+              updateFilters[`${col}:not`] = `${op}.${String(val)}`;
+              return query;
+            },
+            select: () => query,
+            then(resolve: (v: unknown) => unknown, reject: (e: unknown) => unknown) {
+              return Promise.resolve(next(table, "update", payload, updateFilters)).then(
+                resolve,
+                reject,
+              );
+            },
           };
+          return query;
         },
       };
       return chain;
@@ -93,6 +109,12 @@ function fakeFetchSequence(responses: { status: number; body: unknown }[]): type
 describe("completeGoogleCalendarOAuth", () => {
   test("exchanges the code, reads the account, and stores an encrypted refresh token with NEEDS_CALENDAR_SELECTION status", async () => {
     const { client, calls } = makeFakeSupabase([
+      // No existing connection for this business yet.
+      {
+        table: "google_calendar_connections",
+        op: "select.maybeSingle",
+        result: { data: null, error: null },
+      },
       {
         table: "google_calendar_connections",
         op: "upsert.single",
@@ -113,8 +135,12 @@ describe("completeGoogleCalendarOAuth", () => {
       fetchImpl,
     );
 
-    assert.deepEqual(result, { connectionId: "conn-1" });
-    const upsertCall = calls[0]!;
+    assert.deepEqual(result, {
+      connectionId: "conn-1",
+      accountChanged: false,
+      status: "NEEDS_CALENDAR_SELECTION",
+    });
+    const upsertCall = calls[1]!;
     const payload = upsertCall.args[0] as Record<string, unknown>;
     assert.equal(payload["status"], "NEEDS_CALENDAR_SELECTION");
     assert.equal(payload["google_email"], "biz@example.com");
@@ -163,25 +189,119 @@ describe("completeGoogleCalendarOAuth", () => {
 });
 
 describe("selectCalendarForConnection", () => {
-  test("updates the chosen calendar and marks the connection CONNECTED", async () => {
-    const { client, calls } = makeFakeSupabase([
+  /** read (org check) -> read (token mint) -> update (token mint) -> update (selection). */
+  function selectScript(row: Record<string, unknown>) {
+    const encrypted = encryptCredential(JSON.stringify({ refreshToken: "stored-refresh" }));
+    return makeFakeSupabase([
       {
         table: "google_calendar_connections",
         op: "select.maybeSingle",
-        result: { data: { id: "conn-1", organization_id: "org-1" }, error: null },
+        result: { data: row, error: null },
+      },
+      {
+        table: "google_calendar_connections",
+        op: "select.maybeSingle",
+        result: {
+          data: {
+            id: "conn-1",
+            status: row["status"] ?? "NEEDS_CALENDAR_SELECTION",
+            calendar_id: row["calendar_id"] ?? null,
+            encrypted_credentials: encrypted,
+          },
+          error: null,
+        },
       },
       { table: "google_calendar_connections", op: "update", result: { error: null } },
+      { table: "google_calendar_connections", op: "update", result: { error: null } },
     ]);
-    await selectCalendarForConnection(client, {
-      organizationId: "org-1",
-      connectionId: "conn-1",
-      calendarId: "clinic-cal",
-      calendarName: "Clinic Appointments",
+  }
+  const calendarList = {
+    items: [
+      { id: "owner@example.com", summary: "Owner", primary: true, accessRole: "owner" },
+      { id: "clinic-cal", summary: "Clinic Appointments", accessRole: "writer" },
+      { id: "holidays", summary: "Holidays", accessRole: "reader" },
+      { id: "colleague", summary: "Colleague", accessRole: "freeBusyReader" },
+    ],
+  };
+
+  test("works before any calendar is chosen, validates the choice against Google, and takes the name from Google", async () => {
+    const { client, calls } = selectScript({
+      id: "conn-1",
+      organization_id: "org-1",
+      calendar_id: null,
     });
-    const updateCall = calls[1]!;
-    const payload = updateCall.args[0] as Record<string, unknown>;
+    const fetchImpl = fakeFetchSequence([
+      { status: 200, body: { access_token: "a", expires_in: 3600 } },
+      { status: 200, body: calendarList },
+    ]);
+    const result = await selectCalendarForConnection(
+      client,
+      { organizationId: "org-1", connectionId: "conn-1", calendarId: "clinic-cal" },
+      fetchImpl,
+    );
+    assert.deepEqual(result, { calendarId: "clinic-cal", calendarName: "Clinic Appointments" });
+    const payload = calls[3]!.args[0] as Record<string, unknown>;
     assert.equal(payload["calendar_id"], "clinic-cal");
+    assert.equal(payload["calendar_name"], "Clinic Appointments");
     assert.equal(payload["status"], "CONNECTED");
+    // A new calendar drops the old calendar's sync token and channel metadata.
+    assert.equal(payload["sync_token"], null);
+    assert.equal(payload["channel_id"], null);
+    assert.equal(payload["channel_token"], null);
+  });
+
+  for (const calendarId of ["holidays", "colleague", "not-in-this-account"]) {
+    test(`rejects a calendar ClickAI cannot write to (${calendarId}) and stores nothing`, async () => {
+      const { client, calls } = selectScript({
+        id: "conn-1",
+        organization_id: "org-1",
+        calendar_id: null,
+      });
+      const fetchImpl = fakeFetchSequence([
+        { status: 200, body: { access_token: "a", expires_in: 3600 } },
+        { status: 200, body: calendarList },
+      ]);
+      await assert.rejects(
+        () =>
+          selectCalendarForConnection(
+            client,
+            { organizationId: "org-1", connectionId: "conn-1", calendarId },
+            fetchImpl,
+          ),
+        (err: unknown) => {
+          assert.ok(err instanceof GoogleCalendarConnectionError);
+          assert.equal(err.code, "CALENDAR_NOT_WRITABLE");
+          return true;
+        },
+      );
+      const selectionUpdate = calls.find(
+        (c) => c.op === "update" && "calendar_id" in (c.args[0] as Record<string, unknown>),
+      );
+      assert.equal(selectionUpdate, undefined);
+    });
+  }
+
+  test("re-selecting the same calendar keeps its sync token and push channel", async () => {
+    const { client, calls } = selectScript({
+      id: "conn-1",
+      organization_id: "org-1",
+      status: "CONNECTED",
+      calendar_id: "clinic-cal",
+      channel_id: "ch-1",
+      channel_resource_id: "res-1",
+    });
+    const fetchImpl = fakeFetchSequence([
+      { status: 200, body: { access_token: "a", expires_in: 3600 } },
+      { status: 200, body: calendarList },
+    ]);
+    await selectCalendarForConnection(
+      client,
+      { organizationId: "org-1", connectionId: "conn-1", calendarId: "clinic-cal" },
+      fetchImpl,
+    );
+    const payload = calls[3]!.args[0] as Record<string, unknown>;
+    assert.equal("sync_token" in payload, false);
+    assert.equal("channel_id" in payload, false);
   });
 
   test("refuses to select a calendar on a connection belonging to a different organization", async () => {
@@ -198,7 +318,6 @@ describe("selectCalendarForConnection", () => {
           organizationId: "org-1",
           connectionId: "conn-1",
           calendarId: "x",
-          calendarName: "x",
         }),
       GoogleCalendarConnectionError,
     );
@@ -213,6 +332,9 @@ describe("disconnectGoogleCalendarConnection", () => {
         op: "select.maybeSingle",
         result: { data: { id: "conn-1", organization_id: "org-1" }, error: null },
       },
+      { table: "google_calendar_connections", op: "update", result: { error: null } },
+      // No credential was stored, so the guarded clear matches nothing and
+      // the row is still forced to DISCONNECTED.
       { table: "google_calendar_connections", op: "update", result: { error: null } },
     ]);
     await disconnectGoogleCalendarConnection(client, {

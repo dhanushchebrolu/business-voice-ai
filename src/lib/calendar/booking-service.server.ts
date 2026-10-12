@@ -17,7 +17,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
-import type { CalendarProvider } from "./calendar-provider.ts";
+import type { CalendarProvider, NormalizedCalendarEvent } from "./calendar-provider.ts";
 import { CalendarProviderError } from "./calendar-provider.ts";
 import { normalizePhoneNumber } from "../phone-number.ts";
 
@@ -386,6 +386,9 @@ export async function createBooking(
       startIso: input.startIso,
       endIso: input.endIso,
       timezone: input.timezone,
+      // Lets a later retry find this event instead of creating a duplicate
+      // if the confirm step below never runs.
+      clickaiBookingId: booking.id,
     });
   } catch (err) {
     // Reconciliation (spec section 69): the booking already exists and
@@ -400,7 +403,16 @@ export async function createBooking(
       err instanceof CalendarProviderError ? err.message : "Failed to create the calendar event.";
     const { data: failedRows, error: failError } = await supabaseAdmin
       .from("bookings")
-      .update({ status: "CALENDAR_SYNC_FAILED", metadata: { calendar_sync_error: message } })
+      .update({
+        status: "CALENDAR_SYNC_FAILED",
+        metadata: {
+          ...metadataObject((booking as { metadata?: unknown }).metadata),
+          calendar_sync_error: message,
+          // Schedules the automatic retry (retryDueCalendarSyncFailures).
+          calendar_sync_attempts: 0,
+          calendar_sync_next_attempt_at: nextCalendarSyncAttemptAt(0, new Date()),
+        },
+      })
       .eq("id", booking.id)
       .eq("status", "PENDING_CONFIRMATION")
       .select("id, status, start_at, end_at, timezone, google_event_id, contact_id");
@@ -749,4 +761,363 @@ export async function createPaymentRequiredBooking(
     throw error;
   }
   return toPaymentHoldRecord(data);
+}
+
+// ============================================================
+// Google Calendar sync recovery for CALENDAR_SYNC_FAILED bookings
+// ============================================================
+//
+// A CALENDAR_SYNC_FAILED booking is saved in ClickAI and holds its slot;
+// only its Google Calendar event is missing (or, after a failed
+// reschedule, out of date). Recovery re-attempts the event and moves the
+// booking to CONFIRMED only after re-reading the event from Google and
+// checking it is the right one. No new columns: the retry bookkeeping
+// lives in bookings.metadata —
+//   calendar_sync_attempts        retries made so far (automatic + staff)
+//   calendar_sync_next_attempt_at earliest next automatic retry (ISO)
+//   calendar_sync_error           last failure, customer-safe text
+//   calendar_sync_last_attempt_at / calendar_sync_resolved_at
+
+/** Automatic retries stop after this many attempts; staff can still retry. */
+export const MAX_AUTOMATIC_CALENDAR_SYNC_ATTEMPTS = 3;
+/** Wait before automatic attempt n+1, indexed by attempts already made. */
+export const CALENDAR_SYNC_BACKOFF_MS = [5 * 60_000, 30 * 60_000, 2 * 60 * 60_000] as const;
+/** Upper bound on bookings one automatic sweep will retry. */
+export const CALENDAR_SYNC_RETRY_BATCH_SIZE = 20;
+
+function metadataObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? { ...(value as Record<string, unknown>) }
+    : {};
+}
+
+/** When the next automatic retry is due, or null once automatic retries are exhausted. */
+export function nextCalendarSyncAttemptAt(attemptsMade: number, now: Date): string | null {
+  if (attemptsMade >= MAX_AUTOMATIC_CALENDAR_SYNC_ATTEMPTS) return null;
+  const delay = CALENDAR_SYNC_BACKOFF_MS[attemptsMade] ?? CALENDAR_SYNC_BACKOFF_MS.at(-1)!;
+  return new Date(now.getTime() + delay).toISOString();
+}
+
+export function calendarSyncAttempts(metadata: unknown): number {
+  const raw = metadataObject(metadata)["calendar_sync_attempts"];
+  return typeof raw === "number" && Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 0;
+}
+
+/** Whether an automatic sweep may retry this booking now. */
+export function isCalendarSyncRetryDue(
+  booking: { status: string; start_at: string; metadata: unknown },
+  now: Date,
+): boolean {
+  if (booking.status !== "CALENDAR_SYNC_FAILED") return false;
+  if (new Date(booking.start_at).getTime() <= now.getTime()) return false;
+  const attempts = calendarSyncAttempts(booking.metadata);
+  if (attempts >= MAX_AUTOMATIC_CALENDAR_SYNC_ATTEMPTS) return false;
+  const nextAt = metadataObject(booking.metadata)["calendar_sync_next_attempt_at"];
+  if (typeof nextAt === "string" && new Date(nextAt).getTime() > now.getTime()) return false;
+  return true;
+}
+
+function sameInstant(a: string, b: string): boolean {
+  const ta = new Date(a).getTime();
+  return Number.isFinite(ta) && ta === new Date(b).getTime();
+}
+
+/** The event is the live, ClickAI-tagged event for this booking at exactly the booked time. */
+export function eventMatchesBooking(
+  event: NormalizedCalendarEvent | null,
+  booking: { id: string; start_at: string; end_at: string },
+): boolean {
+  return Boolean(
+    event &&
+    event.id &&
+    event.status !== "cancelled" &&
+    event.clickaiBookingId === booking.id &&
+    sameInstant(event.start, booking.start_at) &&
+    sameInstant(event.end, booking.end_at),
+  );
+}
+
+export type CalendarSyncRetryOutcome =
+  | { outcome: "confirmed"; bookingId: string; googleEventId: string; reusedExistingEvent: boolean }
+  | {
+      outcome: "skipped";
+      bookingId: string;
+      reason:
+        | "not_found"
+        | "not_sync_failed"
+        | "in_past"
+        | "attempts_exhausted"
+        | "not_due"
+        | "no_calendar_connection"
+        | "already_in_progress";
+    }
+  | { outcome: "failed"; bookingId: string; code: string; attempts: number }
+  | { outcome: "lost_race"; bookingId: string };
+
+export type ResolveCalendarProvider = (
+  connectionId: string,
+) => Promise<{ provider: CalendarProvider; calendarId: string }>;
+
+const RETRY_BOOKING_COLUMNS =
+  "id, organization_id, business_id, status, start_at, end_at, timezone, customer_name, google_event_id, calendar_connection_id, metadata, updated_at";
+
+/**
+ * Retries the Google Calendar event for one CALENDAR_SYNC_FAILED booking.
+ *
+ * - Tenant-scoped: the booking must belong to `organizationId`, and the
+ *   Google connection used must be a CONNECTED one of the same
+ *   organization and business.
+ * - Future bookings only. `trigger: "automatic"` additionally respects the
+ *   attempt cap and backoff; a staff retry is an explicit human action and
+ *   is allowed past the cap.
+ * - Claims the attempt with an optimistic update (status still
+ *   CALENDAR_SYNC_FAILED and updated_at unchanged) so a cron sweep and a
+ *   staff click can never both create an event.
+ * - Idempotent event creation: re-uses the booking's existing event, or an
+ *   event a previous attempt already tagged with this booking id, before
+ *   ever creating one.
+ * - Confirms only after re-reading the event from Google and checking id,
+ *   booking tag, status and exact start/end (eventMatchesBooking).
+ * - Logs ids, codes and counts only — never tokens, phone numbers or names.
+ */
+export async function retryBookingCalendarSync(
+  supabaseAdmin: Client,
+  resolveProvider: ResolveCalendarProvider,
+  input: {
+    organizationId: string;
+    bookingId: string;
+    trigger: "automatic" | "staff";
+    now?: Date | undefined;
+  },
+): Promise<CalendarSyncRetryOutcome> {
+  const now = input.now ?? new Date();
+  const bookingId = input.bookingId;
+  const LOG = "booking_service:calendar_sync_retry";
+
+  const { data: booking, error } = await supabaseAdmin
+    .from("bookings")
+    .select(RETRY_BOOKING_COLUMNS)
+    .eq("id", bookingId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!booking || booking.organization_id !== input.organizationId) {
+    return { outcome: "skipped", bookingId, reason: "not_found" };
+  }
+  if (booking.status !== "CALENDAR_SYNC_FAILED") {
+    return { outcome: "skipped", bookingId, reason: "not_sync_failed" };
+  }
+  if (new Date(booking.start_at).getTime() <= now.getTime()) {
+    return { outcome: "skipped", bookingId, reason: "in_past" };
+  }
+  const attempts = calendarSyncAttempts(booking.metadata);
+  if (input.trigger === "automatic") {
+    if (attempts >= MAX_AUTOMATIC_CALENDAR_SYNC_ATTEMPTS) {
+      return { outcome: "skipped", bookingId, reason: "attempts_exhausted" };
+    }
+    if (!isCalendarSyncRetryDue(booking, now)) {
+      return { outcome: "skipped", bookingId, reason: "not_due" };
+    }
+  }
+
+  // The connection must be live and belong to this booking's own
+  // organization and business — never another tenant's calendar.
+  let connectionQuery = supabaseAdmin
+    .from("google_calendar_connections")
+    .select("id")
+    .eq("organization_id", booking.organization_id)
+    .eq("business_id", booking.business_id)
+    .eq("status", "CONNECTED");
+  if (booking.calendar_connection_id) {
+    connectionQuery = connectionQuery.eq("id", booking.calendar_connection_id);
+  }
+  const { data: connection, error: connectionError } = await connectionQuery.limit(1).maybeSingle();
+  if (connectionError) throw connectionError;
+  if (!connection) {
+    return { outcome: "skipped", bookingId, reason: "no_calendar_connection" };
+  }
+
+  // Claim this attempt. The updated_at trigger bumps updated_at on every
+  // write, so a concurrent claimant's guarded update matches zero rows.
+  const attemptNumber = attempts + 1;
+  const baseMetadata = metadataObject(booking.metadata);
+  const claimedMetadata = {
+    ...baseMetadata,
+    calendar_sync_attempts: attemptNumber,
+    calendar_sync_last_attempt_at: now.toISOString(),
+    calendar_sync_next_attempt_at: nextCalendarSyncAttemptAt(attemptNumber, now),
+  };
+  const { data: claimed, error: claimError } = await supabaseAdmin
+    .from("bookings")
+    .update({ metadata: claimedMetadata })
+    .eq("id", bookingId)
+    .eq("status", "CALENDAR_SYNC_FAILED")
+    .eq("updated_at", booking.updated_at)
+    .select("id");
+  if (claimError) throw claimError;
+  if (!claimed || claimed.length === 0) {
+    return { outcome: "skipped", bookingId, reason: "already_in_progress" };
+  }
+
+  let createdEventId: string | null = null;
+  let verifiedEvent: NormalizedCalendarEvent | null = null;
+  let reusedExistingEvent = false;
+  let provider: CalendarProvider | null = null;
+  let calendarId: string | null = null;
+  try {
+    const resolved = await resolveProvider(connection.id);
+    provider = resolved.provider;
+    calendarId = resolved.calendarId;
+
+    // 1. An event this booking already points at (e.g. a failed
+    //    reschedule left it at the old time) — patch it into place.
+    let candidate: NormalizedCalendarEvent | null = null;
+    if (booking.google_event_id) {
+      const current = await provider.getEvent(calendarId, booking.google_event_id);
+      if (current && current.status !== "cancelled") candidate = current;
+    }
+    // 2. An event a previous, partially failed attempt created and tagged.
+    if (!candidate && provider.findEventByBookingId) {
+      candidate = await provider.findEventByBookingId(calendarId, bookingId);
+    }
+
+    if (candidate) {
+      reusedExistingEvent = true;
+      if (!eventMatchesBooking(candidate, booking)) {
+        await provider.updateEvent(calendarId, candidate.id, {
+          startIso: booking.start_at,
+          endIso: booking.end_at,
+          timezone: booking.timezone,
+        });
+      }
+      verifiedEvent = await provider.getEvent(calendarId, candidate.id);
+      // An event created before tagging existed can be the booking's own
+      // google_event_id without the tag; accept it only via that link.
+      if (
+        verifiedEvent &&
+        !verifiedEvent.clickaiBookingId &&
+        verifiedEvent.id === booking.google_event_id
+      ) {
+        verifiedEvent = { ...verifiedEvent, clickaiBookingId: bookingId };
+      }
+    } else {
+      const created = await provider.createEvent({
+        calendarId,
+        title: `Appointment - ${booking.customer_name ?? "Customer"}`,
+        description: [`ClickAI Booking ID: ${bookingId}`, "Created by: ClickAI"].join("\n"),
+        startIso: booking.start_at,
+        endIso: booking.end_at,
+        timezone: booking.timezone,
+        clickaiBookingId: bookingId,
+      });
+      createdEventId = created.id;
+      verifiedEvent = await provider.getEvent(calendarId, created.id);
+    }
+
+    if (!eventMatchesBooking(verifiedEvent, booking)) {
+      throw new CalendarProviderError(
+        "CALENDAR_CONFLICT",
+        "The calendar event could not be verified after it was written.",
+      );
+    }
+  } catch (err) {
+    const code = err instanceof CalendarProviderError ? err.code : (err as { code?: string })?.code;
+    const safeCode = typeof code === "string" ? code : "UNKNOWN";
+    if (createdEventId && provider && calendarId) {
+      // Never leave an unverified event behind; the next attempt starts clean.
+      await cleanupOrphanedEvent(provider, calendarId, createdEventId, bookingId);
+    }
+    await supabaseAdmin
+      .from("bookings")
+      .update({
+        metadata: {
+          ...claimedMetadata,
+          calendar_sync_error:
+            err instanceof CalendarProviderError
+              ? err.message
+              : "Failed to create the calendar event.",
+        },
+      })
+      .eq("id", bookingId)
+      .eq("status", "CALENDAR_SYNC_FAILED");
+    console.warn(`${LOG}:failed`, {
+      bookingId,
+      trigger: input.trigger,
+      attempt: attemptNumber,
+      code: safeCode,
+    });
+    return { outcome: "failed", bookingId, code: safeCode, attempts: attemptNumber };
+  }
+
+  // Verified: resolve to CONFIRMED, exactly like a booking whose event was
+  // created on the first try (status + google_event_id), guarded so a
+  // booking cancelled/rescheduled meanwhile is never overwritten.
+  const eventId = verifiedEvent!.id;
+  const resolvedMetadata = { ...claimedMetadata, calendar_sync_resolved_at: now.toISOString() };
+  delete (resolvedMetadata as Record<string, unknown>)["calendar_sync_error"];
+  delete (resolvedMetadata as Record<string, unknown>)["calendar_sync_next_attempt_at"];
+  const { data: confirmed, error: confirmError } = await supabaseAdmin
+    .from("bookings")
+    .update({ status: "CONFIRMED", google_event_id: eventId, metadata: resolvedMetadata })
+    .eq("id", bookingId)
+    .eq("status", "CALENDAR_SYNC_FAILED")
+    .select("id");
+  if (confirmError || !confirmed || confirmed.length === 0) {
+    if (createdEventId && provider && calendarId) {
+      await cleanupOrphanedEvent(provider, calendarId, createdEventId, bookingId);
+    }
+    if (confirmError) throw confirmError;
+    console.warn(`${LOG}:lost_race`, { bookingId, trigger: input.trigger });
+    return { outcome: "lost_race", bookingId };
+  }
+
+  console.info(`${LOG}:confirmed`, {
+    bookingId,
+    trigger: input.trigger,
+    attempt: attemptNumber,
+    reusedExistingEvent,
+  });
+  return { outcome: "confirmed", bookingId, googleEventId: eventId, reusedExistingEvent };
+}
+
+/**
+ * One bounded automatic sweep: future CALENDAR_SYNC_FAILED bookings whose
+ * backoff has elapsed and that have attempts left, soonest appointment
+ * first, at most `limit` per run. Each booking is retried in its own
+ * organization's scope; one failure never stops the sweep.
+ */
+export async function retryDueCalendarSyncFailures(
+  supabaseAdmin: Client,
+  resolveProvider: ResolveCalendarProvider,
+  options: { now?: Date | undefined; limit?: number | undefined } = {},
+): Promise<{ examined: number; attempted: number; confirmed: number; failed: number }> {
+  const now = options.now ?? new Date();
+  const limit = Math.max(1, Math.min(options.limit ?? CALENDAR_SYNC_RETRY_BATCH_SIZE, 100));
+  const { data, error } = await supabaseAdmin
+    .from("bookings")
+    .select("id, organization_id, status, start_at, metadata")
+    .eq("status", "CALENDAR_SYNC_FAILED")
+    .gt("start_at", now.toISOString())
+    .order("start_at", { ascending: true })
+    .limit(limit * 5);
+  if (error) throw error;
+
+  const due = (data ?? []).filter((b) => isCalendarSyncRetryDue(b, now)).slice(0, limit);
+  let confirmed = 0;
+  let failed = 0;
+  for (const b of due) {
+    try {
+      const result = await retryBookingCalendarSync(supabaseAdmin, resolveProvider, {
+        organizationId: b.organization_id,
+        bookingId: b.id,
+        trigger: "automatic",
+        now,
+      });
+      if (result.outcome === "confirmed") confirmed++;
+      else if (result.outcome === "failed") failed++;
+    } catch {
+      failed++;
+      console.warn("booking_service:calendar_sync_retry:error", { bookingId: b.id });
+    }
+  }
+  return { examined: (data ?? []).length, attempted: due.length, confirmed, failed };
 }

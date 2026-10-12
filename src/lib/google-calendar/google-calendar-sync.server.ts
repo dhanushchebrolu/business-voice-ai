@@ -30,6 +30,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { constantTimeEquals } from "../constant-time-equals.server.ts";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import {
@@ -159,7 +160,11 @@ export async function handleWebhookNotification(
     .maybeSingle();
   if (error) throw error;
   if (!connection) return { outcome: "rejected", reason: "unknown channel" };
-  if (!connection.channel_token || connection.channel_token !== headers.channelToken) {
+  if (
+    !connection.channel_token ||
+    !headers.channelToken ||
+    !constantTimeEquals(connection.channel_token, headers.channelToken)
+  ) {
     return { outcome: "rejected", reason: "channel token mismatch" };
   }
   if (connection.status !== "CONNECTED") {

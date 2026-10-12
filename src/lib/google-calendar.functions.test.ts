@@ -21,11 +21,13 @@ const code = src.replace(/\/\*\*[\s\S]*?\*\//g, "");
 describe("authentication and tenant derivation", () => {
   test("every exported server function is gated by requireSupabaseAuth", () => {
     const matches = src.match(/\.middleware\(\[requireSupabaseAuth\]\)/g) ?? [];
+    const exported = src.match(/^export const \w+ = createServerFn/gm) ?? [];
     assert.equal(
       matches.length,
-      6,
-      "listGoogleCalendarConnections, connectGoogleCalendar, listGoogleCalendars, selectGoogleCalendar, disconnectGoogleCalendar, listOrgBusinessesForCalendar",
+      8,
+      "listGoogleCalendarConnections, connectGoogleCalendar, listGoogleCalendars, selectGoogleCalendar, testGoogleCalendarConnection, disconnectGoogleCalendar, getGoogleCalendarIntegrationStatus, listOrgBusinessesForCalendar",
     );
+    assert.equal(matches.length, exported.length, "no exported server function is ungated");
   });
 
   test("organizationId always comes from organization_members via resolveOrgId, never from client input", () => {
@@ -37,13 +39,36 @@ describe("authentication and tenant derivation", () => {
     assert.doesNotMatch(src, /organizationId:\s*z\./);
   });
 
+  // Business/connection ownership is now re-validated by
+  // requireCalendarManager (calendar-access.server.ts), which derives the
+  // organization from the target row and requires an owner/admin
+  // membership in exactly that organization — strictly stronger than the
+  // old first-membership equality check these assertions used to pin.
+  const accessSrc = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "google-calendar/calendar-access.server.ts"),
+    "utf8",
+  );
+
   test("business ownership is explicitly re-validated (not merely assumed from a client-supplied businessId)", () => {
-    assert.match(src, /assertBusinessOwnership\(/);
-    assert.match(src, /business\.organization_id !== organizationId/);
+    assert.match(
+      code,
+      /requireManager\(supabaseAdmin, context\.userId, \{\s*businessId: data\.businessId,?\s*\}\)/,
+    );
+    assert.match(accessSrc, /\.from\("businesses"\)/);
+    assert.match(accessSrc, /organizationId: data\.organization_id/);
+    assert.match(accessSrc, /\.eq\("organization_id", scope\.organizationId\)/);
+    assert.match(accessSrc, /CALENDAR_MANAGER_ROLES\.includes\(membership\.role\)/);
   });
 
   test("connection ownership is explicitly re-validated before listing calendars", () => {
-    assert.match(src, /connection\.organization_id !== organizationId/);
+    const start = code.indexOf("export const listGoogleCalendars =");
+    const block = code.slice(start, code.indexOf("export const", start + 10));
+    assert.match(
+      block,
+      /requireManager\(supabaseAdmin, context\.userId, \{\s*connectionId: data\.connectionId,?\s*\}\)/,
+    );
+    assert.match(block, /organizationId: scope\.organizationId/);
+    assert.match(accessSrc, /\.from\("google_calendar_connections"\)/);
   });
 });
 

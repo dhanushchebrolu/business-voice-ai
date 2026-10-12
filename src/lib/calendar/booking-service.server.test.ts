@@ -354,11 +354,22 @@ describe("createBooking", () => {
         (c.args[0] as Record<string, unknown>)["status"] === "CALENDAR_SYNC_FAILED",
     );
     assert.ok(reconcileUpdate, "expected a CALENDAR_SYNC_FAILED reconciliation update");
+    const metadata = (reconcileUpdate!.args[0] as Record<string, unknown>)["metadata"] as Record<
+      string,
+      unknown
+    >;
+    const { calendar_sync_next_attempt_at: nextAttemptAt, ...recorded } = metadata;
     assert.deepEqual(
-      (reconcileUpdate!.args[0] as Record<string, unknown>)["metadata"],
-      { calendar_sync_error: "Google Calendar is temporarily unavailable." },
-      "the sync failure is recorded for staff",
+      recorded,
+      {
+        calendar_sync_error: "Google Calendar is temporarily unavailable.",
+        calendar_sync_attempts: 0,
+      },
+      "the sync failure is recorded for staff, with no automatic retry made yet",
     );
+    // The first automatic retry is scheduled ~5 minutes out (backoff).
+    const delayMs = new Date(String(nextAttemptAt)).getTime() - Date.now();
+    assert.ok(delayMs > 4 * 60_000 && delayMs <= 5 * 60_000, `retry scheduled ${delayMs}ms out`);
   });
 
   test("reconciliation lost to a concurrent cancellation: the Google failure still propagates — nothing is reported as saved", async () => {

@@ -93,6 +93,9 @@ function mapErrorResponse(
   }
 }
 
+/** Private extended-property key ClickAI tags its own events with. */
+export const CLICKAI_BOOKING_ID_PROPERTY = "clickai_booking_id";
+
 function mapGoogleEvent(raw: {
   id?: string;
   summary?: string;
@@ -100,8 +103,11 @@ function mapGoogleEvent(raw: {
   start?: { dateTime?: string; date?: string };
   end?: { dateTime?: string; date?: string };
   status?: string;
+  extendedProperties?: { private?: Record<string, string> };
 }): NormalizedCalendarEvent {
+  const bookingTag = raw.extendedProperties?.private?.[CLICKAI_BOOKING_ID_PROPERTY];
   return {
+    ...(bookingTag ? { clickaiBookingId: bookingTag } : {}),
     id: raw.id ?? "",
     title: raw.summary ?? "",
     description: raw.description,
@@ -226,12 +232,16 @@ export class GoogleCalendarProvider implements CalendarProvider {
   }
 
   async listCalendars(): Promise<CalendarListEntry[]> {
-    const result = await this.request<{
-      items?: { id?: string; summary?: string; primary?: boolean }[];
-    }>("GET", "/users/me/calendarList");
+    type Item = { id?: string; summary?: string; primary?: boolean; accessRole?: string };
+    const result = await this.request<{ items?: Item[] }>("GET", "/users/me/calendarList");
     return (result?.items ?? [])
-      .filter((c): c is { id: string; summary?: string; primary?: boolean } => Boolean(c.id))
-      .map((c) => ({ id: c.id, name: c.summary ?? c.id, primary: Boolean(c.primary) }));
+      .filter((c): c is Item & { id: string } => Boolean(c.id))
+      .map((c) => ({
+        id: c.id,
+        name: c.summary ?? c.id,
+        primary: Boolean(c.primary),
+        ...(c.accessRole ? { accessRole: c.accessRole } : {}),
+      }));
   }
 
   async getBusyPeriods(input: GetBusyPeriodsInput): Promise<CalendarBusyPeriod[]> {
@@ -254,9 +264,41 @@ export class GoogleCalendarProvider implements CalendarProvider {
         ...(input.description !== undefined ? { description: input.description } : {}),
         start: { dateTime: input.startIso, timeZone: input.timezone },
         end: { dateTime: input.endIso, timeZone: input.timezone },
+        ...(input.clickaiBookingId
+          ? {
+              extendedProperties: {
+                private: { [CLICKAI_BOOKING_ID_PROPERTY]: input.clickaiBookingId },
+              },
+            }
+          : {}),
       },
     );
     return mapGoogleEvent(result ?? {});
+  }
+
+  /**
+   * Looks up a non-cancelled event this OAuth client tagged with a booking
+   * id (private extended properties are only matchable by the client that
+   * set them). Used to make event creation idempotent across retries.
+   */
+  async findEventByBookingId(
+    calendarId: string,
+    bookingId: string,
+  ): Promise<NormalizedCalendarEvent | null> {
+    const params = new URLSearchParams({
+      privateExtendedProperty: `${CLICKAI_BOOKING_ID_PROPERTY}=${bookingId}`,
+      singleEvents: "true",
+      showDeleted: "false",
+      maxResults: "5",
+    });
+    const result = await this.request<{ items?: Record<string, unknown>[] }>(
+      "GET",
+      `/calendars/${encodeURIComponent(calendarId)}/events?${params.toString()}`,
+    );
+    const match = (result?.items ?? [])
+      .map((item) => mapGoogleEvent(item))
+      .find((e) => e.id && e.status !== "cancelled" && e.clickaiBookingId === bookingId);
+    return match ?? null;
   }
 
   async updateEvent(

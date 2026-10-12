@@ -52,6 +52,13 @@ export interface CalendarEventInput {
   startIso: string;
   endIso: string;
   timezone: string;
+  /**
+   * ClickAI booking this event represents. Stored as a private extended
+   * property (visible only to this OAuth client, never to attendees) so a
+   * retry can find an event an earlier, partially failed attempt already
+   * created instead of inserting a duplicate.
+   */
+  clickaiBookingId?: string | undefined;
 }
 
 export interface NormalizedCalendarEvent {
@@ -61,12 +68,21 @@ export interface NormalizedCalendarEvent {
   start: string;
   end: string;
   status: "confirmed" | "cancelled" | "tentative";
+  /** The ClickAI booking id tag, when the event carries one (see CalendarEventInput.clickaiBookingId). */
+  clickaiBookingId?: string | undefined;
 }
 
 export interface CalendarListEntry {
   id: string;
   name: string;
   primary: boolean;
+  /** Google's calendarList accessRole: "owner" | "writer" | "reader" | "freeBusyReader". */
+  accessRole?: string | undefined;
+}
+
+/** Only calendars ClickAI can create events in may be selected for bookings. */
+export function calendarAllowsWrites(entry: Pick<CalendarListEntry, "accessRole">): boolean {
+  return entry.accessRole === "owner" || entry.accessRole === "writer";
 }
 
 export interface CalendarProvider {
@@ -80,4 +96,9 @@ export interface CalendarProvider {
   ): Promise<NormalizedCalendarEvent>;
   deleteEvent(calendarId: string, eventId: string): Promise<void>;
   getEvent(calendarId: string, eventId: string): Promise<NormalizedCalendarEvent | null>;
+  /** Finds a live event this client tagged with the given booking id, if any. */
+  findEventByBookingId?(
+    calendarId: string,
+    bookingId: string,
+  ): Promise<NormalizedCalendarEvent | null>;
 }

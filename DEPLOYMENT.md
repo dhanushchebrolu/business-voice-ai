@@ -204,3 +204,93 @@ and `keep_vars` protects anything already live.
 **Never** put a real secret value in `wrangler.json`, `.env.example`, or any
 committed file. Set/update secrets only through the Cloudflare dashboard or
 `wrangler secret put <NAME>`.
+
+## Google Calendar integration
+
+Customers connect their own calendar with "Connect Google Calendar" on
+**Integrations** (OAuth; they never paste an API key). ClickAI uses one
+Google Cloud OAuth client per deployment. All of the following is manual
+setup; nothing in the build does it.
+
+### 1. Google Cloud project
+
+1. In Google Cloud Console, pick or create the project and **enable the Google
+   Calendar API** (APIs & Services → Library).
+2. **OAuth consent screen**: set it to External, and give it an app name,
+   support email, privacy policy URL and authorized domain (your production
+   host). Add exactly these two scopes. ClickAI requests nothing else:
+   - `https://www.googleapis.com/auth/calendar.readonly`
+   - `https://www.googleapis.com/auth/calendar.events`
+3. Both scopes are **sensitive**, so Google requires app verification before
+   arbitrary customers can use the app. Until verification is complete, only
+   accounts listed as test users can connect. Testing-mode grants also
+   expire after 7 days, which shows up as "Reconnect needed" on the card.
+4. **Credentials → Create OAuth client ID → Web application.** Under
+   *Authorized redirect URIs*, add the exact callback URL. It must match
+   `GOOGLE_CALENDAR_REDIRECT_URI` character for character: scheme, host,
+   path, and no trailing slash.
+
+   ```
+   https://<your-production-host>/api/public/integrations/google-calendar/callback
+   ```
+
+   Add one entry per host that serves the app (for example a staging host),
+   each paired with that environment's own `GOOGLE_CALENDAR_REDIRECT_URI`.
+
+The callback is bound to the browser that started the flow by an HttpOnly
+`clickai_gcal_oauth_state` cookie (Secure, SameSite=Lax, 10 minutes). The
+redirect URI must therefore be on the **same host** the dashboard runs on.
+Otherwise the cookie isn't sent and every connection fails with
+"invalid_state".
+
+### 2. Cloudflare Worker secrets
+
+Set these with `wrangler secret put <NAME>` or in the dashboard
+(Settings → Variables and Secrets, as **secrets**):
+
+| Name | Value |
+| --- | --- |
+| `GOOGLE_CALENDAR_CLIENT_ID` | OAuth client ID from step 4 |
+| `GOOGLE_CALENDAR_CLIENT_SECRET` | OAuth client secret from step 4 |
+| `GOOGLE_CALENDAR_REDIRECT_URI` | The exact callback URL registered above |
+| `GOOGLE_CALENDAR_CREDENTIAL_ENCRYPTION_KEY` | 32 random bytes, base64 (`openssl rand -base64 32`). Encrypts stored refresh tokens (AES-256-GCM). **Never rotate it casually:** existing connections can't be decrypted afterwards and must reconnect. |
+| `GOOGLE_CALENDAR_WEBHOOK_URL` | `https://<your-production-host>/api/public/webhooks/google-calendar` (push notifications). Optional: without it, push channels aren't started and changes are picked up only by the cron sweep. |
+
+If the first three are missing, the card says Google Calendar isn't set up
+on this deployment. None of them are in `secrets.required`, because
+Calendar is a per-feature integration (see above).
+
+### 3. Scheduled sweep (external cron)
+
+`POST /api/public/cron/sync-google-calendars` (with
+`Authorization: Bearer $LOVABLE_CRON_SECRET`) does three things for every
+connected calendar:
+
+- renews push channels before they expire;
+- runs the fallback incremental sync;
+- retries the Google event for up to 20 upcoming `CALENDAR_SYNC_FAILED`
+  bookings per run.
+
+The retry follows a backoff of 5 minutes, then 30 minutes, then 2 hours, with
+at most 3 automatic attempts per booking. Staff can retry any time from
+**Bookings → Retry calendar sync**.
+
+`wrangler.json` has no cron trigger for it. Schedule it externally (Lovable
+scheduled job, Cloudflare cron, or any HTTPS scheduler), e.g. every 10–15
+minutes:
+
+```sh
+curl -fsS -X POST \
+  -H "Authorization: Bearer $LOVABLE_CRON_SECRET" \
+  https://<your-production-host>/api/public/cron/sync-google-calendars
+```
+
+The response is a JSON summary: connections processed, channels renewed and
+booking retries. It never contains tokens or customer data.
+
+### 4. Who can manage it
+
+Only organization **owners and admins** can connect, choose a calendar, test,
+reconnect or disconnect. This is enforced server-side. Disconnecting stops the
+push channel and revokes ClickAI's Google grant (best-effort), then deletes
+the stored credentials. Existing events and ClickAI bookings are kept.

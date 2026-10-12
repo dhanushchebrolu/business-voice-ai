@@ -15,6 +15,9 @@ import { authenticateCronRequest } from "@/integrations/supabase/cron-auth";
  *   2. Re-runs the same incremental sync a webhook notification would have
  *      triggered — the documented fallback for a notification that was
  *      never delivered, delayed, or dropped.
+ *   3. Retries the Google Calendar event for a bounded batch of future
+ *      CALENDAR_SYNC_FAILED bookings whose backoff has elapsed (max 3
+ *      automatic attempts each; see retryDueCalendarSyncFailures).
  *
  * No Cloudflare cron trigger is configured for this route in
  * wrangler.json — scheduling it (e.g. hourly) is an ops-level deployment
@@ -34,7 +37,26 @@ export const Route = createFileRoute("/api/public/cron/sync-google-calendars")({
             await import("@/lib/google-calendar/google-calendar-sync.server");
 
           const summary = await runPeriodicGoogleCalendarSync(supabaseAdmin);
-          return new Response(JSON.stringify(summary), {
+
+          // Independent of the sweep above: a failure here must not hide
+          // the sync summary, and vice versa.
+          let bookingRetries: unknown = null;
+          try {
+            const { retryDueCalendarSyncFailures } =
+              await import("@/lib/calendar/booking-service.server");
+            const { getCalendarProviderForConnection } =
+              await import("@/lib/google-calendar/google-calendar-connection.server");
+            bookingRetries = await retryDueCalendarSyncFailures(supabaseAdmin, (connectionId) =>
+              getCalendarProviderForConnection(supabaseAdmin, connectionId),
+            );
+          } catch (err) {
+            console.error("google_calendar_sync:booking_retry_sweep_failed", {
+              code: (err as { code?: unknown } | null)?.code ?? "UNKNOWN",
+            });
+            bookingRetries = { error: "booking retry sweep failed" };
+          }
+
+          return new Response(JSON.stringify({ ...summary, bookingRetries }), {
             headers: { "content-type": "application/json" },
           });
         } catch (err) {

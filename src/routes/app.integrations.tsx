@@ -22,7 +22,10 @@ import {
   listGoogleCalendars,
   selectGoogleCalendar,
   disconnectGoogleCalendar,
+  testGoogleCalendarConnection,
+  getGoogleCalendarIntegrationStatus,
 } from "@/lib/google-calendar.functions";
+import { googleCalendarCallbackMessage } from "@/lib/google-calendar/google-calendar-errors";
 import {
   listRazorpayConnections,
   getRazorpayIntegrationStatus,
@@ -74,6 +77,11 @@ const connectionsQuery = queryOptions({
   queryFn: () => listGoogleCalendarConnections(),
 });
 
+const googleCalendarStatusQuery = queryOptions({
+  queryKey: ["google-calendar-integration-status"],
+  queryFn: () => getGoogleCalendarIntegrationStatus(),
+});
+
 const razorpayConnectionsQuery = queryOptions({
   queryKey: ["razorpay-connections"],
   queryFn: () => listRazorpayConnections(),
@@ -112,6 +120,8 @@ function IntegrationsPage() {
   const listCalendarsFn = useServerFn(listGoogleCalendars);
   const selectCalendarFn = useServerFn(selectGoogleCalendar);
   const disconnectFn = useServerFn(disconnectGoogleCalendar);
+  const testCalendarFn = useServerFn(testGoogleCalendarConnection);
+  const googleCalendarStatusRes = useQuery(googleCalendarStatusQuery);
 
   const startRazorpayFn = useServerFn(startRazorpayConnection);
   const reconnectRazorpayFn = useServerFn(reconnectRazorpayConnection);
@@ -141,6 +151,7 @@ function IntegrationsPage() {
   >({});
   const [selectingFor, setSelectingFor] = useState<string | null>(null);
   const [disconnectingId, setDisconnectingId] = useState<string | null>(null);
+  const [testingId, setTestingId] = useState<string | null>(null);
 
   const [connectingRazorpayFor, setConnectingRazorpayFor] = useState<string | null>(null);
   const [reconnectingRazorpayId, setReconnectingRazorpayId] = useState<string | null>(null);
@@ -155,15 +166,10 @@ function IntegrationsPage() {
 
   useEffect(() => {
     if (search.google_calendar === "connected") {
-      toast.success("Google Calendar connected. Choose which calendar to use below.");
+      toast.success("Google Calendar connected.");
       void queryClient.invalidateQueries({ queryKey: ["google-calendar-connections"] });
     } else if (search.google_calendar === "error") {
-      const reason = search.reason ?? "unknown_error";
-      toast.error(
-        reason === "denied"
-          ? "Google Calendar connection was cancelled."
-          : "Couldn't connect Google Calendar. Please try again.",
-      );
+      toast.error(googleCalendarCallbackMessage(search.reason));
     }
     if (search.razorpay === "connected") {
       toast.success("Razorpay connected.");
@@ -225,15 +231,11 @@ function IntegrationsPage() {
     }
   }
 
-  async function handleSelectCalendar(
-    connectionId: string,
-    calendarId: string,
-    calendarName: string,
-  ) {
+  async function handleSelectCalendar(connectionId: string, calendarId: string) {
     setSelectingFor(connectionId);
     try {
-      await selectCalendarFn({ data: { connectionId, calendarId, calendarName } });
-      toast.success(`Using "${calendarName}" for this business.`);
+      const result = await selectCalendarFn({ data: { connectionId, calendarId } });
+      toast.success(`Using "${result.calendarName}" for this business.`);
       setCalendarOptionsByConnection((prev) => {
         const next = { ...prev };
         delete next[connectionId];
@@ -247,11 +249,32 @@ function IntegrationsPage() {
     }
   }
 
+  async function handleTestCalendar(connectionId: string) {
+    setTestingId(connectionId);
+    try {
+      const result = await testCalendarFn({ data: { connectionId } });
+      if (result.ok) toast.success("Google Calendar is working.");
+      else toast.error(result.message);
+      await queryClient.invalidateQueries({ queryKey: ["google-calendar-connections"] });
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Couldn't test the Google Calendar connection.",
+      );
+    } finally {
+      setTestingId(null);
+    }
+  }
+
   async function handleDisconnect(connectionId: string) {
     setDisconnectingId(connectionId);
     try {
       await disconnectFn({ data: { connectionId } });
       toast.success("Google Calendar disconnected.");
+      setCalendarOptionsByConnection((prev) => {
+        const next = { ...prev };
+        delete next[connectionId];
+        return next;
+      });
       await queryClient.invalidateQueries({ queryKey: ["google-calendar-connections"] });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Couldn't disconnect Google Calendar.");
@@ -443,6 +466,10 @@ function IntegrationsPage() {
                   key={business.id}
                   businessName={business.name}
                   connection={connection}
+                  canManage={googleCalendarStatusRes.data?.canManage ?? false}
+                  syncFailedCount={
+                    googleCalendarStatusRes.data?.syncFailedByBusiness[business.id] ?? 0
+                  }
                   connecting={connectingBusinessId === business.id}
                   onConnect={() => handleConnect(business.id)}
                   loadingCalendars={loadingCalendarsFor === connection?.id}
@@ -451,11 +478,13 @@ function IntegrationsPage() {
                   }
                   onLoadCalendars={() => connection && handleLoadCalendars(connection.id)}
                   selecting={selectingFor === connection?.id}
-                  onSelectCalendar={(calendarId, calendarName) =>
-                    connection && handleSelectCalendar(connection.id, calendarId, calendarName)
+                  onSelectCalendar={(calendarId) =>
+                    connection && handleSelectCalendar(connection.id, calendarId)
                   }
                   disconnecting={disconnectingId === connection?.id}
                   onDisconnect={() => connection && handleDisconnect(connection.id)}
+                  testing={testingId === connection?.id}
+                  onTest={() => connection && handleTestCalendar(connection.id)}
                 />
               );
             })}

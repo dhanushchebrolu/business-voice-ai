@@ -12,6 +12,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { getCalendarProviderForConnection } from "../google-calendar/google-calendar-connection.server.ts";
 import { CalendarProviderError, type CalendarProvider } from "../calendar/calendar-provider.ts";
+import { nextCalendarSyncAttemptAt } from "../calendar/booking-service.server.ts";
 import type { PaymentDomainEventRow } from "./payment-events.server.ts";
 
 type Client = SupabaseClient<Database>;
@@ -151,6 +152,9 @@ export async function handlePaymentCapturedForCalendar(
       startIso: booking.start_at,
       endIso: booking.end_at,
       timezone: booking.timezone,
+      // Lets the CALENDAR_SYNC_FAILED retry find this event instead of
+      // creating a duplicate if the confirm step below never runs.
+      clickaiBookingId: booking.id,
     });
   } catch (err) {
     // No event was ever created provider-side yet — nothing to clean up.
@@ -164,6 +168,9 @@ export async function handlePaymentCapturedForCalendar(
         status: "CALENDAR_SYNC_FAILED",
         metadata: {
           calendar_sync_error: err instanceof Error ? err.message : "Unknown calendar sync error.",
+          // Schedules the automatic retry (retryDueCalendarSyncFailures).
+          calendar_sync_attempts: 0,
+          calendar_sync_next_attempt_at: nextCalendarSyncAttemptAt(0, new Date()),
         },
       })
       .eq("id", booking.id)
