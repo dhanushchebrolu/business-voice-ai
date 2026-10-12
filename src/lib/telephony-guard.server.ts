@@ -313,22 +313,36 @@ export async function finalizeCallBilling(
     })
     .eq("id", call.id);
 
-  if (!debit?.already_applied && billableMinutes > 0) {
-    // Idempotent at the storage layer too (unique on call_id+kind) — a retry
-    // that reaches here after a partial prior failure still cannot double-count.
-    await supabaseAdmin.from("usage_records").upsert(
-      {
-        organization_id: call.organization_id,
-        call_id: call.id,
-        kind: "call",
-        provider: "telephony",
-        quantity: billableMinutes,
-        unit: "minute",
-        provider_cost: providerCost,
-        billable_cost: customerCharge,
-      },
-      { onConflict: "call_id,kind", ignoreDuplicates: true },
-    );
+  if (billableMinutes > 0) {
+    // The database function uses ON CONFLICT (call_id, kind)
+    // WHERE call_id IS NOT NULL to match the existing partial unique index.
+    // Keep the RPC signature local until Supabase types are regenerated.
+    const recordCallUsage = supabaseAdmin.rpc as unknown as (
+      functionName: string,
+      args: Record<string, unknown>,
+    ) => PromiseLike<{
+      error: { code?: string; message: string } | null;
+    }>;
+
+    const { error: usageError } = await recordCallUsage("record_call_usage", {
+      p_organization_id: call.organization_id,
+      p_call_id: call.id,
+      p_kind: "call",
+      p_provider: "telephony",
+      p_quantity: billableMinutes,
+      p_unit: "minute",
+      p_provider_cost: providerCost,
+      p_billable_cost: customerCharge,
+    });
+
+    if (usageError) {
+      console.error("telephony:usage_record_failed", {
+        callId: call.id,
+        code: usageError.code,
+        message: usageError.message,
+      });
+      throw usageError;
+    }
   }
 
   return {
