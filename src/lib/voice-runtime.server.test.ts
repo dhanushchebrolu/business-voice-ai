@@ -1323,11 +1323,19 @@ describe("silence/timeout handling — wiring", () => {
   });
 
   test("the hangup path speaks a goodbye and terminates with a distinct, honest reason", () => {
+    // Silence ends through the shared closing path (finishCall): the
+    // goodbye, then the provider hang-up after its audio, then the session
+    // terminates with exactly this reason.
     const fnStart = src.indexOf("async function endDueToSilence(");
     const fnBody = src.slice(fnStart, src.indexOf("\n}\n", fnStart));
+    assert.match(fnBody, /await finishCall\(session, \{/);
+    assert.match(fnBody, /reason: "caller_silence_timeout"/);
+    assert.match(fnBody, /message: CLOSING_MESSAGES\.silence/);
+    const finishStart = src.indexOf("async function finishCall(");
+    const finishBody = src.slice(finishStart, src.indexOf("\n}\n", finishStart));
     assert.match(
-      fnBody,
-      /await terminateRuntimeSession\(session\.input\.callId, "caller_silence_timeout"\);/,
+      finishBody,
+      /await terminateRuntimeSession\(session\.input\.callId, opts\.reason\);/,
     );
   });
 });

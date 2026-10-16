@@ -87,6 +87,19 @@ import { zonedWallTimeToUtc, dayOfWeekInTimezone } from "./calendar/timezone.ts"
 import { normalizeCallerId, normalizePhoneNumber, phoneLastFour } from "./phone-number.ts";
 import { classifyBookingStatus, type BookingOutcome } from "./calendar/booking-outcome.ts";
 import {
+  CLOSING_MESSAGES,
+  agentAskedAnythingElse,
+  agentSaidGoodbye,
+  classifyCallerClosingIntent,
+  closingMessageFor,
+  isTransientHangupError,
+  lifecyclePhaseFor,
+  normalizeReplyForRepeat,
+  resolveCallLifecyclePolicy,
+  type CallLifecyclePhase,
+  type CallLifecyclePolicy,
+} from "./call-lifecycle-policy.ts";
+import {
   findConfiguredService,
   resolveServiceFromText,
   spokenServiceList,
@@ -365,6 +378,13 @@ export interface StartRuntimeSessionInput {
    * way the runtime can end the call.
    */
   requestProviderHangup?: () => Promise<void>;
+  /**
+   * Overrides for the call lifecycle policy (silence timings, repeat/error
+   * limits, closing and hang-up deadlines, maximum call length) — see
+   * call-lifecycle-policy.ts. Unset fields keep the conservative defaults;
+   * numeric values are clamped to safe minimums.
+   */
+  lifecyclePolicy?: Partial<CallLifecyclePolicy>;
 }
 
 export interface RuntimeSessionHandle {
@@ -520,8 +540,32 @@ interface Session {
    * whenever the outbound buffer is cleared (barge-in).
    */
   outboundPlayoutEndsAt: number;
-  /** "awaiting_anything_else": a booking was confirmed and the agent asked whether there's anything else — a closing reply ("no, that's all", "bye") or continued silence ends the call cleanly. "ending": the farewell is being spoken. */
-  callCompletion: "none" | "awaiting_anything_else" | "ending";
+  /**
+   * Where the call is in closing (see finishCall):
+   * - "awaiting_anything_else": the agent asked whether there's anything
+   *   else (after a booking, an answered enquiry, or its own goodbye) — a
+   *   closing reply or continued silence ends the call cleanly.
+   * - "ending": the final message is being delivered (CLOSING).
+   * - "terminating": provider hang-up has been initiated (TERMINATING).
+   */
+  callCompletion: "none" | "awaiting_anything_else" | "ending" | "terminating";
+  /** Resolved call lifecycle policy for this call (call-lifecycle-policy.ts). */
+  policy: CallLifecyclePolicy;
+  /** The agent's last reply already said goodbye — a silence-ending need not say it again. */
+  farewellSpoken: boolean;
+  /** Turns in a row that failed (LLM/TTS/unexpected error); reset by any successful turn. */
+  consecutiveTurnErrors: number;
+  /** The previous agent reply (normalised) and how many times in a row it has been said. */
+  lastReplyNorm: string | null;
+  repeatedReplyCount: number;
+  /** The single provider hang-up attempt for this call (shared by every path that ends it). */
+  providerHangup: Promise<void> | null;
+  /** Set just before the runtime itself closes the media bridge, so its own close isn't mistaken for a dropped connection. */
+  closingBridge: boolean;
+  /** terminateRuntimeSession has started for this session — every later call is a no-op (also for a session that failed). */
+  terminationStarted: boolean;
+  /** The maximum-call-length timer (policy.maxCallDurationMs), if armed. */
+  maxDurationTimer: ReturnType<typeof setTimeout> | null;
   input: StartRuntimeSessionInput;
   deps: RuntimeDeps;
   turns: ConversationTurn[];
@@ -787,7 +831,11 @@ function armSilenceTimer(session: Session) {
   if ((state === "listening" || state === "waiting_on_payment") && ttsAudioInFlight(session)) {
     return;
   }
-  const delay = session.silencePromptSent ? SILENCE_HANGUP_MS : SILENCE_PROMPT_MS;
+  // SILENCE_PROMPT_MS / SILENCE_HANGUP_MS are the policy defaults; a call's
+  // own policy (StartRuntimeSessionInput.lifecyclePolicy) may adjust them.
+  const delay = session.silencePromptSent
+    ? session.policy.silenceHangupMs
+    : session.policy.silencePromptMs;
   // Bound to the generation active right now, at arm time — belt-and-
   // suspenders alongside clearSilenceTimer: every call site that starts
   // caller/assistant activity (speech_start, handleUserUtterance,
@@ -821,6 +869,58 @@ function clearPaymentWaitTimer(session: Session) {
     clearTimeout(session.paymentWaitTimer);
     session.paymentWaitTimer = null;
   }
+}
+
+function clearMaxDurationTimer(session: Session) {
+  if (session.maxDurationTimer) {
+    clearTimeout(session.maxDurationTimer);
+    session.maxDurationTimer = null;
+  }
+}
+
+/** A timer that never keeps the process alive on its own (Node); a no-op on Workers. */
+function unrefTimer(timer: ReturnType<typeof setTimeout>) {
+  (timer as { unref?: () => void }).unref?.();
+}
+
+/** Re-check interval while a maximum-length close waits for an in-flight turn to finish. */
+const MAX_DURATION_RECHECK_MS = 2_000;
+
+/**
+ * Closes the call politely once policy.maxCallDurationMs has elapsed —
+ * never in the middle of a legitimate operation: while the agent is
+ * thinking, running a tool or speaking, it re-checks until the call is
+ * waiting on the caller again, and only after
+ * policy.maxCallDurationGraceMs closes regardless (discarding the
+ * in-flight turn). 0 disables the limit.
+ */
+function armMaxDurationTimer(session: Session) {
+  clearMaxDurationTimer(session);
+  const limit = session.policy.maxCallDurationMs;
+  if (limit <= 0) return;
+  const forceAt = session.startedAt + limit + session.policy.maxCallDurationGraceMs;
+  const check = () => {
+    session.maxDurationTimer = null;
+    const state = stateOf(session);
+    if (state === "ending" || state === "ended" || state === "failed") return;
+    const idle = isAwaitingCaller(state) && !ttsAudioInFlight(session);
+    if (!idle && Date.now() < forceAt) {
+      session.maxDurationTimer = setTimeout(check, MAX_DURATION_RECHECK_MS);
+      unrefTimer(session.maxDurationTimer);
+      return;
+    }
+    if (!idle) {
+      log("max_call_duration_forced", session);
+      session.generation++; // discard the in-flight turn
+      session.input.bridge.clearOutboundBuffer();
+    }
+    void finishCall(session, {
+      reason: "max_call_duration",
+      message: CLOSING_MESSAGES.maxDuration(session.input.businessName),
+    });
+  };
+  session.maxDurationTimer = setTimeout(check, limit);
+  unrefTimer(session.maxDurationTimer);
 }
 
 /** Armed only right after entering "waiting_on_payment" (see handleUserUtterance). Fires the bounded fallback exactly once; a PaymentCaptured/Failed/Expired injection (injectPaymentEvent) or any further caller speech clears this timer first, so it never fires after the wait has already resolved another way. */
@@ -864,55 +964,61 @@ async function speakSilencePrompt(session: Session) {
 async function endDueToSilence(session: Session) {
   if (!isAwaitingCaller(session.handle.state)) return;
   log("silence_hangup", session);
-  try {
-    await speak(
-      session,
-      "I haven't heard anything, so I'll end the call here. Feel free to call back anytime.",
-    );
-  } catch (err) {
-    log("silence_goodbye_failed", session, { message: (err as Error).message });
-  }
-  // Let the goodbye actually play before disconnecting (bounded — see
-  // waitForFinalAudio); terminating right after speak() returned used to
-  // cut it off, since speak() only hands text to TTS.
-  await waitForFinalAudio(session);
-  await requestProviderHangup(session, "caller_silence_timeout");
-  await terminateRuntimeSession(session.input.callId, "caller_silence_timeout");
+  // Spoken, then provider hang-up once its audio has played, then the
+  // session terminates as "caller_silence_timeout" — see finishCall.
+  await finishCall(session, {
+    reason: "caller_silence_timeout",
+    message: CLOSING_MESSAGES.silence,
+    generation: session.generation,
+  });
 }
-
-/** Bound on the provider hang-up request — a slow provider API must not keep a finished call's session alive. */
-const PROVIDER_HANGUP_TIMEOUT_MS = 5_000;
 
 /**
  * Asks the telephony provider to end the PSTN call (see
- * StartRuntimeSessionInput.requestProviderHangup) — only ever after the
- * closing message has finished playing. Never throws: a failure or timeout
- * is logged and the caller of this function still terminates the session,
- * which closes the media bridge as the fallback.
+ * StartRuntimeSessionInput.requestProviderHangup) — after the closing
+ * message has finished playing, or when the media connection disappeared
+ * while the call may still be up. Shared per call: every path that ends the
+ * call awaits the same attempt, so the provider is asked at most once
+ * (plus policy.providerHangupRetries retries of a transient failure). Never
+ * throws: a failure is logged and the caller of this function still
+ * terminates the session, which closes the media bridge as the fallback.
  */
-async function requestProviderHangup(session: Session, reason: string): Promise<void> {
-  const hangup = session.input.requestProviderHangup;
-  if (!hangup) {
-    log("provider_hangup_unavailable", session, { reason });
-    return;
+function requestProviderHangup(session: Session, reason: string): Promise<void> {
+  if (session.providerHangup) {
+    log("provider_hangup_already_requested", session, { reason });
+    return session.providerHangup;
   }
-  try {
-    await withToolDeadline(PROVIDER_HANGUP_TIMEOUT_MS, hangup());
-    log("provider_hangup_requested", session, { reason });
-  } catch (err) {
-    log("provider_hangup_failed", session, { reason, message: (err as Error).message });
-  }
+  session.providerHangup = (async () => {
+    const hangup = session.input.requestProviderHangup;
+    if (!hangup) {
+      log("provider_hangup_unavailable", session, { reason });
+      return;
+    }
+    const attempts = 1 + session.policy.providerHangupRetries;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        await withToolDeadline(session.policy.providerHangupTimeoutMs, hangup());
+        log("provider_hangup_requested", session, { reason, attempt });
+        return;
+      } catch (err) {
+        const transient = isTransientHangupError(err);
+        log("provider_hangup_failed", session, {
+          reason,
+          attempt,
+          transient,
+          status: (err as { status?: unknown }).status ?? null,
+          message: (err as Error).message,
+        });
+        if (!transient) return;
+      }
+    }
+  })();
+  return session.providerHangup;
 }
 
 /** Asked after every confirmed booking — see Session.callCompletion. */
 const ANYTHING_ELSE_QUESTION = "Is there anything else I can help you with?";
 
-/**
- * Upper bound on how long a closing message may hold the call open waiting
- * for its audio to finish — a TTS stream that never reports "flushed" (or a
- * playout estimate that's wrong) must never keep a finished call alive.
- */
-const FINAL_AUDIO_MAX_WAIT_MS = 15_000;
 /** Extra margin after the estimated playout end, for provider-side jitter buffering. */
 const FINAL_AUDIO_PLAYOUT_GRACE_MS = 400;
 const FINAL_AUDIO_POLL_MS = 100;
@@ -922,8 +1028,9 @@ const FINAL_AUDIO_POLL_MS = 100;
  * caller: Sarvam has delivered every chunk (no TTS audio in flight) AND the
  * estimated provider-side playout of every frame already forwarded has
  * elapsed (Session.outboundPlayoutEndsAt), plus a small grace. Bounded by
- * FINAL_AUDIO_MAX_WAIT_MS; returns immediately if the session is already
- * ending (the caller hung up first).
+ * policy.closingAudioMaxWaitMs (a TTS stream that never reports "flushed",
+ * or a wrong playout estimate, never keeps a finished call alive); returns
+ * immediately if the session is already ending (the caller hung up first).
  */
 async function waitForFinalAudio(session: Session): Promise<void> {
   const startedAt = Date.now();
@@ -938,7 +1045,7 @@ async function waitForFinalAudio(session: Session): Promise<void> {
       log("final_audio_finished", session, { waited_ms: now - startedAt });
       return;
     }
-    if (now - startedAt >= FINAL_AUDIO_MAX_WAIT_MS) {
+    if (now - startedAt >= session.policy.closingAudioMaxWaitMs) {
       log("final_audio_wait_timed_out", session, {
         waited_ms: now - startedAt,
         tts_audio_in_flight: ttsAudioInFlight(session),
@@ -949,41 +1056,94 @@ async function waitForFinalAudio(session: Session): Promise<void> {
   }
 }
 
+/** Logs the call's lifecycle phase (call-lifecycle-policy.ts) at each closing transition. */
+function logLifecycle(session: Session, phase: CallLifecyclePhase, reason: string) {
+  log("call_lifecycle", session, { phase, reason });
+}
+
+/** The log-facing lifecycle phase for this session right now. */
+function lifecyclePhaseOf(session: Session): CallLifecyclePhase {
+  return lifecyclePhaseFor(session.handle.state, {
+    closing: session.callCompletion === "ending",
+    terminating: session.callCompletion === "terminating",
+    audioPlaying: ttsAudioInFlight(session),
+  });
+}
+
 /**
- * Ends a completed conversation: speaks a short farewell, waits for it to
- * finish playing (waitForFinalAudio), then terminates the session — which
- * closes the media bridge and, with it, the provider call. If the caller
- * starts speaking over the farewell (barge-in bumps session.generation),
- * the hangup is cancelled and their new turn is handled normally — the
- * existing stale-turn protection, not a forced disconnect, wins.
+ * The one way a call is ended by the runtime (every outcome: completed
+ * conversation, caller's request, silence, repeated errors or questions,
+ * maximum length). In order:
+ *
+ * 1. CLOSING — stop timers; nothing else may start closing this call.
+ * 2. Speak `message` (if any) and wait for its audio to actually finish
+ *    (waitForFinalAudio: TTS delivery + estimated playout, bounded by
+ *    policy.closingAudioMaxWaitMs). A TTS failure never blocks the hang-up.
+ * 3. If the caller spoke over it (generation moved on), cancel: their turn
+ *    is handled normally and the call stays in "anything else" mode, so
+ *    silence still ends it.
+ * 4. If the caller already hung up (the session is ending), stop — no
+ *    hang-up request for a call that is already over.
+ * 5. TERMINATING — one provider hang-up (shared, bounded retry), then
+ *    terminateRuntimeSession (transcript persisted, bridge closed).
+ *
+ * Idempotent: a second call while one is in progress is a no-op.
  */
-async function endConversationGracefully(
+async function finishCall(
   session: Session,
-  generation: number,
-  reason: string,
+  opts: { reason: string; message: string | null; generation?: number },
 ): Promise<void> {
-  if (session.callCompletion === "ending") return;
+  if (session.callCompletion === "ending" || session.callCompletion === "terminating") return;
   const state = stateOf(session);
   if (state === "ending" || state === "ended" || state === "failed") return;
   session.callCompletion = "ending";
   clearSilenceTimer(session);
   clearPaymentWaitTimer(session);
-  const farewell = `Thank you for calling ${session.input.businessName}. Goodbye!`;
-  log("conversation_closing", session, { reason });
-  session.turns.push({ role: "assistant", text: farewell, at: new Date().toISOString() });
-  try {
-    await speak(session, farewell);
-  } catch (err) {
-    log("farewell_failed", session, { message: (err as Error).message });
+  clearMaxDurationTimer(session);
+  logLifecycle(session, "CLOSING", opts.reason);
+  log("conversation_closing", session, { reason: opts.reason });
+  if (opts.message) {
+    session.turns.push({ role: "assistant", text: opts.message, at: new Date().toISOString() });
+    try {
+      await speak(session, opts.message);
+    } catch (err) {
+      log("farewell_failed", session, { reason: opts.reason, message: (err as Error).message });
+    }
   }
   await waitForFinalAudio(session);
-  if (session.generation !== generation) {
-    log("conversation_close_cancelled_by_caller", session, { reason });
-    session.callCompletion = "none";
+  if (opts.generation !== undefined && session.generation !== opts.generation) {
+    log("conversation_close_cancelled_by_caller", session, { reason: opts.reason });
+    session.callCompletion = "awaiting_anything_else";
     return;
   }
-  await requestProviderHangup(session, reason);
-  await terminateRuntimeSession(session.input.callId, reason);
+  const after = stateOf(session);
+  if (after === "ending" || after === "ended" || after === "failed") {
+    log("conversation_close_caller_already_gone", session, { reason: opts.reason });
+    return;
+  }
+  session.callCompletion = "terminating";
+  logLifecycle(session, "TERMINATING", opts.reason);
+  await requestProviderHangup(session, opts.reason);
+  await terminateRuntimeSession(session.input.callId, opts.reason);
+}
+
+/**
+ * Ends a completed conversation with a short farewell (skipped when the
+ * agent's own last reply already said goodbye). If the caller starts
+ * speaking over it, the hang-up is cancelled and their turn is handled
+ * normally — see finishCall.
+ */
+async function endConversationGracefully(
+  session: Session,
+  generation: number,
+  reason: string,
+  message: string = CLOSING_MESSAGES.farewell(session.input.businessName),
+): Promise<void> {
+  await finishCall(session, {
+    reason,
+    message: session.farewellSpoken ? null : message,
+    generation,
+  });
 }
 
 /** Spoken when a turn ran a tool but produced no reply text at all. */
@@ -4224,14 +4384,50 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
   const requestStarted = Date.now();
   const llmRequestAt = requestStarted;
 
-  // The caller is wrapping up ("bye", or "no, that's all" right after a
-  // confirmed booking) — a deterministic farewell, then a clean hangup once
-  // it has finished playing. No LLM round trip, so nothing can re-open the
-  // conversation or repeat the confirmation question.
-  if (isClosingUtterance(text, session.callCompletion === "awaiting_anything_else", callerIntent)) {
-    await endConversationGracefully(session, generation, "caller_closed_conversation");
+  // The caller is wrapping up — "bye", "hang up", "that's all", or a plain
+  // "no, thanks" right after the agent asked whether there's anything else
+  // (after a booking, an answered enquiry, or any other completed request).
+  // A deterministic closing, then a provider hang-up once it has finished
+  // playing (finishCall). No LLM round trip, so nothing can re-open the
+  // conversation or repeat a question. A turn that also carries a new
+  // request ("thanks — what time do you close?") is never a closing.
+  const lastAgentText =
+    [...session.turns].reverse().find((t) => t.role === "assistant")?.text ?? "";
+  const closingIntent = classifyCallerClosingIntent(text, {
+    awaitingAnythingElse:
+      session.callCompletion === "awaiting_anything_else" || agentAskedAnythingElse(lastAgentText),
+    hasNewRequest: Boolean(
+      callerIntent.availabilityRequested ||
+      callerIntent.explicitTime ||
+      callerIntent.relativeDate ||
+      callerIntent.weekday,
+    ),
+  });
+  if (closingIntent && closingIntent !== "human_requested") {
+    log("caller_closing_intent", session, { intent: closingIntent });
+    await endConversationGracefully(
+      session,
+      generation,
+      closingIntent === "hangup_request" ? "caller_requested_hangup" : "caller_closed_conversation",
+      closingMessageFor(text, session.input.businessName),
+    );
     return;
   }
+  if (closingIntent === "human_requested") {
+    // No live transfer exists in this runtime (policy.humanHandoffAvailable
+    // is reserved for when one does) — say so honestly and keep helping.
+    log("human_handoff_requested", session, {
+      handoff_available: session.policy.humanHandoffAvailable,
+    });
+    await speakRuntimeTurnReply(session, generation, CLOSING_MESSAGES.humanUnavailable, {
+      awaitAnythingElse: true,
+    });
+    return;
+  }
+  // The caller carried on with a real request: the conversation is open
+  // again until the agent next asks whether there's anything else.
+  if (session.callCompletion === "awaiting_anything_else") session.callCompletion = "none";
+  session.farewellSpoken = false;
 
   // The runtime's own ground truth for what the caller has already
   // confirmed — see AppointmentState's own doc comment. Built from state
@@ -4627,17 +4823,24 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
         return;
       }
 
+      reply = guardRepeatedReply(session, reply);
       session.turns.push({ role: "assistant", text: reply, at: new Date().toISOString() });
       await speak(session, reply);
-      // A booking was really confirmed this turn (deterministic path:
-      // attemptBooking reported "booked"; tool-calling path: book_appointment
-      // succeeded) and the caller was asked whether there's anything else —
-      // from here a closing reply or continued silence ends the call cleanly
-      // (see isClosingUtterance / armSilenceTimer) instead of looping on
-      // "are you still there?".
+      session.consecutiveTurnErrors = 0;
+      // The conversation has reached a natural end point: a booking was
+      // really confirmed this turn (deterministic path: attemptBooking
+      // reported "booked"; tool-calling path: book_appointment succeeded),
+      // or the agent asked whether there's anything else / said goodbye
+      // (an answered enquiry, a completed request of any kind). From here a
+      // closing reply or continued silence ends the call cleanly (see
+      // classifyCallerClosingIntent / armSilenceTimer) instead of looping
+      // on "are you still there?". A follow-up question re-opens it.
+      session.farewellSpoken = agentSaidGoodbye(reply);
       if (
         (toolDispatched && session.appointmentState.bookingStatus === "booked") ||
-        bookedViaTool
+        bookedViaTool ||
+        agentAskedAnythingElse(reply) ||
+        session.farewellSpoken
       ) {
         session.callCompletion = "awaiting_anything_else";
       }
@@ -4679,11 +4882,69 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
       latency_ms: Date.now() - requestStarted,
     });
     if (generation === session.generation) {
+      // Bounded: after policy.consecutiveErrorLimit failed turns in a row
+      // (LLM, TTS or unexpected errors), the call is ended safely with a
+      // deterministic apology rather than apologising forever.
+      session.consecutiveTurnErrors++;
+      if (session.consecutiveTurnErrors >= session.policy.consecutiveErrorLimit) {
+        log("consecutive_turn_errors_limit", session, {
+          count: session.consecutiveTurnErrors,
+          errorCategory,
+        });
+        await finishCall(session, {
+          reason: "repeated_turn_errors",
+          message: CLOSING_MESSAGES.repeatedErrors,
+          generation: session.generation,
+        });
+        return;
+      }
       await speakFallback(session, err, "llm_error");
       setState(session, "listening");
       armSilenceTimer(session);
     }
   }
+}
+
+/**
+ * Breaks a repetition loop: when the agent is about to say the same reply
+ * for the policy.repeatedReplyLimit-th time in a row, it instead offers an
+ * alternative and asks whether there's anything else (so a closing reply
+ * or silence can end the call). Never changes a reply said fewer times.
+ */
+function guardRepeatedReply(session: Session, reply: string): string {
+  const norm = normalizeReplyForRepeat(reply);
+  if (!norm) return reply;
+  session.repeatedReplyCount = norm === session.lastReplyNorm ? session.repeatedReplyCount + 1 : 1;
+  session.lastReplyNorm = norm;
+  if (session.repeatedReplyCount < session.policy.repeatedReplyLimit) return reply;
+  log("repeated_reply_limit", session, { count: session.repeatedReplyCount });
+  session.repeatedReplyCount = 0;
+  session.lastReplyNorm = normalizeReplyForRepeat(CLOSING_MESSAGES.repeatedQuestion);
+  return CLOSING_MESSAGES.repeatedQuestion;
+}
+
+/**
+ * Speaks a runtime-composed reply as this turn's answer (no LLM involved),
+ * then returns to listening — the same ending every handleUserUtterance
+ * path uses. `awaitAnythingElse`: the reply asked whether there's anything
+ * else, so a closing reply or silence may end the call next.
+ */
+async function speakRuntimeTurnReply(
+  session: Session,
+  generation: number,
+  text: string,
+  opts: { awaitAnythingElse: boolean },
+): Promise<void> {
+  session.turns.push({ role: "assistant", text, at: new Date().toISOString() });
+  try {
+    await speak(session, text);
+  } catch (err) {
+    log("runtime_reply_failed", session, { message: (err as Error).message });
+  }
+  if (generation !== session.generation) return;
+  if (opts.awaitAnythingElse) session.callCompletion = "awaiting_anything_else";
+  setState(session, "listening");
+  armSilenceTimer(session);
 }
 
 async function speakFallback(session: Session, error: unknown, trigger: string) {
@@ -4791,7 +5052,8 @@ function onSttEvent(session: Session, event: SttEvent) {
         last.text === event.text &&
         Date.now() - last.at < DUPLICATE_TRANSCRIPT_WINDOW_MS
       ) {
-        log("duplicate_final_transcript_ignored", session, { text: event.text });
+        // Length only — never the caller's words (see log()'s doc comment).
+        log("duplicate_final_transcript_ignored", session, { textLength: event.text.length });
         log("stt:transcript_final_forwarded", session, {
           textLength: event.text.length,
           forwarded: false,
@@ -5094,6 +5356,15 @@ export async function startRuntimeSession(
     callerId,
     outboundPlayoutEndsAt: 0,
     callCompletion: "none",
+    policy: resolveCallLifecyclePolicy(input.lifecyclePolicy),
+    farewellSpoken: false,
+    consecutiveTurnErrors: 0,
+    lastReplyNorm: null,
+    repeatedReplyCount: 0,
+    providerHangup: null,
+    closingBridge: false,
+    terminationStarted: false,
+    maxDurationTimer: null,
     input,
     deps,
     turns: [],
@@ -5144,14 +5415,38 @@ export async function startRuntimeSession(
   // Presence only — never the number itself (see this file's logging rule
   // in log()'s own doc comment). "provided" distinguishes a webhook that
   // sent nothing from one that sent a withheld/malformed value.
+  armMaxDurationTimer(session);
   log("runtime_started", session, {
     caller_id_provided: Boolean(input.callerNumber),
     caller_id_usable: Boolean(callerId),
   });
 
   input.bridge.onClose((reason) => {
-    log("bridge_closed", session, { reason });
-    void terminateRuntimeSession(input.callId, `bridge closed: ${reason}`);
+    log("bridge_closed", session, { reason, by_runtime: session.closingBridge });
+    if (session.closingBridge) {
+      // The runtime closed it itself (a finished call, or the provider's
+      // call-ended webhook already terminated the session) — nothing more.
+      void terminateRuntimeSession(input.callId, `bridge closed: ${reason}`);
+      return;
+    }
+    // The media connection closed without the runtime ending the call: the
+    // caller hung up, the provider ended the stream, or the connection
+    // dropped. The session is torn down at once (stops listening,
+    // generation and any in-flight tool work; nothing is spoken — there is
+    // no audio path left). Closing the stream does not by itself end the
+    // phone call (Vobiz's <Stream> uses keepCallAlive), so unless the
+    // provider confirms the call ended (its call-ended webhook, within
+    // policy.mediaCloseHangupGraceMs), it is asked to hang up — once, and a
+    // call that has already ended is not an error.
+    void (async () => {
+      await terminateRuntimeSession(input.callId, `bridge closed: ${reason}`);
+      await new Promise((resolve) => setTimeout(resolve, session.policy.mediaCloseHangupGraceMs));
+      if (providerReportedCallEnded(input.callId)) {
+        log("media_closed_call_already_ended", session, { reason });
+        return;
+      }
+      await requestProviderHangup(session, "media_connection_closed");
+    })();
   });
 
   // Registered immediately, before either provider connection — not after,
@@ -5296,14 +5591,19 @@ export async function startRuntimeSession(
   // failed; a working STT session is simply closed below if TTS is what
   // failed (there is nothing to speak the apology with).
   if (ttsOutcome.status === "rejected" || sttOutcome.status === "rejected") {
+    const failureReason =
+      ttsOutcome.status === "rejected" ? "tts_connect_failed" : "stt_connect_failed";
     if (sttOutcome.status === "rejected" && session.tts) {
       await speakFallback(session, sttOutcome.reason, "stt_connect_failed");
+      // Let the apology play (bounded) before the line is dropped.
+      await waitForFinalAudio(session);
     }
     setState(session, "failed");
-    await terminateRuntimeSession(
-      input.callId,
-      ttsOutcome.status === "rejected" ? "tts_connect_failed" : "stt_connect_failed",
-    );
+    // The phone call itself must end too — closing the media stream alone
+    // does not hang up (Vobiz keepCallAlive), and nothing can be said or
+    // heard on this call. Bounded; never blocks the session teardown.
+    await requestProviderHangup(session, failureReason);
+    await terminateRuntimeSession(input.callId, failureReason);
     return handle;
   }
 
@@ -5344,6 +5644,9 @@ export async function startRuntimeSession(
     // a greeting failure must too.
     log("greeting_failed", session, { message: (err as Error).message });
     setState(session, "failed");
+    // Nothing can be said on this call: end the phone call, not just the
+    // media stream (see the connect-failure path above).
+    await requestProviderHangup(session, "greeting_failed");
     await terminateRuntimeSession(input.callId, "greeting_failed");
     return handle;
   }
@@ -5352,10 +5655,39 @@ export async function startRuntimeSession(
 }
 
 /** Idempotent: a second call for an already-ending/ended session is a no-op. */
+/** Calls whose provider reported the call ended (call-ended webhook), with when — see providerReportedCallEnded. */
+const providerEndedCalls = new Map<string, number>();
+const PROVIDER_ENDED_MEMORY_MS = 10 * 60_000;
+
+function recordProviderCallEnded(callId: string) {
+  const now = Date.now();
+  for (const [id, at] of providerEndedCalls) {
+    if (now - at > PROVIDER_ENDED_MEMORY_MS) providerEndedCalls.delete(id);
+  }
+  providerEndedCalls.set(callId, now);
+}
+
+/** The provider's call-ended webhook for this call has been received recently. */
+function providerReportedCallEnded(callId: string): boolean {
+  const at = providerEndedCalls.get(callId);
+  return at !== undefined && Date.now() - at <= PROVIDER_ENDED_MEMORY_MS;
+}
+
 export async function terminateRuntimeSession(callId: string, reason: string): Promise<void> {
+  // The provider's own call-ended webhook (telephony.ts terminateAgentRuntime
+  // passes "call ended: <status>") is the confirmation that the phone call
+  // is over — remembered even if the session has already gone, so a media
+  // close that raced it doesn't request a needless hang-up.
+  if (reason.startsWith("call ended:")) recordProviderCallEnded(callId);
   const session = activeSessions.get(callId);
   if (!session) return;
   if (session.handle.state === "ending" || session.handle.state === "ended") return;
+  // A failed session never enters "ending", so the state check above can't
+  // stop a second termination (e.g. the bridge's own close handler firing
+  // while this one is still persisting) — this does: one cleanup, one
+  // transcript, per session.
+  if (session.terminationStarted) return;
+  session.terminationStarted = true;
 
   // A session that failed to start/run (state === "failed") still needs the
   // full cleanup below, but its visible final state should stay "failed"
@@ -5369,6 +5701,7 @@ export async function terminateRuntimeSession(callId: string, reason: string): P
   session.generation++; // discard any in-flight LLM work
   clearSilenceTimer(session);
   clearPaymentWaitTimer(session);
+  clearMaxDurationTimer(session);
   try {
     session.stt?.close();
   } catch {
@@ -5379,6 +5712,9 @@ export async function terminateRuntimeSession(callId: string, reason: string): P
   } catch {
     /* best-effort */
   }
+  // Our own close of the media bridge — not a dropped connection (see the
+  // bridge.onClose handler in startRuntimeSession).
+  session.closingBridge = true;
   try {
     session.input.bridge.close();
   } catch {
@@ -5389,6 +5725,7 @@ export async function terminateRuntimeSession(callId: string, reason: string): P
 
   if (!hadError) setState(session, "ended");
   activeSessions.delete(callId);
+  logLifecycle(session, hadError ? "FAILED" : "COMPLETED", reason);
   log("runtime_terminated", session, { reason });
 }
 
