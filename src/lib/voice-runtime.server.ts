@@ -1391,14 +1391,26 @@ export function parseApptStateMarker(reply: string): {
   try {
     const parsed = JSON.parse(tail.slice(0, closeIdx)) as Record<string, unknown>;
     const state: Partial<AppointmentState> = {};
-    if (typeof parsed["service"] === "string") state.service = parsed["service"];
-    if (typeof parsed["customer_name"] === "string") state.customerName = parsed["customer_name"];
-    if (typeof parsed["phone"] === "string") state.phone = parsed["phone"];
-    if (typeof parsed["email"] === "string") state.email = parsed["email"];
-    if (typeof parsed["preferred_date"] === "string")
-      state.preferredDate = parsed["preferred_date"];
-    if (typeof parsed["preferred_time"] === "string")
-      state.preferredTime = parsed["preferred_time"];
+    // Production call dfcf72ca: the model wrote `"customer_name": ""`, which
+    // replaced the name the caller had given — the runtime then asked for
+    // it again after the caller confirmed. A blank value is "not stated",
+    // never a value.
+    const text = (key: string): string | null => {
+      const value = parsed[key];
+      return typeof value === "string" && value.trim() ? value.trim() : null;
+    };
+    const service = text("service");
+    if (service) state.service = service;
+    const customerName = text("customer_name");
+    if (customerName) state.customerName = customerName;
+    const phone = text("phone");
+    if (phone) state.phone = phone;
+    const email = text("email");
+    if (email) state.email = email;
+    const preferredDate = text("preferred_date");
+    if (preferredDate) state.preferredDate = preferredDate;
+    const preferredTime = text("preferred_time");
+    if (preferredTime) state.preferredTime = preferredTime;
     if (
       parsed["preferred_period"] === "morning" ||
       parsed["preferred_period"] === "afternoon" ||
@@ -1955,6 +1967,75 @@ const CALLER_ID_HEDGE_PATTERN =
   /\b(not sure|unsure|not certain|don'?t know|no idea|maybe|i guess|which number|what number)\b/i;
 const CALLER_ID_ACCEPT_PATTERN =
   /\b(yes|yeah|yep|yup|sure|ok(ay)?|of course|please do|go ahead|that'?s fine|that works|fine|correct|right|use (it|that|this)|same (number|one)|this number|that number|calling from|no problem)\b/i;
+// The caller explicitly names the number they're calling from — a choice of
+// caller ID whether or not the question was asked (call dfcf72ca: "use the
+// number I'm calling from" was refused because the runtime hadn't recorded
+// the model's own wording of the question as asked).
+const CALLER_ID_EXPLICIT_PATTERN =
+  /\b(?:number|phone|one)\s+(?:i'?m|i am|i was|i)\s+(?:calling|called|ringing)\s+(?:from|on|with)\b|\b(?:calling|incoming|current|same|this)\s+(?:phone\s+)?number\b|\bcaller\s?id\b/i;
+const CALLER_ID_NEGATED_PATTERN = /\b(?:don'?t|do not|not|never)\s+(?:use|want)\b/i;
+// The agent (in any wording) offering the number the caller is calling from.
+const CALLER_ID_OFFER_PATTERN =
+  /\b(?:calling|called|ringing)\s+(?:from|on|with)\b|\bnumber\s+you(?:'re|\s+are)\s+(?:calling|using)\b|\b(?:this|same|current|incoming)\s+(?:phone\s+)?number\b|\bcaller\s?id\b/i;
+
+// Words that are never (part of) a caller's name — stops a "yes, book it"
+// or "today at four" from being stored as one.
+const NOT_A_NAME = new Set(
+  (
+    "yes yeah yep yup no nope nah ok okay sure fine right correct please thanks thank you " +
+    "hello hi hey book booking it that this the a an and or but so is it's its was " +
+    "number phone mobile calling from use same my me i i'm im am are be to for of on at in " +
+    "today tomorrow morning afternoon evening pm am time date appointment slot service " +
+    "root canal cleaning teeth tooth checkup dental treatment confirm confirmed go ahead " +
+    "just only also again what why how when where who which can could would will shall " +
+    "not don't do done good great perfect fine wait sorry hmm um uh"
+  ).split(" "),
+);
+
+/** The agent's reply asked for the caller's name. */
+const NAME_QUESTION_PATTERN =
+  /\b(?:your|the)\s+(?:full\s+)?name\b|\bwho\s+(?:am i|is)\s+speaking\b/i;
+
+/**
+ * The caller's name from their own words (call dfcf72ca: the name was
+ * given more than once but the model's state block never carried it, so
+ * after the caller confirmed, the runtime asked for it again).
+ *
+ * - "my name is X" / "my name's X" / "call me X" — always.
+ * - "this is X" / "I'm X" / "I am X" / "it's X", or a bare one-to-three word
+ *   answer — only when the agent's previous reply asked for the name.
+ *
+ * Returns the name (each word capitalised) or null. Never returns a word in
+ * NOT_A_NAME, digits, or more than three words.
+ */
+export function extractCallerName(text: string, agentAskedForName: boolean): string | null {
+  const explicit = /\b(?:my\s+name\s+is|my\s+name'?s|call\s+me)\s+(.+)/i.exec(text);
+  const contextual = agentAskedForName
+    ? /^\s*(?:(?:it'?s|this\s+is|i'?m|i\s+am|name'?s|name\s+is)\s+)?(.+)$/i.exec(text)
+    : null;
+  const candidate = (explicit ?? contextual)?.[1];
+  if (!candidate) return null;
+  const words: string[] = [];
+  for (const raw of candidate.split(/\s+/)) {
+    const word = raw.replace(/^[^a-z]+|[^a-z]+$/gi, "");
+    const ended = /[,.;!?]$/.test(raw);
+    if (!word || !/^[a-z][a-z'.-]*$/i.test(word) || NOT_A_NAME.has(word.toLowerCase())) break;
+    words.push(word);
+    if (ended || words.length === 3) break;
+  }
+  if (!words.length) return null;
+  // A contextual (non-explicit) answer must be ONLY the name — "Dhanush" or
+  // "it's Dhanush", not "I'm calling about my teeth".
+  if (!explicit) {
+    const rest = candidate
+      .split(/\s+/)
+      .slice(words.length)
+      .join(" ")
+      .replace(/[^a-z]/gi, "");
+    if (rest) return null;
+  }
+  return words.map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
+}
 
 /**
  * Interprets the caller's turn as an answer to CALLER_ID_QUESTION — only
@@ -1980,8 +2061,21 @@ export function resolveCallerIdAnswer(
       Partial<Pick<AppointmentState, "phone" | "phoneSource" | "phoneIssue">>)
   | null {
   if (state.phone || !callerId) return null;
-  if (state.callerIdChoice !== "offered" && state.callerIdChoice !== "clarifying") return null;
   const spoken = extractPhoneNumber(text);
+  if (
+    !spoken &&
+    CALLER_ID_EXPLICIT_PATTERN.test(text) &&
+    !CALLER_ID_NEGATED_PATTERN.test(text) &&
+    !CALLER_ID_HEDGE_PATTERN.test(text)
+  ) {
+    return {
+      callerIdChoice: "accepted",
+      phone: callerId,
+      phoneSource: "caller_id",
+      phoneIssue: null,
+    };
+  }
+  if (state.callerIdChoice !== "offered" && state.callerIdChoice !== "clarifying") return null;
   if (spoken) {
     const normalized = normalizePhoneNumber(spoken, phoneCountry);
     return normalized.ok
@@ -2025,7 +2119,7 @@ export function applyCallerIdOffer(
   state: Pick<AppointmentState, "phone" | "callerIdChoice">,
 ): { reply: string; offered: boolean } {
   if (state.phone || state.callerIdChoice !== "not_offered") return { reply, offered: false };
-  if (/calling from/i.test(reply)) return { reply, offered: true };
+  if (CALLER_ID_OFFER_PATTERN.test(reply)) return { reply, offered: true };
   const sentences = reply.match(/[^.!?]+[.!?]*\s*/g) ?? [reply];
   let replaced = false;
   const rewritten = sentences.map((sentence) => {
@@ -2042,6 +2136,52 @@ export function applyCallerIdOffer(
       : sentence;
   });
   return replaced ? { reply: rewritten.join("").trim(), offered: true } : { reply, offered: false };
+}
+
+/** A sentence that asks for, or refuses to use, the caller's phone number. */
+const PHONE_REFUSAL_PATTERN =
+  /\b(?:can'?t|cannot|unable to|don'?t have|do not have)\b[^.?!]*\b(?:number|caller\s?id)\b/i;
+
+/**
+ * Once a phone number is settled, the model's own request for one (or its
+ * claim that it can't see the caller's number) is removed — call dfcf72ca:
+ * the caller agreed to use their calling number and was asked for a number
+ * anyway. When nothing else is left, the next missing detail is asked.
+ * With no caller ID at all, an offer of "the number you're calling from"
+ * (which the runtime couldn't honour) becomes a plain request for a number.
+ * English replies only (the patterns are English).
+ */
+export function guardPhoneRequests(
+  reply: string,
+  state: AppointmentState,
+): { reply: string; changed: boolean } {
+  const sentences = reply.match(/[^.!?]+[.!?]*\s*/g) ?? [reply];
+  const asksForPhone = (sentence: string) =>
+    PHONE_REQUEST_SENTENCE_PATTERN.test(sentence) && QUESTION_SHAPE_PATTERN.test(sentence);
+  if (state.phone) {
+    const kept = sentences.filter(
+      (sentence) => !asksForPhone(sentence) && !PHONE_REFUSAL_PATTERN.test(sentence),
+    );
+    if (kept.length === sentences.length) return { reply, changed: false };
+    const rest = kept.join("").trim();
+    return {
+      reply: rest || nextMissingDetailQuestion(state) || "Thank you.",
+      changed: true,
+    };
+  }
+  if (state.callerIdChoice === "unavailable") {
+    let replaced = false;
+    const rewritten = sentences.map((sentence) => {
+      if (!CALLER_ID_OFFER_PATTERN.test(sentence)) return sentence;
+      if (replaced) return "";
+      replaced = true;
+      return "What's the best phone number to reach you? ";
+    });
+    return replaced
+      ? { reply: rewritten.join("").trim(), changed: true }
+      : { reply, changed: false };
+  }
+  return { reply, changed: false };
 }
 
 /**
@@ -4040,6 +4180,19 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
       phone_issue: callerIdAnswer.phoneIssue ?? null,
     });
   }
+  // The caller's name from their own words, when not already known — the
+  // model's state block does not reliably carry it (see extractCallerName).
+  if (!session.appointmentState.customerName) {
+    const lastAgentTurn = [...session.turns].reverse().find((t) => t.role === "assistant");
+    const agentAskedForName = Boolean(
+      lastAgentTurn && NAME_QUESTION_PATTERN.test(lastAgentTurn.text),
+    );
+    const name = extractCallerName(text, agentAskedForName);
+    if (name) {
+      session.appointmentState = { ...session.appointmentState, customerName: name };
+      log("caller_name_captured", session, { asked: agentAskedForName });
+    }
+  }
   // Captured HERE — not reused from enqueueUserUtterance's fast-phase
   // read — because this turn's place in utteranceQueue means a PREVIOUS
   // turn's slow-phase work (e.g. a booking/availability outcome) may have
@@ -4429,6 +4582,13 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
       // replies only; the question itself is English), and mark it offered
       // so the caller's next turn is read as the answer.
       if (isEnglish) {
+        const guarded = guardPhoneRequests(reply, session.appointmentState);
+        if (guarded.changed) {
+          log("phone_request_guarded", session, {
+            phone_known: Boolean(session.appointmentState.phone),
+          });
+          reply = guarded.reply;
+        }
         const offer = applyCallerIdOffer(reply, session.appointmentState);
         if (offer.offered) {
           reply = offer.reply;
