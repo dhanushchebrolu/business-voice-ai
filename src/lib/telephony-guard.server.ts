@@ -317,7 +317,10 @@ export async function finalizeCallBilling(
     // The database function uses ON CONFLICT (call_id, kind)
     // WHERE call_id IS NOT NULL to match the existing partial unique index.
     // Keep the RPC signature local until Supabase types are regenerated.
-    const recordCallUsage = supabaseAdmin.rpc as unknown as (
+    // Bound to the client: supabase-js's rpc reads `this.rest`, so a
+    // detached reference throws "Cannot read properties of undefined
+    // (reading 'rest')" on every billed call.
+    const recordCallUsage = supabaseAdmin.rpc.bind(supabaseAdmin) as unknown as (
       functionName: string,
       args: Record<string, unknown>,
     ) => PromiseLike<{
