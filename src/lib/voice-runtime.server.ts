@@ -86,6 +86,12 @@ import type { ClaudeTool } from "./claude.server.ts";
 import { zonedWallTimeToUtc, dayOfWeekInTimezone } from "./calendar/timezone.ts";
 import { normalizeCallerId, normalizePhoneNumber, phoneLastFour } from "./phone-number.ts";
 import { classifyBookingStatus, type BookingOutcome } from "./calendar/booking-outcome.ts";
+import {
+  findConfiguredService,
+  resolveServiceFromText,
+  spokenServiceList,
+  type ServiceRow,
+} from "./service-matching.ts";
 
 /**
  * Whether `code` is in the TTS/LLM common supported set (SUPPORTED_VOICE_LANGUAGES
@@ -344,6 +350,13 @@ export interface StartRuntimeSessionInput {
    */
   businessCountry?: string | null;
   /**
+   * The business's active configured services, when the caller already has
+   * them. Optional: when absent, the runtime loads them on first need (see
+   * Session.cachedServices). Used to map how the caller describes a service
+   * ("clean my teeth") onto one of these rows.
+   */
+  services?: ServiceRow[] | null;
+  /**
    * Ends the PSTN call through the telephony provider's own hang-up API
    * (e.g. Vobiz's DELETE /Call/{call_uuid}/) — supplied by the provider's
    * Durable Object, never serialized. Used after a closing message has
@@ -590,6 +603,17 @@ interface Session {
    * resolveBookingContext's own "combine, don't repeat" discipline).
    */
   cachedServices: { id: string; name: string; duration_minutes: number | null }[] | null;
+  /**
+   * Service-question loop guard (Smile Dental incident: the same "Which
+   * service would you like to book?" was asked on every turn). Counts the
+   * consecutive turns the runtime has had to ask for the service; resets
+   * once a service is known. See serviceClarification.
+   */
+  serviceQuestionCount: number;
+  /** Configured services the caller's latest wording matched equally well — asked as "A or B?". */
+  serviceCandidates: ServiceRow[] | null;
+  /** A service the model heard that matches none of the configured services — explained as unavailable. */
+  unmatchedServiceRequest: string | null;
   /** Runtime-owned appointment fields, persisted across turns independent of the LLM's own conversational memory — see AppointmentState's own doc comment. */
   appointmentState: AppointmentState;
   /** The language_code the current TTS connection was opened with — see maybeSwitchTtsLanguage. Starts at the agent's primary_language (what startRuntimeSession connects with). */
@@ -1016,8 +1040,20 @@ function applyTargetedClarification(
   let reason: string | null = null;
   let question: string | null = null;
   if (state.bookingStatus === "ready_to_book" && !appointmentStateIsComplete(state)) {
-    question = nextMissingDetailQuestion(state);
-    reason = "booking_missing_detail";
+    if (!state.service) {
+      const ask = serviceClarification(session);
+      if (ask.question === null) {
+        // Already asked as far as is useful — let the model's own reply
+        // stand rather than repeating the same question again.
+        log("targeted_clarification_skipped", session, { reason: ask.reason });
+        return reply;
+      }
+      question = ask.question;
+      reason = ask.reason;
+    } else {
+      question = nextMissingDetailQuestion(state);
+      reason = "booking_missing_detail";
+    }
   } else if (
     !state.phone &&
     state.phoneIssue !== null &&
@@ -1040,6 +1076,114 @@ function applyTargetedClarification(
   if (!question) return reply;
   log("targeted_clarification", session, { reason });
   return question;
+}
+
+/**
+ * The model's proposed service, mapped onto the business's configured
+ * services. A label that matches a configured row is replaced by that
+ * row's exact name, so booking resolves the real service id. A label that
+ * matches none of them is never stored as the service (the business doesn't
+ * offer it); it is remembered so the next clarification can say so. When no
+ * catalog is loaded, the proposal is kept as before.
+ */
+function canonicalizeProposedService(
+  session: Session,
+  proposed: Partial<AppointmentState> | null,
+): Partial<AppointmentState> | null {
+  if (!proposed?.service) return proposed;
+  const services = session.cachedServices ?? [];
+  if (!services.length) return proposed;
+  const row = findConfiguredService(services, proposed.service);
+  if (row) return { ...proposed, service: row.name.trim() };
+  if (!session.appointmentState.service) session.unmatchedServiceRequest = proposed.service;
+  const rest = { ...proposed };
+  delete rest.service;
+  return rest;
+}
+
+/**
+ * Log-safe summary of this turn's state marker (Smile Dental incident: the
+ * logs couldn't show whether the model's marker was missing, malformed, or
+ * simply left the service null while the caller was asked for it again and
+ * again). Fixed enum values only — never the reply text, the caller's
+ * words, or the service name itself.
+ *
+ * - marker: "absent" (no marker), "unparseable" (marker present, JSON
+ *   invalid or truncated) or "parsed".
+ * - service: "none" (the marker named no service), "accepted" (kept —
+ *   matched a configured service, or no catalog to check against) or
+ *   "unmatched" (named something the business doesn't offer).
+ */
+export function apptStateMarkerDiagnostic(
+  rawReply: string,
+  markerState: Partial<AppointmentState> | null,
+  canonicalState: Partial<AppointmentState> | null,
+): {
+  marker: "absent" | "unparseable" | "parsed";
+  service: "none" | "accepted" | "unmatched";
+} {
+  const marker = markerState
+    ? "parsed"
+    : rawReply.includes(APPT_STATE_MARKER)
+      ? "unparseable"
+      : "absent";
+  const service = !markerState?.service
+    ? "none"
+    : canonicalState?.service
+      ? "accepted"
+      : "unmatched";
+  return { marker, service };
+}
+
+/**
+ * What to say when a booking can't proceed because the service is still
+ * unknown — escalating, never the same question forever:
+ *
+ * 1. The caller's words fit two or more configured services equally:
+ *    "Did you mean A or B?"
+ * 2. The model heard a service that matches nothing configured: say it
+ *    isn't offered and list what is.
+ * 3. First plain ask: "Which service would you like to book?"
+ * 4. Second ask: list the configured services to choose from.
+ * 5. After that: stop asking, offer a callback from the team, and let the
+ *    conversation continue (question null from then on).
+ */
+function serviceClarification(session: Session): { question: string | null; reason: string } {
+  const services = session.cachedServices ?? [];
+  const candidates = session.serviceCandidates;
+  const unmatched = session.unmatchedServiceRequest;
+  session.serviceCandidates = null;
+  session.unmatchedServiceRequest = null;
+  session.serviceQuestionCount++;
+  const attempt = session.serviceQuestionCount;
+
+  if (attempt > 3) return { question: null, reason: "service_unresolved_stop_asking" };
+  if (attempt === 3) {
+    return {
+      question:
+        "I'm sorry, I couldn't match that to one of our services. I'll ask the team to call you back to arrange it. Is there anything else I can help with?",
+      reason: "service_unresolved_callback",
+    };
+  }
+  if (candidates && candidates.length > 1) {
+    return {
+      question: `Did you mean ${spokenServiceList(candidates, "or")}?`,
+      reason: "service_ambiguous",
+    };
+  }
+  if (unmatched && services.length) {
+    return {
+      question: `I'm sorry, we don't offer ${unmatched}. We offer ${spokenServiceList(services, "and")}. Which would you like?`,
+      reason: "service_not_offered",
+    };
+  }
+  if (attempt === 2 && services.length) {
+    return {
+      question: `We offer ${spokenServiceList(services, "and")}. Which one would you like to book?`,
+      reason: "service_list_offered",
+    };
+  }
+  return { question: "Which service would you like to book?", reason: "booking_missing_detail" };
 }
 
 /**
@@ -2331,13 +2475,9 @@ export function matchService(
   fallbackDurationMinutes: number = DEFAULT_APPOINTMENT_DURATION_MINUTES,
 ): ResolvedService {
   if (!serviceName) return { id: null, durationMinutes: fallbackDurationMinutes };
-  const normalized = serviceName.trim().toLowerCase();
-  const match =
-    rows.find((s) => s.name.trim().toLowerCase() === normalized) ??
-    rows.find((s) => {
-      const name = s.name.trim().toLowerCase();
-      return name.includes(normalized) || normalized.includes(name);
-    });
+  // Exact name, then substring either way, then the caller-wording matcher
+  // ("clean my teeth" -> "Teeth Cleaning") — see service-matching.ts.
+  const match = findConfiguredService(rows, serviceName);
   if (!match) return { id: null, durationMinutes: fallbackDurationMinutes };
   return {
     id: match.id,
@@ -2362,16 +2502,8 @@ export function matchServiceInText(
   rows: { id: string; name: string; duration_minutes: number | null }[],
   text: string,
 ): string | null {
-  const lowerText = text.toLowerCase();
-  let best: string | null = null;
-  for (const row of rows) {
-    const name = row.name.trim();
-    if (!name) continue;
-    if (lowerText.includes(name.toLowerCase()) && (!best || name.length > best.length)) {
-      best = name;
-    }
-  }
-  return best;
+  const result = resolveServiceFromText(rows, text);
+  return result.kind === "match" ? result.row.name.trim() : null;
 }
 
 /**
@@ -2388,7 +2520,12 @@ export function matchServiceInText(
 async function resolveBookingContext(
   businessId: string,
   serviceName: string | null,
+  // The configured services already loaded for this call (the same rows the
+  // caller's wording was matched against). When present, the booking uses
+  // exactly those rows rather than querying them again.
+  knownServices: ServiceRow[] | null = null,
 ): Promise<{ timezone: string; service: ResolvedService }> {
+  const cached = knownServices && knownServices.length ? knownServices : null;
   try {
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const [businessRes, servicesRes] = await Promise.all([
@@ -2397,11 +2534,13 @@ async function resolveBookingContext(
         .select("timezone, default_appointment_duration_minutes")
         .eq("id", businessId)
         .maybeSingle(),
-      supabaseAdmin
-        .from("services")
-        .select("id, name, duration_minutes")
-        .eq("business_id", businessId)
-        .eq("is_active", true),
+      cached
+        ? Promise.resolve({ data: cached })
+        : supabaseAdmin
+            .from("services")
+            .select("id, name, duration_minutes")
+            .eq("business_id", businessId)
+            .eq("is_active", true),
     ]);
     const fallbackDurationMinutes =
       businessRes.data?.default_appointment_duration_minutes ??
@@ -2413,7 +2552,7 @@ async function resolveBookingContext(
   } catch {
     return {
       timezone: "UTC",
-      service: { id: null, durationMinutes: DEFAULT_APPOINTMENT_DURATION_MINUTES },
+      service: matchService(cached ?? [], serviceName, DEFAULT_APPOINTMENT_DURATION_MINUTES),
     };
   }
 }
@@ -2437,9 +2576,14 @@ async function resolveDeterministicExtractionContext(
   needsServices: boolean,
 ): Promise<{
   timezone: string | null;
+  /** Null when not requested OR when the read failed — never an empty stand-in for a failure. */
   services: { id: string; name: string; duration_minutes: number | null }[] | null;
+  /** Why the services read failed (a PostgREST/SQLSTATE code, or "unavailable"); null otherwise. */
+  servicesError: string | null;
 }> {
-  if (!needsTimezone && !needsServices) return { timezone: null, services: null };
+  if (!needsTimezone && !needsServices) {
+    return { timezone: null, services: null, servicesError: null };
+  }
   try {
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const [businessRes, servicesRes] = await Promise.all([
@@ -2454,14 +2598,24 @@ async function resolveDeterministicExtractionContext(
             .eq("is_active", true)
         : Promise.resolve(null),
     ]);
+    // Production incident (Smile Dental, "Root canal"): a failed services
+    // read (e.g. PGRST303) came back as `data: null` and was used as an
+    // empty catalog — cached for the rest of the call, so nothing the caller
+    // said could ever match. A failure is now reported as such.
+    const servicesError =
+      needsServices && servicesRes?.error
+        ? (servicesRes.error as { code?: string }).code || "unknown"
+        : null;
     return {
       timezone: needsTimezone ? (businessRes?.data?.timezone ?? "UTC") : null,
-      services: needsServices ? (servicesRes?.data ?? []) : null,
+      services: needsServices && !servicesError ? (servicesRes?.data ?? []) : null,
+      servicesError,
     };
   } catch {
     return {
       timezone: needsTimezone ? "UTC" : null,
-      services: needsServices ? [] : null,
+      services: null,
+      servicesError: needsServices ? "unavailable" : null,
     };
   }
 }
@@ -2736,7 +2890,9 @@ async function composeHonestBookingReply(
         { role: "user", content: facts },
       ]),
     );
-    const spoken = reply.trim();
+    // The phrasing prompt asks for no markers; strip one anyway so a stray
+    // state block can never be read aloud.
+    const spoken = parseApptStateMarker(reply).spokenText.trim();
     // An empty phrasing reply must never become silence after a real tool
     // result — the caller would hear nothing and the call would sit idle
     // until the silence prompt. The canned, already-honest fallback says
@@ -3006,7 +3162,11 @@ async function attemptAvailabilityCheck(
     agentConfigId: session.input.agentConfigId,
     callId,
   };
-  const { timezone, service } = await resolveBookingContext(businessId, state.service);
+  const { timezone, service } = await resolveBookingContext(
+    businessId,
+    state.service,
+    session.cachedServices,
+  );
   const exactStartIso = state.preferredTime
     ? zonedWallTimeToUtc(state.preferredDate, state.preferredTime, timezone).toISOString()
     : null;
@@ -3200,6 +3360,7 @@ async function attemptBooking(
   const { timezone, service } = await resolveBookingContext(
     session.input.businessId,
     state.service,
+    session.cachedServices,
   );
   // Only computable when the caller gave an exact time — when they asked
   // for "the next available slot" instead, the target start/end is
@@ -3694,11 +3855,23 @@ async function tryEarlyDeterministicDispatch(
         : resolveWeekdayInTimezone(callerIntent.weekday!, timezone);
     }
     if (needsServicesFetch) {
-      session.cachedServices = ctx.services ?? [];
+      if (ctx.services) {
+        session.cachedServices = ctx.services;
+      } else {
+        // Left uncached so the next turn reads the catalog again. Only the
+        // error code is logged — no caller speech or service data.
+        log("services_catalog_unavailable", session, { code: ctx.servicesError });
+      }
     }
   }
   if (needsServices) {
-    matchedServiceName = matchServiceInText(session.cachedServices ?? [], text);
+    // The caller's own words, mapped onto the configured services
+    // (service-matching.ts) — "clean my teeth" now finds "Teeth Cleaning".
+    // A tie between services is remembered so the clarification can ask
+    // "A or B?" instead of the generic question.
+    const resolution = resolveServiceFromText(session.cachedServices ?? [], text);
+    if (resolution.kind === "match") matchedServiceName = resolution.row.name.trim();
+    else if (resolution.kind === "ambiguous") session.serviceCandidates = resolution.candidates;
   }
   // `proposed: null` is deliberate — this preview reflects ONLY what's
   // deterministically extractable this turn, never anything a marker
@@ -3838,7 +4011,7 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
   // phase already computed its own copy for immediateCallerAck) rather
   // than threaded through — it's a pure, cheap regex pass, and threading
   // it would only save that.
-  const callerIntent = parseCallerIntentFromText(text);
+  let callerIntent = parseCallerIntentFromText(text);
   // The answer to CALLER_ID_QUESTION, when it's pending — applied before
   // anything else reads appointment state this turn, so the early
   // deterministic dispatch, the model's grounding message, and the booking
@@ -3851,6 +4024,15 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
     session.input.businessCountry ?? null,
   );
   if (callerIdAnswer) {
+    // Smile Dental incident: the caller's "Yes" to "may I use the number
+    // you're calling from?" was also read as "yes, book it" — with the date
+    // and time already known that made the turn ready_to_book, and with no
+    // service yet the runtime asked "Which service would you like to book?"
+    // instead of continuing. A yes/no to the caller-ID question is only an
+    // answer to that question unless the caller explicitly asks to book.
+    if (callerIntent.bookingConfirmed && !/\bbook/i.test(text)) {
+      callerIntent = { ...callerIntent, bookingConfirmed: false };
+    }
     session.appointmentState = { ...session.appointmentState, ...callerIdAnswer };
     log("caller_id_answer", session, {
       choice: callerIdAnswer.callerIdChoice,
@@ -4014,7 +4196,13 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
           // (see parseApptStateMarker/APPT_STATE_MARKER) — spokenText is what
           // the caller actually hears; the marker itself never reaches TTS or
           // the persisted transcript.
-          const { spokenText, state: proposedAppointmentState } = parseApptStateMarker(rawReply);
+          const { spokenText, state: markerState } = parseApptStateMarker(rawReply);
+          const proposedAppointmentState = canonicalizeProposedService(session, markerState);
+          log(
+            "appt_state_marker",
+            session,
+            apptStateMarkerDiagnostic(rawReply, markerState, proposedAppointmentState),
+          );
 
           // Deterministic date/time extraction over the caller's own raw
           // words (production incident: an explicit "tomorrow at 3 PM" /
@@ -4116,6 +4304,7 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
             appointmentState = { ...appointmentState, bookingStatus: "checking_availability" };
           }
           session.appointmentState = appointmentState;
+          if (appointmentState.service) session.serviceQuestionCount = 0;
 
           reply = spokenText;
 
@@ -4770,7 +4959,10 @@ export async function startRuntimeSession(
     staleAudioDropLogged: false,
     utteranceQueue: Promise.resolve(),
     immediateAckQueue: Promise.resolve(),
-    cachedServices: null,
+    cachedServices: input.services ?? null,
+    serviceQuestionCount: 0,
+    serviceCandidates: null,
+    unmatchedServiceRequest: null,
     appointmentState: {
       ...emptyAppointmentState(),
       callerIdChoice: callerId ? "not_offered" : "unavailable",

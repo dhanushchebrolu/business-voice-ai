@@ -1,0 +1,289 @@
+/**
+ * Maps how a caller describes a service ("clean my teeth", "dental
+ * cleaning", "I want to book teeth cleaning") onto one of the business's
+ * OWN configured `services` rows. It never invents a service: the result is
+ * always one of the rows passed in, or no match.
+ *
+ * Why this exists (Smile Dental incident): the voice runtime only recognised
+ * a service when the caller's words contained a configured service name
+ * verbatim. "Clean my teeth" never contains "Teeth Cleaning", and "teeth
+ * cleaning" never contains a longer configured name such as "Teeth Cleaning
+ * & Polish" — so the service stayed unknown and the runtime asked "Which
+ * service would you like to book?" on every turn.
+ *
+ * Matching works on word stems, with "teeth"/"tooth"/"dental" treated as
+ * one concept. A row matches when the caller's words share at least one
+ * DISTINCTIVE stem with the row name (e.g. "clean", "whiten", "root",
+ * "canal", "checkup"). Body words alone ("teeth", "tooth", "mouth", "gum")
+ * never select a service: "my tooth hurts" must not book a "Tooth
+ * Extraction". When two rows score equally the result is ambiguous and the
+ * caller is asked to choose between exactly those rows.
+ *
+ * Pure (no I/O) and isomorphic.
+ */
+
+export interface ServiceRow {
+  id: string;
+  name: string;
+  duration_minutes: number | null;
+}
+
+export type ServiceMatch =
+  | { kind: "match"; row: ServiceRow; exact: boolean }
+  | { kind: "ambiguous"; candidates: ServiceRow[] }
+  | { kind: "none" };
+
+// Words that carry no information about WHICH service is meant.
+const STOPWORDS = new Set([
+  "a",
+  "an",
+  "the",
+  "i",
+  "id",
+  "im",
+  "me",
+  "my",
+  "mine",
+  "we",
+  "our",
+  "you",
+  "your",
+  "to",
+  "for",
+  "of",
+  "and",
+  "or",
+  "with",
+  "on",
+  "in",
+  "at",
+  "is",
+  "it",
+  "its",
+  "be",
+  "want",
+  "wanted",
+  "wanna",
+  "would",
+  "like",
+  "need",
+  "needs",
+  "please",
+  "get",
+  "got",
+  "have",
+  "has",
+  "do",
+  "done",
+  "some",
+  "can",
+  "could",
+  "book",
+  "booking",
+  "booked",
+  "schedule",
+  "appointment",
+  "appointments",
+  "slot",
+  "session",
+  "service",
+  "services",
+  "just",
+  "also",
+  "today",
+  "tomorrow",
+  "pm",
+  "am",
+  "this",
+  "that",
+  "yes",
+  "yeah",
+  "ok",
+  "okay",
+  "sure",
+  "go",
+  "ahead",
+  "come",
+  "visit",
+  "let",
+  "lets",
+  "s",
+  "am",
+  "are",
+  "will",
+  "shall",
+  "should",
+  "now",
+  "then",
+  "there",
+  "here",
+  "kind",
+  "type",
+  "regular",
+  "normal",
+  "routine",
+  "general",
+  "quick",
+]);
+
+// Concepts that say what part of the body is involved but not what is done
+// to it — never enough on their own to choose a service.
+const WEAK_STEMS = new Set(["tooth", "mouth", "gum", "smile", "oral"]);
+
+// Equivalent words folded to one stem before comparison.
+const SYNONYMS: Record<string, string> = {
+  teeth: "tooth",
+  tooth: "tooth",
+  dental: "tooth",
+  dentist: "tooth",
+  dentistry: "tooth",
+  gums: "gum",
+  clean: "clean",
+  cleaning: "clean",
+  cleanings: "clean",
+  cleaned: "clean",
+  cleanup: "clean",
+  scaling: "clean",
+  scale: "clean",
+  prophylaxis: "clean",
+  polish: "polish",
+  polishing: "polish",
+  whiten: "whiten",
+  whitening: "whiten",
+  bleach: "whiten",
+  bleaching: "whiten",
+  checkup: "checkup",
+  "check-up": "checkup",
+  examination: "checkup",
+  exam: "checkup",
+  consult: "consult",
+  consultation: "consult",
+  filling: "fill",
+  fillings: "fill",
+  fill: "fill",
+  extraction: "extract",
+  extract: "extract",
+  pull: "extract",
+  pulled: "extract",
+  removal: "extract",
+  braces: "brace",
+  brace: "brace",
+  aligner: "align",
+  aligners: "align",
+  crown: "crown",
+  crowns: "crown",
+  implant: "implant",
+  implants: "implant",
+  canal: "canal",
+  rootcanal: "canal",
+  rct: "canal",
+};
+
+function stem(word: string): string {
+  const w = word.toLowerCase();
+  if (SYNONYMS[w]) return SYNONYMS[w];
+  // Light suffix stripping for words not in the synonym table.
+  if (w.length > 5 && w.endsWith("ing")) return w.slice(0, -3);
+  if (w.length > 4 && w.endsWith("es")) return w.slice(0, -2);
+  if (w.length > 3 && w.endsWith("s") && !w.endsWith("ss")) return w.slice(0, -1);
+  return w;
+}
+
+/** The meaningful stems of a phrase, in order, without duplicates. */
+export function serviceStems(text: string): string[] {
+  const words = text
+    .toLowerCase()
+    .replace(/check[\s-]up/g, "checkup")
+    .replace(/root\s+canal/g, "root canal")
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+  const out: string[] = [];
+  for (const word of words) {
+    if (STOPWORDS.has(word)) continue;
+    const s = stem(word);
+    if (s && !STOPWORDS.has(s) && !out.includes(s)) out.push(s);
+  }
+  return out;
+}
+
+function normalizeName(name: string): string {
+  return name.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+/**
+ * Resolves caller wording to one configured service row.
+ *
+ * 1. A configured name said verbatim (longest wins) — the original
+ *    behaviour, kept so specific names beat generic ones.
+ * 2. Otherwise stem overlap: distinctive stems shared with the row name
+ *    score 2, body stems 1; at least one distinctive stem is required.
+ *    A unique top score is a match; a tie is ambiguous.
+ */
+export function resolveServiceFromText(rows: ServiceRow[], text: string): ServiceMatch {
+  const usable = rows.filter((r) => r.name.trim());
+  if (!usable.length || !text.trim()) return { kind: "none" };
+
+  const lowerText = ` ${text.toLowerCase().replace(/\s+/g, " ")} `;
+  let verbatim: ServiceRow | null = null;
+  for (const row of usable) {
+    const name = normalizeName(row.name);
+    if (lowerText.includes(name) && (!verbatim || name.length > verbatim.name.trim().length)) {
+      verbatim = row;
+    }
+  }
+  if (verbatim) return { kind: "match", row: verbatim, exact: true };
+
+  const spoken = new Set(serviceStems(text));
+  if (!spoken.size) return { kind: "none" };
+
+  const scored = usable
+    .map((row) => {
+      const nameStems = serviceStems(row.name);
+      let score = 0;
+      let distinctive = 0;
+      for (const s of nameStems) {
+        if (!spoken.has(s)) continue;
+        if (WEAK_STEMS.has(s)) score += 1;
+        else {
+          score += 2;
+          distinctive++;
+        }
+      }
+      return { row, score, distinctive };
+    })
+    .filter((s) => s.distinctive > 0)
+    .sort((a, b) => b.score - a.score);
+
+  if (!scored.length) return { kind: "none" };
+  const top = scored[0]!.score;
+  const best = scored.filter((s) => s.score === top).map((s) => s.row);
+  if (best.length === 1) return { kind: "match", row: best[0]!, exact: false };
+  return { kind: "ambiguous", candidates: best };
+}
+
+/**
+ * The configured row a free-text service label refers to (e.g. the label
+ * the model proposed, or one already stored on a booking): exact name,
+ * then either-direction substring, then resolveServiceFromText. Null when
+ * nothing (or more than one row equally) fits.
+ */
+export function findConfiguredService(rows: ServiceRow[], label: string | null): ServiceRow | null {
+  if (!label || !label.trim()) return null;
+  const normalized = normalizeName(label);
+  const exact = rows.find((r) => normalizeName(r.name) === normalized);
+  if (exact) return exact;
+  const substring = rows.filter((r) => {
+    const name = normalizeName(r.name);
+    return name && (name.includes(normalized) || normalized.includes(name));
+  });
+  if (substring.length === 1) return substring[0]!;
+  const resolved = resolveServiceFromText(substring.length > 1 ? substring : rows, label);
+  return resolved.kind === "match" ? resolved.row : null;
+}
+
+/** "A", "A or B", "A, B or C" — for a spoken clarification. */
+export function spokenServiceList(rows: ServiceRow[], conjunction = "or"): string {
+  const names = rows.map((r) => r.name.trim()).filter(Boolean);
+  if (names.length <= 1) return names[0] ?? "";
+  return `${names.slice(0, -1).join(", ")} ${conjunction} ${names[names.length - 1]}`;
+}
