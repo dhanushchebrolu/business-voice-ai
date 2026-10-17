@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from "crypto";
 import {
   TelephonyAdapterError,
+  type HangupOutcome,
   type InitiateOutboundCallInput,
   type InitiatedCall,
   type NormalizedCallEvent,
@@ -276,7 +277,7 @@ export class VobizTelephonyAdapter implements TelephonyProviderAdapter {
    * X-Auth-Token headers — terminates the live call immediately. 404 means
    * the call has already ended, which is the outcome being asked for.
    */
-  async hangupCall(providerCallId: string): Promise<void> {
+  async hangupCall(providerCallId: string): Promise<HangupOutcome> {
     let res: Response;
     try {
       res = await fetch(
@@ -284,14 +285,28 @@ export class VobizTelephonyAdapter implements TelephonyProviderAdapter {
         { method: "DELETE", headers: this.authHeaders() },
       );
     } catch {
+      console.info("vobiz:hangup_response", {
+        callRef: `…${providerCallId.slice(-4)}`,
+        status: null,
+        outcome: "unreachable",
+      });
       throw new TelephonyAdapterError("Could not reach Vobiz to hang up the call.", 503);
     }
-    if (!res.ok && res.status !== 404) {
-      throw new TelephonyAdapterError(
-        `Vobiz could not hang up the call (${res.status}).`,
-        res.status,
-      );
-    }
+    // Evidence of what Vobiz actually did: 2xx = it hung up; 404 = no live
+    // call with this id (already ended — or a wrong id, which this line
+    // makes visible instead of indistinguishable from success). Status and
+    // the last 4 characters of the call id only.
+    console.info("vobiz:hangup_response", {
+      callRef: `…${providerCallId.slice(-4)}`,
+      status: res.status,
+      outcome: res.ok ? "hung_up" : res.status === 404 ? "call_not_found" : "failed",
+    });
+    if (res.ok) return "hung_up";
+    if (res.status === 404) return "call_not_found";
+    throw new TelephonyAdapterError(
+      `Vobiz could not hang up the call (${res.status}).`,
+      res.status,
+    );
   }
 
   async releaseNumber(providerNumberId: string): Promise<void> {

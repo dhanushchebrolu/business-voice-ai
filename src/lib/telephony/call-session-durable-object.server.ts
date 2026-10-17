@@ -121,6 +121,8 @@ export interface StartRuntimeRpcInput {
   callerNumber?: string | null;
   /** businesses.country, read live at call start — see StartRuntimeSessionInput.businessCountry. */
   businessCountry?: string | null;
+  /** When telephony routing for this call began (ms since epoch) — greeting-latency instrumentation only. Optional so an older in-flight RPC body still parses. */
+  routingStartedAt?: number;
   timeoutMs?: number;
 }
 
@@ -474,6 +476,9 @@ export class CallSessionDurableObject {
       businessName: body.businessName,
       bridge,
       callerNumber: body.callerNumber ?? null,
+      ...(typeof body.routingStartedAt === "number"
+        ? { routingStartedAt: body.routingStartedAt }
+        : {}),
       businessCountry: body.businessCountry ?? null,
     });
 

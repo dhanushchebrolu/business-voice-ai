@@ -1385,3 +1385,49 @@ describe("STT session lifecycle diagnostics — production incident round 5: run
     assert.equal(logs.calls.filter((c) => c.event === "stt:session_end_received").length, 0);
   });
 });
+
+describe("TTS completion event — production: the agent's audio was never reported finished (the connection never asked for Sarvam's completion event, and its documented shape wasn't parsed), so the voice runtime believed it was still speaking for the rest of the call", () => {
+  const originalKey = process.env["SARVAM_API_KEY"];
+  afterEach(() => {
+    if (originalKey === undefined) delete process.env["SARVAM_API_KEY"];
+    else process.env["SARVAM_API_KEY"] = originalKey;
+  });
+
+  test('Sarvam\'s {"type":"event","data":{"event_type":"final"}} is the end-of-utterance signal', () => {
+    assert.deepEqual(normalizeTtsMessage({ type: "event", data: { event_type: "final" } }), {
+      type: "flushed",
+    });
+    // The pre-existing shapes still work.
+    assert.deepEqual(normalizeTtsMessage({ type: "flushed" }), { type: "flushed" });
+    assert.deepEqual(normalizeTtsMessage({ type: "flush_ack" }), { type: "flushed" });
+  });
+
+  test("other events are not mistaken for completion", () => {
+    assert.equal(
+      normalizeTtsMessage({ type: "event", data: { event_type: "start" } }).type,
+      "unknown",
+    );
+    assert.equal(normalizeTtsMessage({ type: "event" }).type, "unknown");
+  });
+
+  test("connectSarvamTts asks for completion events (send_completion_event=true) alongside the model", async () => {
+    process.env["SARVAM_API_KEY"] = "test-key-not-a-real-secret";
+    await withFakeWebSocket(async () => {
+      const { connectSarvamTts } = await import("./sarvam-realtime.server.ts");
+      const connectPromise = connectSarvamTts({
+        voiceId: "ritu",
+        language: "en-IN",
+        pace: 1,
+        outputCodec: "mulaw",
+        outputSampleRateHz: 8000,
+        onEvent: () => {},
+      });
+      const socket = FakeWebSocket.instances[0]!;
+      socket.simulateOpen();
+      await connectPromise;
+      const url = new URL(socket.url);
+      assert.equal(url.searchParams.get("send_completion_event"), "true");
+      assert.equal(url.searchParams.get("model"), "bulbul:v3");
+    });
+  });
+});

@@ -72,6 +72,9 @@ async function resolveBusinessId(
 export async function routeToAgentRuntime(
   input: AgentRuntimeHandoffInput,
 ): Promise<AgentRuntimeHandoffResult> {
+  // Greeting-latency instrumentation: carried to the voice runtime, which
+  // logs the time from here to the greeting's first audio frame.
+  const routingStartedAt = Date.now();
   console.info("telephony:runtime_handoff", {
     callId: input.callId,
     organizationId: input.organizationId,
@@ -115,24 +118,24 @@ export async function routeToAgentRuntime(
     }
 
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { data: publishedVersion } = await supabaseAdmin
-      .from("agent_versions")
-      .select("version, snapshot, instructions")
-      .eq("business_id", businessId)
-      .eq("status", "active")
-      .order("version", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    // How a phone number given without a country code is read (see
-    // phone-number.ts) — the live business row, not a possibly-older
-    // published agent snapshot. Null (international numbers only) if unset
-    // or unreadable; never a guessed default.
-    const { data: businessRow } = await supabaseAdmin
-      .from("businesses")
-      .select("country")
-      .eq("id", businessId)
-      .maybeSingle();
+    // Greeting latency: these two reads are independent (both keyed by the
+    // already-authorized businessId), so they run concurrently — one round
+    // trip before the caller hears the greeting, not two.
+    const [{ data: publishedVersion }, { data: businessRow }] = await Promise.all([
+      supabaseAdmin
+        .from("agent_versions")
+        .select("version, snapshot, instructions")
+        .eq("business_id", businessId)
+        .eq("status", "active")
+        .order("version", { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+      // How a phone number given without a country code is read (see
+      // phone-number.ts) — the live business row, not a possibly-older
+      // published agent snapshot. Null (international numbers only) if
+      // unset or unreadable; never a guessed default.
+      supabaseAdmin.from("businesses").select("country").eq("id", businessId).maybeSingle(),
+    ]);
     const businessCountry = businessRow?.country ?? null;
 
     let instructions: string;
@@ -193,6 +196,7 @@ export async function routeToAgentRuntime(
       // — the voice runtime offers it as the appointment contact number.
       callerNumber: input.callerE164,
       businessCountry,
+      routingStartedAt,
     };
 
     // Production path: the media bridge and the Sarvam voice runtime both
@@ -277,6 +281,7 @@ export async function routeToAgentRuntime(
       bridge,
       callerNumber: input.callerE164,
       businessCountry,
+      routingStartedAt,
       ...(adapter.hangupCall && input.providerCallId
         ? {
             requestProviderHangup: () => adapter.hangupCall!(input.providerCallId!),

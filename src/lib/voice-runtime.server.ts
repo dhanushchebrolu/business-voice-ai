@@ -68,6 +68,7 @@
  */
 
 import type { AudioMediaBridge, AudioFrame } from "./telephony/audio-bridge.ts";
+import type { HangupOutcome } from "./telephony/adapter.ts";
 import {
   connectSarvamStt,
   connectSarvamTts,
@@ -377,7 +378,7 @@ export interface StartRuntimeSessionInput {
    * closing the media bridge (terminateRuntimeSession) is then the only
    * way the runtime can end the call.
    */
-  requestProviderHangup?: () => Promise<void>;
+  requestProviderHangup?: () => Promise<HangupOutcome | void>;
   /**
    * Overrides for the call lifecycle policy (silence timings, repeat/error
    * limits, closing and hang-up deadlines, maximum call length) — see
@@ -385,6 +386,8 @@ export interface StartRuntimeSessionInput {
    * numeric values are clamped to safe minimums.
    */
   lifecyclePolicy?: Partial<CallLifecyclePolicy>;
+  /** When telephony routing for this call began (ms since epoch) — logged against the greeting's first audio frame (greeting_first_audio). */
+  routingStartedAt?: number;
 }
 
 export interface RuntimeSessionHandle {
@@ -598,6 +601,13 @@ interface Session {
    */
   ttsChunksSent: number;
   ttsChunksFlushed: number;
+  /** When text was last handed to TTS, and when TTS audio last arrived — the evidence ttsAudioInFlight falls back on when no completion event arrives. */
+  ttsLastSendAt: number;
+  ttsLastAudioAt: number;
+  /** Whether any TTS audio has arrived since the last text was sent. */
+  ttsAudioSinceSend: boolean;
+  /** Logged once when an utterance is judged finished without TTS's completion event. */
+  ttsCompletionFallbackLogged: boolean;
   /** The output codec/sample rate this session told Sarvam to synthesize into (from connectTts's options) — compared against Sarvam's actual first audio chunk in onTtsEvent's first_outbound_audio_frame diagnostic, so a provider that silently ignores the declared format is visible rather than assumed. */
   declaredTtsOutputCodec: "mulaw" | "linear16" | "wav" | null;
   declaredTtsOutputSampleRateHz: number | null;
@@ -781,9 +791,47 @@ const PAYMENT_WAIT_TIMEOUT_MS = 90_000;
  * still-playing tail as a genuine interruption, even though the state has
  * already nominally moved past "speaking".
  */
-function ttsAudioInFlight(session: Session): boolean {
-  return session.ttsChunksSent > session.ttsChunksFlushed;
+/** Sarvam has reported every chunk sent so far as synthesized (its completion event) — says nothing about playback. */
+function ttsSynthesisComplete(session: Session): boolean {
+  return session.ttsChunksSent <= session.ttsChunksFlushed;
 }
+
+function ttsAudioInFlight(session: Session): boolean {
+  const now = Date.now();
+  // Audio already forwarded to the provider is still playing to the caller
+  // (estimated from its duration). Sarvam's completion event only means
+  // synthesis finished — never that the caller has heard it — so this is
+  // checked first, whatever the event said.
+  if (now < session.outboundPlayoutEndsAt) return true;
+  if (session.ttsChunksSent <= session.ttsChunksFlushed) return false;
+  // Sarvam's completion event (send_completion_event — see
+  // sarvam-realtime.server.ts) is the authoritative "synthesis finished"
+  // signal. When it doesn't arrive (production: the connection never asked
+  // for it, so "audio still playing" stayed true for the rest of the call —
+  // the silence timer never armed, and a booked caller who went quiet was
+  // never hung up on), fall back on what was observed, bounded: audio still
+  // arriving, or the first audio of just-sent text not here yet.
+  const stillArriving = session.ttsAudioSinceSend
+    ? now - session.ttsLastAudioAt < TTS_DELIVERY_IDLE_MS
+    : now - session.ttsLastSendAt < TTS_FIRST_AUDIO_MAX_WAIT_MS;
+  if (stillArriving) return true;
+  if (!session.ttsCompletionFallbackLogged) {
+    session.ttsCompletionFallbackLogged = true;
+    log("tts_completion_inferred", session, {
+      chunks_sent: session.ttsChunksSent,
+      chunks_flushed: session.ttsChunksFlushed,
+      audio_received: session.ttsAudioSinceSend,
+    });
+  }
+  return false;
+}
+
+/** No TTS audio for this long after the last chunk, with its playout over: the utterance is done. */
+const TTS_DELIVERY_IDLE_MS = 1_500;
+/** Longest the first audio of just-sent text is waited for before it counts as not coming. */
+const TTS_FIRST_AUDIO_MAX_WAIT_MS = 8_000;
+/** How often a silence timer deferred by still-playing audio re-checks. */
+const SILENCE_DEFER_RECHECK_MS = 500;
 
 function isAwaitingCaller(state: RuntimeState): boolean {
   return (
@@ -829,6 +877,9 @@ function armSilenceTimer(session: Session) {
   // actually catches up, which is the only thing that can turn this back
   // into a real wait-on-the-caller window.
   if ((state === "listening" || state === "waiting_on_payment") && ttsAudioInFlight(session)) {
+    // Re-checked shortly (cleared like the timer itself), so the window
+    // still opens when TTS never sends its completion event.
+    session.silenceTimer = setTimeout(() => armSilenceTimer(session), SILENCE_DEFER_RECHECK_MS);
     return;
   }
   // SILENCE_PROMPT_MS / SILENCE_HANGUP_MS are the policy defaults; a call's
@@ -997,8 +1048,21 @@ function requestProviderHangup(session: Session, reason: string): Promise<void> 
     const attempts = 1 + session.policy.providerHangupRetries;
     for (let attempt = 1; attempt <= attempts; attempt++) {
       try {
-        await withToolDeadline(session.policy.providerHangupTimeoutMs, hangup());
-        log("provider_hangup_requested", session, { reason, attempt });
+        const outcome = await withToolDeadline(session.policy.providerHangupTimeoutMs, hangup());
+        log("provider_hangup_requested", session, {
+          reason,
+          attempt,
+          outcome: outcome ?? "unknown",
+        });
+        if (outcome === "call_not_found") {
+          // The provider has no live call with this id. That is only proof
+          // the call is over if the provider's own call-ended webhook says
+          // so; otherwise it may be a wrong id and the call may still be up.
+          log("provider_hangup_call_not_found", session, {
+            reason,
+            provider_reported_end: providerReportedCallEnded(session.input.callId),
+          });
+        }
         return;
       } catch (err) {
         const transient = isTransientHangupError(err);
@@ -2615,6 +2679,8 @@ async function speak(
   for (const chunk of chunkIntoSentences(text)) {
     session.tts.sendText(chunk);
     session.tts.flush();
+    session.ttsLastSendAt = Date.now();
+    session.ttsAudioSinceSend = false;
     // See ttsAudioInFlight — paired with onTtsEvent's "flushed" case
     // incrementing ttsChunksFlushed once Sarvam confirms this chunk's
     // audio was fully delivered.
@@ -5000,6 +5066,8 @@ function onSttEvent(session: Session, event: SttEvent) {
         session.input.bridge.clearOutboundBuffer();
         session.outboundPlayoutEndsAt = 0;
         session.tts?.flush();
+        // The interrupted audio will never be heard: nothing is in flight.
+        session.ttsChunksFlushed = session.ttsChunksSent;
         setState(session, "interrupted");
         log("interruption", session, { audioStillPlaying });
         // Task 7: explicit, dedicated barge-in diagnostic — old/new
@@ -5191,6 +5259,19 @@ function onTtsEvent(session: Session, event: TtsEvent, connectionId: number) {
           declaredSampleRateHz: session.declaredTtsOutputSampleRateHz,
           sarvamMeta: event.meta,
         });
+        // Greeting latency, measured: the call's first audio is the
+        // greeting. From telephony routing starting (shortly after the
+        // provider's answer webhook) and from this runtime starting.
+        const firstAudioAt = Date.now();
+        log("greeting_first_audio", session, {
+          ms_since_runtime_start: firstAudioAt - session.startedAt,
+          ms_since_routing_start:
+            session.input.routingStartedAt !== undefined
+              ? firstAudioAt - session.input.routingStartedAt
+              : null,
+          ms_since_tts_connected:
+            session.ttsConnectedAt !== null ? firstAudioAt - session.ttsConnectedAt : null,
+        });
       }
       // Latency diagnostics: the first audio byte of THIS turn's reply is
       // the moment the caller actually starts hearing a response — the
@@ -5209,6 +5290,8 @@ function onTtsEvent(session: Session, event: TtsEvent, connectionId: number) {
         });
       }
       session.ttsBytesInFlight += event.data.length;
+      session.ttsLastAudioAt = Date.now();
+      session.ttsAudioSinceSend = true;
       const frame: AudioFrame = { data: event.data, timestampMs: Date.now() - session.startedAt };
       session.input.bridge.sendOutboundFrame(frame);
       // Playout estimate for waitForFinalAudio: the provider plays frames in
@@ -5245,13 +5328,15 @@ function onTtsEvent(session: Session, event: TtsEvent, connectionId: number) {
       // See ttsAudioInFlight — this is what lets onSttEvent's barge-in
       // check recognize caller speech during a still-playing reply's tail
       // even after the state machine has already moved on to "listening".
-      session.ttsChunksFlushed += 1;
+      // Never beyond what was sent (a barge-in's extra flush, or chunks
+      // already discarded, must not make later audio look delivered).
+      session.ttsChunksFlushed = Math.min(session.ttsChunksFlushed + 1, session.ttsChunksSent);
       // Requested diagnostic naming (distinct from the voice_runtime:*
       // namespace) — pairs with tts:start above: fires once THIS speak()
       // call's audio has fully played out (ttsAudioInFlight false again),
       // not per-chunk, so a single log line per utterance (not per flush
       // event) actually answers "how long did synthesis+delivery take".
-      if (!ttsAudioInFlight(session)) {
+      if (ttsSynthesisComplete(session)) {
         namedLog("tts:completed", session, { at: Date.now() });
       }
       // Latency diagnostics: once every chunk sent so far has been fully
@@ -5262,7 +5347,7 @@ function onTtsEvent(session: Session, event: TtsEvent, connectionId: number) {
       if (
         session.currentTurnTranscriptFinalAt !== null &&
         session.currentTurnFirstAudioLogged &&
-        !ttsAudioInFlight(session)
+        ttsSynthesisComplete(session)
       ) {
         const responseAudioEndAt = Date.now();
         const totalResponseLatencyMs = responseAudioEndAt - session.currentTurnTranscriptFinalAt;
@@ -5309,7 +5394,7 @@ function onTtsEvent(session: Session, event: TtsEvent, connectionId: number) {
       // the state on since, this is the actual moment the caller starts
       // being genuinely silent, so the wait-on-the-caller window starts
       // counting down now rather than never.
-      if (!ttsAudioInFlight(session) && isAwaitingCaller(stateOf(session))) {
+      if (ttsSynthesisComplete(session) && isAwaitingCaller(stateOf(session))) {
         armSilenceTimer(session);
       }
       break;
@@ -5383,6 +5468,10 @@ export async function startRuntimeSession(
     ttsBytesInFlight: 0,
     ttsChunksSent: 0,
     ttsChunksFlushed: 0,
+    ttsLastSendAt: 0,
+    ttsLastAudioAt: 0,
+    ttsAudioSinceSend: false,
+    ttsCompletionFallbackLogged: false,
     declaredTtsOutputCodec: null,
     declaredTtsOutputSampleRateHz: null,
     firstOutboundAudioFrameLogged: false,
@@ -5530,7 +5619,13 @@ export async function startRuntimeSession(
     }),
   );
 
-  const [ttsOutcome, sttOutcome] = await Promise.allSettled([ttsConnectPromise, sttConnectPromise]);
+  // Greeting latency: the greeting starts as soon as TTS is connected — it
+  // no longer also waits for STT. Nothing the caller says is lost while STT
+  // is still connecting: every inbound frame is buffered (pendingInboundFrames,
+  // registered above) and flushed into STT the moment it connects. If STT
+  // then fails, the caller hears an honest apology and the call is ended,
+  // exactly as before — just after the greeting instead of instead of it.
+  const [ttsOutcome] = await Promise.allSettled([ttsConnectPromise]);
 
   if (ttsOutcome.status === "fulfilled") {
     session.tts = ttsOutcome.value;
@@ -5550,61 +5645,78 @@ export async function startRuntimeSession(
     log("tts_connect_failed", session, { message: (ttsOutcome.reason as Error).message });
   }
 
-  if (sttOutcome.status === "fulfilled") {
-    session.stt = sttOutcome.value;
-    /**
-     * Diagnostic (audio format tracing): the exact format this session
-     * told the AI voice provider inbound audio would arrive in, derived
-     * entirely from the bridge's own declared inboundFormat — never a
-     * hardcoded assumption here. Compare against the telephony provider's
-     * own configured format if STT connects but never produces a
-     * transcript for audio that is clearly being sent.
-     */
-    log("stt_connected", session, { sttSampleRateHz, sttEncoding });
-    // Task 1: the caller's audio must never be silently lost while STT is
-    // still connecting (it can take a while — see timedStep's own doc
-    // comment on the ~20.4s production incident this responds to).
-    // onInboundFrame above already buffers every frame into
-    // pendingInboundFrames (bounded by MAX_PENDING_INBOUND_FRAMES) for
-    // exactly this reason; this just makes that buffering's outcome
-    // visible — how much was buffered, and that all of it (bounded) was
-    // actually flushed into STT the moment it connected, not discarded.
-    log("startup_step", session, {
-      step: "initial_audio_buffering",
-      bufferedFrameCount: session.pendingInboundFrames.length,
-      bufferCapacity: MAX_PENDING_INBOUND_FRAMES,
-      outcome: "flushed_to_stt",
-    });
-    // Flush whatever arrived on the bridge while STT was still connecting —
-    // see the onInboundFrame registration above.
-    for (const frame of session.pendingInboundFrames) session.stt.sendAudioFrame(frame.data);
-    session.pendingInboundFrames = [];
-  } else {
-    log("stt_connect_failed", session, { message: (sttOutcome.reason as Error).message });
-  }
+  /** Applies STT's connect outcome (connected: flush the buffered audio). */
+  const applySttOutcome = (sttOutcome: PromiseSettledResult<SttSession>) => {
+    // The session already ended while STT was connecting (the greeting
+    // failed, the caller hung up): close the late connection, never leak it.
+    if (session.terminationStarted) {
+      if (sttOutcome.status === "fulfilled") {
+        try {
+          sttOutcome.value.close();
+        } catch {
+          /* best-effort */
+        }
+      }
+      return;
+    }
+    if (sttOutcome.status === "fulfilled") {
+      session.stt = sttOutcome.value;
+      /**
+       * Diagnostic (audio format tracing): the exact format this session
+       * told the AI voice provider inbound audio would arrive in, derived
+       * entirely from the bridge's own declared inboundFormat — never a
+       * hardcoded assumption here. Compare against the telephony provider's
+       * own configured format if STT connects but never produces a
+       * transcript for audio that is clearly being sent.
+       */
+      log("stt_connected", session, { sttSampleRateHz, sttEncoding });
+      // Task 1: the caller's audio must never be silently lost while STT is
+      // still connecting (it can take a while — see timedStep's own doc
+      // comment on the ~20.4s production incident this responds to).
+      // onInboundFrame above already buffers every frame into
+      // pendingInboundFrames (bounded by MAX_PENDING_INBOUND_FRAMES) for
+      // exactly this reason; this just makes that buffering's outcome
+      // visible — how much was buffered, and that all of it (bounded) was
+      // actually flushed into STT the moment it connected, not discarded.
+      log("startup_step", session, {
+        step: "initial_audio_buffering",
+        bufferedFrameCount: session.pendingInboundFrames.length,
+        bufferCapacity: MAX_PENDING_INBOUND_FRAMES,
+        outcome: "flushed_to_stt",
+      });
+      // Flush whatever arrived on the bridge while STT was still connecting —
+      // see the onInboundFrame registration above.
+      for (const frame of session.pendingInboundFrames) session.stt.sendAudioFrame(frame.data);
+      session.pendingInboundFrames = [];
+    } else {
+      log("stt_connect_failed", session, { message: (sttOutcome.reason as Error).message });
+    }
+  };
 
-  // The call cannot proceed without BOTH a way to speak and a way to
-  // listen. Either connection failing independently is fatal to the
-  // session — but (unlike the old serial code) the OTHER connection was
-  // still attempted and, if it succeeded, is used here: a working TTS
-  // session speaks an honest apology before the call ends if STT is what
-  // failed; a working STT session is simply closed below if TTS is what
-  // failed (there is nothing to speak the apology with).
-  if (ttsOutcome.status === "rejected" || sttOutcome.status === "rejected") {
-    const failureReason =
-      ttsOutcome.status === "rejected" ? "tts_connect_failed" : "stt_connect_failed";
-    if (sttOutcome.status === "rejected" && session.tts) {
-      await speakFallback(session, sttOutcome.reason, "stt_connect_failed");
+  /**
+   * Either connection failing is fatal to the session: a working TTS
+   * session speaks an honest apology first if STT is what failed (there is
+   * nothing to speak with if TTS failed), then the phone call itself is
+   * ended — closing the media stream alone does not hang up (Vobiz
+   * keepCallAlive). Bounded; never blocks the session teardown.
+   */
+  const failStartup = async (failureReason: string, sttError: unknown | null) => {
+    if (sttError !== null && session.tts) {
+      await speakFallback(session, sttError, "stt_connect_failed");
       // Let the apology play (bounded) before the line is dropped.
       await waitForFinalAudio(session);
     }
     setState(session, "failed");
-    // The phone call itself must end too — closing the media stream alone
-    // does not hang up (Vobiz keepCallAlive), and nothing can be said or
-    // heard on this call. Bounded; never blocks the session teardown.
     await requestProviderHangup(session, failureReason);
     await terminateRuntimeSession(input.callId, failureReason);
     return handle;
+  };
+
+  if (ttsOutcome.status === "rejected") {
+    // Still settle STT so a connected STT session is closed by termination.
+    const [sttOutcome] = await Promise.allSettled([sttConnectPromise]);
+    applySttOutcome(sttOutcome);
+    return failStartup("tts_connect_failed", null);
   }
 
   // Task 2: the initial greeting must be spoken exactly once per call.
@@ -5648,13 +5760,20 @@ export async function startRuntimeSession(
     // media stream (see the connect-failure path above).
     await requestProviderHangup(session, "greeting_failed");
     await terminateRuntimeSession(input.callId, "greeting_failed");
+    void Promise.allSettled([sttConnectPromise]).then(([late]) => applySttOutcome(late));
     return handle;
+  }
+
+  const [sttOutcome] = await Promise.allSettled([sttConnectPromise]);
+  applySttOutcome(sttOutcome);
+  if (session.terminationStarted) return handle; // ended during the greeting
+  if (sttOutcome.status === "rejected") {
+    return failStartup("stt_connect_failed", sttOutcome.reason);
   }
 
   return handle;
 }
 
-/** Idempotent: a second call for an already-ending/ended session is a no-op. */
 /** Calls whose provider reported the call ended (call-ended webhook), with when — see providerReportedCallEnded. */
 const providerEndedCalls = new Map<string, number>();
 const PROVIDER_ENDED_MEMORY_MS = 10 * 60_000;
@@ -5673,6 +5792,7 @@ function providerReportedCallEnded(callId: string): boolean {
   return at !== undefined && Date.now() - at <= PROVIDER_ENDED_MEMORY_MS;
 }
 
+/** Idempotent: a second call for an already-ending/ended session is a no-op. */
 export async function terminateRuntimeSession(callId: string, reason: string): Promise<void> {
   // The provider's own call-ended webhook (telephony.ts terminateAgentRuntime
   // passes "call ended: <status>") is the confirmation that the phone call

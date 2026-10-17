@@ -423,7 +423,7 @@ describe("openMediaBridge: honest 'no live audio path yet' when Vobiz's WS conne
 describe("hangupCall: Vobiz's documented live-call hang-up API", () => {
   async function withFetch(
     respond: (url: string, init?: RequestInit) => Response,
-    run: () => Promise<void>,
+    run: () => Promise<unknown>,
   ): Promise<{ url: string; init: RequestInit | undefined }[]> {
     const calls: { url: string; init: RequestInit | undefined }[] = [];
     const originalFetch = globalThis.fetch;
@@ -453,12 +453,69 @@ describe("hangupCall: Vobiz's documented live-call hang-up API", () => {
     assert.equal(headers["X-Auth-Token"], "secret-token");
   });
 
-  test("a call that has already ended (404) is treated as hung up", async () => {
+  test("2xx is reported as hung_up", async () => {
     const adapter = new VobizTelephonyAdapter(config);
+    let outcome: unknown;
+    await withFetch(
+      () => new Response(null, { status: 204 }),
+      async () => {
+        outcome = await adapter.hangupCall("call-uuid-1");
+      },
+    );
+    assert.equal(outcome, "hung_up");
+  });
+
+  test("404 is reported as call_not_found — never as a successful hang-up", async () => {
+    const adapter = new VobizTelephonyAdapter(config);
+    let outcome: unknown;
     await withFetch(
       () => new Response("not found", { status: 404 }),
-      () => adapter.hangupCall("gone"),
+      async () => {
+        outcome = await adapter.hangupCall("gone");
+      },
     );
+    assert.equal(outcome, "call_not_found");
+  });
+
+  test("Vobiz unreachable rejects with a transient (503) status, so the runtime may retry once", async () => {
+    const adapter = new VobizTelephonyAdapter(config);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new TypeError("fetch failed");
+    }) as typeof fetch;
+    try {
+      await assert.rejects(adapter.hangupCall("call-uuid-1"), (err: { status?: number }) => {
+        assert.equal(err.status, 503);
+        return true;
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("every hang-up logs Vobiz's actual response — status and outcome, never the full call id", async () => {
+    const adapter = new VobizTelephonyAdapter(config);
+    const logged: unknown[] = [];
+    const original = console.info;
+    console.info = (event: unknown, payload?: unknown) => {
+      if (event === "vobiz:hangup_response") logged.push(payload);
+    };
+    try {
+      await withFetch(
+        () => new Response(null, { status: 204 }),
+        () => adapter.hangupCall("call-uuid-0001"),
+      );
+      await withFetch(
+        () => new Response("not found", { status: 404 }),
+        () => adapter.hangupCall("call-uuid-0002"),
+      );
+    } finally {
+      console.info = original;
+    }
+    assert.deepEqual(logged, [
+      { callRef: "…0001", status: 204, outcome: "hung_up" },
+      { callRef: "…0002", status: 404, outcome: "call_not_found" },
+    ]);
   });
 
   test("any other failure is reported, never swallowed", async () => {

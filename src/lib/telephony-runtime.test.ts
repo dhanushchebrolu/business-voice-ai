@@ -297,3 +297,17 @@ describe("Caller ID reaches the voice runtime (trusted webhook `From`, never spe
     );
   });
 });
+
+describe("greeting latency: routing reads after the gate", () => {
+  test("the published version and business country are read concurrently, still after the tenant/entitlement gate", () => {
+    const gateIdx = runtimeSrc.indexOf("const gate = await checkTelephonyAccess(");
+    const allIdx = runtimeSrc.indexOf(
+      "const [{ data: publishedVersion }, { data: businessRow }] = await Promise.all([",
+    );
+    assert.ok(gateIdx > -1 && allIdx > -1);
+    assert.ok(gateIdx < allIdx, "no agent data is read before the gate");
+    const block = runtimeSrc.slice(allIdx, runtimeSrc.indexOf("]);", allIdx));
+    assert.match(block, /\.from\("agent_versions"\)/);
+    assert.match(block, /\.from\("businesses"\)\.select\("country"\)/);
+  });
+});

@@ -113,6 +113,8 @@ export interface VobizStartRuntimeRpcInput {
   /** businesses.country, read live at call start — see StartRuntimeSessionInput.businessCountry. */
   businessCountry?: string | null;
   timeoutMs?: number;
+  /** When telephony routing for this call began (ms since epoch) — greeting-latency instrumentation only. Optional so an older in-flight RPC body still parses. */
+  routingStartedAt?: number;
 }
 
 export interface VobizAgentRuntimeRpcResult {
@@ -498,6 +500,9 @@ export class VobizCallSessionDurableObject {
       businessName: body.businessName,
       bridge,
       callerNumber: body.callerNumber ?? null,
+      ...(typeof body.routingStartedAt === "number"
+        ? { routingStartedAt: body.routingStartedAt }
+        : {}),
       businessCountry: body.businessCountry ?? null,
       // Vobiz documents a live-call hang-up API, so a completed
       // conversation ends the PSTN call explicitly rather than relying on
@@ -506,7 +511,7 @@ export class VobizCallSessionDurableObject {
         const { getTelephonyAdapter } = await import("../telephony.server.ts");
         const adapter = getTelephonyAdapter("vobiz");
         if (!adapter?.hangupCall) throw new Error("Vobiz adapter is not configured.");
-        await adapter.hangupCall(body.providerCallId);
+        return adapter.hangupCall(body.providerCallId);
       },
     });
 

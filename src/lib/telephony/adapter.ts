@@ -178,11 +178,16 @@ export interface TelephonyProviderAdapter {
    * drop). Optional: only implemented where the provider's hang-up API is
    * documented. Without it, closing the media bridge is the only way the
    * runtime can end a call, and whether that drops the PSTN leg depends on
-   * the provider's own stream semantics. Resolves when the provider has
-   * accepted the hang-up (or reports the call already gone).
+   * the provider's own stream semantics. Resolves with what the provider
+   * reported: "hung_up" (it accepted the hang-up) or "call_not_found" (no
+   * live call with that id — already ended, or a wrong id; never proof the
+   * intended call was ended). Rejects on any other failure.
    */
-  hangupCall?(providerCallId: string): Promise<void>;
+  hangupCall?(providerCallId: string): Promise<HangupOutcome>;
 }
+
+/** What a provider hang-up request achieved — see TelephonyAdapter.hangupCall. */
+export type HangupOutcome = "hung_up" | "call_not_found";
 
 export class TelephonyAdapterError extends Error {
   status: number;

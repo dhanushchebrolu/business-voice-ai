@@ -870,6 +870,19 @@ export function normalizeTtsMessage(raw: unknown): TtsEvent {
     }
   }
   if (kind === "flushed" || kind === "flush_ack") return { type: "flushed" };
+  // Sarvam's completion signal (sent only when the connection asks for it —
+  // send_completion_event, see connectSarvamTts). Schema per Sarvam's
+  // official SDK (sarvamai@1.1.12, EventResponse):
+  //   {"type":"event","data":{"event_type":"final","message"?,"timestamp"?}}
+  // sent "when the final audio chunk has been generated" — synthesis is
+  // done; it says nothing about playback (the runtime tracks that itself).
+  // The SDK's server-message union is AudioOutput | EventResponse |
+  // ErrorResponse: there is no "flushed"/"flush_ack" message, so before this
+  // the runtime was never told an utterance had finished.
+  if (kind === "event") {
+    const data = (msg["data"] as Record<string, unknown> | undefined) ?? msg;
+    if (String(data["event_type"] ?? "") === "final") return { type: "flushed" };
+  }
   if (kind === "error") {
     const message = extractErrorDetail(msg) ?? "Speech synthesis error";
     return { type: "error", message, raw: msg };
@@ -880,6 +893,14 @@ export function normalizeTtsMessage(raw: unknown): TtsEvent {
 export async function connectSarvamTts(opts: ConnectTtsOptions): Promise<TtsSession> {
   const url = new URL(TTS_WS_URL);
   url.searchParams.set("model", SARVAM_REALTIME_MODELS.tts);
+  // Ask Sarvam to report when synthesis has finished (an
+  // {"type":"event","data":{"event_type":"final"}} message, see
+  // normalizeTtsMessage). A WS URL query parameter, "true"/"false", alongside
+  // `model` — exactly as Sarvam's official SDK (sarvamai@1.1.12,
+  // TextToSpeechStreamingClient.connect) sends it to /text-to-speech/ws.
+  // The voice runtime treats the event as "synthesis done" only, and keeps a
+  // bounded fallback for when it never arrives.
+  url.searchParams.set("send_completion_event", "true");
 
   const socket = await openSocket(url.toString(), "tts");
 
