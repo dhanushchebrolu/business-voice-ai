@@ -274,6 +274,15 @@ describe("Smile Dental: the service is understood once, then the booking complet
       `Booking.\n${marker({ service: "dental cleaning", customer_name: "Dhanush", ready_to_book: true })}`,
       200,
     );
+    // The model's "ready to book" alone never books — the caller confirms.
+    assert.equal(h.tools.calls.filter((c) => c.name === "book_appointment").length, 0);
+    await turn(
+      h,
+      catchUp,
+      "Yes, book it",
+      `Booking.\n${marker({ service: "dental cleaning", customer_name: "Dhanush", ready_to_book: true })}`,
+      200,
+    );
     const bookCalls = h.tools.calls.filter((c) => c.name === "book_appointment");
     assert.equal(bookCalls.length, 1);
     assert.equal(bookCalls[0]!.input["serviceId"], "svc-teeth-cleaning");
@@ -285,10 +294,21 @@ describe("Smile Dental: the service is understood once, then the booking complet
 describe("honest outcomes", () => {
   test("a calendar sync failure is never announced as a confirmed booking", async () => {
     const { h, callId, catchUp } = await openCall(SMILE_DENTAL_SERVICES, "CALENDAR_SYNC_FAILED");
-    const spoken = await turn(
+    const first = await turn(
       h,
       catchUp,
       "Teeth cleaning please, I'm Dhanush, book it",
+      `You're all booked and confirmed!\n${marker({ customer_name: "Dhanush", ready_to_book: true })}`,
+      200,
+    );
+    // The details arrived on this turn: they're checked and confirmed with
+    // the caller first — and the model's "all booked" is never spoken.
+    assert.equal(h.tools.calls.filter((c) => c.name === "book_appointment").length, 0);
+    assert.doesNotMatch(first, /\bconfirmed\b|all booked|all set/i, first);
+    const spoken = await turn(
+      h,
+      catchUp,
+      "Yes, book it",
       `You're all booked and confirmed!\n${marker({ customer_name: "Dhanush", ready_to_book: true })}`,
       200,
     );

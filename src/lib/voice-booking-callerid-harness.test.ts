@@ -154,6 +154,22 @@ function installBookingStore(h: Harness, daySlots: { start: string; end: string 
   return Object.assign(bookings, { availabilityResults });
 }
 
+/**
+ * The caller gives the appointment details (the runtime checks the slot and
+ * asks to book). A booking needs the caller's own confirmation on a later
+ * turn — the model's "ready to book" alone never books.
+ */
+async function giveDetails(h: Harness, phone: string | null = "9876543210") {
+  h.llm.setNextReply(`Let me check that time.\n${marker({ phone })}`);
+  h.stt.speakUtterance("Teeth cleaning at 6:30 PM, I'm Dhanush");
+  await drain(120);
+  assert.equal(
+    h.tools.calls.filter((c) => c.name === "book_appointment").length,
+    0,
+    "nothing is booked before the caller confirms",
+  );
+}
+
 function spokenSince(h: Harness, index: number) {
   return h.tts.sentTexts.slice(index).join(" ");
 }
@@ -168,6 +184,8 @@ describe("voice booking persists exactly once, with the caller's number", () => 
     const callId = newCallId();
     await startRuntimeSession(input(callId, h.bridge), h.deps);
     const catchUp = flushCatchUp(h);
+    catchUp();
+    await giveDetails(h, "98765 43210");
     catchUp();
 
     h.llm.setNextReply(
@@ -257,7 +275,10 @@ describe("voice booking persists exactly once, with the caller's number", () => 
     installBookingStore(h, [SLOT]);
     const callId = newCallId();
     await startRuntimeSession(input(callId, h.bridge), h.deps);
-    flushCatchUp(h)();
+    const catchUp = flushCatchUp(h);
+    catchUp();
+    await giveDetails(h);
+    catchUp();
     h.llm.setNextReply(`Booking.\n${marker({ phone: "9876543210", ready_to_book: true })}`);
     const before = h.tts.sentTexts.length;
     h.stt.speakUtterance("Book it please");
@@ -483,9 +504,12 @@ describe("call completion: confirmation, farewell, and disconnect after final au
     const handle = await startRuntimeSession(input(callId, h.bridge), h.deps);
     const catchUp = flushCatchUp(h);
     catchUp();
+    await giveDetails(h);
+    catchUp();
     h.llm.setNextReply(`Booking.\n${marker({ phone: "9876543210", ready_to_book: true })}`);
     h.stt.speakUtterance("Book it");
     await drain(120);
+    assert.equal(h.tools.calls.filter((c) => c.name === "book_appointment").length, 1);
     return { callId, handle, catchUp };
   }
 

@@ -635,12 +635,13 @@ describe("15. Duplicate event delivery", () => {
     const callId = newCallId();
     await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
 
-    h.stt.emit({ type: "final_transcript", text: "hello", language: "en-IN" });
+    // (Not "hello": a bare presence check is answered without the model.)
+    h.stt.emit({ type: "final_transcript", text: "do you deliver", language: "en-IN" });
     await drain();
     // A real caller saying the same word again later is not a duplicate
     // delivery — only an immediate redelivery within the dedup window is.
     // Simulate "later" by driving the session back to listening first.
-    h.stt.emit({ type: "final_transcript", text: "hello", language: "en-IN" });
+    h.stt.emit({ type: "final_transcript", text: "do you deliver", language: "en-IN" });
     await drain();
 
     // Both calls count because the guard is a time window, not "ever seen
@@ -1040,6 +1041,62 @@ describe("13. Silence timer defense in depth", () => {
   });
 });
 
+/**
+ * The caller asks for the appointment (the runtime checks the slot; nothing
+ * is booked), then says "Yes, book it" — the booking step re-checks the
+ * calendar and books only then. The same availability answer is given both
+ * times.
+ */
+async function requestThenConfirm(
+  h: ReturnType<typeof createHarness>,
+  availability: { content: string; isError?: boolean },
+  bookingResult: { content: string; isError?: boolean } | null,
+): Promise<number> {
+  h.tools.setNextResult("check_calendar_availability", availability);
+  h.llm.setNextReply(bookingReadyToBookReply());
+  h.llm.setDelay(0);
+  h.stt.speakUtterance("Book an appointment tomorrow at 3pm for teeth cleaning");
+  await drain(60);
+  assert.equal(
+    h.tools.calls.filter((c) => c.name === "book_appointment").length,
+    0,
+    "the request alone books nothing — the caller hasn't confirmed",
+  );
+  makeTtsFlushCatchUp(h.tts)();
+  h.tools.setNextResult("check_calendar_availability", availability);
+  if (bookingResult) h.tools.setNextResult("book_appointment", bookingResult);
+  // The confirmed slot is booked without a conversational model call; the
+  // only model call left is the outcome's wording (the harness default).
+  const spokenBefore = h.tts.sentTexts.length;
+  h.stt.speakUtterance("Yes, book it");
+  await drain(60);
+  return spokenBefore;
+}
+
+/**
+ * The slot was first given on the previous turn (even with "please book
+ * it"), so the runtime checked it and asked; this is the caller's "Yes" —
+ * the booking step re-checks the calendar, then books.
+ */
+async function confirmBooking(
+  h: ReturnType<typeof createHarness>,
+  slots: { start: string; end: string }[],
+  bookingResult: { content: string; isError?: boolean },
+) {
+  assert.equal(
+    h.tools.calls.filter((c) => c.name === "book_appointment").length,
+    0,
+    "nothing is booked until the caller confirms the slot",
+  );
+  makeTtsFlushCatchUp(h.tts)();
+  h.tools.setNextResult("check_calendar_availability", {
+    content: JSON.stringify({ success: true, data: { slots } }),
+  });
+  h.tools.setNextResult("book_appointment", bookingResult);
+  h.stt.speakUtterance("Yes, book it");
+  await drain(60);
+}
+
 function bookingReadyToBookReply(overrides: Partial<Record<string, unknown>> = {}): string {
   const state = {
     service: "teeth cleaning",
@@ -1096,22 +1153,18 @@ describe("15. Deterministic appointment booking (tests H, I, J)", () => {
     await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
     makeTtsFlushCatchUp(h.tts)();
 
-    h.tools.setNextResult("check_calendar_availability", {
-      content: JSON.stringify({
-        success: true,
-        data: { slots: [{ start: BOOKING_START_ISO, end: "2026-10-08T15:30:00.000Z" }] },
-      }),
-    });
-    h.tools.setNextResult("book_appointment", {
-      content: JSON.stringify({ success: true, data: { id: "booking-1", status: "CONFIRMED" } }),
-    });
-    h.llm.setNextReply(bookingReadyToBookReply());
-    // The second generateReply call (composeHonestBookingReply) uses the
-    // fake LLM's defaultReply, since setNextReply is consumed by the first call.
-    h.llm.setDelay(0);
-
-    h.stt.speakUtterance("Book an appointment tomorrow at 3pm for teeth cleaning");
-    await drain(40);
+    await requestThenConfirm(
+      h,
+      {
+        content: JSON.stringify({
+          success: true,
+          data: { slots: [{ start: BOOKING_START_ISO, end: "2026-10-08T15:30:00.000Z" }] },
+        }),
+      },
+      {
+        content: JSON.stringify({ success: true, data: { id: "booking-1", status: "CONFIRMED" } }),
+      },
+    );
 
     const availabilityCall = h.tools.calls.find((c) => c.name === "check_calendar_availability");
     const bookingCall = h.tools.calls.find((c) => c.name === "book_appointment");
@@ -1129,13 +1182,13 @@ describe("15. Deterministic appointment booking (tests H, I, J)", () => {
     await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
     makeTtsFlushCatchUp(h.tts)();
 
-    h.tools.setNextResult("check_calendar_availability", {
-      content: JSON.stringify({ success: true, data: { slots: [] } }), // nothing available at the requested time
-    });
-    h.llm.setNextReply(bookingReadyToBookReply());
-
-    h.stt.speakUtterance("Book an appointment tomorrow at 3pm for teeth cleaning");
-    await drain(40);
+    // Nothing available at the requested time — and the caller says
+    // "yes, book it" anyway: the booking step's own re-check still refuses.
+    await requestThenConfirm(
+      h,
+      { content: JSON.stringify({ success: true, data: { slots: [] } }) },
+      null,
+    );
 
     const bookingCall = h.tools.calls.find((c) => c.name === "book_appointment");
     assert.equal(bookingCall, undefined, "must never attempt to book an unavailable slot");
@@ -1149,25 +1202,30 @@ describe("15. Deterministic appointment booking (tests H, I, J)", () => {
     await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
     makeTtsFlushCatchUp(h.tts)();
 
-    h.tools.setNextResult("check_calendar_availability", {
-      content: JSON.stringify({
-        success: true,
-        data: { slots: [{ start: BOOKING_START_ISO, end: "2026-10-08T15:30:00.000Z" }] },
-      }),
-    });
-    h.tools.setNextResult("book_appointment", {
-      content: JSON.stringify({
-        success: false,
-        error: { code: "SLOT_NO_LONGER_AVAILABLE", message: "Someone else just booked this slot." },
-      }),
-      isError: true,
-    });
-    h.llm.setNextReply(bookingReadyToBookReply());
-    h.llm.setDelay(0);
-
-    const spokenBefore = h.tts.sentTexts.length;
-    h.stt.speakUtterance("Book an appointment tomorrow at 3pm for teeth cleaning");
-    await drain(40);
+    const spokenBefore = await requestThenConfirm(
+      h,
+      {
+        content: JSON.stringify({
+          success: true,
+          data: { slots: [{ start: BOOKING_START_ISO, end: "2026-10-08T15:30:00.000Z" }] },
+        }),
+      },
+      {
+        content: JSON.stringify({
+          success: false,
+          error: {
+            code: "SLOT_NO_LONGER_AVAILABLE",
+            message: "Someone else just booked this slot.",
+          },
+        }),
+        isError: true,
+      },
+    );
+    assert.equal(
+      h.tools.calls.filter((c) => c.name === "book_appointment").length,
+      1,
+      "the confirmed booking was attempted",
+    );
 
     const spokenSinceBooking = h.tts.sentTexts.slice(spokenBefore).join(" ");
     assert.ok(
@@ -1647,6 +1705,42 @@ function openAvailabilityReply(overrides: Partial<Record<string, unknown>> = {})
   return `Let me check what's open — one moment.\n<<<APPT_STATE:${JSON.stringify(state)}>>>`;
 }
 
+/**
+ * "Book me at the next available time", then — once the agent has offered
+ * the earliest real slot and asked to book it — the caller's "Yes". The
+ * model's "ready to book" never books on its own: the caller confirms.
+ */
+async function requestThenConfirmNextAvailable(
+  h: ReturnType<typeof createHarness>,
+  slots: { start: string; end: string }[],
+  bookingResult: { content: string; isError?: boolean },
+  confirmDrain: number,
+) {
+  const availability = { content: JSON.stringify({ success: true, data: { slots } }) };
+  h.tools.setNextResult("check_calendar_availability", availability);
+  h.llm.setNextReply(nextAvailableBookingReply());
+  h.llm.setDelay(0);
+  h.stt.speakUtterance("Book me at the next available time");
+  await drain(60);
+  assert.equal(
+    h.tools.calls.filter((c) => c.name === "book_appointment").length,
+    0,
+    "the request alone books nothing",
+  );
+  makeTtsFlushCatchUp(h.tts)();
+  h.llm.setNextReply(
+    `The earliest is 9:15 AM. Shall I book that for you?\n${nextAvailableBookingReply({ ready_to_book: false }).split("\n")[1]}`,
+  );
+  h.stt.speakUtterance("Which is the earliest one?");
+  await drain(60);
+  makeTtsFlushCatchUp(h.tts)();
+  h.tools.setNextResult("check_calendar_availability", availability);
+  h.tools.setNextResult("book_appointment", bookingResult);
+  h.llm.setNextReply(nextAvailableBookingReply());
+  h.stt.speakUtterance("Yes please");
+  await drain(confirmDrain);
+}
+
 function nextAvailableBookingReply(overrides: Partial<Record<string, unknown>> = {}): string {
   const state = {
     service: "teeth cleaning",
@@ -1788,32 +1882,20 @@ describe("28. 'Book me at the next available time' (no exact time given)", () =>
     await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
     makeTtsFlushCatchUp(h.tts)();
 
-    h.tools.setNextResult("check_calendar_availability", {
-      content: JSON.stringify({
-        success: true,
-        data: {
-          slots: [
-            { start: "2026-10-08T09:15:00.000Z", end: "2026-10-08T09:45:00.000Z" },
-            { start: "2026-10-08T11:00:00.000Z", end: "2026-10-08T11:30:00.000Z" },
-          ],
-        },
-      }),
-    });
-    h.tools.setNextResult("book_appointment", {
-      content: JSON.stringify({
-        success: true,
-        data: { id: "booking-next-1", status: "CONFIRMED" },
-      }),
-    });
-    h.llm.setNextReply(nextAvailableBookingReply());
-    h.llm.setDelay(0);
-
-    h.stt.speakUtterance("Book me at the next available time");
-    // Not the (now-bumped) default: this turn also resolves the
-    // configured-services lookup (service still unknown on a fresh
-    // session — see tryEarlyDeterministicDispatch/resolveDeterministicExtractionContext)
-    // before the marker-driven booking path runs.
-    await drain(20);
+    await requestThenConfirmNextAvailable(
+      h,
+      [
+        { start: "2026-10-08T09:15:00.000Z", end: "2026-10-08T09:45:00.000Z" },
+        { start: "2026-10-08T11:00:00.000Z", end: "2026-10-08T11:30:00.000Z" },
+      ],
+      {
+        content: JSON.stringify({
+          success: true,
+          data: { id: "booking-next-1", status: "CONFIRMED" },
+        }),
+      },
+      60,
+    );
 
     const bookingCall = h.tools.calls.find((c) => c.name === "book_appointment");
     assert.ok(bookingCall, "must actually book, not just check");
@@ -1832,27 +1914,18 @@ describe("28. 'Book me at the next available time' (no exact time given)", () =>
     await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
     makeTtsFlushCatchUp(h.tts)();
 
-    h.tools.setNextResult("check_calendar_availability", {
-      content: JSON.stringify({
-        success: true,
-        data: { slots: [{ start: "2026-10-08T09:15:00.000Z", end: "2026-10-08T09:45:00.000Z" }] },
-      }),
-    });
-    h.tools.setNextResult("book_appointment", {
-      content: JSON.stringify({
-        success: true,
-        data: { id: "booking-next-2", status: "CONFIRMED" },
-      }),
-    });
-    h.llm.setNextReply(nextAvailableBookingReply());
-    h.llm.setDelay(0);
-
-    h.stt.speakUtterance("Book me at the next available time");
-    // Not 16: every turn now also awaits tryEarlyDeterministicDispatch
-    // (Fix #1/#4) before falling through to getReply when it doesn't
-    // apply — one more microtask hop than before, on top of this test's
-    // already-tight two-sequential-tool-calls-plus-two-LLM-calls budget.
-    await drain(60);
+    await requestThenConfirmNextAvailable(
+      h,
+      [{ start: "2026-10-08T09:15:00.000Z", end: "2026-10-08T09:45:00.000Z" }],
+      {
+        content: JSON.stringify({
+          success: true,
+          data: { id: "booking-next-2", status: "CONFIRMED" },
+        }),
+      },
+      60,
+    );
+    assert.equal(h.tools.calls.filter((c) => c.name === "book_appointment").length, 1);
 
     // English confirmations are spoken verbatim (no phrasing-model round
     // trip), so the real booked time must be in what the caller hears.
@@ -2003,6 +2076,15 @@ describe("29. New diagnostic events (calendar_tool:*, voice:tool_result, voice:f
 describe("30. Conversation state regression — the exact real-call sequence (production incident: 'is there any slot available today?' got no tool call, and a booking confirmation combined with a reminder request was treated as reconsideration)", () => {
   test("full sequence: book → capture name/phone/service → open availability (marker unreliable) → select tomorrow 3pm → confirm + embedded reminder request (marker unreliable again) → booking still executes correctly, reminder honestly declined, never a false ticket/reminder claim", async () => {
     const h = createHarness();
+    // A real calendar result is worded by a narrow model call given only the
+    // facts; when the facts say the slot IS available, that wording asks to
+    // book it — the question the caller's "Yeah, please confirm" answers.
+    const conversational = h.deps.generateReply;
+    h.deps.generateReply = async (messages) =>
+      /a phone receptionist\. Respond in language code/.test(messages[0]?.content ?? "") &&
+      /\bIS available\b/.test(messages.at(-1)?.content ?? "")
+        ? { reply: "Good news — tomorrow at 3 PM is available. Shall I confirm that?" }
+        : conversational(messages);
     const callId = newCallId();
     await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
     makeTtsFlushCatchUp(h.tts)();
@@ -2059,14 +2141,20 @@ describe("30. Conversation state regression — the exact real-call sequence (pr
     // Step 6: caller selects tomorrow 3pm. This is also the exact turn
     // every required availability-check field (service, name, date, time)
     // becomes complete, so the completion-triggered-availability backstop
-    // (Fix #1) now fires here too, before step 7's booking confirmation —
-    // its own real check_calendar_availability call needs the default
-    // mock result (NOT_CONFIGURED/isError, since nothing is queued for
-    // this turn specifically), which resolves availabilityStatus back to
-    // "unknown" and bookingStatus back to "collecting", same as any other
-    // honest tool failure. A bigger drain (matching step 5's) is needed so
-    // this extra real dispatch (speak + tool call + composeHonestBookingReply)
+    // (Fix #1) fires here, before step 7's booking confirmation: the real
+    // check finds 3 PM open and the agent asks whether to book it (the
+    // reply below is the wording of that result). That question is what
+    // the caller's "Yeah, please confirm" in step 7 answers — the runtime
+    // books only on the caller's confirmation of the slot, never on the
+    // model's own state block. A bigger drain (matching step 5's) is needed
+    // so this real dispatch (speak + tool call + composeHonestBookingReply)
     // fully settles before step 7 fires, rather than racing it.
+    h.tools.setNextResult("check_calendar_availability", {
+      content: JSON.stringify({
+        success: true,
+        data: { slots: [{ start: "2026-10-09T15:00:00.000Z", end: "2026-10-09T15:30:00.000Z" }] },
+      }),
+    });
     h.llm.setNextReply(
       'Tomorrow at 3 PM works. Shall I confirm that?\n<<<APPT_STATE:{"service":"teeth cleaning","customer_name":"Dhanush","phone":"9999999999","preferred_date":"2026-10-09","preferred_time":"15:00","preferred_period":null,"wants_next_available":false,"checking_availability":false,"ready_to_book":false}>>>',
     );
@@ -2748,12 +2836,6 @@ describe("31. Deterministic date/time extraction backstop (production reliabilit
         data: { slots: [{ start: startIso, end: endIso }] },
       }),
     });
-    h.tools.setNextResult("book_appointment", {
-      content: JSON.stringify({
-        success: true,
-        data: { id: "booking-extract-1", status: "CONFIRMED" },
-      }),
-    });
     // Deliberately omits preferred_date/preferred_time (both null) —
     // reproducing the production incident where the model's own marker
     // drops fields the caller actually said. Only the deterministic
@@ -2768,6 +2850,13 @@ describe("31. Deterministic date/time extraction backstop (production reliabilit
       "Book an appointment tomorrow at 3 PM for teeth cleaning, I'm Dhanush, phone 9999999999, please confirm",
     );
     await drain(40);
+    // The extracted slot is checked and read back; the caller then confirms.
+    await confirmBooking(h, [{ start: startIso, end: endIso }], {
+      content: JSON.stringify({
+        success: true,
+        data: { id: "booking-extract-1", status: "CONFIRMED" },
+      }),
+    });
 
     const bookingCall = h.tools.calls.find((c) => c.name === "book_appointment");
     assert.ok(
@@ -3421,15 +3510,19 @@ describe("35. Phone/email are never truncated end-to-end, even when the model's 
         },
       }),
     });
-    h.tools.setNextResult("book_appointment", {
-      content: JSON.stringify({ success: true, data: { id: "booking-2", status: "CONFIRMED" } }),
-    });
     h.stt.emit({
       type: "final_transcript",
       text: "Tomorrow at 3pm, please book it",
       language: "en-IN",
     });
     await drain(48);
+    await confirmBooking(
+      h,
+      [{ start: `${tomorrowIso()}T15:00:00.000Z`, end: `${tomorrowIso()}T15:30:00.000Z` }],
+      {
+        content: JSON.stringify({ success: true, data: { id: "booking-2", status: "CONFIRMED" } }),
+      },
+    );
 
     const bookingCall = h.tools.calls.find((c) => c.name === "book_appointment");
     assert.ok(bookingCall, "the booking must actually execute");
@@ -3473,15 +3566,19 @@ describe("35. Phone/email are never truncated end-to-end, even when the model's 
         },
       }),
     });
-    h.tools.setNextResult("book_appointment", {
-      content: JSON.stringify({ success: true, data: { id: "booking-3", status: "CONFIRMED" } }),
-    });
     h.stt.emit({
       type: "final_transcript",
       text: "Tomorrow at 3pm, please book it",
       language: "en-IN",
     });
     await drain(48);
+    await confirmBooking(
+      h,
+      [{ start: `${tomorrowIso()}T15:00:00.000Z`, end: `${tomorrowIso()}T15:30:00.000Z` }],
+      {
+        content: JSON.stringify({ success: true, data: { id: "booking-3", status: "CONFIRMED" } }),
+      },
+    );
 
     const bookingCall = h.tools.calls.find((c) => c.name === "book_appointment");
     assert.ok(bookingCall, "the booking must actually execute");

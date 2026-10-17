@@ -93,15 +93,48 @@ function bookingResult(h: Harness, payload: Record<string, unknown>, isError = f
   h.tools.setNextResult("book_appointment", { content: JSON.stringify(payload), isError });
 }
 
+/** The details, as the model's state block carries them before the caller has confirmed. */
+const detailsKnown = readyToBook
+  .replace("Booking it.", "Let me check that time.")
+  .replace('"ready_to_book":true', '"ready_to_book":false');
+
+/**
+ * The caller gives the details (the runtime checks the slot), then says
+ * "Yes, book it" — the booking needs the caller's own confirmation; the
+ * model's "ready to book" alone never books. The calendar answers the
+ * booking step's last-moment re-check the same way it answered the first
+ * check, so each test's configured availability result applies to both.
+ */
 async function bookOnce(h: Harness, extra: Partial<StartRuntimeSessionInput> = {}) {
+  const execute = h.deps.executeTool!;
+  let lastAvailability: { content: string; isError?: boolean } | null = null;
+  h.deps.executeTool = async (name, toolInput, ctx) => {
+    const result = await execute(name, toolInput, ctx);
+    if (name !== "check_calendar_availability") return result;
+    if (lastAvailability && result.isError && result.content.includes("NOT_CONFIGURED")) {
+      return lastAvailability;
+    }
+    lastAvailability = result;
+    return result;
+  };
   const callId = newCallId();
   const handle = await startRuntimeSession(input(callId, h.bridge, extra), h.deps);
   const flush = catchUp(h);
   flush();
-  const before = h.tts.sentTexts.length;
-  h.llm.setNextReply(readyToBook);
-  h.stt.speakUtterance("Yes, book it");
+  h.llm.setNextReply(detailsKnown);
+  h.stt.speakUtterance("Teeth cleaning on the 14th at 6:30 PM please");
   await drain();
+  assert.equal(
+    h.tools.calls.filter((c) => c.name === "book_appointment").length,
+    0,
+    "nothing is booked before the caller confirms",
+  );
+  flush();
+  const before = h.tts.sentTexts.length;
+  // The confirmed slot is booked without a conversational model call, so
+  // the only model call left is the outcome's wording (the harness default).
+  h.stt.speakUtterance("Yes, book it");
+  await drain(300);
   return { callId, handle, flush, spoken: h.tts.sentTexts.slice(before).join(" ") };
 }
 

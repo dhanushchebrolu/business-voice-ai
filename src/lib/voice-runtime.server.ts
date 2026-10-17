@@ -729,6 +729,14 @@ interface Session {
   unmatchedServiceRequest: string | null;
   /** Runtime-owned appointment fields, persisted across turns independent of the LLM's own conversational memory — see AppointmentState's own doc comment. */
   appointmentState: AppointmentState;
+  /** The slot (see appointmentSlotKey) the deterministic availability check or booking last ran for — a ready slot not yet checked is checked at once, and a checked one is never re-checked just because another turn went by. */
+  lastDispatchedSlotKey: string | null;
+  /** The caller's words on the turn being handled authorize creating the booking (callerAuthorizesBooking) — read by the native tool-calling path. */
+  bookingAuthorizedThisTurn: boolean;
+  /** A booking was actually confirmed by the booking layer on this call — until then, no reply may tell the caller they're booked. */
+  confirmedBookingThisCall: boolean;
+  /** The model called (or tried to call) a booking-creation tool on the turn being handled. */
+  bookingToolCalledThisTurn: boolean;
   /** An in-progress change to one of the caller's existing bookings — see handleRescheduleTurn. Null when none. While set, no new booking is ever created. */
   reschedule: RescheduleFlow | null;
   /** Ids of bookings created on this call — a later time change refers to these, and is confirmed as a move, never booked again. */
@@ -1289,16 +1297,127 @@ function toolBookingOutcomeSentence(outcome: BookingOutcome): string {
     case "pending":
       return "I've passed on your request, but it isn't confirmed yet. Our team will confirm it with you shortly.";
     default:
-      return "I'm sorry, I wasn't able to complete that booking. Someone will follow up to confirm.";
+      return "I'm sorry, I wasn't able to complete that booking, so it isn't confirmed. Would you like me to try again, or choose another time?";
   }
 }
 
-/** A reply that tells the caller the appointment is done ("booked", "confirmed", "all set") — and not a negated form like "isn't confirmed yet". */
-function claimsBookingSuccess(reply: string): boolean {
-  return (
-    /\b(booked|confirmed|all set|scheduled)\b/i.test(reply) &&
-    !/\b(not|isn't|wasn't|unable|couldn't|can't|cannot)\b/i.test(reply)
-  );
+const BOOKING_SUCCESS_PATTERN =
+  /\b(?:booked|confirmed|all set|scheduled|reserved|locked in|secured)\b|बुक|कन्फर्म|पक्का|\b(?:book(?:ing)?|confirm|fix|pakka|done) ho (?:gaya|gayi|gya|gyi)\b|\b(?:book|confirm) kar (?:di|diya|diye)\b/i;
+const AVAILABILITY_CLAIM_PATTERN =
+  /\b(?:is|are|it'?s|that'?s|is still|are still)\s+(?:available|free|open)\b|\bgood news\b|\bwe (?:do )?have (?:a |an )?(?:slot|opening|availability)\b|उपलब्ध|खाली/i;
+const NEGATION_PATTERN =
+  /\b(?:not|no|isn't|wasn't|aren't|weren't|unable|couldn't|can't|cannot|haven't|hasn't|didn't|won't|yet to)\b|नहीं|\bnahi(?:n)?\b/i;
+
+/** Some sentence states `claim` and that same sentence isn't negated. */
+function sentenceClaims(reply: string, claim: RegExp): boolean {
+  const sentences = reply.match(/[^.!?।]+[.!?।]*/g) ?? [reply];
+  return sentences.some((sentence) => claim.test(sentence) && !NEGATION_PATTERN.test(sentence));
+}
+
+/**
+ * A reply that tells the caller the appointment is done ("booked",
+ * "confirmed", "all set", "reserved"; basic Hindi/Hinglish too) — judged
+ * sentence by sentence, so "Sorry, I couldn't check — but you're booked!"
+ * still counts, while "it isn't confirmed yet" does not.
+ */
+export function claimsBookingSuccess(reply: string): boolean {
+  return sentenceClaims(reply, BOOKING_SUCCESS_PATTERN);
+}
+
+/**
+ * Whether the runtime can reliably check `text` for a false booking claim:
+ * English text in Latin script only. Every other supported language —
+ * Hindi, Bengali, Tamil, Telugu, Gujarati, Kannada, Malayalam, Marathi,
+ * Punjabi, Odia, in their own scripts — can't be checked reliably by a
+ * phrase list, so model wording in them is never trusted to report a
+ * booking or calendar result (see composeHonestBookingReply and the
+ * final reply check in handleUserUtterance).
+ */
+export function isClaimCheckableText(text: string): boolean {
+  // Latin letters, digits, punctuation, ₹ and other currency/typographic
+  // symbols only — any other script makes the text uncheckable.
+  return !/[^\s!-\u024F\u2000-\u20CF]/.test(text);
+}
+
+/**
+ * Booking/appointment vocabulary in each supported non-Latin script —
+ * mostly the loanwords "book", "booking", "confirm", "appointment" as
+ * they are written in that script, plus a few native words for
+ * "confirmed/fixed". Only used to decide that an uncheckable reply is
+ * ABOUT a booking (and so must not be trusted), never that it is honest.
+ */
+const BOOKING_TERMS_ANY_SCRIPT = new RegExp(
+  [
+    // Devanagari (Hindi, Marathi)
+    "बुक",
+    "बुकिंग",
+    "कन्फर्म",
+    "अपॉइंटमेंट",
+    "अपॉइंटमेन्ट",
+    "पक्का",
+    "निश्चित",
+    "तय",
+    // Bengali
+    "বুক",
+    "বুকিং",
+    "কনফার্ম",
+    "অ্যাপয়েন্টমেন্ট",
+    "নিশ্চিত",
+    // Tamil
+    "புக்",
+    "புக்கிங்",
+    "கன்ஃபர்ம்",
+    "அப்பாயிண்ட்மெண்ட்",
+    "உறுதி",
+    // Telugu
+    "బుక్",
+    "బుకింగ్",
+    "కన్ఫర్మ్",
+    "అపాయింట్",
+    "ఖరారు",
+    "ఫిక్స్",
+    // Gujarati
+    "બુક",
+    "બુકિંગ",
+    "કન્ફર્મ",
+    "એપોઇન્ટમેન્ટ",
+    "નક્કી",
+    // Kannada
+    "ಬುಕ್",
+    "ಬುಕಿಂಗ್",
+    "ಕನ್ಫರ್ಮ್",
+    "ಅಪಾಯಿಂಟ್",
+    "ಖಚಿತ",
+    // Malayalam
+    "ബുക്ക്",
+    "ബുക്കിങ്",
+    "ബുക്കിംഗ്",
+    "കൺഫേം",
+    "അപ്പോയിന്റ്",
+    "ഉറപ്പ",
+    // Punjabi (Gurmukhi)
+    "ਬੁੱਕ",
+    "ਬੁਕਿੰਗ",
+    "ਕਨਫਰਮ",
+    "ਅਪੌਇੰਟਮੈਂਟ",
+    "ਪੱਕੀ",
+    // Odia
+    "ବୁକ",
+    "ବୁକିଂ",
+    "କନଫର୍ମ",
+    "ଆପଏଣ୍ଟମେଣ୍ଟ",
+    "ନିଶ୍ଚିତ",
+  ].join("|"),
+);
+
+/** An uncheckable (non-English-script) reply that talks about a booking at all. */
+export function mentionsBookingInAnyScript(text: string): boolean {
+  return BOOKING_TERMS_ANY_SCRIPT.test(text);
+}
+
+/** A reply that tells the caller a time is available ("is available", "good news", "we have a slot"). */
+export function claimsAvailability(reply: string): boolean {
+  return sentenceClaims(reply, AVAILABILITY_CLAIM_PATTERN);
 }
 
 /** Any appointment detail is known — the call is in a booking conversation. */
@@ -1922,6 +2041,32 @@ export function appointmentReadyForAvailabilityCheck(s: AppointmentState): boole
   );
 }
 
+/** Identifies the slot a check/booking is about: service, date and time (or the open request standing in for a time). */
+function appointmentSlotKey(s: AppointmentState): string {
+  const when = s.preferredTime ?? (s.wantsNextAvailable ? "next" : (s.preferredPeriod ?? ""));
+  return `${(s.service ?? "").toLowerCase()}|${s.preferredDate ?? ""}|${when}`;
+}
+
+/**
+ * Smile Dental incident (root canal today at 7 PM): the caller's name was
+ * the last required detail. It was saved from the caller's words BEFORE the
+ * turn's "previous state" snapshot was taken, so the old edge-triggered
+ * check ("not ready before this turn, ready now") saw it as already ready
+ * and never fired — and being edge-triggered, never fired on any later
+ * turn either, leaving the model to keep asking the caller to "confirm"
+ * their name. Level-triggered instead: every required detail is known, the
+ * caller isn't confirming a booking, and THIS slot hasn't been checked or
+ * booked yet on this call.
+ */
+function readyForUncheckedAvailability(session: Session, s: AppointmentState): boolean {
+  return (
+    appointmentReadyForAvailabilityCheck(s) &&
+    s.bookingStatus !== "ready_to_book" &&
+    s.availabilityStatus === "unknown" &&
+    appointmentSlotKey(s) !== session.lastDispatchedSlotKey
+  );
+}
+
 /** Required to check availability — unlike a booking attempt, the caller's name/phone are not needed merely to ask "is this slot free" or "what's available". A specific time is NOT required either — an open "any slots today"/"this afternoon" query is checked and listed by attemptAvailabilityCheck just as validly as an exact-time check. */
 function appointmentSlotIsKnown(s: AppointmentState): boolean {
   return Boolean(s.preferredDate);
@@ -2083,6 +2228,74 @@ const RELATIVE_DATE_PATTERNS: [RegExp, "today" | "tomorrow"][] = [
 const BOOKING_CONFIRMATION_PATTERN =
   /\b(yes|yeah|yep|yup|sure|confirm(ed)?|go ahead|sounds good|that works|book it|please book)\b/i;
 const BOOKING_NEGATION_PATTERN = /\b(no|not|don't|do not|never ?mind|cancel|wait)\b/i;
+/**
+ * The agent's reply asked the caller to confirm the booking ("Would you like
+ * me to book it?", "Shall I go ahead and book…", "Shall I confirm it?").
+ */
+const BOOKING_QUESTION_PATTERN =
+  /\b(?:shall|should|can|may) i (?:go ahead and )?(?:book|confirm|reserve|schedule)\b|\b(?:would|do) you (?:like|want) (?:me )?to (?:book|confirm|reserve|schedule|go ahead|try again)\b|\b(?:shall|should) i go ahead\b|\b(?:book|confirm) (?:it|that|this)(?: for you)?\s*\?/i;
+/** The caller instructing the booking in so many words — not merely "yes". */
+const EXPLICIT_BOOKING_INSTRUCTION_PATTERN =
+  /\b(?:book (?:it|that|this|that slot|the slot|the appointment|my appointment)|please book|go ahead and book|confirm (?:it|that|the booking|my booking|the appointment|my appointment))\b/i;
+/** A plain affirmative — counts only as the answer to a booking question. */
+const AFFIRMATIVE_PATTERN =
+  /\b(?:yes|yeah|yep|yup|sure|correct|that'?s (?:right|correct)|sounds good|that works|go ahead|please do|do it)\b/i;
+
+/**
+ * Whether the caller's own words on this turn authorize creating the
+ * booking. The runtime — never the model — decides this: the model marking
+ * a booking "ready to book", or calling book_appointment, is not by itself
+ * authorization.
+ *
+ * Authorized only when the turn is not negated ("no", "not yet", "wait",
+ * "don't") and either
+ *  - the caller explicitly instructs it ("book it", "please book", "confirm
+ *    the booking"), or
+ *  - the caller answers the agent's booking-confirmation question (its
+ *    previous reply asked "Would you like me to book it?" or similar) with a
+ *    clear affirmative ("yes", "sure", "go ahead"). A bare "okay" or
+ *    "alright" is too often filler to count.
+ * A "yes" to any other question, "Hello", a name, an interjection or
+ * unclear speech never counts. (Changing the slot in the same breath is
+ * checked where this is used: authorization covers the slot that was
+ * asked about, never a new one.)
+ */
+export function callerAuthorizesBooking(text: string, agentTextBeforeTurn: string): boolean {
+  if (BOOKING_NEGATION_PATTERN.test(text) || isPresenceCheck(text)) return false;
+  if (EXPLICIT_BOOKING_INSTRUCTION_PATTERN.test(text)) return true;
+  return AFFIRMATIVE_PATTERN.test(text) && BOOKING_QUESTION_PATTERN.test(agentTextBeforeTurn);
+}
+
+/** Reads the booking back and asks the caller to confirm it — the question callerAuthorizesBooking accepts a "yes" to. */
+function bookingConfirmationQuestion(s: AppointmentState): string {
+  const day = s.preferredDate ? spokenDateLabel(s.preferredDate, "UTC") : null;
+  const dayText = !day ? "" : day === "today" || day === "tomorrow" ? ` ${day}` : ` on ${day}`;
+  const timeText = s.preferredTime
+    ? ` at ${spokenTimeLabel(s.preferredTime)}`
+    : " at the next available time";
+  const who = s.customerName ? ` for ${s.customerName}` : "";
+  return `Just to confirm — ${s.service ?? "your appointment"}${dayText}${timeText}${who}. Shall I book it?`;
+}
+
+/** Said instead of a reply that claimed a booking nothing made: where things really stand, and the way forward. */
+function notBookedYetReply(s: AppointmentState): string {
+  if (appointmentStateIsComplete(s)) {
+    return `I haven't booked anything yet. ${bookingConfirmationQuestion(s)}`;
+  }
+  return `I haven't booked anything yet. ${nextMissingDetailQuestion(s) ?? "How can I help you?"}`;
+}
+
+/** The text of the agent's most recent reply, or "" at the start of a call. */
+function lastAgentReplyText(session: { turns: ConversationTurn[] }): string {
+  return [...session.turns].reverse().find((t) => t.role === "assistant")?.text ?? "";
+}
+
+/** Tools that create a booking — run on the native tool-calling path only with the caller's authorization (see callerAuthorizesBooking). */
+const BOOKING_CREATION_TOOLS: ReadonlySet<string> = new Set([
+  "book_appointment",
+  "create_payment_required_booking",
+]);
+
 const REMINDER_PATTERN =
   /\b(remind(er)?|alert) me\b|\bset (a |an )?remind(er)?\b|\bsend me a remind(er)?\b/i;
 
@@ -2277,9 +2490,40 @@ const NOT_A_NAME = new Set(
     "today tomorrow morning afternoon evening pm am time date appointment slot service " +
     "root canal cleaning teeth tooth checkup dental treatment confirm confirmed go ahead " +
     "just only also again what why how when where who which can could would will shall " +
-    "not don't do done good great perfect fine wait sorry hmm um uh"
+    "not don't do done good great perfect fine wait sorry hmm um uh " +
+    "guys sir madam maam ma'am bro ji listen hear there anyone anybody"
   ).split(" "),
 );
+
+const PRESENCE_CORE_PATTERN =
+  /\b(hello|hi|hey|hallo|helo|guys|hear me|you there|anyone there|anybody there|listening)\b/i;
+const PRESENCE_WORDS = new Set(
+  (
+    "hello hi hey hallo helo guys sir madam maam ma'am ji bro can you hear me are there is " +
+    "anyone anybody listening still"
+  ).split(" "),
+);
+
+/**
+ * The caller is only checking the line — "Hello", "Hello?", "Can you hear
+ * me?", "Guys" — and saying nothing else. Such a turn answers no question
+ * and must not move the conversation backwards (restart the greeting or
+ * re-ask a completed question). A turn with any other word ("Hello, I'm
+ * Dhanush", "Hi, 7 PM") is not a presence check.
+ */
+export function isPresenceCheck(text: string): boolean {
+  const words = text
+    .toLowerCase()
+    .replace(/[^a-z' ]+/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+  return (
+    words.length > 0 &&
+    words.length <= 8 &&
+    PRESENCE_CORE_PATTERN.test(text) &&
+    words.every((w) => PRESENCE_WORDS.has(w))
+  );
+}
 
 /** The agent's reply asked for the caller's name. */
 const NAME_QUESTION_PATTERN =
@@ -2430,6 +2674,33 @@ export function applyCallerIdOffer(
 /** A sentence that asks for, or refuses to use, the caller's phone number. */
 const PHONE_REFUSAL_PATTERN =
   /\b(?:can'?t|cannot|unable to|don'?t have|do not have)\b[^.?!]*\b(?:number|caller\s?id)\b/i;
+
+/** A sentence asking for, or to confirm, the caller's name. */
+const NAME_REQUEST_SENTENCE_PATTERN = /\b(?:your|the)\s+(?:full\s+)?name\b/i;
+const NAME_REQUEST_SHAPE_PATTERN =
+  /\?|\b(confirm(?:ing)?|may i|could (?:you|i)|can (?:you|i)|tell me|share|spell|provide|repeat)\b/i;
+
+/**
+ * Once the caller's name is saved, the model's reply never asks for it, or
+ * to "confirm" it, again (Smile Dental incident: "I was just confirming your
+ * name for the appointment. Once you confirm…" on every turn after the
+ * caller had said it). Those sentences are dropped; if nothing is left,
+ * `fallback` (the step the call is on) is said instead.
+ */
+export function guardNameRequests(
+  reply: string,
+  state: AppointmentState,
+  fallback: string,
+): { reply: string; changed: boolean } {
+  if (!state.customerName) return { reply, changed: false };
+  const sentences = reply.match(/[^.!?]+[.!?]*\s*/g) ?? [reply];
+  const kept = sentences.filter(
+    (sentence) =>
+      !(NAME_REQUEST_SENTENCE_PATTERN.test(sentence) && NAME_REQUEST_SHAPE_PATTERN.test(sentence)),
+  );
+  if (kept.length === sentences.length) return { reply, changed: false };
+  return { reply: kept.join("").trim() || fallback, changed: true };
+}
 
 /**
  * Once a phone number is settled, the model's own request for one (or its
@@ -2822,6 +3093,22 @@ async function getReply(
       // model's own wording must never be the only evidence of a booking.
       let bookingOutcome: BookingOutcome | null = null;
       const result = await generateReplyWithTools(messages, tools, async (name, input) => {
+        if (BOOKING_CREATION_TOOLS.has(name)) session.bookingToolCalledThisTurn = true;
+        // The model calling a booking tool is not authorization either.
+        if (BOOKING_CREATION_TOOLS.has(name) && !session.bookingAuthorizedThisTurn) {
+          log("booking_not_authorized", session, { source: "tool_call", tool: name });
+          return {
+            content: JSON.stringify({
+              success: false,
+              error: {
+                code: "CALLER_CONFIRMATION_REQUIRED",
+                message:
+                  "Not booked. Read the appointment details back to the caller and ask them to confirm the booking first.",
+              },
+            }),
+            isError: true,
+          };
+        }
         const toolResult = await executeTool(name, input, toolCtx);
         if (name === "book_appointment") {
           const parsed = safeJsonParse(toolResult.content);
@@ -2838,6 +3125,7 @@ async function getReply(
             !toolResult.isError && typeof reported === "string"
               ? (reported as BookingOutcome)
               : "not_booked";
+          if (bookingOutcome === "confirmed") session.confirmedBookingThisCall = true;
         }
         return toolResult;
       });
@@ -3243,13 +3531,14 @@ function fieldTransitionAck(previous: AppointmentState, next: AppointmentState):
 function immediateCallerAck(
   previous: AppointmentState,
   intent: CallerIntentSignals,
+  bookingAuthorized: boolean,
 ): string | null {
   // Only once a specific slot is already clearly on the table — matches
   // the same gating handleUserUtterance's own bookingConfirmed backstop
   // applies before escalating to ready_to_book, so a stray "yes"/"sure"
   // earlier in an unrelated exchange never triggers this.
   if (
-    intent.bookingConfirmed &&
+    bookingAuthorized &&
     previous.bookingStatus !== "ready_to_book" &&
     previous.preferredDate &&
     (previous.preferredTime || previous.wantsNextAvailable)
@@ -3325,11 +3614,27 @@ async function composeHonestBookingReply(
   session: Session,
   facts: string,
   localFallback: string,
+  /**
+   * What the real result lets the wording claim. Anything else the model
+   * says — "booked"/"confirmed" when nothing was booked, "available" when
+   * nothing was found — is never spoken: the runtime's own `localFallback`
+   * is. `englishVerbatim`: an English caller hears `localFallback` itself,
+   * with no model wording at all (booking failures).
+   */
+  allowed: { booking?: boolean; availability?: boolean; englishVerbatim?: boolean } = {},
 ): Promise<string> {
   const language = resolveResponseLanguage(
     session.detectedLanguage,
     session.input.snapshotAgent.primary_language,
   );
+  if (allowed.englishVerbatim && language === "en-IN") return localFallback;
+  // A language the runtime can't check: when nothing was booked, the
+  // caller hears the runtime's own sentence, never model wording that
+  // might announce a booking.
+  if (!allowed.booking && language !== "en-IN") {
+    log("booking_reply_unchecked_language_fallback", session, { language });
+    return localFallback;
+  }
   // Requested diagnostic naming: every call into this function follows a
   // real calendar tool result (or the "no tool executor configured"
   // degenerate case) — this is the "tool result -> final LLM response"
@@ -3360,6 +3665,22 @@ async function composeHonestBookingReply(
     // the same facts.
     if (!spoken) {
       log("booking_reply_composition_empty", session);
+      namedLog("voice:final_response", session, {
+        latency_ms: Date.now() - startedAt,
+        replyLength: localFallback.length,
+        fellBackToCannedReply: true,
+      });
+      return localFallback;
+    }
+    const overclaim =
+      (!allowed.booking && (!isClaimCheckableText(spoken) || claimsBookingSuccess(spoken))) ||
+      (!allowed.availability && claimsAvailability(spoken));
+    if (overclaim) {
+      // The model's wording contradicts the real result — never spoken.
+      log("booking_reply_overclaim_rejected", session, {
+        claimed_booking: claimsBookingSuccess(spoken),
+        claimed_availability: claimsAvailability(spoken),
+      });
       namedLog("voice:final_response", session, {
         latency_ms: Date.now() - startedAt,
         replyLength: localFallback.length,
@@ -3466,6 +3787,22 @@ function calendarErrorFallback(errorCode: string): string {
       return "I'm sorry, I couldn't reach the calendar just now, so I can't confirm that. I'll have someone call you back to confirm.";
   }
 }
+
+/** book_appointment errors meaning the slot was taken before it could be booked. */
+const SLOT_TAKEN_CODES: ReadonlySet<string> = new Set([
+  "SLOT_NO_LONGER_AVAILABLE",
+  "SLOT_UNAVAILABLE",
+  "CALENDAR_CONFLICT",
+  "SLOT_OUTSIDE_SCHEDULE",
+]);
+const BOOKING_SLOT_TAKEN_REPLY =
+  "I'm sorry, that time was just taken, so I couldn't book it. Would you like to choose another time?";
+const BOOKING_TIMEOUT_REPLY =
+  "I'm sorry, the calendar is taking too long to respond, so I couldn't confirm the booking. Would you like me to try again, or choose another time?";
+const BOOKING_FAILED_REPLY =
+  "I'm sorry, the booking attempt failed on our end, so I can't confirm it. Would you like me to try again, or choose another time?";
+const BOOKING_CALENDAR_UNREACHABLE_REPLY =
+  "I'm sorry, I couldn't reach the calendar just now, so I haven't booked anything. Would you like me to try again, or choose another time?";
 
 /** Formats a UTC ISO instant as a plain local HH:mm-style time in the business's own timezone, for phrasing real alternative slots naturally — never a manual UTC-offset calculation (see this file's and calendar/timezone.ts's own convention of using Intl.DateTimeFormat for IANA-timezone-aware formatting, which is DST-safe). */
 function formatSlotTimeLocal(isoUtc: string, timeZone: string): string {
@@ -3597,6 +3934,7 @@ async function attemptAvailabilityCheck(
         state.availabilityStatus === "available" && state.selectedSlot
           ? "That time is already confirmed available — would you like me to book it?"
           : "That time isn't available, as I mentioned a moment ago.",
+        { availability: state.availabilityStatus === "available" && Boolean(state.selectedSlot) },
       ),
       state: { ...state, bookingStatus: "collecting" },
     };
@@ -3687,6 +4025,7 @@ async function attemptAvailabilityCheck(
           session,
           `The requested slot (${state.preferredTime} on ${state.preferredDate}) IS available, confirmed by the calendar. Tell the caller it's available and ask if they'd like you to book it now.`,
           "Good news — that time is available. Would you like me to book it?",
+          { availability: true },
         ),
         state: {
           ...state,
@@ -3708,6 +4047,7 @@ async function attemptAvailabilityCheck(
         alternatives.length
           ? `That time isn't available. The only open times that day are ${alternatives.join(" and ")}. Would either of those work?`
           : "That time isn't available, and there are no other open slots that day. Would you like me to check a different day?",
+        { availability: alternatives.length > 0 },
       ),
       state: {
         ...state,
@@ -3750,6 +4090,7 @@ async function attemptAvailabilityCheck(
       session,
       `These real times are open on ${state.preferredDate}${periodLabel}: ${listed.join(", ")}. List exactly these times, nothing else, and ask if they'd like to book one. Never invent a time not in this list.`,
       `These times are open on ${state.preferredDate}${periodLabel}: ${listed.join(", ")}. Would any of those work?`,
+      { availability: true },
     ),
     state: {
       ...state,
@@ -3802,6 +4143,7 @@ async function attemptBooking(
         session,
         "The booking could not be attempted because this line isn't configured for live booking. Tell the caller you'll have someone confirm the appointment and call them back.",
         "I'm sorry, I'm unable to complete the booking on this line right now. I'll have someone call you back to confirm.",
+        { englishVerbatim: true },
       ),
       state: { ...state, bookingStatus: "unavailable" },
     };
@@ -3873,8 +4215,9 @@ async function attemptBooking(
     return {
       spoken: await composeHonestBookingReply(
         session,
-        calendarErrorFacts(errorCode),
-        calendarErrorFallback(errorCode),
+        `${calendarErrorFacts(errorCode)} Nothing was booked. Do not say it was booked; offer to try again or choose another time.`,
+        BOOKING_CALENDAR_UNREACHABLE_REPLY,
+        { englishVerbatim: true },
       ),
       state: { ...state, bookingStatus: "collecting" },
     };
@@ -3910,6 +4253,7 @@ async function attemptBooking(
         alternatives.length
           ? `That time isn't available. The only open times that day are ${alternatives.join(" and ")}. Would either of those work?`
           : "There are no open slots available for that time. Would you like me to check a different day?",
+        { availability: alternatives.length > 0, englishVerbatim: true },
       ),
       state: {
         ...state,
@@ -3997,6 +4341,7 @@ async function attemptBooking(
           session,
           "The booking was NOT made because the caller's phone number is not a valid, complete number. Do not say it was booked. Apologize briefly and ask ONLY for their phone number again, digit by digit. Do not ask for anything else.",
           "I'm sorry, I couldn't use that phone number. Could you please tell me your phone number again, digit by digit?",
+          { englishVerbatim: true },
         ),
         state: {
           ...state,
@@ -4008,15 +4353,30 @@ async function attemptBooking(
         },
       };
     }
+    // Truthful about what is known, never a claim the booking went
+    // through, and always a way forward: try again (safe — a retry reuses
+    // this booking's idempotency key, so it can never create a second
+    // booking) or pick another time.
+    if (errorCode && SLOT_TAKEN_CODES.has(errorCode)) {
+      return {
+        spoken: await composeHonestBookingReply(
+          session,
+          "The booking was NOT made: that time was taken by someone else moments ago. Do not say it was booked. Apologize briefly and ask whether they'd like a different time.",
+          BOOKING_SLOT_TAKEN_REPLY,
+          { englishVerbatim: true },
+        ),
+        // That slot is known to be gone: never re-offered or re-checked as is.
+        state: { ...state, bookingStatus: "collecting", availabilityStatus: "unavailable" },
+      };
+    }
     return {
       spoken: await composeHonestBookingReply(
         session,
         errorCode === "CALENDAR_TIMEOUT"
-          ? calendarErrorFacts("CALENDAR_TIMEOUT")
-          : "The booking attempt failed on our end. Apologize briefly and say someone will follow up to confirm. Do not say it was booked.",
-        errorCode === "CALENDAR_TIMEOUT"
-          ? calendarErrorFallback("CALENDAR_TIMEOUT")
-          : "I'm sorry, the booking attempt failed on our end. Someone will follow up to confirm.",
+          ? "The calendar took too long to respond, so the booking could NOT be confirmed. Do not say it was booked. Offer to try again or choose another time."
+          : "The booking attempt failed, so it could NOT be confirmed. Do not say it was booked. Offer to try again or choose another time.",
+        errorCode === "CALENDAR_TIMEOUT" ? BOOKING_TIMEOUT_REPLY : BOOKING_FAILED_REPLY,
+        { englishVerbatim: true },
       ),
       state: { ...state, bookingStatus: "unavailable" },
     };
@@ -4089,7 +4449,7 @@ async function attemptBooking(
     const notConfirmedText =
       outcome === "pending"
         ? `I've passed on your request for ${confirmedDateLabel} at ${confirmedLocalTime}, but it isn't confirmed yet. Our team will confirm it with you shortly.`
-        : "I'm sorry, I wasn't able to complete that booking. Someone will follow up to confirm.";
+        : "I'm sorry, I wasn't able to complete that booking, so it isn't confirmed. Would you like me to try again, or choose another time?";
     return {
       spoken: englishReply
         ? notConfirmedText
@@ -4097,7 +4457,7 @@ async function attemptBooking(
             session,
             outcome === "pending"
               ? "The appointment request was received but is NOT confirmed yet; the team will confirm it shortly. Do not say it is booked or confirmed."
-              : "The booking was NOT completed. Apologize briefly and say someone will follow up. Do not say it was booked.",
+              : "The booking was NOT completed. Apologize briefly and offer to try again or choose another time. Do not say it was booked.",
             notConfirmedText,
           ),
       state: { ...state, bookingStatus: "unavailable" },
@@ -4105,6 +4465,7 @@ async function attemptBooking(
   }
 
   log("booking_attempt_succeeded", session, { booking_id: bookingId });
+  session.confirmedBookingThisCall = true;
   namedLog("calendar_tool:completed", session, { tool: "book_appointment" });
   const plainConfirmation = `You're all set — your ${what} at ${businessName} is confirmed for ${confirmedDateLabel} at ${confirmedLocalTime}. ${ANYTHING_ELSE_QUESTION}`;
   // English: spoken verbatim — the confirmation must state the real
@@ -4117,6 +4478,7 @@ async function attemptBooking(
         session,
         `The booking succeeded and is confirmed in the system: ${what} at ${businessName} for ${state.customerName ?? "the caller"} on ${confirmedDateLabel} at ${confirmedLocalTime}. Confirm the service, date and time in one short sentence, then ask whether there is anything else you can help with.`,
         plainConfirmation,
+        { booking: true, availability: true },
       );
   if (!/anything else/i.test(confirmation))
     confirmation = `${confirmation} ${ANYTHING_ELSE_QUESTION}`;
@@ -4169,6 +4531,8 @@ async function dispatchDeterministicTool(
   generation: number,
 ): Promise<string | null> {
   const stillCurrent = () => session.generation === generation;
+  const firstCheckThisCall = session.lastDispatchedSlotKey === null;
+  session.lastDispatchedSlotKey = appointmentSlotKey(session.appointmentState);
   if (willAttemptBooking) {
     // Production incident: real calendar+LLM round trips left the caller
     // in dead air long enough to say "hello? are you there?". A short,
@@ -4182,6 +4546,8 @@ async function dispatchDeterministicTool(
     }
     const outcome = await attemptBooking(session, generation);
     session.appointmentState = outcome.state;
+    // The booked time can differ from the request ("next available").
+    session.lastDispatchedSlotKey = appointmentSlotKey(outcome.state);
     return stillCurrent() ? outcome.spoken : null;
   }
 
@@ -4192,7 +4558,7 @@ async function dispatchDeterministicTool(
   // same thing twice. The generic "Let me check that for you." is what
   // gets skipped when redundant with an equivalent immediate ack.
   let ack = "Let me check that for you.";
-  if (completionTriggeredAvailability) {
+  if (completionTriggeredAvailability && firstCheckThisCall) {
     // "UTC" here is the same deliberate cosmetic-label tradeoff as
     // fieldTransitionAck (see its doc comment) — the REAL availability
     // check immediately below still resolves and uses the real business
@@ -4264,6 +4630,7 @@ async function tryEarlyDeterministicDispatch(
   immediateAckAlreadySpoken: boolean,
   generation: number,
   text: string,
+  bookingAuthorized: boolean,
 ): Promise<
   | { dispatched: true; spoken: string | null }
   | { dispatched: false; extractedDate: string | null; matchedServiceName: string | null }
@@ -4355,19 +4722,19 @@ async function tryEarlyDeterministicDispatch(
       bookingStatus: "checking_availability",
     };
   }
+  // Authorization covers the slot the caller was asked about: a turn that
+  // also changes the service, date or time ("yes, but make it 8 PM") gets
+  // that new slot checked first, never booked.
   if (
-    callerIntent.bookingConfirmed &&
+    bookingAuthorized &&
+    appointmentSlotKey(preview) === appointmentSlotKey(previous) &&
     preview.bookingStatus !== "ready_to_book" &&
     preview.preferredDate &&
     (preview.preferredTime || preview.wantsNextAvailable)
   ) {
     preview = { ...preview, bookingStatus: "ready_to_book" };
   }
-  const wasReadyForAvailability = appointmentReadyForAvailabilityCheck(previous);
-  const completionTriggeredAvailability =
-    !wasReadyForAvailability &&
-    appointmentReadyForAvailabilityCheck(preview) &&
-    preview.bookingStatus !== "ready_to_book";
+  const completionTriggeredAvailability = readyForUncheckedAvailability(session, preview);
   if (completionTriggeredAvailability) {
     preview = { ...preview, bookingStatus: "checking_availability" };
   }
@@ -4680,6 +5047,8 @@ async function speakRescheduleReply(
         session,
         `Say exactly this to the caller, in their language, adding nothing: "${english}"`,
         english,
+        // A sentence the runtime already wrote from the real outcome.
+        { booking: true, availability: true },
       );
   if (generation !== session.generation) return;
   await speakRuntimeTurnReply(session, generation, text, opts);
@@ -5163,7 +5532,11 @@ function enqueueUserUtterance(session: Session, text: string) {
   const immediateAck =
     session.deps.generateReplyWithTools || rescheduleTurn
       ? null
-      : immediateCallerAck(session.appointmentState, intent);
+      : immediateCallerAck(
+          session.appointmentState,
+          intent,
+          callerAuthorizesBooking(text, lastAgentReplyText(session)),
+        );
   if (immediateAck) {
     session.immediateAckQueue = session.immediateAckQueue.then(() =>
       speak(session, immediateAck).catch((err: unknown) => {
@@ -5179,7 +5552,12 @@ function enqueueUserUtterance(session: Session, text: string) {
 }
 
 async function handleUserUtterance(session: Session, text: string, immediateAck: string | null) {
+  // Read before this turn is recorded: the question the caller is answering.
+  const agentTextBeforeTurn = lastAgentReplyText(session);
   session.turns.push({ role: "user", text, at: new Date().toISOString() });
+  // The name as it stood BEFORE this turn — previousAppointmentState below
+  // already includes a name captured from this turn's own words.
+  const nameBeforeTurn = session.appointmentState.customerName;
   // Deterministic backstop over the caller's own raw words — see
   // parseCallerIntentFromText's own doc comment for the production
   // incident this responds to (the model's own marker emission is not
@@ -5196,12 +5574,16 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
   // deterministic dispatch, the model's grounding message, and the booking
   // attempt all see the caller's choice (and never ask for the number
   // again once it's settled). See resolveCallerIdAnswer.
-  const callerIdAnswer = resolveCallerIdAnswer(
-    text,
-    session.appointmentState,
-    session.callerId,
-    session.input.businessCountry ?? null,
-  );
+  // "Hello?" answers nothing — not the caller-ID question either.
+  const presenceCheck = isPresenceCheck(text);
+  const callerIdAnswer = presenceCheck
+    ? null
+    : resolveCallerIdAnswer(
+        text,
+        session.appointmentState,
+        session.callerId,
+        session.input.businessCountry ?? null,
+      );
   if (callerIdAnswer) {
     // Smile Dental incident: the caller's "Yes" to "may I use the number
     // you're calling from?" was also read as "yes, book it" — with the date
@@ -5241,6 +5623,11 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
   // now", not a possibly-stale snapshot from before this turn's own place
   // in the queue was reached.
   const previousAppointmentState = session.appointmentState;
+  // Booking authorization comes only from the caller's own words — see
+  // callerAuthorizesBooking. Recorded for the native tool-calling path too.
+  const bookingAuthorized = callerAuthorizesBooking(text, agentTextBeforeTurn);
+  session.bookingAuthorizedThisTurn = bookingAuthorized;
+  session.bookingToolCalledThisTurn = false;
   // Defensive: speech_end (onSttEvent) already arms a fresh silence timer
   // the moment the caller stops talking, before final_transcript has even
   // arrived. That timer is only otherwise cleared by a subsequent
@@ -5331,6 +5718,32 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
     return;
   }
 
+  // A turn that only checks the line ("Hello?", "Can you hear me?") or
+  // repeats the name already saved ("I am Dhanush" again) adds nothing: a
+  // brief reply, then the step the call is already on — no model round
+  // trip, so the greeting is never restarted and a completed question is
+  // never asked again.
+  const savedName = nameBeforeTurn;
+  const restatedName =
+    !presenceCheck &&
+    savedName !== null &&
+    extractCallerName(text, true)?.toLowerCase() === savedName.toLowerCase();
+  if (presenceCheck || restatedName) {
+    const pending = pendingStepQuestion(session);
+    log(presenceCheck ? "presence_check_answered" : "known_name_restated", session, {
+      generation,
+    });
+    await speakRuntimeTurnReply(
+      session,
+      generation,
+      presenceCheck
+        ? `Yes, I can hear you. ${pending}`
+        : `Got it, ${savedName} — that's noted. ${pending}`,
+      { awaitAnythingElse: /anything else/i.test(pending) },
+    );
+    return;
+  }
+
   // The runtime's own ground truth for what the caller has already
   // confirmed — see AppointmentState's own doc comment. Built from state
   // BEFORE this turn, so the model is told what's already known without
@@ -5390,10 +5803,12 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
             Boolean(immediateAck),
             generation,
             text,
+            bookingAuthorized,
           );
       let reply: string;
       let enteredPaymentWait = false;
       let toolDispatched = early.dispatched;
+      let modelProposedBooking = false;
       let usedToolCallingThisTurn = false;
       let bookedViaTool = false;
       let toolBookingOutcome: BookingOutcome | null = null;
@@ -5449,6 +5864,7 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
           // the persisted transcript.
           const { spokenText, state: markerState } = parseApptStateMarker(rawReply);
           const proposedAppointmentState = canonicalizeProposedService(session, markerState);
+          modelProposedBooking = proposedAppointmentState?.bookingStatus === "ready_to_book";
           log(
             "appt_state_marker",
             session,
@@ -5525,13 +5941,35 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
           // (a date, and either a time or an explicit "next available") — never
           // lets a stray "yes"/"sure" earlier in an unrelated exchange misfire
           // into booking something.
+          const slotUnchanged =
+            appointmentSlotKey(appointmentState) === appointmentSlotKey(previousAppointmentState);
           if (
-            callerIntent.bookingConfirmed &&
+            bookingAuthorized &&
+            slotUnchanged &&
             appointmentState.bookingStatus !== "ready_to_book" &&
             appointmentState.preferredDate &&
             (appointmentState.preferredTime || appointmentState.wantsNextAvailable)
           ) {
             appointmentState = { ...appointmentState, bookingStatus: "ready_to_book" };
+          }
+          // The model's state block marking the booking "ready to book" is a
+          // proposal, never authorization: without the caller's own
+          // confirmation of this same slot, nothing is booked.
+          // (With a detail still missing nothing can be booked anyway, and
+          // the targeted clarification below asks for just that detail.)
+          let confirmationNeeded = false;
+          if (
+            appointmentState.bookingStatus === "ready_to_book" &&
+            appointmentStateIsComplete(appointmentState) &&
+            !(bookingAuthorized && slotUnchanged)
+          ) {
+            log("booking_not_authorized", session, {
+              source: "model_state",
+              caller_confirmed: bookingAuthorized,
+              slot_changed: !slotUnchanged,
+            });
+            appointmentState = { ...appointmentState, bookingStatus: "collecting" };
+            confirmationNeeded = true;
           }
           // Production incident: a real call collected service, name, date,
           // AND time — every field appointmentReadyForAvailabilityCheck
@@ -5543,14 +5981,12 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
           // question or said an explicit "yes" in that exact turn. This
           // fires the INSTANT the four required fields become complete —
           // independent of the model's marker, an explicit "yes", or an
-          // explicit "is it available?" — never on a later turn where they
-          // were already complete (wasReadyForAvailability guards that).
-          const wasReadyForAvailability =
-            appointmentReadyForAvailabilityCheck(previousAppointmentState);
-          const completionTriggeredAvailability =
-            !wasReadyForAvailability &&
-            appointmentReadyForAvailabilityCheck(appointmentState) &&
-            appointmentState.bookingStatus !== "ready_to_book";
+          // explicit "is it available?" — and never twice for the same slot
+          // (see readyForUncheckedAvailability).
+          const completionTriggeredAvailability = readyForUncheckedAvailability(
+            session,
+            appointmentState,
+          );
           if (completionTriggeredAvailability) {
             appointmentState = { ...appointmentState, bookingStatus: "checking_availability" };
           }
@@ -5625,6 +6061,11 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
               return;
             }
             reply = dispatched;
+          } else if (confirmationNeeded) {
+            // The model said it was booking; nothing was booked. Ask the
+            // caller to confirm the details instead — their "yes" to this
+            // question is what authorizes the booking.
+            reply = bookingConfirmationQuestion(session.appointmentState);
           }
         }
       }
@@ -5649,6 +6090,31 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
       ) {
         log("tool_reply_overclaimed_booking", session, { outcome: toolBookingOutcome });
         reply = toolBookingOutcomeSentence(toolBookingOutcome);
+      }
+      // Any path: until the booking layer has actually confirmed a booking
+      // on this call, no reply tells the caller they're booked — whatever
+      // the model wrote. The caller hears where things really stand.
+      if (!session.confirmedBookingThisCall) {
+        const checkable = isEnglish && isClaimCheckableText(reply);
+        if (checkable && claimsBookingSuccess(reply)) {
+          log("reply_overclaimed_booking", session, { tool_calling: usedToolCallingThisTurn });
+          reply = notBookedYetReply(session.appointmentState);
+        } else if (
+          !checkable &&
+          !toolDispatched &&
+          (modelProposedBooking ||
+            session.bookingToolCalledThisTurn ||
+            bookingAuthorized ||
+            mentionsBookingInAnyScript(reply))
+        ) {
+          // A language the runtime can't check, on a turn about the booking,
+          // with nothing booked yet: the runtime's own words, not a guess
+          // that the model's are honest.
+          log("reply_unchecked_language_booking_fallback", session, {
+            tool_calling: usedToolCallingThisTurn,
+          });
+          reply = notBookedYetReply(session.appointmentState);
+        }
       }
 
       if (!reply) {
@@ -5675,6 +6141,18 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
         reply = fallbackQuestion;
       }
 
+      // A name already saved is never asked for, or "confirmed", again.
+      if (isEnglish && !toolDispatched) {
+        const nameGuarded = guardNameRequests(
+          reply,
+          session.appointmentState,
+          pendingStepQuestion(session),
+        );
+        if (nameGuarded.changed) {
+          log("name_request_guarded", session, { generation });
+          reply = nameGuarded.reply;
+        }
+      }
       // Caller ID is usable and the phone number is being requested for the
       // first time — make sure it's asked as CALLER_ID_QUESTION (English
       // replies only; the question itself is English), and mark it offered
@@ -5823,6 +6301,30 @@ function guardRepeatedReply(session: Session, reply: string): string {
   session.repeatedReplyCount = 0;
   session.lastReplyNorm = normalizeReplyForRepeat(CLOSING_MESSAGES.repeatedQuestion);
   return CLOSING_MESSAGES.repeatedQuestion;
+}
+
+/**
+ * The question the call is waiting on: the last question the agent asked
+ * (never a "can you hear me?"), else the next missing booking detail, else
+ * a plain offer to help. Used to carry on after a turn that answered
+ * nothing ("Hello?") without moving the conversation backwards.
+ */
+function pendingStepQuestion(session: Session): string {
+  const lastAgent = [...session.turns].reverse().find((t) => t.role === "assistant");
+  const questions = (lastAgent?.text.match(/[^.!?]*\?/g) ?? [])
+    .map((q) => q.trim())
+    .filter((q) => q && !/\b(hear me|you there|still there)\b/i.test(q));
+  const state = session.appointmentState;
+  return (
+    questions.at(-1) ??
+    (state.availabilityStatus === "available" && state.bookingStatus !== "booked"
+      ? "Would you like me to book it?"
+      : null) ??
+    (appointmentInProgress(session.appointmentState)
+      ? nextMissingDetailQuestion(session.appointmentState)
+      : null) ??
+    "How can I help you today?"
+  );
 }
 
 /**
@@ -6325,6 +6827,10 @@ export async function startRuntimeSession(
     },
     reschedule: null,
     bookedThisCallIds: [],
+    lastDispatchedSlotKey: null,
+    bookingAuthorizedThisTurn: false,
+    confirmedBookingThisCall: false,
+    bookingToolCalledThisTurn: false,
     returningCallerName: { settled: false, name: null },
     ttsLanguage: input.snapshotAgent.primary_language,
     currentTurnTranscriptFinalAt: null,

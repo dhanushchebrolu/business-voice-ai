@@ -359,7 +359,8 @@ describe("errors end the call safely, never silently", () => {
     await call.turn("What are your hours?");
     call.h.llm.setNextError(new Error("model unavailable"));
     const before = call.h.tts.sentTexts.length;
-    await call.turn("Hello?");
+    // A real question: a bare "Hello?" is answered without the model.
+    await call.turn("Are you open on Sunday?");
     assert.match(call.spokenSince(before), /technical difficulties/i);
     await finishAudio(call, t);
     assert.deepEqual(call.hangups, ["before_close"]);
@@ -384,7 +385,7 @@ describe("errors end the call safely, never silently", () => {
     const call = await openCall(t, { harness: h });
     ttsDown = true;
     await call.turn("What are your hours?", "We're open 9 to 6.");
-    await call.turn("Hello?", "We're open 9 to 6.");
+    await call.turn("Are you open on Sunday?", "We're open 9 to 6.");
     t.mock.timers.tick(DEFAULT_CALL_LIFECYCLE_POLICY.closingAudioMaxWaitMs);
     await drain(200);
     assert.deepEqual(call.hangups, ["before_close"]);
@@ -639,15 +640,16 @@ describe("maximum call length", () => {
     });
     t.mock.timers.tick(5 * 60_000 - 1_000);
     call.h.llm.setDelay(4_000);
-    call.h.llm.setNextReply("Your appointment is confirmed for Friday.");
-    call.h.stt.speakUtterance("Please confirm Friday");
+    // (Not a booking claim: nothing was booked, so one would never be spoken.)
+    call.h.llm.setNextReply("We're open on Friday from 9 to 6.");
+    call.h.stt.speakUtterance("Are you open on Friday?");
     await drain();
     t.mock.timers.tick(2_000); // limit passed while the model is still working
     await drain();
     assert.deepEqual(call.hangups, []);
     t.mock.timers.tick(2_000); // the turn completes and is spoken
     await drain(200);
-    assert.match(call.h.tts.sentTexts.join(" "), /confirmed for Friday/);
+    assert.match(call.h.tts.sentTexts.join(" "), /open on Friday/);
     call.flush();
     t.mock.timers.tick(2_000); // next re-check finds the call idle
     await drain(200);
