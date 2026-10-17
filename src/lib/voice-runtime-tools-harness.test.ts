@@ -161,6 +161,10 @@ describe("voice-runtime tool-calling path (getReply)", () => {
       businessId: input.businessId,
       agentConfigId: input.agentConfigId,
       callId: input.callId,
+      // The trusted caller ID (none on this harness call) — what
+      // reschedule_appointment verifies ownership against.
+      callerE164: null,
+      phoneCountry: null,
     });
     assert.ok(h.tts.sentTexts.some((t) => t.includes("free at 3pm")));
     assert.equal(handle.state, "listening");

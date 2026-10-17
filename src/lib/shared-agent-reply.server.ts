@@ -88,8 +88,19 @@ export async function generateSharedAgentReply(
     callId: ctx.callId,
     source: ctx.source,
   };
-  const result = await claude.runConversationWithTools(messages, tools, (name, input) =>
-    executeAiTool(supabaseAdmin, toolCtx, name, input),
+  // These channels carry no trusted customer phone, so a tool that changes
+  // an existing booking is always refused here (guardBookingOwnership).
+  const { guardBookingOwnership } = await import("./calendar/caller-bookings.server.ts");
+  const result = await claude.runConversationWithTools(
+    messages,
+    tools,
+    async (name, input) =>
+      (await guardBookingOwnership(
+        supabaseAdmin,
+        { ...toolCtx, callId: ctx.source === "voice" ? ctx.callId : null },
+        name,
+        input,
+      )) ?? executeAiTool(supabaseAdmin, toolCtx, name, input),
   );
   return { reply: result.reply, toolCalls: result.toolCalls };
 }

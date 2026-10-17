@@ -86,6 +86,12 @@ import { SUPPORTED_VOICE_LANGUAGES, type AgentSnapshot } from "./agent-instructi
 import type { ClaudeTool } from "./claude.server.ts";
 import { zonedWallTimeToUtc, dayOfWeekInTimezone } from "./calendar/timezone.ts";
 import { normalizeCallerId, normalizePhoneNumber, phoneLastFour } from "./phone-number.ts";
+import {
+  findCallerUpcomingBookings,
+  findReturningCallerFirstName,
+  guardBookingOwnership,
+  type CallerBooking,
+} from "./calendar/caller-bookings.server.ts";
 import { classifyBookingStatus, type BookingOutcome } from "./calendar/booking-outcome.ts";
 import {
   CLOSING_MESSAGES,
@@ -421,6 +427,19 @@ export interface ToolExecContext {
   businessId: string;
   agentConfigId: string | null;
   callId: string;
+  /** The caller's provider-signed caller ID (E.164), or null when withheld/invalid — the only identity reschedule_appointment accepts. Never a number the caller spoke. */
+  callerE164?: string | null;
+  /** businesses.country — how a stored national-format customer_phone is read when matching callerE164. */
+  phoneCountry?: string | null;
+}
+
+/** Context for a caller-identity lookup — tenant ids from the session, caller ID from the signed webhook. */
+export interface CallerLookupQuery {
+  organizationId: string;
+  businessId: string;
+  callerE164: string;
+  callId: string;
+  country: string | null;
 }
 
 export interface RuntimeDeps {
@@ -454,6 +473,29 @@ export interface RuntimeDeps {
     input: Record<string, unknown>,
     ctx: ToolExecContext,
   ) => Promise<{ content: string; isError?: boolean }>;
+  /**
+   * The caller's own upcoming bookings at this business, matched by caller
+   * ID (see caller-bookings.server.ts). Optional: absent, the runtime can't
+   * identify an existing booking and never changes one.
+   */
+  findCallerBookings?: (query: CallerLookupQuery) => Promise<CallerBooking[]>;
+  /** A returning caller's first name for the greeting, or null when unknown or ambiguous. Optional: absent, the greeting stays generic. */
+  findReturningCallerName?: (query: CallerLookupQuery) => Promise<string | null>;
+}
+
+/** The server-resolved context every tool call on this session runs with — tenant ids and the trusted caller ID, never anything from the model or the caller's words. */
+function toolContextFor(session: {
+  input: StartRuntimeSessionInput;
+  callerId: string | null;
+}): ToolExecContext {
+  return {
+    organizationId: session.input.organizationId,
+    businessId: session.input.businessId,
+    agentConfigId: session.input.agentConfigId,
+    callId: session.input.callId,
+    callerE164: session.callerId,
+    phoneCountry: session.input.businessCountry ?? null,
+  };
 }
 
 async function persistTranscriptToCallLogs(record: TranscriptRecord): Promise<void> {
@@ -485,6 +527,11 @@ async function executeToolViaRegistry(
 ): Promise<{ content: string; isError?: boolean }> {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   const { executeAiTool } = await import("./ai-tools.server.ts");
+  // Both voice paths (the deterministic flows and native tool-calling)
+  // dispatch here, so no booking-changing tool runs for a caller who
+  // doesn't own the booking — whatever booking id was supplied.
+  const refused = await guardBookingOwnership(supabaseAdmin, ctx, name, input);
+  if (refused) return refused;
   return executeAiTool(
     supabaseAdmin,
     {
@@ -497,6 +544,16 @@ async function executeToolViaRegistry(
     name,
     input,
   );
+}
+
+async function findCallerBookingsInDb(query: CallerLookupQuery): Promise<CallerBooking[]> {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  return findCallerUpcomingBookings(supabaseAdmin, query);
+}
+
+async function findReturningCallerNameInDb(query: CallerLookupQuery): Promise<string | null> {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  return findReturningCallerFirstName(supabaseAdmin, query);
 }
 
 const generateReplyWithTools = resolveGenerateReplyWithTools();
@@ -517,6 +574,8 @@ export const defaultRuntimeDeps: RuntimeDeps = {
   // itself has no dependency on which LLM is selected; it's a plain
   // tenant-validated calendar/payment dispatcher.
   executeTool: executeToolViaRegistry,
+  findCallerBookings: findCallerBookingsInDb,
+  findReturningCallerName: findReturningCallerNameInDb,
   // generateReplyWithTools/resolveAvailableTools remain all-or-nothing and
   // Claude-only (see getReply): an agent running on Sarvam never gets the
   // LLM-initiated tool-use path half-wired, only the separate deterministic
@@ -670,6 +729,12 @@ interface Session {
   unmatchedServiceRequest: string | null;
   /** Runtime-owned appointment fields, persisted across turns independent of the LLM's own conversational memory — see AppointmentState's own doc comment. */
   appointmentState: AppointmentState;
+  /** An in-progress change to one of the caller's existing bookings — see handleRescheduleTurn. Null when none. While set, no new booking is ever created. */
+  reschedule: RescheduleFlow | null;
+  /** Ids of bookings created on this call — a later time change refers to these, and is confirmed as a move, never booked again. */
+  bookedThisCallIds: string[];
+  /** The returning caller's name lookup, started at session start in parallel with the TTS connection — see startRuntimeSession. */
+  returningCallerName: { settled: boolean; name: string | null };
   /** The language_code the current TTS connection was opened with — see maybeSwitchTtsLanguage. Starts at the agent's primary_language (what startRuntimeSession connects with). */
   ttsLanguage: string;
   /**
@@ -2545,6 +2610,33 @@ function pickGreeting(agent: AgentSnapshot["agent"], businessName: string): stri
   );
 }
 
+const GREETING_SALUTATION_PATTERN =
+  /^\s*(hello|hi|hey|namaste|namaskar|vanakkam|good (?:morning|afternoon|evening))\b[,!.]?\s*/i;
+
+/**
+ * Greets a returning caller by first name: inserted after the configured
+ * greeting's own salutation ("Hello, thanks for calling…" → "Hello Ravi,
+ * thanks for calling…"), or — for an English greeting without one —
+ * prefixed ("Hi Ravi! Thank you for calling…"). Nothing else changes: no
+ * appointment detail is ever added to a greeting. Unchanged when the name
+ * is unknown, or when a non-English greeting has no recognisable salutation.
+ */
+export function personalizeGreeting(
+  greeting: string,
+  firstName: string | null,
+  language: string,
+): string {
+  if (!firstName) return greeting;
+  const match = GREETING_SALUTATION_PATTERN.exec(greeting);
+  if (match) {
+    let rest = greeting.slice(match[0].length);
+    if (/^[A-Z][a-z]/.test(rest)) rest = rest.charAt(0).toLowerCase() + rest.slice(1);
+    return rest ? `${match[1]} ${firstName}, ${rest}` : `${match[1]} ${firstName}!`;
+  }
+  if (!language.toLowerCase().startsWith("en")) return greeting;
+  return `Hi ${firstName}! ${greeting}`;
+}
+
 function outputCodecFor(bridge: AudioMediaBridge): "mulaw" | "linear16" | "wav" {
   const enc = bridge.outboundFormat.encoding;
   return enc === "mulaw" ? "mulaw" : enc === "linear16" ? "linear16" : "wav";
@@ -2724,12 +2816,7 @@ async function getReply(
       session.input.businessId,
     );
     if (tools.length > 0) {
-      const toolCtx: ToolExecContext = {
-        organizationId: session.input.organizationId,
-        businessId: session.input.businessId,
-        agentConfigId: session.input.agentConfigId,
-        callId: session.input.callId,
-      };
+      const toolCtx = toolContextFor(session);
       // Record book_appointment's REAL outcome (the stored booking's status)
       // as it passes through — toolCalls only carries name/isError, and the
       // model's own wording must never be the only evidence of a booking.
@@ -2738,6 +2825,14 @@ async function getReply(
         const toolResult = await executeTool(name, input, toolCtx);
         if (name === "book_appointment") {
           const parsed = safeJsonParse(toolResult.content);
+          const bookedId = (parsed?.["data"] as { id?: unknown } | undefined)?.id;
+          if (
+            !toolResult.isError &&
+            typeof bookedId === "string" &&
+            !session.bookedThisCallIds.includes(bookedId)
+          ) {
+            session.bookedThisCallIds.push(bookedId);
+          }
           const reported = parsed?.["bookingOutcome"];
           bookingOutcome =
             !toolResult.isError && typeof reported === "string"
@@ -3522,12 +3617,7 @@ async function attemptAvailabilityCheck(
     };
   }
 
-  const ctx: ToolExecContext = {
-    organizationId: session.input.organizationId,
-    businessId,
-    agentConfigId: session.input.agentConfigId,
-    callId,
-  };
+  const ctx = toolContextFor(session);
   const { timezone, service } = await resolveBookingContext(
     businessId,
     state.service,
@@ -3717,12 +3807,7 @@ async function attemptBooking(
     };
   }
 
-  const ctx: ToolExecContext = {
-    organizationId: session.input.organizationId,
-    businessId: session.input.businessId,
-    agentConfigId: session.input.agentConfigId,
-    callId: session.input.callId,
-  };
+  const ctx = toolContextFor(session);
   const { timezone, service } = await resolveBookingContext(
     session.input.businessId,
     state.service,
@@ -3962,6 +4047,9 @@ async function attemptBooking(
     timezone,
   );
   const bookingId = typeof bookedData.id === "string" ? bookedData.id : null;
+  if (bookingId && !session.bookedThisCallIds.includes(bookingId)) {
+    session.bookedThisCallIds.push(bookingId);
+  }
   const what = state.service ?? "appointment";
   const businessName = session.input.businessName;
   const englishReply =
@@ -4347,10 +4435,735 @@ async function tryEarlyDeterministicDispatch(
  * is NOT a second copy of utteranceQueue's booking/TTS-race protection,
  * which the slow phase above still owns in full.
  */
-function enqueueUserUtterance(session: Session, text: string) {
-  const immediateAck = session.deps.generateReplyWithTools
+// ============================================================
+// Rescheduling an existing booking (deterministic, both LLM paths)
+// ============================================================
+//
+// Production incident: "reschedule my appointment to 1 PM" ran the NEW-
+// booking path — a second booking was created at 1 PM and the original
+// 12 PM booking stayed booked. The runtime had no reschedule flow at all,
+// and the model has no tool that can find which booking is the caller's.
+//
+// This flow owns every reschedule request:
+//   - The caller is identified ONLY by the provider-signed caller ID (or a
+//     booking made on this same call) — never by a number they speak.
+//   - It finds the caller's own upcoming bookings (findCallerBookings),
+//     reuses the stored service and name, and asks only for what's missing
+//     (which booking, when there are several; the new date/time).
+//   - It moves the SAME booking via reschedule_appointment (the atomic
+//     reschedule_booking_atomic RPC: one row, old slot released in the
+//     same transaction, overlap re-checked under the business lock), which
+//     re-verifies ownership server-side.
+//   - While it is active it never creates a booking, and nothing about a
+//     booking is said unless it belongs to the caller.
+
+export interface RescheduleFlow {
+  /** "choose": several bookings, waiting for which one. "await_time": waiting for the new date/time. "confirm": a new time is known but the caller didn't explicitly ask to move — waiting for yes/no. */
+  stage: "choose" | "await_time" | "confirm";
+  candidates: CallerBooking[];
+  target: CallerBooking | null;
+  /** New date, YYYY-MM-DD in the business's timezone; null = keep the booking's own date. */
+  newDate: string | null;
+  /** New time, 24-hour HH:mm. */
+  newTime: string | null;
+  /** Caller turns spent in this flow — bounded so it can never loop forever. */
+  turns: number;
+}
+
+const MAX_RESCHEDULE_TURNS = 6;
+
+const RESCHEDULE_KEYWORD_PATTERN = /\bre-?schedul\w*\b|\b(postpone|prepone)\b/i;
+const RESCHEDULE_MOVE_PATTERN =
+  /\b(move|shift|change|push|bring)\b[^.?!]{0,40}\b(appointment|booking|slot)\b/i;
+const RESCHEDULE_MOVE_IT_PATTERN = /\b(move|shift|change|push)\s+it\b/i;
+/** The caller wants an ADDITIONAL booking, not a change to the existing one. */
+const NEW_BOOKING_PATTERN =
+  /\b(another|additional|second|separate|extra|one more|new)\s+(appointment|booking|slot)\b|\balso\s+book\b|\bbook\s+(another|one more|a new)\b/i;
+const RESCHEDULE_ABORT_PATTERN =
+  /\b(never ?mind|leave it|keep it|forget it|don'?t (change|move|reschedule)|no,? (thanks|thank you)|cancel (that|the change))\b/i;
+const RESCHEDULE_DECLINE_PATTERN = /^\s*(no|nope|nah|not really|no,? (thanks|thank you))\b/i;
+const GENERIC_SERVICE_WORDS = new Set([
+  "treatment",
+  "appointment",
+  "session",
+  "service",
+  "consultation",
+  "procedure",
+  "checkup",
+  "check-up",
+]);
+const ORDINALS: [RegExp, number][] = [
+  [/\b(first|1st|earlier|earliest)\b/i, 0],
+  [/\b(second|2nd|later|latest)\b/i, 1],
+  [/\b(third|3rd)\b/i, 2],
+];
+const MONTH_NAMES = [
+  "january",
+  "february",
+  "march",
+  "april",
+  "may",
+  "june",
+  "july",
+  "august",
+  "september",
+  "october",
+  "november",
+  "december",
+] as const;
+const MONTH_ALT = MONTH_NAMES.map((m) => `${m.slice(0, 3)}(?:${m.slice(3)})?`).join("|");
+const DAY_MONTH_PATTERN = new RegExp(
+  `\\b(\\d{1,2})(?:st|nd|rd|th)?(?:\\s+of)?\\s+(${MONTH_ALT})\\b`,
+  "i",
+);
+const MONTH_DAY_PATTERN = new RegExp(`\\b(${MONTH_ALT})\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b`, "i");
+const BARE_ORDINAL_DAY_PATTERN = /\bthe\s+(\d{1,2})(?:st|nd|rd|th)\b/i;
+
+/**
+ * Whether this utterance asks to change an existing booking:
+ *  - "explicit": "reschedule", "postpone", "move my appointment", "move it to 3 PM";
+ *  - "implicit": a new date/time right after a booking was made on this
+ *    call ("actually, 1 PM instead") — confirmed with the caller before
+ *    anything is moved, and never booked as a second appointment.
+ * Null otherwise, and always null when the caller asks for an additional
+ * booking ("book another appointment").
+ */
+export function detectRescheduleRequest(
+  text: string,
+  intent: CallerIntentSignals,
+  bookedThisCall: boolean,
+): "explicit" | "implicit" | null {
+  if (NEW_BOOKING_PATTERN.test(text)) return null;
+  const givesSlot = Boolean(intent.explicitTime || intent.relativeDate || intent.weekday);
+  if (RESCHEDULE_KEYWORD_PATTERN.test(text) || RESCHEDULE_MOVE_PATTERN.test(text)) {
+    return "explicit";
+  }
+  if (RESCHEDULE_MOVE_IT_PATTERN.test(text) && (givesSlot || bookedThisCall)) return "explicit";
+  if (bookedThisCall && givesSlot && !intent.availabilityRequested) return "implicit";
+  return null;
+}
+
+function localYmd(isoUtc: string, timeZone: string): string {
+  return formatSlotDateLocal(isoUtc, timeZone) ?? isoUtc.slice(0, 10);
+}
+
+/**
+ * A calendar date the caller named ("20th October", "October 20", "the
+ * 20th", "tomorrow", "Friday"), as YYYY-MM-DD in the business's timezone —
+ * the nearest such date on or after today. Null when none was named.
+ */
+export function extractRequestedDate(
+  text: string,
+  intent: CallerIntentSignals,
+  timeZone: string,
+  now: Date = new Date(),
+): string | null {
+  if (intent.relativeDate) return resolveRelativeDateInTimezone(intent.relativeDate, timeZone, now);
+  if (intent.weekday) return resolveWeekdayInTimezone(intent.weekday, timeZone, now);
+  const today = localYmd(now.toISOString(), timeZone);
+  const [ty, tm] = today.split("-").map(Number) as [number, number];
+  const monthIndex = (name: string) =>
+    MONTH_NAMES.findIndex((m) => m.startsWith(name.toLowerCase().slice(0, 3)));
+  let month: number | null = null;
+  let day: number | null = null;
+  const dm = DAY_MONTH_PATTERN.exec(text);
+  const md = dm ? null : MONTH_DAY_PATTERN.exec(text);
+  if (dm) {
+    day = Number(dm[1]);
+    month = monthIndex(dm[2]!) + 1;
+  } else if (md) {
+    month = monthIndex(md[1]!) + 1;
+    day = Number(md[2]);
+  } else {
+    const bare = BARE_ORDINAL_DAY_PATTERN.exec(text);
+    if (!bare) return null;
+    day = Number(bare[1]);
+  }
+  if (!day || day < 1 || day > 31) return null;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const valid = (y: number, m: number) => {
+    const d = new Date(Date.UTC(y, m - 1, day!));
+    return d.getUTCMonth() === m - 1 ? `${y}-${pad(m)}-${pad(day!)}` : null;
+  };
+  const candidates: string[] = [];
+  if (month) {
+    for (const y of [ty, ty + 1]) {
+      const c = valid(y, month);
+      if (c) candidates.push(c);
+    }
+  } else {
+    for (let i = 0; i < 3; i++) {
+      const m = ((tm - 1 + i) % 12) + 1;
+      const y = ty + Math.floor((tm - 1 + i) / 12);
+      const c = valid(y, m);
+      if (c) candidates.push(c);
+    }
+  }
+  return candidates.find((c) => c >= today) ?? null;
+}
+
+/** How a booking is described to its owner: "root canal on October 20 at 12 PM". */
+function describeCallerBooking(booking: CallerBooking, now: Date = new Date()): string {
+  const tz = booking.timezone;
+  const date = spokenDateLabel(localYmd(booking.startAt, tz), tz, now);
+  const time = spokenTimeLabel(formatSlotTime24h(booking.startAt, tz));
+  const what = booking.serviceName ?? "appointment";
+  return `${what} ${date === "today" || date === "tomorrow" ? date : `on ${date}`} at ${time}`;
+}
+
+export interface CallerBookingSelection {
+  booking: CallerBooking;
+  /** What identified it — a date or time that only picked the booking is not also the new date/time. */
+  by: "only" | "service" | "ordinal" | "date" | "time";
+}
+
+/**
+ * Which of the caller's bookings this utterance points at — by service
+ * ("the cleaning"), position ("the first one"), or the booking's own date
+ * or time ("the one on Friday", "the 12 o'clock one"). Null unless exactly
+ * one booking matches.
+ */
+export function selectCallerBooking(
+  candidates: CallerBooking[],
+  text: string,
+  intent: CallerIntentSignals,
+  now: Date = new Date(),
+): CallerBookingSelection | null {
+  if (candidates.length === 1) return { booking: candidates[0]!, by: "only" };
+  const lower = text.toLowerCase();
+  // Any distinctive word of the service name ("the cleaning one"); generic
+  // words ("treatment") never identify a booking on their own.
+  const byService = candidates.filter((c) => {
+    const name = c.serviceName?.toLowerCase().trim();
+    if (!name) return false;
+    if (lower.includes(name)) return true;
+    return name
+      .split(/\s+/)
+      .filter((w) => w.length >= 4 && !GENERIC_SERVICE_WORDS.has(w))
+      .some((w) => new RegExp(`\\b${w.replace(/[^a-z0-9]/g, "")}\\b`).test(lower));
+  });
+  if (byService.length === 1) return { booking: byService[0]!, by: "service" };
+  const pool = byService.length > 1 ? byService : candidates;
+  for (const [pattern, index] of ORDINALS) {
+    if (pattern.test(text) && pool[index]) return { booking: pool[index]!, by: "ordinal" };
+  }
+  const tz = pool[0]?.timezone ?? "UTC";
+  const date = extractRequestedDate(text, intent, tz, now);
+  if (date) {
+    const byDate = pool.filter((c) => localYmd(c.startAt, c.timezone) === date);
+    if (byDate.length === 1) return { booking: byDate[0]!, by: "date" };
+  }
+  if (intent.explicitTime) {
+    const byTime = pool.filter(
+      (c) => formatSlotTime24h(c.startAt, c.timezone) === intent.explicitTime,
+    );
+    if (byTime.length === 1) return { booking: byTime[0]!, by: "time" };
+  }
+  return null;
+}
+
+/** Speaks a reschedule-flow reply: verbatim in English, otherwise phrased by the model from the same facts. */
+async function speakRescheduleReply(
+  session: Session,
+  generation: number,
+  english: string,
+  opts: { awaitAnythingElse: boolean },
+): Promise<void> {
+  const englishReply =
+    resolveResponseLanguage(
+      session.detectedLanguage,
+      session.input.snapshotAgent.primary_language,
+    ) === "en-IN";
+  const text = englishReply
+    ? english
+    : await composeHonestBookingReply(
+        session,
+        `Say exactly this to the caller, in their language, adding nothing: "${english}"`,
+        english,
+      );
+  if (generation !== session.generation) return;
+  await speakRuntimeTurnReply(session, generation, text, opts);
+}
+
+const RESCHEDULE_NO_CALLER_ID =
+  "I can only change an existing appointment when you call from the phone number it was booked with, and I can't see that number on this call. Please call us back from that number, and I'll be happy to help.";
+const RESCHEDULE_NOT_FOUND =
+  "I couldn't find an upcoming appointment booked under the number you're calling from. If it was booked with a different number, please call us from that number. I can also book a new appointment for you if you'd like.";
+const RESCHEDULE_UNAVAILABLE =
+  "I'm sorry, I'm not able to change appointments on this line right now. Our team can help you with that.";
+const RESCHEDULE_LOOKUP_FAILED =
+  "I'm sorry, I couldn't look up your appointment just now. Please try again in a moment, or our team can help you.";
+
+/**
+ * Handles this turn when it belongs to a reschedule — starting one, or
+ * continuing one already in progress. Returns false (the turn is not a
+ * reschedule) and leaves everything untouched otherwise.
+ */
+async function handleRescheduleTurn(
+  session: Session,
+  text: string,
+  intent: CallerIntentSignals,
+  generation: number,
+): Promise<boolean> {
+  const flow = session.reschedule;
+  if (!flow) {
+    const trigger = detectRescheduleRequest(text, intent, session.bookedThisCallIds.length > 0);
+    if (!trigger) return false;
+    log("reschedule_requested", session, { trigger });
+    await startReschedule(session, text, intent, generation, trigger);
+    return true;
+  }
+
+  // The caller switched to booking an additional appointment: leave the
+  // existing booking alone and let the normal booking flow take the turn.
+  if (NEW_BOOKING_PATTERN.test(text) && !RESCHEDULE_KEYWORD_PATTERN.test(text)) {
+    log("reschedule_abandoned", session, { reason: "new_booking_requested" });
+    session.reschedule = null;
+    return false;
+  }
+  flow.turns++;
+  const slotGiven = Boolean(intent.explicitTime || intent.relativeDate || intent.weekday);
+  if (
+    flow.turns > MAX_RESCHEDULE_TURNS ||
+    (RESCHEDULE_ABORT_PATTERN.test(text) && !slotGiven) ||
+    (flow.stage === "confirm" && RESCHEDULE_DECLINE_PATTERN.test(text) && !slotGiven)
+  ) {
+    log("reschedule_abandoned", session, {
+      reason: flow.turns > MAX_RESCHEDULE_TURNS ? "turn_limit" : "caller_declined",
+    });
+    session.reschedule = null;
+    await speakRescheduleReply(
+      session,
+      generation,
+      `Okay, I've left your appointment as it is. ${ANYTHING_ELSE_QUESTION}`,
+      { awaitAnythingElse: true },
+    );
+    return true;
+  }
+
+  if (flow.stage === "choose") {
+    const chosen = selectCallerBooking(flow.candidates, text, intent);
+    if (chosen) {
+      flow.target = chosen.booking;
+      applyRequestedSlot(flow, text, intent, chosen.by);
+      // A time given before the choice that turns out to be this booking's
+      // own time only described it.
+      if (
+        flow.newTime === formatSlotTime24h(chosen.booking.startAt, chosen.booking.timezone) &&
+        !flow.newDate
+      ) {
+        flow.newTime = null;
+      }
+    }
+  } else if (flow.stage === "confirm") {
+    if (slotGiven) {
+      applyRequestedSlot(flow, text, intent);
+    } else if (BOOKING_CONFIRMATION_PATTERN.test(text) && !BOOKING_NEGATION_PATTERN.test(text)) {
+      await executeReschedule(session, flow, generation);
+      return true;
+    }
+  } else {
+    applyRequestedSlot(flow, text, intent);
+  }
+  await advanceReschedule(session, flow, generation, false);
+  return true;
+}
+
+/**
+ * The part of the utterance that names the NEW slot: what follows the last
+ * " to " when that names a date or time ("move my 12 PM appointment to
+ * 1 PM" → "1 PM"), otherwise the whole utterance.
+ */
+function newSlotSignals(
+  text: string,
+  intent: CallerIntentSignals,
+): { text: string; intent: CallerIntentSignals; explicitTarget: boolean } {
+  const idx = text.toLowerCase().lastIndexOf(" to ");
+  if (idx >= 0) {
+    const tailText = text.slice(idx + 4);
+    const tail = parseCallerIntentFromText(tailText);
+    if (
+      tail.explicitTime ||
+      tail.relativeDate ||
+      tail.weekday ||
+      DAY_MONTH_PATTERN.test(tailText) ||
+      MONTH_DAY_PATTERN.test(tailText)
+    ) {
+      return { text: tailText, intent: tail, explicitTarget: true };
+    }
+  }
+  return { text, intent, explicitTarget: false };
+}
+
+/**
+ * Folds the date/time the caller just gave into the flow (time-only keeps
+ * the date already chosen). `selectedBy`: a date or time that only picked
+ * which booking is meant is not also taken as its new date or time.
+ */
+function applyRequestedSlot(
+  flow: RescheduleFlow,
+  text: string,
+  intent: CallerIntentSignals,
+  selectedBy: CallerBookingSelection["by"] | null = null,
+) {
+  const tz = flow.target?.timezone ?? flow.candidates[0]?.timezone ?? "UTC";
+  const slot = newSlotSignals(text, intent);
+  // "my 12 PM appointment" names the booking's CURRENT time, not a new one.
+  const namesCurrentTime =
+    !slot.explicitTarget &&
+    flow.target !== null &&
+    slot.intent.explicitTime === formatSlotTime24h(flow.target.startAt, flow.target.timezone);
+  const skipDate = selectedBy === "date" && !slot.explicitTarget;
+  const skipTime = (selectedBy === "time" && !slot.explicitTarget) || namesCurrentTime;
+  const date = skipDate ? null : extractRequestedDate(slot.text, slot.intent, tz);
+  if (date) flow.newDate = date;
+  if (slot.intent.explicitTime && !skipTime) flow.newTime = slot.intent.explicitTime;
+}
+
+async function startReschedule(
+  session: Session,
+  text: string,
+  intent: CallerIntentSignals,
+  generation: number,
+  trigger: "explicit" | "implicit",
+): Promise<void> {
+  const reply = (english: string) =>
+    speakRescheduleReply(session, generation, english, { awaitAnythingElse: true });
+  const { findCallerBookings, executeTool } = session.deps;
+  if (!session.callerId) {
+    log("reschedule_refused", session, { reason: "no_caller_id" });
+    await reply(RESCHEDULE_NO_CALLER_ID);
+    return;
+  }
+  if (!findCallerBookings || !executeTool) {
+    log("reschedule_refused", session, { reason: "not_configured" });
+    await reply(RESCHEDULE_UNAVAILABLE);
+    return;
+  }
+  let candidates: CallerBooking[];
+  try {
+    candidates = await withToolDeadline(
+      CALENDAR_TOOL_TIMEOUT_MS,
+      findCallerBookings({
+        organizationId: session.input.organizationId,
+        businessId: session.input.businessId,
+        callerE164: session.callerId,
+        callId: session.input.callId,
+        country: session.input.businessCountry ?? null,
+      }),
+    );
+  } catch (err) {
+    log("reschedule_lookup_failed", session, { message: (err as Error).message });
+    await reply(RESCHEDULE_LOOKUP_FAILED);
+    return;
+  }
+  // Counts only — never the bookings' details, the caller's number or name.
+  log("reschedule_lookup", session, { matches: candidates.length });
+  if (candidates.length === 0) {
+    await reply(RESCHEDULE_NOT_FOUND);
+    return;
+  }
+
+  const flow: RescheduleFlow = {
+    stage: "await_time",
+    candidates,
+    target: null,
+    newDate: null,
+    newTime: null,
+    turns: 0,
+  };
+  let selectedBy: CallerBookingSelection["by"] | null = null;
+  if (trigger === "implicit") {
+    // "1 PM instead" right after booking: the booking just made is the one
+    // meant, and the move is confirmed before anything changes.
+    flow.target =
+      candidates.find((c) => session.bookedThisCallIds.includes(c.id)) ??
+      (candidates.length === 1 ? candidates[0]! : null);
+  } else {
+    const chosen = selectCallerBooking(candidates, text, intent);
+    flow.target = chosen?.booking ?? null;
+    selectedBy = chosen?.by ?? null;
+  }
+  // Kept even before the booking is chosen ("reschedule to 4 PM" with two
+  // appointments): a time that matched no booking can only be the new one.
+  applyRequestedSlot(flow, text, intent, selectedBy);
+  if (trigger === "implicit" && flow.target && !flow.newTime && !flow.newDate) {
+    // Only restated the booking's own time ("great, so 12 PM then").
+    await reply(
+      `Your ${describeCallerBooking(flow.target)} is already booked for that time. ${ANYTHING_ELSE_QUESTION}`,
+    );
+    return;
+  }
+  session.reschedule = flow;
+  await advanceReschedule(session, flow, generation, trigger === "implicit");
+}
+
+/** Asks for whatever the reschedule still needs, or performs it once everything is known. */
+async function advanceReschedule(
+  session: Session,
+  flow: RescheduleFlow,
+  generation: number,
+  confirmFirst: boolean,
+): Promise<void> {
+  const ask = (english: string) =>
+    speakRescheduleReply(session, generation, english, { awaitAnythingElse: false });
+  const target = flow.target;
+  if (!target) {
+    flow.stage = "choose";
+    const list = flow.candidates.map((c) => describeCallerBooking(c)).join("; and ");
+    await ask(
+      `I can see ${flow.candidates.length} upcoming appointments under your number: ${list}. Which one would you like to change?`,
+    );
+    return;
+  }
+  const greeting = target.customerName ? `Sure, ${target.customerName.split(" ")[0]}. ` : "Sure. ";
+  if (!flow.newTime) {
+    flow.stage = "await_time";
+    if (flow.newDate) {
+      await ask(
+        `${greeting}What time on ${spokenDateLabel(flow.newDate, target.timezone)} would you like your ${target.serviceName ?? "appointment"} moved to?`,
+      );
+    } else {
+      await ask(
+        `${greeting}Your ${describeCallerBooking(target)} is booked. What new date and time would you like?`,
+      );
+    }
+    return;
+  }
+  const requestedStart = zonedWallTimeToUtc(
+    flow.newDate ?? localYmd(target.startAt, target.timezone),
+    flow.newTime,
+    target.timezone,
+  );
+  if (requestedStart.getTime() === new Date(target.startAt).getTime()) {
+    // The caller repeated the time they already have — nothing to move.
+    session.reschedule = null;
+    await speakRescheduleReply(
+      session,
+      generation,
+      `Your ${describeCallerBooking(target)} is already booked for that time. ${ANYTHING_ELSE_QUESTION}`,
+      { awaitAnythingElse: true },
+    );
+    return;
+  }
+  if (confirmFirst || flow.stage === "confirm") {
+    flow.stage = "confirm";
+    const date = flow.newDate ?? localYmd(target.startAt, target.timezone);
+    await ask(
+      `Just to confirm — would you like to move your ${describeCallerBooking(target)} to ${spokenDateLabel(date, target.timezone)} at ${spokenTimeLabel(flow.newTime)}?`,
+    );
+    return;
+  }
+  await executeReschedule(session, flow, generation);
+}
+
+/** reschedule_appointment failures raised before anything is written — the booking is untouched. */
+const RESCHEDULE_PRE_WRITE_CODES: ReadonlySet<string> = new Set([
+  "INVALID_TOOL_INPUT",
+  "NOT_FOUND",
+  "NOT_RESCHEDULABLE",
+  "PAYMENT_PENDING",
+  "SLOT_NO_LONGER_AVAILABLE",
+  "SLOT_UNAVAILABLE",
+  "SLOT_OUTSIDE_SCHEDULE",
+  "TOOL_NOT_PERMITTED",
+  "AGENT_NOT_FOUND",
+]);
+
+/** The booking as stored now (null: no longer one of the caller's upcoming bookings; "unknown": couldn't be read). */
+async function rereadCallerBooking(
+  session: Session,
+  bookingId: string,
+): Promise<CallerBooking | null | "unknown"> {
+  const find = session.deps.findCallerBookings;
+  if (!find || !session.callerId) return "unknown";
+  try {
+    const bookings = await withToolDeadline(
+      CALENDAR_TOOL_TIMEOUT_MS,
+      find({
+        organizationId: session.input.organizationId,
+        businessId: session.input.businessId,
+        callerE164: session.callerId,
+        callId: session.input.callId,
+        country: session.input.businessCountry ?? null,
+      }),
+    );
+    return bookings.find((b) => b.id === bookingId) ?? null;
+  } catch {
+    return "unknown";
+  }
+}
+
+/** Moves the target booking to the requested slot through reschedule_appointment and tells the caller the real outcome. */
+async function executeReschedule(
+  session: Session,
+  flow: RescheduleFlow,
+  generation: number,
+): Promise<void> {
+  const target = flow.target!;
+  const tz = target.timezone;
+  const date = flow.newDate ?? localYmd(target.startAt, tz);
+  const time = flow.newTime!;
+  const what = target.serviceName ?? "appointment";
+  const oldDescription = describeCallerBooking(target);
+  const newLabel = `${spokenDateLabel(date, tz)} at ${spokenTimeLabel(time)}`;
+  const finish = (english: string) => {
+    session.reschedule = null;
+    return speakRescheduleReply(session, generation, english, { awaitAnythingElse: true });
+  };
+  const askAgain = (english: string) => {
+    flow.stage = "await_time";
+    flow.newTime = null;
+    return speakRescheduleReply(session, generation, english, { awaitAnythingElse: false });
+  };
+
+  const newStart = zonedWallTimeToUtc(date, time, tz);
+  const durationMs = new Date(target.endAt).getTime() - new Date(target.startAt).getTime();
+  const newEnd = new Date(newStart.getTime() + durationMs);
+  if (newStart.getTime() === new Date(target.startAt).getTime()) {
+    await finish(
+      `Your ${oldDescription} is already booked for that time. ${ANYTHING_ELSE_QUESTION}`,
+    );
+    return;
+  }
+  if (newStart.getTime() <= Date.now()) {
+    await askAgain(`That time has already passed. What other time would you like?`);
+    return;
+  }
+
+  if (generation === session.generation) {
+    await speak(session, "One moment while I move that for you.");
+  }
+  log("reschedule_attempt_started", session, { booking_id: target.id });
+  const result = await withToolDeadline(
+    CALENDAR_TOOL_TIMEOUT_MS,
+    session.deps.executeTool!(
+      "reschedule_appointment",
+      {
+        bookingId: target.id,
+        newStartIso: newStart.toISOString(),
+        newEndIso: newEnd.toISOString(),
+      },
+      toolContextFor(session),
+    ),
+  ).catch(timeoutToolResult);
+  const parsed = safeJsonParse(result.content);
+  const succeeded = !result.isError && parsed?.["success"] === true;
+  const code = succeeded
     ? null
-    : immediateCallerAck(session.appointmentState, parseCallerIntentFromText(text));
+    : ((parsed?.["error"] as { code?: string } | undefined)?.code ?? "UNKNOWN");
+  // Codes the booking layer raises before anything is written: the
+  // booking is exactly as it was. Anything else (a Google Calendar error
+  // raised after the database move committed, a timeout, an unexpected
+  // error) is ambiguous — the booking is re-read to say what really
+  // happened rather than guess.
+  let status: string | null = succeeded
+    ? String((parsed!["data"] as { status?: unknown } | undefined)?.status ?? "")
+    : null;
+  if (code && !RESCHEDULE_PRE_WRITE_CODES.has(code)) {
+    const current = await rereadCallerBooking(session, target.id);
+    log("reschedule_outcome_reread", session, {
+      booking_id: target.id,
+      code,
+      found: current !== null && current !== "unknown",
+      moved:
+        current !== null &&
+        current !== "unknown" &&
+        new Date(current.startAt).getTime() === newStart.getTime(),
+    });
+    if (
+      current !== null &&
+      current !== "unknown" &&
+      new Date(current.startAt).getTime() === newStart.getTime()
+    ) {
+      // The move committed; only the calendar copy lagged (the retry job
+      // patches the existing event to the new time).
+      status = "CALENDAR_SYNC_FAILED";
+    } else if (
+      code !== "CALENDAR_TIMEOUT" &&
+      current !== null &&
+      current !== "unknown" &&
+      new Date(current.startAt).getTime() === new Date(target.startAt).getTime()
+    ) {
+      log("reschedule_failed", session, { booking_id: target.id, code });
+      await finish(
+        `I'm sorry, I couldn't change that just now. Your ${oldDescription} is unchanged. ${ANYTHING_ELSE_QUESTION}`,
+      );
+      return;
+    }
+  }
+  if (status !== null) {
+    log("reschedule_succeeded", session, { booking_id: target.id, status });
+    target.startAt = newStart.toISOString();
+    target.endAt = newEnd.toISOString();
+    if (session.bookedThisCallIds.includes(target.id)) {
+      session.appointmentState = {
+        ...session.appointmentState,
+        preferredDate: date,
+        preferredTime: time,
+        availabilityStatus: "unknown",
+        selectedSlot: null,
+      };
+    }
+    const name = target.customerName ? `, ${target.customerName.split(" ")[0]}` : "";
+    await finish(
+      status === "CALENDAR_SYNC_FAILED"
+        ? `Your ${what} has been moved to ${newLabel}. Our team will finish updating the calendar and confirm with you if anything changes. ${ANYTHING_ELSE_QUESTION}`
+        : `Done${name} — your ${what} at ${session.input.businessName} has been moved to ${newLabel}. ${ANYTHING_ELSE_QUESTION}`,
+    );
+    return;
+  }
+
+  log("reschedule_failed", session, { booking_id: target.id, code });
+  switch (code) {
+    case "SLOT_NO_LONGER_AVAILABLE":
+    case "SLOT_UNAVAILABLE":
+      await askAgain(
+        `I'm sorry, ${newLabel} isn't available. Your ${oldDescription} is unchanged. Would you like a different time?`,
+      );
+      return;
+    case "SLOT_OUTSIDE_SCHEDULE":
+      await askAgain(
+        `I'm sorry, ${newLabel} is outside our working hours. Your ${oldDescription} is unchanged. Would you like a different time?`,
+      );
+      return;
+    case "TOOL_NOT_PERMITTED":
+    case "AGENT_NOT_FOUND":
+      await finish(
+        `I'm sorry, I'm not able to change appointments on this line. Your ${oldDescription} is unchanged, and our team can help you move it. ${ANYTHING_ELSE_QUESTION}`,
+      );
+      return;
+    case "PAYMENT_PENDING":
+      await finish(
+        `That appointment has a payment pending, so I can't move it on this call. Our team can help you with it. ${ANYTHING_ELSE_QUESTION}`,
+      );
+      return;
+    case "NOT_FOUND":
+    case "NOT_RESCHEDULABLE":
+      await finish(
+        `I'm sorry, I can't change that appointment on this call. Our team can help you with it. ${ANYTHING_ELSE_QUESTION}`,
+      );
+      return;
+    default:
+      // A timeout or unexpected error: the change may or may not have gone
+      // through, so neither outcome is claimed.
+      await finish(
+        `I'm sorry, I couldn't confirm that change just now. Our team will check and confirm your appointment time with you. ${ANYTHING_ELSE_QUESTION}`,
+      );
+  }
+}
+
+function enqueueUserUtterance(session: Session, text: string) {
+  const intent = parseCallerIntentFromText(text);
+  // A reschedule speaks its own replies — a booking-flow ack ("Got it —
+  // 1 PM") would misdescribe what is happening.
+  const rescheduleTurn =
+    session.reschedule !== null ||
+    detectRescheduleRequest(text, intent, session.bookedThisCallIds.length > 0) !== null;
+  const immediateAck =
+    session.deps.generateReplyWithTools || rescheduleTurn
+      ? null
+      : immediateCallerAck(session.appointmentState, intent);
   if (immediateAck) {
     session.immediateAckQueue = session.immediateAckQueue.then(() =>
       speak(session, immediateAck).catch((err: unknown) => {
@@ -4494,6 +5307,29 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
   // again until the agent next asks whether there's anything else.
   if (session.callCompletion === "awaiting_anything_else") session.callCompletion = "none";
   session.farewellSpoken = false;
+
+  // A change to one of the caller's existing bookings never goes through
+  // the new-booking path below (see handleRescheduleTurn). Runs on both
+  // LLM paths: the model has no tool that can find the caller's bookings.
+  // Checked synchronously first, so an ordinary turn takes no extra await.
+  const rescheduleTurn =
+    session.reschedule !== null ||
+    detectRescheduleRequest(text, callerIntent, session.bookedThisCallIds.length > 0) !== null;
+  try {
+    if (rescheduleTurn && (await handleRescheduleTurn(session, text, callerIntent, generation))) {
+      return;
+    }
+  } catch (err) {
+    log("reschedule_error", session, { message: (err as Error).message });
+    session.reschedule = null;
+    await speakRuntimeTurnReply(
+      session,
+      generation,
+      `I'm sorry, I couldn't change your appointment just now. Our team can help you with it. ${ANYTHING_ELSE_QUESTION}`,
+      { awaitAnythingElse: true },
+    );
+    return;
+  }
 
   // The runtime's own ground truth for what the caller has already
   // confirmed — see AppointmentState's own doc comment. Built from state
@@ -5487,6 +6323,9 @@ export async function startRuntimeSession(
       ...emptyAppointmentState(),
       callerIdChoice: callerId ? "not_offered" : "unavailable",
     },
+    reschedule: null,
+    bookedThisCallIds: [],
+    returningCallerName: { settled: false, name: null },
     ttsLanguage: input.snapshotAgent.primary_language,
     currentTurnTranscriptFinalAt: null,
     currentTurnFirstAudioLogged: false,
@@ -5559,6 +6398,32 @@ export async function startRuntimeSession(
   });
 
   setState(session, "connecting");
+
+  // Returning caller: the name lookup runs alongside the TTS/STT connects
+  // and is used only if it has already finished when the greeting is
+  // spoken — it never delays the greeting. Unknown, ambiguous (a shared
+  // number with more than one name) or failed → the generic greeting.
+  if (callerId && deps.findReturningCallerName) {
+    deps
+      .findReturningCallerName({
+        organizationId: input.organizationId,
+        businessId: input.businessId,
+        callerE164: callerId,
+        callId: input.callId,
+        country: input.businessCountry ?? null,
+      })
+      .then(
+        (name) => {
+          session.returningCallerName = { settled: true, name };
+        },
+        (err: unknown) => {
+          session.returningCallerName = { settled: true, name: null };
+          log("returning_caller_lookup_failed", session, { message: (err as Error).message });
+        },
+      );
+  } else {
+    session.returningCallerName = { settled: true, name: null };
+  }
 
   // Task 1 FIX (production incident: ~20.4s between runtime_started and
   // tts_connected, with stt_connected arriving only ~183ms after that):
@@ -5735,7 +6600,17 @@ export async function startRuntimeSession(
     return handle;
   }
   try {
-    const greeting = pickGreeting(input.snapshotAgent, input.businessName);
+    const knownName = session.returningCallerName.name;
+    // Presence only — never the name itself.
+    log("greeting_personalization", session, {
+      lookup_settled: session.returningCallerName.settled,
+      personalized: Boolean(knownName),
+    });
+    const greeting = personalizeGreeting(
+      pickGreeting(input.snapshotAgent, input.businessName),
+      knownName,
+      input.snapshotAgent.primary_language,
+    );
     session.turns.push({ role: "assistant", text: greeting, at: new Date().toISOString() });
     await timedStep(session, "greeting_speak", () => speak(session, greeting, "greeting"));
     session.initialGreetingSent = true;

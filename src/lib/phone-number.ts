@@ -97,9 +97,11 @@ const WITHHELD_CALLER_ID_PATTERN =
  * Normalizes the provider-reported inbound caller number (the trusted
  * `From` webhook field) to E.164, or null when it is withheld, malformed,
  * or a placeholder. National-format values are interpreted with the same
- * country rule as normalizePhoneNumber. Caller ID is only ever treated as
- * a contact detail the caller can choose to use — never as proof of
- * identity or authorization.
+ * country rule as normalizePhoneNumber. For a NEW booking, caller ID is
+ * only a contact detail the caller can choose to use. It is also the one
+ * identity check for changing an EXISTING booking by phone (see
+ * calendar/caller-bookings.server.ts) — a number the caller merely speaks
+ * never is.
  */
 export function normalizeCallerId(
   raw: string | null | undefined,
