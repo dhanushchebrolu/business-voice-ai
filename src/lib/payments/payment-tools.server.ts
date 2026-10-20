@@ -36,7 +36,10 @@ import {
 } from "./payment-request-service.server.ts";
 import { RazorpayPaymentProvider } from "./razorpay-payment-provider.server.ts";
 import { PaymentProviderError, type PaymentStatus } from "./payment-provider.ts";
-import { sendWhatsAppPaymentMessage } from "../whatsapp/whatsapp-payments.server.ts";
+import {
+  sendWhatsAppPaymentMessage,
+  paymentLinkMessageText,
+} from "../whatsapp/whatsapp-payments.server.ts";
 import { CalendarProviderError } from "../calendar/calendar-provider.ts";
 import { GoogleCalendarConnectionError } from "../google-calendar/google-calendar-connection.server.ts";
 
@@ -187,9 +190,7 @@ export async function request_payment(
           paymentRequestId: paymentRequest.id,
           customerPhone: booking.customer_phone,
           purpose: "payment_link",
-          bodyText: paymentRequest.paymentLinkUrl
-            ? `Please complete your payment here: ${paymentRequest.paymentLinkUrl}`
-            : "We are preparing your payment link and will send it shortly.",
+          bodyText: paymentLinkMessageText(paymentRequest.paymentLinkUrl),
         },
         fetchImpl,
       );

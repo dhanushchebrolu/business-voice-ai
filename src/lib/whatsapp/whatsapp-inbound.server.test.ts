@@ -2,8 +2,11 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
   verifyWebhookHandshake,
+  verifyWhatsAppWebhookSignature,
   processInboundWhatsAppWebhook,
 } from "./whatsapp-inbound.server.ts";
+import { signMetaWebhookBody } from "../meta/meta-webhook-signature.server.ts";
+import { createFakeDb } from "./whatsapp-test-db.ts";
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -68,208 +71,337 @@ describe("verifyWebhookHandshake", () => {
   });
 });
 
-function makeFakeSupabase(script: { table: string; op: string; result: unknown }[]) {
-  const calls: { table: string; op: string; args: unknown[] }[] = [];
-  let i = 0;
-  function next(table: string, op: string, ...args: unknown[]) {
-    calls.push({ table, op, args });
-    const entry = script[i];
-    i++;
-    if (!entry) throw new Error(`test bug: no scripted response for call ${i} (${table}.${op})`);
-    return entry.result;
-  }
+describe("verifyWhatsAppWebhookSignature", () => {
+  test("verifies against META_APP_SECRET and fails closed without it", () => {
+    const body = '{"entry":[]}';
+    process.env["META_APP_SECRET"] = "app-secret";
+    try {
+      assert.equal(
+        verifyWhatsAppWebhookSignature(body, signMetaWebhookBody(body, "app-secret")),
+        true,
+      );
+      assert.equal(verifyWhatsAppWebhookSignature(body, signMetaWebhookBody(body, "nope")), false);
+      assert.equal(verifyWhatsAppWebhookSignature(body, null), false);
+    } finally {
+      resetEnv();
+    }
+    delete process.env["META_APP_SECRET"];
+    assert.equal(verifyWhatsAppWebhookSignature(body, signMetaWebhookBody(body, "")), false);
+    resetEnv();
+  });
+});
 
-  function insertChain(table: string) {
-    return {
-      then(resolve: (v: unknown) => unknown) {
-        return Promise.resolve(next(table, "insert")).then(resolve);
-      },
-      select() {
-        return {
-          single: () => Promise.resolve(next(table, "insert.select.single")),
-        };
-      },
-    };
-  }
+const ORG_A = "org-a";
+const ORG_B = "org-b";
 
-  function upsertChain(table: string, payload: unknown, opts: unknown) {
-    return {
-      select() {
-        return {
-          single: () => Promise.resolve(next(table, "upsert.select.single", payload, opts)),
-        };
-      },
-    };
-  }
-
-  function selectChain(table: string) {
-    const filters: Record<string, unknown> = {};
-    const chain = {
-      eq(col: string, val: unknown) {
-        filters[col] = val;
-        return chain;
-      },
-      neq(col: string, val: unknown) {
-        filters[col] = val;
-        return chain;
-      },
-      maybeSingle: () => Promise.resolve(next(table, "select.maybeSingle", filters)),
-    };
-    return chain;
-  }
-
-  function updateChain(table: string, payload: unknown) {
-    const filters: Record<string, unknown> = {};
-    const chain = {
-      eq(col: string, val: unknown) {
-        filters[col] = val;
-        return chain;
-      },
-      then(resolve: (v: unknown) => unknown) {
-        return Promise.resolve(next(table, "update", payload, filters)).then(resolve);
-      },
-    };
-    return chain;
-  }
-
-  const client = {
-    from(table: string) {
-      return {
-        select: () => selectChain(table),
-        insert: () => insertChain(table),
-        upsert: (payload: unknown, opts: unknown) => upsertChain(table, payload, opts),
-        update: (payload: unknown) => updateChain(table, payload),
-      };
-    },
+function seed() {
+  return {
+    whatsapp_connections: [
+      { id: "conn-a", organization_id: ORG_A, phone_number_id: "PN_A", status: "connected" },
+      { id: "conn-b", organization_id: ORG_B, phone_number_id: "PN_B", status: "connected" },
+      { id: "conn-old", organization_id: ORG_B, phone_number_id: "PN_OLD", status: "disconnected" },
+    ],
   };
-  return { client: client as never, calls };
 }
 
-describe("processInboundWhatsAppWebhook", () => {
-  test("short-circuits as duplicate on a redelivered event (webhook_events unique violation)", async () => {
-    const { client, calls } = makeFakeSupabase([
-      { table: "webhook_events", op: "insert", result: { error: { code: "23505" } } },
-    ]);
-    const result = await processInboundWhatsAppWebhook(client, {
-      rawBody: JSON.stringify({ entry: [] }),
-      eventId: "hash-1",
-    });
-    assert.equal(result.outcome, "duplicate");
-    assert.equal(calls.length, 1, "must never process the payload after a duplicate dedupe insert");
-  });
+function textMessage(id: string, body: string, timestamp = "1735000000", from = "919876543210") {
+  return { id, from, type: "text", timestamp, text: { body } };
+}
 
-  test("applies a status update to whatsapp_messages by wa_message_id, never touching payment/booking tables", async () => {
-    const payload = {
-      entry: [
-        {
-          changes: [
-            {
-              value: {
-                metadata: { phone_number_id: "1234567890" },
-                statuses: [{ id: "wamid.ABC", status: "delivered", recipient_id: "919876543210" }],
-              },
-            },
-          ],
-        },
-      ],
-    };
-    const { client, calls } = makeFakeSupabase([
-      { table: "webhook_events", op: "insert", result: { error: null } },
+function webhook(phoneNumberId: string, value: Record<string, unknown>) {
+  return JSON.stringify({
+    object: "whatsapp_business_account",
+    entry: [
       {
-        table: "whatsapp_connections",
-        op: "select.maybeSingle",
-        result: { data: { id: "conn-1", organization_id: "org-1" }, error: null },
+        id: "WABA",
+        changes: [
+          { field: "messages", value: { metadata: { phone_number_id: phoneNumberId }, ...value } },
+        ],
       },
-      { table: "whatsapp_messages", op: "update", result: { error: null } },
-      { table: "webhook_events", op: "update", result: { error: null } },
-    ]);
-    const result = await processInboundWhatsAppWebhook(client, {
-      rawBody: JSON.stringify(payload),
-      eventId: "hash-2",
-    });
+    ],
+  });
+}
+
+let eventSeq = 0;
+const run = (client: never, rawBody: string) =>
+  processInboundWhatsAppWebhook(client, { rawBody, eventId: `evt-${++eventSeq}` });
+
+describe("processInboundWhatsAppWebhook — inbound messages", () => {
+  test("stores a new inbound text under the connection's own organization and reports it for an AI reply", async () => {
+    const db = createFakeDb(seed());
+    const result = await run(
+      db.client,
+      webhook("PN_A", {
+        contacts: [{ profile: { name: "Asha" }, wa_id: "919876543210" }],
+        messages: [textMessage("wamid.1", "Hi, is my slot confirmed?")],
+      }),
+    );
     assert.equal(result.outcome, "processed");
-    const updateCall = calls.find((c) => c.table === "whatsapp_messages" && c.op === "update");
-    assert.ok(updateCall);
-    assert.deepEqual(updateCall!.args[0], { status: "delivered" });
+    const [msg] = db.rows("whatsapp_messages");
+    assert.equal(msg!["organization_id"], ORG_A);
+    assert.equal(msg!["whatsapp_connection_id"], "conn-a");
+    assert.equal(msg!["direction"], "inbound");
+    assert.equal(msg!["status"], "received");
+    assert.deepEqual(result.newInboundTextMessageIds, [msg!["id"]]);
+    const [conv] = db.rows("whatsapp_conversations");
+    assert.equal(conv!["organization_id"], ORG_A);
+    assert.equal(conv!["customer_display_name"], "Asha");
+    assert.equal(conv!["last_inbound_at"], new Date(1735000000 * 1000).toISOString());
+    assert.equal(conv!["last_message_preview"], "Hi, is my slot confirmed?");
+    assert.ok(db.log.every((c) => c.table !== "payment_requests" && c.table !== "bookings"));
   });
 
-  test("persists an inbound text message and updates the conversation preview", async () => {
-    const payload = {
-      entry: [
-        {
-          changes: [
-            {
-              value: {
-                metadata: { phone_number_id: "1234567890" },
-                contacts: [{ profile: { name: "Asha" }, wa_id: "919876543210" }],
-                messages: [
-                  {
-                    id: "wamid.XYZ",
-                    from: "919876543210",
-                    type: "text",
-                    timestamp: "1735000000",
-                    text: { body: "Hi, is my slot confirmed?" },
-                  },
-                ],
-              },
-            },
-          ],
-        },
-      ],
-    };
-    const { client, calls } = makeFakeSupabase([
-      { table: "webhook_events", op: "insert", result: { error: null } },
-      {
-        table: "whatsapp_connections",
-        op: "select.maybeSingle",
-        result: { data: { id: "conn-1", organization_id: "org-1" }, error: null },
-      },
-      {
-        table: "whatsapp_conversations",
-        op: "upsert.select.single",
-        result: { data: { id: "conv-1" }, error: null },
-      },
-      { table: "whatsapp_messages", op: "insert", result: { error: null } },
-      { table: "whatsapp_conversations", op: "update", result: { error: null } },
-      { table: "webhook_events", op: "update", result: { error: null } },
-    ]);
-    const result = await processInboundWhatsAppWebhook(client, {
-      rawBody: JSON.stringify(payload),
-      eventId: "hash-3",
+  test("an exact redelivery is a duplicate: nothing stored twice, nothing reported for a reply", async () => {
+    const db = createFakeDb(seed());
+    const body = webhook("PN_A", { messages: [textMessage("wamid.1", "Hello")] });
+    await processInboundWhatsAppWebhook(db.client, { rawBody: body, eventId: "same" });
+    const again = await processInboundWhatsAppWebhook(db.client, {
+      rawBody: body,
+      eventId: "same",
     });
-    assert.equal(result.outcome, "processed");
-    assert.ok(calls.some((c) => c.table === "whatsapp_messages" && c.op === "insert"));
-    assert.ok(calls.every((c) => c.table !== "payment_requests" && c.table !== "bookings"));
+    assert.deepEqual(again, { outcome: "duplicate", newInboundTextMessageIds: [] });
+    assert.equal(db.rows("whatsapp_messages").length, 1);
   });
 
-  test("ignores an event for an unknown phone_number_id rather than throwing", async () => {
-    const payload = {
-      entry: [
-        {
-          changes: [
-            {
-              value: {
-                metadata: { phone_number_id: "unknown-id" },
-                statuses: [{ id: "w1", status: "sent" }],
-              },
-            },
-          ],
-        },
-      ],
-    };
-    const { client } = makeFakeSupabase([
-      { table: "webhook_events", op: "insert", result: { error: null } },
-      {
-        table: "whatsapp_connections",
-        op: "select.maybeSingle",
-        result: { data: null, error: null },
-      },
-      { table: "webhook_events", op: "update", result: { error: null } },
-    ]);
-    const result = await processInboundWhatsAppWebhook(client, {
-      rawBody: JSON.stringify(payload),
-      eventId: "hash-4",
+  test("the same message in a different payload (Meta batches differently on retry) is stored once and not re-reported", async () => {
+    const db = createFakeDb(seed());
+    const first = await run(
+      db.client,
+      webhook("PN_A", { messages: [textMessage("wamid.1", "Hello")] }),
+    );
+    const second = await run(
+      db.client,
+      webhook("PN_A", {
+        messages: [textMessage("wamid.1", "Hello"), textMessage("wamid.2", "Also…", "1735000100")],
+      }),
+    );
+    assert.equal(first.newInboundTextMessageIds.length, 1);
+    assert.equal(second.newInboundTextMessageIds.length, 1, "only wamid.2 is new");
+    assert.equal(db.rows("whatsapp_messages").length, 2);
+  });
+
+  test("non-text messages are stored but never reported for an AI reply", async () => {
+    const db = createFakeDb(seed());
+    const result = await run(
+      db.client,
+      webhook("PN_A", {
+        messages: [
+          { id: "wamid.img", from: "91999", type: "image", timestamp: "1735000000" },
+          { id: "wamid.x", from: "91999", type: "sticker", timestamp: "1735000000" },
+        ],
+      }),
+    );
+    assert.deepEqual(result.newInboundTextMessageIds, []);
+    assert.deepEqual(
+      db
+        .rows("whatsapp_messages")
+        .map((m) => m["message_type"])
+        .sort(),
+      ["image", "unsupported"],
+    );
+  });
+
+  test("a late, out-of-order message never moves the 24-hour window start backwards", async () => {
+    const db = createFakeDb(seed());
+    await run(
+      db.client,
+      webhook("PN_A", { messages: [textMessage("wamid.new", "newer", "1735000500")] }),
+    );
+    await run(
+      db.client,
+      webhook("PN_A", { messages: [textMessage("wamid.old", "older", "1735000000")] }),
+    );
+    const [conv] = db.rows("whatsapp_conversations");
+    assert.equal(conv!["last_inbound_at"], new Date(1735000500 * 1000).toISOString());
+    assert.equal(conv!["last_message_preview"], "newer");
+  });
+
+  test("the tenant comes only from phone_number_id: an unknown or disconnected number stores nothing", async () => {
+    const db = createFakeDb(seed());
+    for (const pn of ["unknown-id", "PN_OLD"]) {
+      const result = await run(
+        db.client,
+        webhook(pn, {
+          messages: [textMessage(`wamid.${pn}`, "hi")],
+          statuses: [{ id: "w1", status: "sent" }],
+        }),
+      );
+      assert.equal(result.outcome, "ignored");
+    }
+    assert.equal(db.rows("whatsapp_messages").length, 0);
+    assert.equal(db.rows("whatsapp_conversations").length, 0);
+  });
+
+  test("malformed payloads are ignored without throwing", async () => {
+    const db = createFakeDb(seed());
+    for (const raw of [
+      "not json",
+      "null",
+      "[]",
+      JSON.stringify({ entry: "x" }),
+      JSON.stringify({ entry: [{ changes: [null, { value: 3 }, { value: { metadata: {} } }] }] }),
+      webhook("PN_A", { messages: [{ type: "text", text: { body: "no id or sender" } }] }),
+      webhook("PN_A", { statuses: [{ status: "delivered" }, { id: "w", status: "bogus" }] }),
+    ]) {
+      const result = await run(db.client, raw);
+      assert.notEqual(result.outcome, "duplicate");
+      assert.deepEqual(result.newInboundTextMessageIds, []);
+    }
+    assert.equal(db.rows("whatsapp_messages").length, 0);
+  });
+
+  test("partial failure: the claim is released and the error propagates so Meta's retry is processed", async () => {
+    let failMessages = true;
+    const db = createFakeDb(seed(), {
+      failWhen: (table, op) =>
+        failMessages && table === "whatsapp_messages" && op === "insert"
+          ? { code: "08006", message: "connection failure" }
+          : null,
     });
-    assert.equal(result.outcome, "ignored");
+    const body = webhook("PN_A", { messages: [textMessage("wamid.1", "Hello")] });
+    await assert.rejects(
+      processInboundWhatsAppWebhook(db.client, { rawBody: body, eventId: "e1" }),
+    );
+    assert.equal(db.rows("webhook_events").length, 0, "claim released");
+    failMessages = false;
+    const retry = await processInboundWhatsAppWebhook(db.client, { rawBody: body, eventId: "e1" });
+    assert.equal(retry.outcome, "processed");
+    assert.equal(retry.newInboundTextMessageIds.length, 1);
+    assert.ok(db.rows("webhook_events")[0]!["processed_at"]);
+  });
+});
+
+describe("processInboundWhatsAppWebhook — delivery statuses", () => {
+  function withOutbound(status: string, connection = "conn-a", org = ORG_A) {
+    const s = seed() as Record<string, Record<string, unknown>[]>;
+    s["whatsapp_messages"] = [
+      {
+        id: "out-1",
+        organization_id: org,
+        whatsapp_connection_id: connection,
+        conversation_id: "c",
+        direction: "outbound",
+        message_type: "text",
+        wa_message_id: "wamid.OUT",
+        status,
+      },
+    ];
+    return createFakeDb(s);
+  }
+
+  test("moves a sent message forward through delivered and read", async () => {
+    const db = withOutbound("sent");
+    await run(db.client, webhook("PN_A", { statuses: [{ id: "wamid.OUT", status: "delivered" }] }));
+    assert.equal(db.rows("whatsapp_messages")[0]!["status"], "delivered");
+    await run(db.client, webhook("PN_A", { statuses: [{ id: "wamid.OUT", status: "read" }] }));
+    assert.equal(db.rows("whatsapp_messages")[0]!["status"], "read");
+  });
+
+  test("never moves backwards: a late 'delivered' or 'sent' can't undo 'read', and 'failed' can't undo 'delivered'", async () => {
+    const db = withOutbound("read");
+    await run(
+      db.client,
+      webhook("PN_A", {
+        statuses: [
+          { id: "wamid.OUT", status: "delivered" },
+          { id: "wamid.OUT", status: "sent" },
+        ],
+      }),
+    );
+    assert.equal(db.rows("whatsapp_messages")[0]!["status"], "read");
+    const db2 = withOutbound("delivered");
+    await run(db2.client, webhook("PN_A", { statuses: [{ id: "wamid.OUT", status: "failed" }] }));
+    assert.equal(db2.rows("whatsapp_messages")[0]!["status"], "delivered");
+  });
+
+  test("a 'failed' status records Meta's short reason, never the raw payload", async () => {
+    const db = withOutbound("sent");
+    await run(
+      db.client,
+      webhook("PN_A", {
+        statuses: [
+          {
+            id: "wamid.OUT",
+            status: "failed",
+            errors: [
+              {
+                code: 131047,
+                title: "Re-engagement message",
+                error_data: { details: "secret-ish" },
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    const row = db.rows("whatsapp_messages")[0]!;
+    assert.equal(row["status"], "failed");
+    assert.equal(row["error_message"], "Re-engagement message (131047)");
+  });
+
+  test("a status is applied only within the connection the payload names (no cross-tenant update by message id)", async () => {
+    const db = withOutbound("sent", "conn-b", ORG_B);
+    await run(db.client, webhook("PN_A", { statuses: [{ id: "wamid.OUT", status: "read" }] }));
+    assert.equal(db.rows("whatsapp_messages")[0]!["status"], "sent");
+  });
+
+  test("unknown status values are skipped, never written", async () => {
+    const db = withOutbound("sent");
+    await run(db.client, webhook("PN_A", { statuses: [{ id: "wamid.OUT", status: "deleted" }] }));
+    assert.equal(db.rows("whatsapp_messages")[0]!["status"], "sent");
+  });
+});
+
+describe("Meta's 'user stopped marketing messages' signal", () => {
+  test("a failed status with error 131050 records a marketing opt-out for that number and business", async () => {
+    const s = seed() as Record<string, Record<string, unknown>[]>;
+    s["whatsapp_connections"]![0]!["business_id"] = "biz-a";
+    s["whatsapp_messages"] = [
+      {
+        id: "out-1",
+        organization_id: ORG_A,
+        whatsapp_connection_id: "conn-a",
+        conversation_id: "c",
+        direction: "outbound",
+        message_type: "template",
+        wa_message_id: "wamid.MKT",
+        status: "sent",
+      },
+    ];
+    const db = createFakeDb(s);
+    await run(
+      db.client,
+      webhook("PN_A", {
+        statuses: [
+          {
+            id: "wamid.MKT",
+            status: "failed",
+            recipient_id: "919876543210",
+            errors: [{ code: 131050, title: "User has stopped marketing messages" }],
+          },
+        ],
+      }),
+    );
+    assert.deepEqual(
+      db
+        .rows("whatsapp_consent_events")
+        .map((e) => [e["business_id"], e["wa_id"], e["scope"], e["action"], e["source"]]),
+      [["biz-a", "919876543210", "marketing", "opt_out", "meta_signal"]],
+    );
+  });
+
+  test("other failures record nothing", async () => {
+    const s = seed() as Record<string, Record<string, unknown>[]>;
+    s["whatsapp_connections"]![0]!["business_id"] = "biz-a";
+    const db = createFakeDb(s);
+    await run(
+      db.client,
+      webhook("PN_A", {
+        statuses: [
+          { id: "w", status: "failed", recipient_id: "919876543210", errors: [{ code: 131026 }] },
+        ],
+      }),
+    );
+    assert.equal(db.rows("whatsapp_consent_events").length, 0);
   });
 });

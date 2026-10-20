@@ -36,6 +36,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import type { ChatMessage } from "./sarvam.server.ts";
+import type { ClaudeTool } from "./claude.server.ts";
 
 type Client = SupabaseClient<Database>;
 
@@ -46,6 +47,20 @@ export interface SharedAgentReplyContext {
   /** Threaded through to tools exactly like voice's callId — e.g. so a payment tool can be traced back to the originating conversation. Optional; channels without a call concept simply omit it. */
   callId?: string | undefined;
   source: "voice" | "whatsapp" | "website" | "manual" | "instagram";
+  /** Tools this channel must not use (neither offered to the model nor executed if it names one anyway). Omitted: every permitted tool, as before. */
+  excludeToolNames?: readonly string[] | undefined;
+  /**
+   * Channel-specific tools, offered alongside the agent's permitted ones
+   * and executed by the channel itself (which closes over its own trusted
+   * identity — e.g. WhatsApp's verified sender number). Their names must
+   * not collide with registry tools.
+   */
+  extraTools?: readonly ChannelTool[] | undefined;
+}
+
+export interface ChannelTool {
+  schema: ClaudeTool;
+  execute: (input: Record<string, unknown>) => Promise<{ content: string; isError: boolean }>;
 }
 
 export interface SharedAgentReplyResult {
@@ -75,7 +90,14 @@ export async function generateSharedAgentReply(
   const systemPrompt = buildAgentInstructions(snapshot);
   const messages: ChatMessage[] = [{ role: "system", content: systemPrompt }, ...history];
 
-  const tools = await resolveAvailableTools(supabaseAdmin, ctx.organizationId, ctx.businessId);
+  const excluded = new Set(ctx.excludeToolNames ?? []);
+  const channelTools = new Map((ctx.extraTools ?? []).map((t) => [t.schema.name, t]));
+  const tools = [
+    ...(await resolveAvailableTools(supabaseAdmin, ctx.organizationId, ctx.businessId)).filter(
+      (tool) => !excluded.has(tool.name) && !channelTools.has(tool.name),
+    ),
+    ...[...channelTools.values()].map((t) => t.schema),
+  ];
   if (tools.length === 0) {
     const { reply } = await claude.runConversation(messages);
     return { reply, toolCalls: [] };
@@ -91,16 +113,23 @@ export async function generateSharedAgentReply(
   // These channels carry no trusted customer phone, so a tool that changes
   // an existing booking is always refused here (guardBookingOwnership).
   const { guardBookingOwnership } = await import("./calendar/caller-bookings.server.ts");
-  const result = await claude.runConversationWithTools(
-    messages,
-    tools,
-    async (name, input) =>
-      (await guardBookingOwnership(
-        supabaseAdmin,
-        { ...toolCtx, callId: ctx.source === "voice" ? ctx.callId : null },
-        name,
-        input,
-      )) ?? executeAiTool(supabaseAdmin, toolCtx, name, input),
+  const result = await claude.runConversationWithTools(messages, tools, async (name, input) =>
+    channelTools.has(name)
+      ? channelTools.get(name)!.execute(input)
+      : excluded.has(name)
+        ? {
+            content: JSON.stringify({
+              success: false,
+              error: { code: "TOOL_NOT_PERMITTED", message: "Not available on this channel." },
+            }),
+            isError: true,
+          }
+        : ((await guardBookingOwnership(
+            supabaseAdmin,
+            { ...toolCtx, callId: ctx.source === "voice" ? ctx.callId : null },
+            name,
+            input,
+          )) ?? executeAiTool(supabaseAdmin, toolCtx, name, input)),
   );
   return { reply: result.reply, toolCalls: result.toolCalls };
 }

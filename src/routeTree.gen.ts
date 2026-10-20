@@ -66,6 +66,8 @@ import { Route as AppCampaignsNewRouteImport } from './routes/app.campaigns.new'
 import { Route as ApiPublicCronDispatchCampaignsRouteImport } from './routes/api/public/cron/dispatch-campaigns'
 import { Route as ApiPublicCronExpirePaymentsRouteImport } from './routes/api/public/cron/expire-payments'
 import { Route as ApiPublicCronSyncGoogleCalendarsRouteImport } from './routes/api/public/cron/sync-google-calendars'
+import { Route as ApiPublicCronWhatsappDispatchRouteImport } from './routes/api/public/cron/whatsapp-dispatch'
+import { Route as ApiPublicCronWhatsappRepliesRouteImport } from './routes/api/public/cron/whatsapp-replies'
 import { Route as ApiPublicSarvamClientContextRouteImport } from './routes/api/public/sarvam/client-context'
 import { Route as ApiPublicWebhooksGoogleCalendarRouteImport } from './routes/api/public/webhooks/google-calendar'
 import { Route as ApiPublicWebhooksInstagramRouteImport } from './routes/api/public/webhooks/instagram'
@@ -368,6 +370,18 @@ const ApiPublicCronSyncGoogleCalendarsRoute =
     path: '/api/public/cron/sync-google-calendars',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicCronWhatsappDispatchRoute =
+  ApiPublicCronWhatsappDispatchRouteImport.update({
+    id: '/api/public/cron/whatsapp-dispatch',
+    path: '/api/public/cron/whatsapp-dispatch',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicCronWhatsappRepliesRoute =
+  ApiPublicCronWhatsappRepliesRouteImport.update({
+    id: '/api/public/cron/whatsapp-replies',
+    path: '/api/public/cron/whatsapp-replies',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicSarvamClientContextRoute =
   ApiPublicSarvamClientContextRouteImport.update({
     id: '/api/public/sarvam/client-context',
@@ -499,6 +513,8 @@ export interface FileRoutesByFullPath {
   '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
   '/api/public/cron/expire-payments': typeof ApiPublicCronExpirePaymentsRoute
   '/api/public/cron/sync-google-calendars': typeof ApiPublicCronSyncGoogleCalendarsRoute
+  '/api/public/cron/whatsapp-dispatch': typeof ApiPublicCronWhatsappDispatchRoute
+  '/api/public/cron/whatsapp-replies': typeof ApiPublicCronWhatsappRepliesRoute
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
   '/api/public/webhooks/google-calendar': typeof ApiPublicWebhooksGoogleCalendarRoute
   '/api/public/webhooks/instagram': typeof ApiPublicWebhooksInstagramRoute
@@ -566,6 +582,8 @@ export interface FileRoutesByTo {
   '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
   '/api/public/cron/expire-payments': typeof ApiPublicCronExpirePaymentsRoute
   '/api/public/cron/sync-google-calendars': typeof ApiPublicCronSyncGoogleCalendarsRoute
+  '/api/public/cron/whatsapp-dispatch': typeof ApiPublicCronWhatsappDispatchRoute
+  '/api/public/cron/whatsapp-replies': typeof ApiPublicCronWhatsappRepliesRoute
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
   '/api/public/webhooks/google-calendar': typeof ApiPublicWebhooksGoogleCalendarRoute
   '/api/public/webhooks/instagram': typeof ApiPublicWebhooksInstagramRoute
@@ -638,6 +656,8 @@ export interface FileRoutesById {
   '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
   '/api/public/cron/expire-payments': typeof ApiPublicCronExpirePaymentsRoute
   '/api/public/cron/sync-google-calendars': typeof ApiPublicCronSyncGoogleCalendarsRoute
+  '/api/public/cron/whatsapp-dispatch': typeof ApiPublicCronWhatsappDispatchRoute
+  '/api/public/cron/whatsapp-replies': typeof ApiPublicCronWhatsappRepliesRoute
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
   '/api/public/webhooks/google-calendar': typeof ApiPublicWebhooksGoogleCalendarRoute
   '/api/public/webhooks/instagram': typeof ApiPublicWebhooksInstagramRoute
@@ -711,6 +731,8 @@ export interface FileRouteTypes {
     | '/api/public/cron/dispatch-campaigns'
     | '/api/public/cron/expire-payments'
     | '/api/public/cron/sync-google-calendars'
+    | '/api/public/cron/whatsapp-dispatch'
+    | '/api/public/cron/whatsapp-replies'
     | '/api/public/sarvam/client-context'
     | '/api/public/webhooks/google-calendar'
     | '/api/public/webhooks/instagram'
@@ -778,6 +800,8 @@ export interface FileRouteTypes {
     | '/api/public/cron/dispatch-campaigns'
     | '/api/public/cron/expire-payments'
     | '/api/public/cron/sync-google-calendars'
+    | '/api/public/cron/whatsapp-dispatch'
+    | '/api/public/cron/whatsapp-replies'
     | '/api/public/sarvam/client-context'
     | '/api/public/webhooks/google-calendar'
     | '/api/public/webhooks/instagram'
@@ -849,6 +873,8 @@ export interface FileRouteTypes {
     | '/api/public/cron/dispatch-campaigns'
     | '/api/public/cron/expire-payments'
     | '/api/public/cron/sync-google-calendars'
+    | '/api/public/cron/whatsapp-dispatch'
+    | '/api/public/cron/whatsapp-replies'
     | '/api/public/sarvam/client-context'
     | '/api/public/webhooks/google-calendar'
     | '/api/public/webhooks/instagram'
@@ -883,6 +909,8 @@ export interface RootRouteChildren {
   ApiPublicCronDispatchCampaignsRoute: typeof ApiPublicCronDispatchCampaignsRoute
   ApiPublicCronExpirePaymentsRoute: typeof ApiPublicCronExpirePaymentsRoute
   ApiPublicCronSyncGoogleCalendarsRoute: typeof ApiPublicCronSyncGoogleCalendarsRoute
+  ApiPublicCronWhatsappDispatchRoute: typeof ApiPublicCronWhatsappDispatchRoute
+  ApiPublicCronWhatsappRepliesRoute: typeof ApiPublicCronWhatsappRepliesRoute
   ApiPublicSarvamClientContextRoute: typeof ApiPublicSarvamClientContextRoute
   ApiPublicWebhooksGoogleCalendarRoute: typeof ApiPublicWebhooksGoogleCalendarRoute
   ApiPublicWebhooksInstagramRoute: typeof ApiPublicWebhooksInstagramRoute
@@ -1298,6 +1326,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicCronSyncGoogleCalendarsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/cron/whatsapp-dispatch': {
+      id: '/api/public/cron/whatsapp-dispatch'
+      path: '/api/public/cron/whatsapp-dispatch'
+      fullPath: '/api/public/cron/whatsapp-dispatch'
+      preLoaderRoute: typeof ApiPublicCronWhatsappDispatchRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/cron/whatsapp-replies': {
+      id: '/api/public/cron/whatsapp-replies'
+      path: '/api/public/cron/whatsapp-replies'
+      fullPath: '/api/public/cron/whatsapp-replies'
+      preLoaderRoute: typeof ApiPublicCronWhatsappRepliesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/sarvam/client-context': {
       id: '/api/public/sarvam/client-context'
       path: '/api/public/sarvam/client-context'
@@ -1534,6 +1576,8 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicCronDispatchCampaignsRoute: ApiPublicCronDispatchCampaignsRoute,
   ApiPublicCronExpirePaymentsRoute: ApiPublicCronExpirePaymentsRoute,
   ApiPublicCronSyncGoogleCalendarsRoute: ApiPublicCronSyncGoogleCalendarsRoute,
+  ApiPublicCronWhatsappDispatchRoute: ApiPublicCronWhatsappDispatchRoute,
+  ApiPublicCronWhatsappRepliesRoute: ApiPublicCronWhatsappRepliesRoute,
   ApiPublicSarvamClientContextRoute: ApiPublicSarvamClientContextRoute,
   ApiPublicWebhooksGoogleCalendarRoute: ApiPublicWebhooksGoogleCalendarRoute,
   ApiPublicWebhooksInstagramRoute: ApiPublicWebhooksInstagramRoute,

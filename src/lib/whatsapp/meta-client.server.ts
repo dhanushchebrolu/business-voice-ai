@@ -71,6 +71,15 @@ export { MetaApiError };
 
 export type MetaWhatsAppClientConfig = MetaGraphClientConfig;
 
+export interface MetaMessageTemplate {
+  id: string | null;
+  name: string;
+  language: string;
+  status: string;
+  category: string;
+  bodyText: string | null;
+}
+
 export class MetaWhatsAppClient extends MetaGraphClientBase {
   /**
    * Exchanges the short-lived authorization code Embedded Signup v4
@@ -121,6 +130,60 @@ export class MetaWhatsAppClient extends MetaGraphClientBase {
       verifiedName: typeof parsed["verified_name"] === "string" ? parsed["verified_name"] : null,
       qualityRating: typeof parsed["quality_rating"] === "string" ? parsed["quality_rating"] : null,
     };
+  }
+
+  /**
+   * Lists the WABA's Message Templates (read-only). Follows Meta's cursor
+   * paging up to `maxPages` pages. Each template's own status/category are
+   * Meta's — this client never decides whether a template is usable.
+   */
+  async listMessageTemplates(
+    wabaId: string,
+    accessToken: string,
+    maxPages = 10,
+  ): Promise<MetaMessageTemplate[]> {
+    const templates: MetaMessageTemplate[] = [];
+    let after: string | undefined;
+    for (let page = 0; page < maxPages; page++) {
+      const parsed = await this.request<Record<string, unknown>>(
+        "GET",
+        `/${encodeURIComponent(wabaId)}/message_templates`,
+        {
+          query: {
+            fields: "id,name,language,status,category,components",
+            limit: "100",
+            ...(after ? { after } : {}),
+          },
+          accessToken,
+        },
+      );
+      const data = Array.isArray(parsed["data"])
+        ? (parsed["data"] as Record<string, unknown>[])
+        : [];
+      for (const t of data) {
+        const name = typeof t["name"] === "string" ? t["name"] : null;
+        const language = typeof t["language"] === "string" ? t["language"] : null;
+        if (!name || !language) continue;
+        const components = Array.isArray(t["components"])
+          ? (t["components"] as Record<string, unknown>[])
+          : [];
+        const body = components.find((c) => c["type"] === "BODY");
+        templates.push({
+          id: typeof t["id"] === "string" ? t["id"] : null,
+          name,
+          language,
+          status: typeof t["status"] === "string" ? t["status"] : "UNKNOWN",
+          category: typeof t["category"] === "string" ? t["category"] : "UNKNOWN",
+          bodyText: typeof body?.["text"] === "string" ? body["text"] : null,
+        });
+      }
+      const paging = parsed["paging"] as
+        { cursors?: { after?: unknown }; next?: unknown } | undefined;
+      const next = paging?.cursors?.after;
+      if (!paging?.next || typeof next !== "string") break;
+      after = next;
+    }
+    return templates;
   }
 
   /**

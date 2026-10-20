@@ -2480,6 +2480,162 @@ export type Database = {
         };
         Relationships: [];
       };
+      whatsapp_audit_log: {
+        Row: {
+          action: string;
+          actor_type: string;
+          actor_user_id: string | null;
+          business_id: string | null;
+          created_at: string;
+          details: Json;
+          id: string;
+          organization_id: string;
+          subject_id: string | null;
+          subject_type: string;
+        };
+        Insert: {
+          action: string;
+          actor_type: string;
+          actor_user_id?: string | null;
+          business_id?: string | null;
+          created_at?: string;
+          details?: Json;
+          id?: string;
+          organization_id: string;
+          subject_id?: string | null;
+          subject_type: string;
+        };
+        Update: {
+          action?: string;
+          actor_type?: string;
+          actor_user_id?: string | null;
+          business_id?: string | null;
+          created_at?: string;
+          details?: Json;
+          id?: string;
+          organization_id?: string;
+          subject_id?: string | null;
+          subject_type?: string;
+        };
+        Relationships: [];
+      };
+      whatsapp_campaign_recipients: {
+        Row: {
+          attempts: number;
+          campaign_id: string;
+          contact_id: string | null;
+          created_at: string;
+          error: string | null;
+          id: string;
+          locked_at: string | null;
+          next_attempt_at: string;
+          organization_id: string;
+          sent_at: string | null;
+          skip_reason: string | null;
+          status: string;
+          updated_at: string;
+          wa_id: string;
+          whatsapp_message_id: string | null;
+        };
+        Insert: {
+          attempts?: number;
+          campaign_id: string;
+          contact_id?: string | null;
+          created_at?: string;
+          error?: string | null;
+          id?: string;
+          locked_at?: string | null;
+          next_attempt_at?: string;
+          organization_id: string;
+          sent_at?: string | null;
+          skip_reason?: string | null;
+          status?: string;
+          updated_at?: string;
+          wa_id: string;
+          whatsapp_message_id?: string | null;
+        };
+        Update: {
+          attempts?: number;
+          campaign_id?: string;
+          contact_id?: string | null;
+          created_at?: string;
+          error?: string | null;
+          id?: string;
+          locked_at?: string | null;
+          next_attempt_at?: string;
+          organization_id?: string;
+          sent_at?: string | null;
+          skip_reason?: string | null;
+          status?: string;
+          updated_at?: string;
+          wa_id?: string;
+          whatsapp_message_id?: string | null;
+        };
+        Relationships: [];
+      };
+      whatsapp_campaigns: {
+        Row: {
+          audience: Json;
+          business_id: string;
+          completed_at: string | null;
+          created_at: string;
+          created_by: string | null;
+          id: string;
+          launched_at: string | null;
+          max_per_minute: number;
+          name: string;
+          organization_id: string;
+          paused_reason: string | null;
+          schedule: Json;
+          scheduled_at: string | null;
+          status: string;
+          template_id: string;
+          template_params: Json;
+          updated_at: string;
+          whatsapp_connection_id: string;
+        };
+        Insert: {
+          audience?: Json;
+          business_id: string;
+          completed_at?: string | null;
+          created_at?: string;
+          created_by?: string | null;
+          id?: string;
+          launched_at?: string | null;
+          max_per_minute?: number;
+          name: string;
+          organization_id: string;
+          paused_reason?: string | null;
+          schedule?: Json;
+          scheduled_at?: string | null;
+          status?: string;
+          template_id: string;
+          template_params?: Json;
+          updated_at?: string;
+          whatsapp_connection_id: string;
+        };
+        Update: {
+          audience?: Json;
+          business_id?: string;
+          completed_at?: string | null;
+          created_at?: string;
+          created_by?: string | null;
+          id?: string;
+          launched_at?: string | null;
+          max_per_minute?: number;
+          name?: string;
+          organization_id?: string;
+          paused_reason?: string | null;
+          schedule?: Json;
+          scheduled_at?: string | null;
+          status?: string;
+          template_id?: string;
+          template_params?: Json;
+          updated_at?: string;
+          whatsapp_connection_id?: string;
+        };
+        Relationships: [];
+      };
       whatsapp_connections: {
         Row: {
           access_token_ciphertext: string | null;
@@ -2493,9 +2649,13 @@ export type Database = {
           last_connected_at: string | null;
           last_error: string | null;
           metadata: Json;
+          notifications_enabled: boolean;
+          notifications_enabled_at: string | null;
+          notifications_enabled_by: string | null;
           organization_id: string;
           phone_number_id: string;
           status: string;
+          transactional_consent_basis: string | null;
           two_step_pin_ciphertext: string | null;
           updated_at: string;
           verified_name: string | null;
@@ -2514,9 +2674,13 @@ export type Database = {
           last_connected_at?: string | null;
           last_error?: string | null;
           metadata?: Json;
+          notifications_enabled?: boolean;
+          notifications_enabled_at?: string | null;
+          notifications_enabled_by?: string | null;
           organization_id: string;
           phone_number_id: string;
           status?: string;
+          transactional_consent_basis?: string | null;
           two_step_pin_ciphertext?: string | null;
           updated_at?: string;
           verified_name?: string | null;
@@ -2535,9 +2699,13 @@ export type Database = {
           last_connected_at?: string | null;
           last_error?: string | null;
           metadata?: Json;
+          notifications_enabled?: boolean;
+          notifications_enabled_at?: string | null;
+          notifications_enabled_by?: string | null;
           organization_id?: string;
           phone_number_id?: string;
           status?: string;
+          transactional_consent_basis?: string | null;
           two_step_pin_ciphertext?: string | null;
           updated_at?: string;
           verified_name?: string | null;
@@ -2568,12 +2736,57 @@ export type Database = {
           },
         ];
       };
+      whatsapp_consent_events: {
+        Row: {
+          action: string;
+          actor_user_id: string | null;
+          business_id: string;
+          contact_id: string | null;
+          created_at: string;
+          evidence: string | null;
+          id: string;
+          organization_id: string;
+          scope: string;
+          source: string;
+          wa_id: string;
+        };
+        Insert: {
+          action: string;
+          actor_user_id?: string | null;
+          business_id: string;
+          contact_id?: string | null;
+          created_at?: string;
+          evidence?: string | null;
+          id?: string;
+          organization_id: string;
+          scope: string;
+          source: string;
+          wa_id: string;
+        };
+        Update: {
+          action?: string;
+          actor_user_id?: string | null;
+          business_id?: string;
+          contact_id?: string | null;
+          created_at?: string;
+          evidence?: string | null;
+          id?: string;
+          organization_id?: string;
+          scope?: string;
+          source?: string;
+          wa_id?: string;
+        };
+        Relationships: [];
+      };
       whatsapp_conversations: {
         Row: {
+          ai_enabled: boolean;
           contact_id: string | null;
           created_at: string;
           customer_display_name: string | null;
+          handoff_requested_at: string | null;
           id: string;
+          last_inbound_at: string | null;
           last_message_at: string | null;
           last_message_preview: string | null;
           organization_id: string;
@@ -2584,10 +2797,13 @@ export type Database = {
           whatsapp_connection_id: string;
         };
         Insert: {
+          ai_enabled?: boolean;
           contact_id?: string | null;
           created_at?: string;
           customer_display_name?: string | null;
+          handoff_requested_at?: string | null;
           id?: string;
+          last_inbound_at?: string | null;
           last_message_at?: string | null;
           last_message_preview?: string | null;
           organization_id: string;
@@ -2598,10 +2814,13 @@ export type Database = {
           whatsapp_connection_id: string;
         };
         Update: {
+          ai_enabled?: boolean;
           contact_id?: string | null;
           created_at?: string;
           customer_display_name?: string | null;
+          handoff_requested_at?: string | null;
           id?: string;
+          last_inbound_at?: string | null;
           last_message_at?: string | null;
           last_message_preview?: string | null;
           organization_id?: string;
@@ -2637,6 +2856,7 @@ export type Database = {
       };
       whatsapp_messages: {
         Row: {
+          attempts: number;
           contact_id: string | null;
           content: string | null;
           conversation_id: string;
@@ -2648,11 +2868,13 @@ export type Database = {
           metadata: Json;
           occurred_at: string;
           organization_id: string;
+          reply_to_message_id: string | null;
           status: string;
           wa_message_id: string | null;
           whatsapp_connection_id: string;
         };
         Insert: {
+          attempts?: number;
           contact_id?: string | null;
           content?: string | null;
           conversation_id: string;
@@ -2664,11 +2886,13 @@ export type Database = {
           metadata?: Json;
           occurred_at?: string;
           organization_id: string;
+          reply_to_message_id?: string | null;
           status?: string;
           wa_message_id?: string | null;
           whatsapp_connection_id: string;
         };
         Update: {
+          attempts?: number;
           contact_id?: string | null;
           content?: string | null;
           conversation_id?: string;
@@ -2680,6 +2904,7 @@ export type Database = {
           metadata?: Json;
           occurred_at?: string;
           organization_id?: string;
+          reply_to_message_id?: string | null;
           status?: string;
           wa_message_id?: string | null;
           whatsapp_connection_id?: string;
@@ -3863,6 +4088,207 @@ export type Database = {
           },
         ];
       };
+      whatsapp_notifications: {
+        Row: {
+          attempts: number;
+          booking_id: string | null;
+          business_id: string;
+          created_at: string;
+          dedupe_key: string;
+          id: string;
+          kind: string;
+          last_error: string | null;
+          locked_at: string | null;
+          next_attempt_at: string;
+          organization_id: string;
+          payload: Json;
+          payment_request_id: string | null;
+          sent_at: string | null;
+          skip_reason: string | null;
+          status: string;
+          updated_at: string;
+          whatsapp_message_id: string | null;
+        };
+        Insert: {
+          attempts?: number;
+          booking_id?: string | null;
+          business_id: string;
+          created_at?: string;
+          dedupe_key: string;
+          id?: string;
+          kind: string;
+          last_error?: string | null;
+          locked_at?: string | null;
+          next_attempt_at?: string;
+          organization_id: string;
+          payload?: Json;
+          payment_request_id?: string | null;
+          sent_at?: string | null;
+          skip_reason?: string | null;
+          status?: string;
+          updated_at?: string;
+          whatsapp_message_id?: string | null;
+        };
+        Update: {
+          attempts?: number;
+          booking_id?: string | null;
+          business_id?: string;
+          created_at?: string;
+          dedupe_key?: string;
+          id?: string;
+          kind?: string;
+          last_error?: string | null;
+          locked_at?: string | null;
+          next_attempt_at?: string;
+          organization_id?: string;
+          payload?: Json;
+          payment_request_id?: string | null;
+          sent_at?: string | null;
+          skip_reason?: string | null;
+          status?: string;
+          updated_at?: string;
+          whatsapp_message_id?: string | null;
+        };
+        Relationships: [];
+      };
+      whatsapp_pending_actions: {
+        Row: {
+          action: string;
+          business_id: string;
+          conversation_id: string;
+          created_at: string;
+          decided_by_message_id: string | null;
+          error: string | null;
+          expires_at: string;
+          id: string;
+          organization_id: string;
+          params: Json;
+          proposed_in_message_id: string | null;
+          result: Json | null;
+          status: string;
+          summary: string;
+          updated_at: string;
+        };
+        Insert: {
+          action: string;
+          business_id: string;
+          conversation_id: string;
+          created_at?: string;
+          decided_by_message_id?: string | null;
+          error?: string | null;
+          expires_at: string;
+          id?: string;
+          organization_id: string;
+          params: Json;
+          proposed_in_message_id?: string | null;
+          result?: Json | null;
+          status?: string;
+          summary: string;
+          updated_at?: string;
+        };
+        Update: {
+          action?: string;
+          business_id?: string;
+          conversation_id?: string;
+          created_at?: string;
+          decided_by_message_id?: string | null;
+          error?: string | null;
+          expires_at?: string;
+          id?: string;
+          organization_id?: string;
+          params?: Json;
+          proposed_in_message_id?: string | null;
+          result?: Json | null;
+          status?: string;
+          summary?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      whatsapp_suppressions: {
+        Row: {
+          business_id: string;
+          created_at: string;
+          created_by: string | null;
+          details: string | null;
+          id: string;
+          organization_id: string;
+          reason: string;
+          wa_id: string;
+        };
+        Insert: {
+          business_id: string;
+          created_at?: string;
+          created_by?: string | null;
+          details?: string | null;
+          id?: string;
+          organization_id: string;
+          reason: string;
+          wa_id: string;
+        };
+        Update: {
+          business_id?: string;
+          created_at?: string;
+          created_by?: string | null;
+          details?: string | null;
+          id?: string;
+          organization_id?: string;
+          reason?: string;
+          wa_id?: string;
+        };
+        Relationships: [];
+      };
+      whatsapp_templates: {
+        Row: {
+          body_param_count: number;
+          body_text: string | null;
+          category: string;
+          created_at: string;
+          id: string;
+          language: string;
+          meta_template_id: string | null;
+          name: string;
+          organization_id: string;
+          purpose: string | null;
+          status: string;
+          synced_at: string;
+          updated_at: string;
+          whatsapp_connection_id: string;
+        };
+        Insert: {
+          body_param_count?: number;
+          body_text?: string | null;
+          category: string;
+          created_at?: string;
+          id?: string;
+          language: string;
+          meta_template_id?: string | null;
+          name: string;
+          organization_id: string;
+          purpose?: string | null;
+          status: string;
+          synced_at?: string;
+          updated_at?: string;
+          whatsapp_connection_id: string;
+        };
+        Update: {
+          body_param_count?: number;
+          body_text?: string | null;
+          category?: string;
+          created_at?: string;
+          id?: string;
+          language?: string;
+          meta_template_id?: string | null;
+          name?: string;
+          organization_id?: string;
+          purpose?: string | null;
+          status?: string;
+          synced_at?: string;
+          updated_at?: string;
+          whatsapp_connection_id?: string;
+        };
+        Relationships: [];
+      };
     };
     Views: {
       [_ in never]: never;
@@ -3963,6 +4389,19 @@ export type Database = {
           timezone: string;
           updated_at: string;
         };
+      };
+      enqueue_whatsapp_notification: {
+        Args: {
+          p_booking_id: string | null;
+          p_business_id: string;
+          p_dedupe_key: string;
+          p_delay: unknown;
+          p_kind: string;
+          p_organization_id: string;
+          p_payload: Json;
+          p_payment_request_id: string | null;
+        };
+        Returns: undefined;
       };
       reschedule_booking_atomic: {
         Args: {

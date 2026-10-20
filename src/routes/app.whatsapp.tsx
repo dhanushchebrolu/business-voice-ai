@@ -15,6 +15,8 @@ import {
   EmptyState,
 } from "@/components/app/primitives";
 import { ServiceLocked } from "@/components/app/ServiceLocked";
+import { WhatsAppConversationsPanel } from "@/components/app/WhatsAppConversationsPanel";
+import { WhatsAppMessagingPanel } from "@/components/app/WhatsAppMessagingPanel";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -390,6 +392,13 @@ function WhatsAppPage() {
           )}
         </SectionCard>
       )}
+
+      {!whatsappLocked && orgId && connections && connections.length > 0 ? (
+        <>
+          <WhatsAppConversationsPanel orgId={orgId} />
+          <WhatsAppMessagingPanel orgId={orgId} />
+        </>
+      ) : null}
     </div>
   );
 }

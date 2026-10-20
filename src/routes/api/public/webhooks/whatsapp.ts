@@ -1,30 +1,24 @@
 import { createFileRoute } from "@tanstack/react-router";
 
 /**
- * Meta WhatsApp Cloud API webhook — the two things Meta requires and no
- * more (Phase 4 WhatsApp scope: "Meta webhook verification. Delivery
- * status handling." — NOT a full inbound-conversation/AI-reply pipeline):
+ * Meta WhatsApp Cloud API webhook.
  *
- *   GET  — Meta's one-time (and reconnect-time) subscription handshake.
- *          Echoes back hub.challenge only if hub.verify_token matches our
- *          own WHATSAPP_WEBHOOK_VERIFY_TOKEN (a Klyro-generated shared
- *          secret configured in the Meta App Dashboard's webhook
- *          subscription form — never a Meta-issued value).
- *   POST — delivery-status updates for messages we sent (sent/delivered/
- *          read/failed) plus persistence of inbound customer messages
- *          (needed for whatsapp-payments.server.ts's own 24-hour
- *          free-form-window check — see whatsapp-inbound.server.ts's own
- *          doc comment). No AI reply is ever generated from this route.
+ *   GET  — Meta's subscription handshake. Echoes back hub.challenge only if
+ *          hub.verify_token matches our own WHATSAPP_WEBHOOK_VERIFY_TOKEN (a
+ *          ClickAI-generated secret entered in the Meta App Dashboard).
+ *   POST — authenticated first: the X-Hub-Signature-256 HMAC of the raw body
+ *          with META_APP_SECRET must match, or the request is refused (403)
+ *          before anything is parsed or stored. Then delivery-status updates
+ *          and inbound messages are stored (whatsapp-inbound.server.ts), Meta
+ *          gets its 200, and AI replies to new inbound text messages run in
+ *          the background (whatsapp-ai-reply.server.ts) — never delaying the
+ *          acknowledgement. If storing fails, the event's claim is released
+ *          and the route answers 500 so Meta retries.
  *
- * Idempotency reuses the existing generic webhook_events table
- * (provider='whatsapp'), per that table's own established convention
- * (see 20260923090000_whatsapp_business_integration.sql's header comment)
- * — no new table introduced. Meta's POST body itself has no single
- * request-level id, so the raw body is hashed to form a stable dedupe key
- * for exact-duplicate redelivery; per-item idempotency for individual
- * messages/statuses is additionally handled by whatsapp_messages' own
- * constraints (defense-in-depth, same pattern the migration documents for
- * call_logs.provider_call_id).
+ * Idempotency: the raw body is hashed into a webhook_events claim (provider
+ * 'whatsapp') for exact redeliveries, and each message is unique per
+ * (connection, wa_message_id), so a retry never stores or answers a message
+ * twice.
  */
 export const Route = createFileRoute("/api/public/webhooks/whatsapp")({
   server: {
@@ -47,16 +41,18 @@ export const Route = createFileRoute("/api/public/webhooks/whatsapp")({
       },
       POST: async ({ request }) => {
         const raw = await request.text();
-
-        const { processInboundWhatsAppWebhook } =
+        const { verifyWhatsAppWebhookSignature, processInboundWhatsAppWebhook } =
           await import("@/lib/whatsapp/whatsapp-inbound.server");
+
+        // Authenticate before parsing or storing anything: Meta signs every
+        // POST with the app secret (X-Hub-Signature-256).
+        if (!verifyWhatsAppWebhookSignature(raw, request.headers.get("x-hub-signature-256"))) {
+          console.error("whatsapp_webhook:invalid_signature");
+          return new Response("Forbidden", { status: 403 });
+        }
+
         const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
         const { createHash } = await import("node:crypto");
-
-        // Meta's payload has no request-level event id (unlike Razorpay's
-        // x-razorpay-event-id header); a hash of the exact body is a
-        // stable, collision-safe dedupe key for the webhook_events unique
-        // index (provider, event_id) covering exact-duplicate redelivery.
         const eventId = createHash("sha256").update(raw).digest("hex");
 
         try {
@@ -64,21 +60,33 @@ export const Route = createFileRoute("/api/public/webhooks/whatsapp")({
             rawBody: raw,
             eventId,
           });
+          // AI replies run after Meta has its 200 — never blocking the
+          // acknowledgement on model latency. An interrupted reply is picked
+          // up by /api/public/cron/whatsapp-replies.
+          if (result.newInboundTextMessageIds.length > 0) {
+            const { replyToInboundWhatsAppMessages } =
+              await import("@/lib/whatsapp/whatsapp-ai-reply.server");
+            const { getRequestWaitUntil, runInBackground } =
+              await import("@/lib/background-task.server");
+            runInBackground(
+              replyToInboundWhatsAppMessages(supabaseAdmin, result.newInboundTextMessageIds),
+              getRequestWaitUntil(request),
+              "whatsapp_ai_reply:background_failed",
+            );
+          }
           return new Response(JSON.stringify({ outcome: result.outcome }), {
             headers: { "content-type": "application/json" },
           });
         } catch (err) {
+          // The event's claim was released: answer 5xx so Meta retries it.
           console.error(
             "whatsapp_webhook:processing_failed",
-            err instanceof Error ? err.message : err,
+            err instanceof Error
+              ? err.message
+              : ((err as { message?: string } | null)?.message ?? String(err)),
           );
-          // Always 200 to Meta even on an internal processing error — a
-          // non-2xx response makes Meta retry-storm the same batch, and a
-          // failure here is never payment/booking truth (this route never
-          // touches either), so there is nothing unsafe about acking receipt
-          // while logging the failure for investigation.
           return new Response(JSON.stringify({ outcome: "error" }), {
-            status: 200,
+            status: 500,
             headers: { "content-type": "application/json" },
           });
         }
