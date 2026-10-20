@@ -58,7 +58,11 @@ export interface SendPaymentMessageResult {
   error?: string;
   /** For a failure: whether trying again later is safe (Meta did not accept the message). */
   retryable?: boolean;
-  /** For skipped_not_permitted: why (invalid_phone, suppressed, opted_out). */
+  /** For skipped_duplicate: the existing message's status ('queued' = still in flight or outcome unknown). */
+  existingStatus?: string | null;
+  /** For a failure: the sender's code (e.g. template_missing, template_not_approved). */
+  code?: string;
+  /** For skipped_not_permitted: why (invalid_phone, suppressed, opted_out, notifications_disabled, no_consent_basis). */
   reason?: string;
 }
 
@@ -102,12 +106,17 @@ export async function sendWhatsAppPaymentMessage(
     case "sent":
       return { outcome: "sent" };
     case "skipped_duplicate":
-      return { outcome: "skipped_duplicate" };
+      return { outcome: "skipped_duplicate", existingStatus: result.existingStatus };
     case "skipped":
       return result.reason === "no_connection"
         ? { outcome: "skipped_no_connection" }
         : { outcome: "skipped_not_permitted", reason: result.reason };
     case "failed":
-      return { outcome: "failed", error: result.error, retryable: result.retryable };
+      return {
+        outcome: "failed",
+        code: result.code,
+        error: result.error,
+        retryable: result.retryable,
+      };
   }
 }

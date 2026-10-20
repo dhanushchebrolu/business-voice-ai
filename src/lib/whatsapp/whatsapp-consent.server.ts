@@ -73,30 +73,102 @@ export async function recordConsentEvent(
   if (error) throw error;
 }
 
+/** Rows read per request: at or below PostgREST's default max-rows, so a page is never silently cut short. */
+export const CONSENT_PAGE_SIZE = 1000;
+const WA_ID_CHUNK = 100;
+
+type ConsentAction = "opt_in" | "opt_out";
+interface ConsentRow {
+  wa_id: string;
+  action: string;
+  created_at: string;
+  contact_id?: string | null;
+}
+
+/**
+ * Folds consent rows into the latest action per number. The newest
+ * created_at wins; on an exact tie an opt-out wins, so the answer never
+ * depends on row order and an opt-out can't be lost to a same-instant
+ * opt-in.
+ */
+export function foldLatestConsent(
+  rows: Iterable<ConsentRow>,
+  into = new Map<string, { action: ConsentAction; at: number; contactId: string | null }>(),
+) {
+  for (const row of rows) {
+    const at = new Date(row.created_at).getTime();
+    const action: ConsentAction = row.action === "opt_out" ? "opt_out" : "opt_in";
+    const current = into.get(row.wa_id);
+    if (
+      !current ||
+      at > current.at ||
+      (at === current.at && action === "opt_out" && current.action !== "opt_out")
+    ) {
+      into.set(row.wa_id, { action, at, contactId: row.contact_id ?? current?.contactId ?? null });
+    }
+  }
+  return into;
+}
+
+/**
+ * Reads every consent row matching `filter`, page by page in a stable order
+ * (newest first, then id), so no row is skipped however many there are.
+ * Rows inserted while paging only push others down a page, so at worst a
+ * row is read twice, which folding tolerates.
+ */
+async function readAllConsentRows(
+  supabaseAdmin: Client,
+  businessId: string,
+  scope: ConsentScope,
+  waIds: string[] | null,
+): Promise<ConsentRow[]> {
+  const rows: ConsentRow[] = [];
+  for (let offset = 0; ; offset += CONSENT_PAGE_SIZE) {
+    let query = supabaseAdmin
+      .from("whatsapp_consent_events")
+      .select("wa_id, action, created_at, contact_id")
+      .eq("business_id", businessId)
+      .eq("scope", scope);
+    if (waIds) query = query.in("wa_id", waIds);
+    const { data, error } = await query
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
+      .range(offset, offset + CONSENT_PAGE_SIZE - 1);
+    if (error) throw error;
+    rows.push(...(data ?? []));
+    if (!data || data.length < CONSENT_PAGE_SIZE) return rows;
+  }
+}
+
 /** Latest consent action per wa_id for one business and scope (absent = never recorded). */
 export async function latestConsent(
   supabaseAdmin: Client,
   businessId: string,
   scope: ConsentScope,
   waIds: string[],
-): Promise<Map<string, "opt_in" | "opt_out">> {
-  const result = new Map<string, "opt_in" | "opt_out">();
-  for (let i = 0; i < waIds.length; i += 200) {
-    const chunk = waIds.slice(i, i + 200);
-    const { data, error } = await supabaseAdmin
-      .from("whatsapp_consent_events")
-      .select("wa_id, action, created_at")
-      .eq("business_id", businessId)
-      .eq("scope", scope)
-      .in("wa_id", chunk)
-      .order("created_at", { ascending: false });
-    if (error) throw error;
-    for (const row of data ?? []) {
-      // Rows arrive newest first: the first one seen per number wins.
-      if (!result.has(row.wa_id)) result.set(row.wa_id, row.action as "opt_in" | "opt_out");
-    }
+): Promise<Map<string, ConsentAction>> {
+  const folded = new Map<string, { action: ConsentAction; at: number; contactId: string | null }>();
+  for (let i = 0; i < waIds.length; i += WA_ID_CHUNK) {
+    foldLatestConsent(
+      await readAllConsentRows(supabaseAdmin, businessId, scope, waIds.slice(i, i + WA_ID_CHUNK)),
+      folded,
+    );
   }
-  return result;
+  return new Map([...folded].map(([waId, v]) => [waId, v.action]));
+}
+
+/** Latest consent per number for every number this business has a record for (campaign audiences). */
+export async function latestConsentForBusiness(
+  supabaseAdmin: Client,
+  businessId: string,
+  scope: ConsentScope,
+): Promise<Map<string, { action: ConsentAction; contactId: string | null }>> {
+  const folded = foldLatestConsent(
+    await readAllConsentRows(supabaseAdmin, businessId, scope, null),
+  );
+  return new Map(
+    [...folded].map(([waId, v]) => [waId, { action: v.action, contactId: v.contactId }]),
+  );
 }
 
 export async function suppressedWaIds(

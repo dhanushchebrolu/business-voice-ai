@@ -136,6 +136,8 @@ export interface FakeDbOptions {
     table: string,
     op: "select" | "insert" | "upsert" | "update" | "delete",
   ) => DbError | null;
+  /** Like PostgREST's max-rows: a select returns at most this many rows (silently). */
+  maxRows?: number;
 }
 
 export function createFakeDb(seed: Record<string, Row[]> = {}, options: FakeDbOptions = {}) {
@@ -185,8 +187,9 @@ export function createFakeDb(seed: Record<string, Row[]> = {}, options: FakeDbOp
     opts?: Record<string, unknown>,
   ) {
     const preds: Pred[] = [];
-    let order: { col: string; asc: boolean } | null = null;
+    const orders: { col: string; asc: boolean }[] = [];
     let limit: number | null = null;
+    let range: [number, number] | null = null;
     let returning = op === "select";
     let countHead = false;
     let mode: "many" | "single" | "maybeSingle" = "many";
@@ -234,15 +237,22 @@ export function createFakeDb(seed: Record<string, Row[]> = {}, options: FakeDbOp
         tables[name] = table(name).filter((r) => !affected.includes(r));
       }
 
-      if (order) {
-        const { col, asc } = order;
+      if (orders.length > 0) {
         affected = [...affected].sort((a, b) => {
-          const x = String(read(a, col) ?? "");
-          const y = String(read(b, col) ?? "");
-          return asc ? x.localeCompare(y) : y.localeCompare(x);
+          for (const { col, asc } of orders) {
+            const x = String(read(a, col) ?? "");
+            const y = String(read(b, col) ?? "");
+            const c = asc ? x.localeCompare(y) : y.localeCompare(x);
+            if (c !== 0) return c;
+          }
+          return 0;
         });
       }
+      if (range) affected = affected.slice(range[0], range[1] + 1);
       if (limit !== null) affected = affected.slice(0, limit);
+      if (op === "select" && options.maxRows !== undefined && !countHead) {
+        affected = affected.slice(0, options.maxRows);
+      }
       if (countHead) return { data: null, error: null, count: affected.length };
       if (!returning) return { data: null, error: null };
       const copies = affected.map((r) => structuredClone(r));
@@ -324,7 +334,11 @@ export function createFakeDb(seed: Record<string, Row[]> = {}, options: FakeDbOp
         return chain;
       },
       order(col: string, o?: { ascending?: boolean }) {
-        order = { col, asc: o?.ascending !== false };
+        orders.push({ col, asc: o?.ascending !== false });
+        return chain;
+      },
+      range(from: number, to: number) {
+        range = [from, to];
         return chain;
       },
       limit(n: number) {

@@ -7,6 +7,8 @@ import {
   latestConsent,
   checkSendPermission,
   recordConsentEvent,
+  latestConsentForBusiness,
+  foldLatestConsent,
 } from "./whatsapp-consent.server.ts";
 import { createFakeDb } from "./whatsapp-test-db.ts";
 
@@ -131,5 +133,75 @@ describe("latestConsent / checkSendPermission", () => {
     assert.equal(rows.length, 1);
     assert.equal(String(rows[0]!["evidence"]).length, 1000);
     assert.ok(db.log.every((l) => l.op !== "update" && l.op !== "delete"));
+  });
+});
+
+describe("latest consent is complete and deterministic", () => {
+  const many = (waId: string, n: number, action: string, startMinutesAgo: number) =>
+    Array.from({ length: n }, (_, i) =>
+      event(waId, "marketing", action, startMinutesAgo - i * 0.001),
+    );
+
+  test("a row cap (PostgREST max-rows) can't hide an older opt-out behind another number's newer rows", async () => {
+    // 1,200 newer rows for one number push the other number's opt-out past
+    // the first 1,000 rows; every page must still be read.
+    const db = createFakeDb(
+      {
+        whatsapp_consent_events: [
+          ...many("911", 1200, "opt_in", 10),
+          event("922", "marketing", "opt_in", 300),
+          event("922", "marketing", "opt_out", 200),
+        ],
+      },
+      { maxRows: 1000 },
+    );
+    const latest = await latestConsent(db.client, "biz-a", "marketing", ["911", "922"]);
+    assert.equal(latest.get("922"), "opt_out");
+    assert.equal(latest.get("911"), "opt_in");
+    assert.deepEqual(await checkSendPermission(db.client, "biz-a", "922", "marketing"), {
+      allowed: false,
+      reason: "opted_out",
+    });
+  });
+
+  test("latestConsentForBusiness reads every page too", async () => {
+    const db = createFakeDb(
+      {
+        whatsapp_consent_events: [
+          ...many("911", 1500, "opt_in", 10),
+          event("933", "marketing", "opt_in", 900),
+          event("944", "marketing", "opt_in", 900),
+          event("944", "marketing", "opt_out", 800),
+        ],
+      },
+      { maxRows: 1000 },
+    );
+    const all = await latestConsentForBusiness(db.client, "biz-a", "marketing");
+    assert.equal(all.get("933")?.action, "opt_in", "an old opt-in is still found");
+    assert.equal(all.get("944")?.action, "opt_out", "an old opt-out is still found");
+  });
+
+  test("ties: same instant → opt-out wins, in either order", () => {
+    const at = "2026-10-20T05:00:00.000Z";
+    for (const rows of [
+      [
+        { wa_id: "9", action: "opt_in", created_at: at },
+        { wa_id: "9", action: "opt_out", created_at: at },
+      ],
+      [
+        { wa_id: "9", action: "opt_out", created_at: at },
+        { wa_id: "9", action: "opt_in", created_at: at },
+      ],
+    ]) {
+      assert.equal(foldLatestConsent(rows).get("9")?.action, "opt_out");
+    }
+    assert.equal(
+      foldLatestConsent([
+        { wa_id: "9", action: "opt_out", created_at: "2026-10-20T05:00:00.000Z" },
+        { wa_id: "9", action: "opt_in", created_at: "2026-10-20T05:00:00.001Z" },
+      ]).get("9")?.action,
+      "opt_in",
+      "a strictly newer opt-in wins",
+    );
   });
 });

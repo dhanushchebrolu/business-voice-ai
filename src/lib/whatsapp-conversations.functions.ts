@@ -128,6 +128,7 @@ const REFUSAL_MESSAGES: Record<string, string> = {
   no_opt_in: "This customer hasn't opted in to business-initiated WhatsApp messages.",
   rate_limited: "Too many messages to this customer in the last minute. Please wait a moment.",
   empty: "Type a message first.",
+  template_unverified: "That template isn't an approved template for this number.",
 };
 
 /** A staff reply. Sending one takes the conversation over from the AI (ai_enabled = false). */

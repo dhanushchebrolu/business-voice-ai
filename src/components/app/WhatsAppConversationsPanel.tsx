@@ -169,7 +169,9 @@ export function WhatsAppConversationsPanel({ orgId }: { orgId: string }) {
                       {m.direction === "outbound" ? (
                         <p className="mt-1 text-[10px] text-muted-foreground">
                           {m.status}
-                          {m.status === "failed" && m.error_message ? ` — ${m.error_message}` : ""}
+                          {m.error_message && (m.status === "failed" || m.status === "queued")
+                            ? ` — ${m.error_message}`
+                            : ""}
                         </p>
                       ) : null}
                     </div>

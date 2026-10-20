@@ -485,3 +485,43 @@ describe("syncTemplates", () => {
     );
   });
 });
+
+describe("hardening", () => {
+  test("the audience reads every consent page: an older opt-out behind 1,000+ newer rows still excludes that number", async () => {
+    const s = seed() as unknown as Record<string, Record<string, unknown>[]>;
+    for (let i = 0; i < 1200; i++) {
+      s["whatsapp_consent_events"]!.push({
+        ...consent(`9198${String(1_000_000 + i)}`, "opt_in", 5),
+      });
+    }
+    // 919800000002 opted in (100 min ago in the seed) and then out (90 min ago).
+    s["whatsapp_consent_events"]!.push(consent("919800000002", "opt_out", 90));
+    const db = createFakeDb(s, { now: () => NOW, maxRows: 1000 });
+    await launch(db);
+    const r = recipients(db);
+    assert.equal(r["919800000002"], undefined, "opted out: not in the audience");
+    assert.equal(r["919800000001"]!["status"], "pending", "an older opt-in is still reached");
+    assert.equal(Object.values(r).filter((x) => x["status"] === "pending").length, 1201);
+  });
+
+  test("a campaign pointed at another tenant's template sends nothing (campaign check and sender both verify)", async () => {
+    const db = createFakeDb(seed(), { now: () => NOW });
+    await launch(db);
+    // Even if a row were changed after launch, another tenant's template is never used.
+    db.rows("whatsapp_templates").push({
+      id: "tpl-other",
+      organization_id: "org-b",
+      whatsapp_connection_id: "conn-b",
+      name: "theirs",
+      language: "en",
+      category: "MARKETING",
+      status: "APPROVED",
+      body_text: "{{1}} {{2}}",
+      body_param_count: 2,
+    });
+    db.rows("whatsapp_campaigns")[0]!["template_id"] = "tpl-other";
+    const meta = fakeMeta();
+    await dispatch(db, meta);
+    assert.equal(meta.sent.length, 0);
+  });
+});

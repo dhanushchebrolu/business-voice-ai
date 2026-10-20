@@ -81,13 +81,25 @@ The worker (`whatsapp-notifications.server.ts`, run by the dispatch cron):
 
 - **Claims** a row with conditional updates: pending, or a `sending` claim abandoned for 5 minutes. Two workers never send the same row.
 - **Re-reads current state** before sending. A confirmation for a booking cancelled since, a superseded reschedule or reminder, or a link for a paid/closed request is `skipped` with a reason.
-- **Sends** through `sendBusinessWhatsAppMessage` (`whatsapp-business-message.server.ts`), the one path for every business-initiated message:
-  - the business's own connected number;
-  - consent and suppression;
-  - free text only inside the 24-hour window, else an APPROVED template;
-  - a unique live idempotency key per number, so the inline sender and the worker can't both deliver;
-  - bounded delivery retries.
-- **Retries** with exponential backoff, up to 5 attempts, only when safe (Meta answered 429/5xx, or a transient DB error). A timeout or rejection is never repeated.
+- **Sends** through `sendBusinessWhatsAppMessage` (`whatsapp-business-message.server.ts`), the one path for every business-initiated message. In order, and nothing is written or sent until all pass:
+  1. **Purpose and scope agree:** marketing only with the marketing consent scope; booking/payment only with the transactional scope.
+  2. **The business's own connected number:** organization + business, and the exact connection when the caller pins one (campaigns).
+  3. **A unique live idempotency key** per number, so the inline sender and the worker can't both deliver.
+  4. **Recipient consent and suppression** (below).
+  5. **Business notification settings, re-read at send time:**
+     - Booking notifications always need notifications on and a recorded consent basis (20+ characters).
+     - So do payment messages outside the 24-hour window.
+     - A payment message inside an open window answers a conversation the customer started, so it doesn't need the switch; it still needs consent and suppression checks.
+  6. **Templates:** free text only inside the window. Otherwise, and always for marketing, only a template from **this number's synced registry** that is APPROVED, of the right category (UTILITY for booking/payment, MARKETING for campaigns), with positional parameters matching the message.
+     - A `WHATSAPP_TEMPLATE_*_NAME` variable can only _select_ a registry row; it never proves approval.
+     - A campaign's template is re-verified by id on the campaign's own number.
+     - Anything unverifiable fails with a reason code (`template_missing`, `template_not_found_for_number`, `template_not_approved`, `template_wrong_category`, `template_named_params`, `template_param_mismatch`).
+  7. **Bounded delivery retries.**
+
+  Database errors in any of these checks throw (fail closed): nothing is sent.
+
+- **Retries** with exponential backoff, up to 5 attempts, only when safe (Meta answered 429/5xx, or a transient DB error). A rejection is never repeated.
+- **Unknown outcomes** (a timeout after the request left, or a 2xx without a message id): the message row **stays `queued`**, with "Delivery outcome unknown" in `error_message`. It therefore keeps blocking every later attempt with the same idempotency key (inline sender, outbox, campaign), so it is never sent twice. It needs a person to check.
 - **Skips stale rows:** anything older than 48 h is skipped, never sent late.
 
 Payment truth is never touched: the worker only reads `payment_requests` and `bookings`. A WhatsApp failure never undoes a capture. The webhook's inline consumer now records `whatsapp_error` (instead of a misleading `whatsapp_dispatched_at`) and the outbox retries.
@@ -95,8 +107,12 @@ Payment truth is never touched: the worker only reads `payment_requests` and `bo
 ## Consent, suppression and campaigns
 
 - **Transactional** (booking/payment):
-  - An owner/admin turns notifications on per number and must record the basis on which customers agree (`transactional_consent_basis`, audited).
-  - An explicit opt-out (STOP) or a suppression still wins.
+  - An owner/admin turns notifications on per number and must record the basis on which customers agree (`transactional_consent_basis`, audited). The sender re-checks both at send time.
+  - This business declaration is in addition to the recipient's own state, never a substitute: an explicit opt-out (STOP) or a suppression always wins.
+  - Transactional messages don't need a per-recipient opt-in event; the recorded basis covers that. Requiring one would block voice-booking confirmations until opt-ins are captured.
+- **Which event counts:**
+  - The latest event per business, number and scope wins. On an exact timestamp tie, an **opt-out** wins.
+  - Every consent row is read, paged in a stable order, so a large history (or PostgREST's max-rows) can't hide an older opt-out.
 - **Marketing:**
   - Only to numbers whose **latest marketing consent is an explicit opt-in** (customer START, a staff-attested opt-in with evidence, or an import) and that aren't suppressed.
   - Checked at launch **and again right before each message**.
@@ -138,17 +154,17 @@ All server functions (`whatsapp-messaging.functions.ts`, `whatsapp-conversations
 
 Server-side (Cloudflare Worker secrets; names already in `.env.example` unless marked new):
 
-| Variable                                                                                  | Purpose                                                                                                                                                                 |
-| ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `META_APP_ID`, `META_APP_SECRET`, `META_WHATSAPP_CONFIG_ID`, `META_GRAPH_API_VERSION`     | Meta app. `META_APP_SECRET` also verifies webhook signatures.                                                                                                           |
-| `WHATSAPP_CREDENTIAL_ENCRYPTION_KEY`                                                      | AES-256-GCM key for stored WhatsApp tokens (the key they were encrypted with).                                                                                          |
-| `WHATSAPP_WEBHOOK_VERIFY_TOKEN`                                                           | Your random string, also entered in Meta's webhook settings.                                                                                                            |
-| `ANTHROPIC_API_KEY` (optional `CLAUDE_MODEL`)                                             | AI replies.                                                                                                                                                             |
-| `LOVABLE_CRON_SECRET`                                                                     | Bearer secret for the cron routes.                                                                                                                                      |
-| `RAZORPAY_CUSTOMER_PAYMENTS_WEBHOOK_SECRET`, `RAZORPAY_*` OAuth / credential key          | Existing Razorpay customer payments.                                                                                                                                    |
-| `WHATSAPP_TEMPLATE_PAYMENT_*_NAME` / `_LANGUAGE`                                          | Existing **fallback** template names for payment messages.                                                                                                              |
-| `WHATSAPP_TEMPLATE_BOOKING_{CONFIRMED,RESCHEDULED,CANCELLED,REMINDER}_NAME` / `_LANGUAGE` | **New, optional** fallbacks for booking notifications. Prefer mapping synced templates in the dashboard (per number; Tech Provider customers each have their own WABA). |
-| `VITE_META_APP_ID`, `VITE_META_WHATSAPP_CONFIG_ID`, `VITE_META_GRAPH_API_VERSION`         | Browser mirrors for Embedded Signup.                                                                                                                                    |
+| Variable                                                                                  | Purpose                                                                                                                                                                                             |
+| ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `META_APP_ID`, `META_APP_SECRET`, `META_WHATSAPP_CONFIG_ID`, `META_GRAPH_API_VERSION`     | Meta app. `META_APP_SECRET` also verifies webhook signatures.                                                                                                                                       |
+| `WHATSAPP_CREDENTIAL_ENCRYPTION_KEY`                                                      | AES-256-GCM key for stored WhatsApp tokens (the key they were encrypted with).                                                                                                                      |
+| `WHATSAPP_WEBHOOK_VERIFY_TOKEN`                                                           | Your random string, also entered in Meta's webhook settings.                                                                                                                                        |
+| `ANTHROPIC_API_KEY` (optional `CLAUDE_MODEL`)                                             | AI replies.                                                                                                                                                                                         |
+| `LOVABLE_CRON_SECRET`                                                                     | Bearer secret for the cron routes.                                                                                                                                                                  |
+| `RAZORPAY_CUSTOMER_PAYMENTS_WEBHOOK_SECRET`, `RAZORPAY_*` OAuth / credential key          | Existing Razorpay customer payments.                                                                                                                                                                |
+| `WHATSAPP_TEMPLATE_PAYMENT_*_NAME` / `_LANGUAGE`                                          | Optional: **selects** a synced registry template by name + language (default `en_US`) when none is mapped to the purpose. The template must still be in this number's registry as APPROVED UTILITY. |
+| `WHATSAPP_TEMPLATE_BOOKING_{CONFIRMED,RESCHEDULED,CANCELLED,REMINDER}_NAME` / `_LANGUAGE` | Optional, same rule. Prefer mapping synced templates in the dashboard (per number; Tech Provider customers each have their own WABA).                                                               |
+| `VITE_META_APP_ID`, `VITE_META_WHATSAPP_CONFIG_ID`, `VITE_META_GRAPH_API_VERSION`         | Browser mirrors for Embedded Signup.                                                                                                                                                                |
 
 **Cron** (external scheduler, `POST` with `Authorization: Bearer $LOVABLE_CRON_SECRET`):
 

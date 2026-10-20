@@ -137,7 +137,11 @@ function decidePayment(result: Awaited<ReturnType<typeof sendWhatsAppPaymentMess
     case "sent":
       return { status: "sent", messageRowId: null };
     case "skipped_duplicate":
-      return { status: "sent", messageRowId: null };
+      // Delivered by another path → done. Still 'queued' (in flight, or an
+      // unknown outcome) → check again later; never send it a second time.
+      return result.existingStatus && result.existingStatus !== "queued"
+        ? { status: "sent", messageRowId: null }
+        : { status: "retry", error: "Another sender holds this message; outcome not yet known." };
     case "skipped_no_connection":
       return { status: "skipped", reason: "no_connection" };
     case "skipped_not_permitted":

@@ -62,6 +62,23 @@ function seed(over: { inboundMinutesAgo?: number; connectionBusiness?: string } 
         phone_number_id: "pnid-1",
         status: "connected",
         access_token_ciphertext: encryptCredential("test-access-token"),
+        notifications_enabled: true,
+        transactional_consent_basis: "Customers agree to WhatsApp updates when they book.",
+      },
+    ],
+    // Synced from Meta. The WHATSAPP_TEMPLATE_PAYMENT_LINK_NAME variable only
+    // selects it; this registry row is what proves it is approved.
+    whatsapp_templates: [
+      {
+        id: "tpl-env",
+        organization_id: "org-1",
+        whatsapp_connection_id: "conn-1",
+        name: "payment_link_notify",
+        language: "en_US",
+        category: "UTILITY",
+        status: "APPROVED",
+        body_text: "{{1}}",
+        body_param_count: 1,
       },
     ],
   };

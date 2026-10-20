@@ -29,9 +29,13 @@ import { MetaWhatsAppClient } from "./meta-client.server.ts";
 import { resolveMetaWhatsAppConfig } from "./meta-config.server.ts";
 import { decryptCredential } from "./whatsapp-token-crypto.server.ts";
 import type { DeliveryDeps } from "./whatsapp-outbound.server.ts";
-import { sendBusinessWhatsAppMessage } from "./whatsapp-business-message.server.ts";
+import {
+  countBodyParams,
+  sendBusinessWhatsAppMessage,
+} from "./whatsapp-business-message.server.ts";
 import {
   latestConsent,
+  latestConsentForBusiness,
   suppressedWaIds,
   toWaId,
   writeAuditLog,
@@ -43,6 +47,7 @@ type CampaignRow = Database["public"]["Tables"]["whatsapp_campaigns"]["Row"];
 type RecipientRow = Database["public"]["Tables"]["whatsapp_campaign_recipients"]["Row"];
 
 export const MAX_RECIPIENTS = 10_000;
+const ANALYTICS_PAGE_SIZE = 1000;
 export const MAX_RECIPIENT_ATTEMPTS = 3;
 export const MAX_SENDS_PER_TICK = 80;
 export const RECIPIENT_CLAIM_TIMEOUT_MS = 5 * 60_000;
@@ -60,13 +65,8 @@ export class CampaignError extends Error {
 // ---------------------------------------------------------------------------
 // Templates
 
-/** Positional body parameters ({{1}}, {{2}}…). Named parameters ({{name}}) aren't supported by this sender. */
-export function countBodyParams(bodyText: string | null): { count: number; named: boolean } {
-  if (!bodyText) return { count: 0, named: false };
-  const vars = [...bodyText.matchAll(/\{\{\s*([^}]+?)\s*\}\}/g)].map((m) => m[1]!);
-  const named = vars.some((v) => !/^\d+$/.test(v));
-  return { count: new Set(vars).size, named };
-}
+// One definition, shared with the sender's own template verification.
+export { countBodyParams };
 
 export async function syncTemplates(
   supabaseAdmin: Client,
@@ -300,20 +300,10 @@ async function audienceNumbers(
     }
     return out;
   }
-  // "all_consented": everyone whose latest marketing consent is an opt-in.
-  const { data, error } = await supabaseAdmin
-    .from("whatsapp_consent_events")
-    .select("wa_id, contact_id, action, created_at")
-    .eq("business_id", campaign.business_id)
-    .eq("scope", "marketing")
-    .order("created_at", { ascending: false })
-    .limit(50_000);
-  if (error) throw error;
-  const latest = new Map<string, { action: string; contactId: string | null }>();
-  for (const row of data ?? []) {
-    if (!latest.has(row.wa_id))
-      latest.set(row.wa_id, { action: row.action, contactId: row.contact_id });
-  }
+  // "all_consented": everyone whose latest marketing consent is an opt-in —
+  // every consent row is read (paged), so an older opt-in can never hide a
+  // newer opt-out, and a same-instant opt-in/opt-out counts as an opt-out.
+  const latest = await latestConsentForBusiness(supabaseAdmin, campaign.business_id, "marketing");
   return [...latest.entries()]
     .filter(([, v]) => v.action === "opt_in")
     .slice(0, MAX_RECIPIENTS)
@@ -619,11 +609,10 @@ async function dispatchCampaign(
           idempotencyKey: `campaign:${campaign.id}:${row.wa_id}`,
           bodyText: `[${template!.name}] ${params.join(" | ")}`.slice(0, 1000),
           templateBodyParams: params,
-          template: {
-            name: template!.name,
-            language: template!.language,
-            bodyParamCount: template!.body_param_count,
-          },
+          // The campaign's own number and template: the sender re-verifies
+          // both (same organization and business, APPROVED, MARKETING).
+          connectionId: campaign.whatsapp_connection_id,
+          templateId: campaign.template_id,
           forceTemplate: true,
           metadata: { campaign_id: campaign.id, campaign_recipient_id: row.id },
         },
@@ -758,13 +747,24 @@ export async function campaignAnalytics(
   organizationId: string,
   campaignId: string,
 ): Promise<CampaignAnalytics> {
-  const { data: recipients, error } = await supabaseAdmin
-    .from("whatsapp_campaign_recipients")
-    .select("status, skip_reason, whatsapp_message_id")
-    .eq("campaign_id", campaignId)
-    .eq("organization_id", organizationId)
-    .limit(MAX_RECIPIENTS);
-  if (error) throw error;
+  // Paged: a single read is capped by PostgREST's max-rows.
+  const recipients: {
+    status: string;
+    skip_reason: string | null;
+    whatsapp_message_id: string | null;
+  }[] = [];
+  for (let offset = 0; offset < MAX_RECIPIENTS; offset += ANALYTICS_PAGE_SIZE) {
+    const { data, error } = await supabaseAdmin
+      .from("whatsapp_campaign_recipients")
+      .select("status, skip_reason, whatsapp_message_id")
+      .eq("campaign_id", campaignId)
+      .eq("organization_id", organizationId)
+      .order("id", { ascending: true })
+      .range(offset, offset + ANALYTICS_PAGE_SIZE - 1);
+    if (error) throw error;
+    recipients.push(...(data ?? []));
+    if (!data || data.length < ANALYTICS_PAGE_SIZE) break;
+  }
   const result: CampaignAnalytics = {
     total: 0,
     pending: 0,
@@ -775,7 +775,7 @@ export async function campaignAnalytics(
     skipped: {},
   };
   const messageIds: string[] = [];
-  for (const r of recipients ?? []) {
+  for (const r of recipients) {
     result.total++;
     if (r.status === "pending" || r.status === "sending") result.pending++;
     else if (r.status === "failed") result.failed++;

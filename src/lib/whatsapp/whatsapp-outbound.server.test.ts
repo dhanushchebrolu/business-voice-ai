@@ -101,6 +101,32 @@ function seed(
     whatsapp_suppressions: over.suppressed
       ? [{ organization_id: "org-a", business_id: "biz-a", wa_id: "919876543210", reason: "staff" }]
       : [],
+    whatsapp_templates: [
+      registryTemplate("appointment_reminder", "conn-a", "org-a"),
+      // The same name on another tenant's number proves nothing for conn-a.
+      registryTemplate("other_tenant_template", "conn-b", "org-b"),
+      registryTemplate("paused_template", "conn-a", "org-a", { status: "PAUSED" }),
+      registryTemplate("promo_template", "conn-a", "org-a", { category: "MARKETING" }),
+    ],
+  };
+}
+
+function registryTemplate(
+  name: string,
+  connectionId: string,
+  organizationId: string,
+  over: Record<string, unknown> = {},
+) {
+  return {
+    organization_id: organizationId,
+    whatsapp_connection_id: connectionId,
+    name,
+    language: "en",
+    category: "UTILITY",
+    status: "APPROVED",
+    body_text: "Hi {{1}}",
+    body_param_count: 1,
+    ...over,
   };
 }
 
@@ -212,6 +238,36 @@ describe("sendWhatsAppConversationMessage", () => {
         assert.equal(body.template.name, "appointment_reminder");
       } else {
         assert.equal(meta.calls.length, 0);
+      }
+    }
+  });
+
+  test("a staff template is sent only when this number's registry says it's an APPROVED UTILITY template", async () => {
+    const optedIn = { consent: [{ action: "opt_in", minutesAgo: 10 }] };
+    for (const [name, expected] of [
+      ["appointment_reminder", "sent"],
+      ["not_synced", "template_unverified"],
+      ["other_tenant_template", "template_unverified"],
+      ["paused_template", "template_unverified"],
+      ["promo_template", "template_unverified"],
+    ] as const) {
+      for (const lastInboundAt of [hoursAgo(48), hoursAgo(1)]) {
+        const db = createFakeDb(seed({ lastInboundAt, ...optedIn }));
+        const meta = fakeMeta([200]);
+        const result = await send(
+          db,
+          {
+            payload: { kind: "template", name, languageCode: "en", bodyParams: ["Asha"] },
+            idempotencyKey: `staff:${name}:${lastInboundAt}`,
+          },
+          meta,
+        );
+        assert.equal(
+          result.outcome === "refused" ? result.reason : result.outcome,
+          expected,
+          `${name} @ ${lastInboundAt}`,
+        );
+        assert.equal(meta.calls.length, expected === "sent" ? 1 : 0);
       }
     }
   });

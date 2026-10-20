@@ -60,7 +60,7 @@ function fakeMeta(statuses: (number | "timeout")[] = [200]) {
   return { fetchImpl, sent };
 }
 
-const TEMPLATES = (
+const TEMPLATES: Record<string, unknown>[] = (
   ["booking_confirmed", "booking_rescheduled", "booking_cancelled", "booking_reminder"] as const
 ).map((purpose) => ({
   organization_id: "org-a",
@@ -72,6 +72,25 @@ const TEMPLATES = (
   purpose,
   body_param_count: 3,
 }));
+// Payment templates as synced from Meta (one body parameter each). The
+// WHATSAPP_TEMPLATE_PAYMENT_*_NAME variables used below only select them.
+TEMPLATES.push(
+  ...(
+    [
+      ["payment_link_v1", "payment_link"],
+      ["payment_ok_v1", "payment_confirmation"],
+    ] as const
+  ).map(([name]) => ({
+    organization_id: "org-a",
+    whatsapp_connection_id: "conn-a",
+    name,
+    language: "en_US",
+    category: "UTILITY",
+    status: "APPROVED",
+    purpose: null,
+    body_param_count: 1,
+  })),
+);
 
 function seed(over: { notificationsEnabled?: boolean; booking?: Record<string, unknown> } = {}) {
   return {
@@ -87,6 +106,7 @@ function seed(over: { notificationsEnabled?: boolean; booking?: Record<string, u
         phone_number_id: "PN_A",
         status: "connected",
         notifications_enabled: over.notificationsEnabled ?? true,
+        transactional_consent_basis: "Customers agree to WhatsApp updates when they book.",
         access_token_ciphertext: encryptCredential("token-a"),
       },
     ],

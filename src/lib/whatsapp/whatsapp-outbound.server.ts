@@ -36,6 +36,7 @@ import { MetaWhatsAppClient, MetaApiError } from "./meta-client.server.ts";
 import { resolveMetaWhatsAppConfig } from "./meta-config.server.ts";
 import { decryptCredential, CredentialCryptoError } from "./whatsapp-token-crypto.server.ts";
 import { checkSendPermission, latestConsent } from "./whatsapp-consent.server.ts";
+import { TEMPLATE_COLUMNS, templateProblem } from "./whatsapp-templates.server.ts";
 
 type Client = SupabaseClient<Database>;
 
@@ -93,7 +94,7 @@ export async function deliverWhatsAppMessage(
   deps: DeliveryDeps = {},
 ): Promise<
   | { outcome: "sent"; waMessageId: string }
-  | { outcome: "failed"; error: string; retryable: boolean }
+  | { outcome: "failed"; error: string; retryable: boolean; ambiguous?: boolean }
 > {
   const fail = async (error: string, attempts: number, retryable = false) => {
     const { error: writeError } = await supabaseAdmin
@@ -106,6 +107,27 @@ export async function deliverWhatsAppMessage(
       });
     }
     return { outcome: "failed" as const, error, retryable };
+  };
+  /**
+   * The request may have reached Meta (no response, or a 2xx without a
+   * message id). The row stays 'queued' — still a live message for its
+   * idempotency key — so no later attempt with the same key can send it
+   * again; the error says why it was never confirmed.
+   */
+  const unknownOutcome = async (error: string, attempts: number) => {
+    const { error: writeError } = await supabaseAdmin
+      .from("whatsapp_messages")
+      .update({
+        error_message: `Delivery outcome unknown (${error}); not retried, Meta may already have delivered it.`,
+        attempts,
+      })
+      .eq("id", input.messageRowId);
+    if (writeError) {
+      console.error("whatsapp_outbound:unknown_outcome_unrecorded", {
+        messageRowId: input.messageRowId,
+      });
+    }
+    return { outcome: "failed" as const, error, retryable: false, ambiguous: true };
   };
 
   const config = resolveMetaWhatsAppConfig();
@@ -185,8 +207,12 @@ export async function deliverWhatsAppMessage(
           attempt,
           status: httpStatus,
         });
+        const status: number | null = httpStatus;
+        if (status === null || (status >= 200 && status < 300)) {
+          return unknownOutcome(lastError, attempt);
+        }
         // Retryable later only when Meta answered 429/5xx: it didn't accept the message.
-        return fail(lastError, attempt, isRetryable(err, httpStatus));
+        return fail(lastError, attempt, isRetryable(err, status));
       }
       await sleep(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
     }
@@ -200,7 +226,14 @@ export type SendConversationMessageOutcome =
   | {
       outcome: "refused";
       reason:
-        "not_found" | "not_connected" | "window_closed" | "no_opt_in" | "rate_limited" | "empty";
+        | "not_found"
+        | "not_connected"
+        | "window_closed"
+        | "no_opt_in"
+        | "rate_limited"
+        | "empty"
+        | "template_unverified";
+      detail?: string | undefined;
     }
   | { outcome: "failed"; messageRowId: string; error: string };
 
@@ -284,6 +317,31 @@ export async function sendWhatsAppConversationMessage(
     if (!(await hasRecordedOptIn(supabaseAdmin, connection.business_id, conversation.wa_id))) {
       return { outcome: "refused", reason: "no_opt_in" };
     }
+  }
+
+  // A template is only sent when this number's synced registry says it is an
+  // APPROVED UTILITY template with matching parameters — a caller naming one
+  // proves nothing. (Marketing goes through campaigns and their opt-in rules.)
+  if (input.payload.kind === "template") {
+    const { data: template, error: templateError } = await supabaseAdmin
+      .from("whatsapp_templates")
+      .select(TEMPLATE_COLUMNS)
+      .eq("organization_id", input.organizationId)
+      .eq("whatsapp_connection_id", connection.id)
+      .eq("name", input.payload.name)
+      .eq("language", input.payload.languageCode)
+      .maybeSingle();
+    if (templateError) throw templateError;
+    const problem = template
+      ? templateProblem(
+          template,
+          "UTILITY",
+          input.payload.bodyParams?.length ?? 0,
+          "A staff template",
+        )
+      : { problem: "This template isn't in this number's synced, approved templates." };
+    if (problem)
+      return { outcome: "refused", reason: "template_unverified", detail: problem.problem };
   }
 
   const { data: existing, error: dupError } = await supabaseAdmin

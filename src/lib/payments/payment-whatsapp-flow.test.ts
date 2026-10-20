@@ -52,7 +52,7 @@ afterEach(() => {
   }
 });
 
-function world() {
+function world(over: { notificationsEnabled?: boolean } = {}) {
   const db = createFakeDb({
     businesses: [{ id: "biz-1", organization_id: "org-1", name: "Smile Dental", country: "IN" }],
     agent_configs: [
@@ -97,8 +97,21 @@ function world() {
         phone_number_id: "PN_1",
         status: "connected",
         access_token_ciphertext: encryptWhatsAppCredential("wa-token"),
+        notifications_enabled: over.notificationsEnabled ?? true,
+        transactional_consent_basis:
+          "Callers agree to WhatsApp payment links and updates on the call.",
       },
     ],
+    // Synced from Meta; the WHATSAPP_TEMPLATE_* variables select these, the registry proves approval.
+    whatsapp_templates: ["payment_link_v1", "payment_ok_v1"].map((name) => ({
+      organization_id: "org-1",
+      whatsapp_connection_id: "wa-conn-1",
+      name,
+      language: "en_US",
+      category: "UTILITY",
+      status: "APPROVED",
+      body_param_count: 1,
+    })),
   });
   const razorpayCalls: string[] = [];
   const whatsapp: {
@@ -278,5 +291,38 @@ describe("voice booking → payment link on WhatsApp → verified payment → on
     const event = db.rows("payment_domain_events")[0]!;
     assert.equal(event["whatsapp_dispatched_at"] ?? null, null);
     assert.match(String(event["whatsapp_error"]), /not delivered/);
+  });
+});
+
+describe("notifications switched off for the business", () => {
+  test("the link is still created and payment is still captured, but nothing is sent on WhatsApp", async () => {
+    const { db, fetchImpl, razorpayCalls, whatsapp } = world({ notificationsEnabled: false });
+    const requested = await request_payment(
+      db.client,
+      {
+        organizationId: "org-1",
+        businessId: "biz-1",
+        bookingId: "booking-1",
+        amountMinorUnits: 50000,
+      },
+      fetchImpl,
+    );
+    assert.equal(requested.success, true);
+    assert.equal(requested.success && requested.data.whatsappSent, false);
+    assert.equal(
+      razorpayCalls.length,
+      1,
+      "the Razorpay link exists (the voice agent can read it out)",
+    );
+    const result = await processRazorpayPaymentWebhook(
+      db.client,
+      { rawBody: paidEvent(), eventId: "evt_off" },
+      { whatsapp: handlePaymentEventForWhatsApp },
+      fetchImpl,
+    );
+    assert.equal(result.outcome, "captured");
+    assert.equal(db.rows("payment_requests")[0]!["status"], "CAPTURED");
+    assert.equal(whatsapp.length, 0);
+    assert.equal(db.rows("whatsapp_messages").length, 0, "no message rows either");
   });
 });
