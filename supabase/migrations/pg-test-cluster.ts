@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, chmodSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -110,10 +110,21 @@ export function postgresUserExists(): PostgresUserCheck {
   };
 }
 
-/** Runs a shell command either directly, or as the `postgres` OS user when this process is root. */
+/** Quotes one argument for a POSIX shell, so `su -c` passes it through unchanged. */
+export function shellQuote(arg: string): string {
+  return `'${arg.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * Runs a command either directly, or as the `postgres` OS user when this
+ * process is root. Both ways hand the command the same argv: on the su path
+ * every argument is shell-quoted rather than joined raw.
+ */
 export function runCmd(cmd: string, args: string[], useSu: boolean): RunResult {
   const result = useSu
-    ? spawnSync("su", ["postgres", "-c", [cmd, ...args].join(" ")], { encoding: "utf8" })
+    ? spawnSync("su", ["postgres", "-c", [cmd, ...args].map(shellQuote).join(" ")], {
+        encoding: "utf8",
+      })
     : spawnSync(cmd, args, { encoding: "utf8" });
   return { status: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
@@ -141,6 +152,15 @@ export function makeExecSql(cluster: Pick<Cluster, "pgBinDir" | "sockDir" | "use
       : spawnSync(`${cluster.pgBinDir}psql`, args, { input: sql, encoding: "utf8" });
     return { status: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
   };
+}
+
+/**
+ * pg_ctl start arguments. The -o value is one plain argument (no literal
+ * quotes): pg_ctl itself splits it into the server's options, so `-h ''`
+ * means "no TCP listener" and the socket goes only into sockDir.
+ */
+export function pgCtlStartArgs(dataDir: string, sockDir: string, logFile: string): string[] {
+  return ["-D", dataDir, "-o", `-k ${sockDir} -h ''`, "-l", logFile, "start"];
 }
 
 /**
@@ -230,18 +250,27 @@ export function bootstrapCluster(): BootstrapResult {
     return { ok: false, reason: `initdb failed: ${initResult.stderr}` };
   }
 
-  const startResult = runCmd(
-    `${pgBinDir}pg_ctl`,
-    ["-D", dataDir, "-o", `"-k ${sockDir} -h ''"`, "-l", join(workDir, "log.txt"), "start"],
-    useSu,
-  );
+  const logFile = join(workDir, "log.txt");
+  const startResult = runCmd(`${pgBinDir}pg_ctl`, pgCtlStartArgs(dataDir, sockDir, logFile), useSu);
   if (startResult.status !== 0) {
+    // Say why, not just "Examine the log output": the server log and the
+    // cluster status go into the reason (and so into CI's output).
+    let serverLog = "(no server log)";
+    try {
+      serverLog = readFileSync(logFile, "utf8").trim().split("\n").slice(-20).join("\n");
+    } catch {
+      // keep the placeholder
+    }
+    const status = runCmd(`${pgBinDir}pg_ctl`, ["-D", dataDir, "status"], useSu);
     try {
       rmSync(workDir, { recursive: true, force: true });
     } catch {
       // best effort
     }
-    return { ok: false, reason: `pg_ctl start failed: ${startResult.stderr}` };
+    return {
+      ok: false,
+      reason: `pg_ctl start failed: ${startResult.stderr.trim()}\npg_ctl status: ${(status.stdout || status.stderr).trim()}\nserver log:\n${serverLog}`,
+    };
   }
 
   return { ok: true, cluster: { workDir, dataDir, sockDir, pgBinDir, useSu } };
