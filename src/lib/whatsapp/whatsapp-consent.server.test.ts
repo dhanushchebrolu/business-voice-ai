@@ -4,6 +4,7 @@ import {
   toWaId,
   isWaId,
   parseConsentKeyword,
+  consentScopesForKeyword,
   latestConsent,
   checkSendPermission,
   recordConsentEvent,
@@ -60,6 +61,13 @@ describe("parseConsentKeyword", () => {
     ]) {
       assert.equal(parseConsentKeyword(t), null, t);
     }
+  });
+});
+
+describe("consentScopesForKeyword", () => {
+  test("STOP opts out of everything; START only restores transactional messages", () => {
+    assert.deepEqual(consentScopesForKeyword("opt_out"), ["transactional", "marketing"]);
+    assert.deepEqual(consentScopesForKeyword("opt_in"), ["transactional"]);
   });
 });
 

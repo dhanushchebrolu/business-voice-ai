@@ -506,19 +506,87 @@ describe("STOP / START keywords", () => {
     }
   });
 
-  test("START opts back in", async () => {
-    const db = createFakeDb(seed({ content: "start" }), { now: () => NOW });
-    assert.equal(await reply(db), "consent_updated");
-    assert.deepEqual(
-      db.rows("whatsapp_consent_events").map((e) => e["action"]),
-      ["opt_in", "opt_in"],
-    );
+  test("START opts back in to transactional messages only — never to marketing", async () => {
+    for (const word of ["start", "Subscribe", "unstop", "opt in"]) {
+      const db = createFakeDb(seed({ content: word }), { now: () => NOW });
+      const meta = fakeMeta();
+      assert.equal(await reply(db, okAi(), meta), "consent_updated", word);
+      assert.deepEqual(
+        db.rows("whatsapp_consent_events").map((e) => [e["scope"], e["action"]]),
+        [["transactional", "opt_in"]],
+        word,
+      );
+      assert.equal(meta.sent.length, 1);
+      assert.doesNotMatch(meta.sent[0]!.body, /offers|promotion|marketing/i);
+    }
+  });
+
+  test("STOP is recorded even when the number isn't 'connected' or the 24-hour window has closed; no acknowledgement is sent then", async () => {
+    const cases: [Parameters<typeof seed>[0], string][] = [
+      [{ connectionStatus: "needs_attention" }, "connection"],
+      [{ connectionStatus: "error" }, "connection"],
+      [{ inboundAt: minutesAgo(26 * 60) }, "window"],
+    ];
+    for (const [over, why] of cases) {
+      const db = createFakeDb(seed({ ...over, content: "STOP" }), { now: () => NOW });
+      const ai = okAi();
+      const meta = fakeMeta();
+      assert.equal(await reply(db, ai, meta), "consent_updated", JSON.stringify(over));
+      assert.deepEqual(
+        db.rows("whatsapp_consent_events").map((e) => [e["scope"], e["action"]]),
+        [
+          ["transactional", "opt_out"],
+          ["marketing", "opt_out"],
+        ],
+        JSON.stringify(over),
+      );
+      assert.equal(meta.sent.length, 0, "nothing can be sent on this connection/window");
+      assert.equal(ai.calls.length, 0);
+      // The reply slot is settled (failed, with the reason), so recovery and
+      // redeliveries neither record again nor try to send.
+      const [row] = replies(db);
+      assert.equal(row!["status"], "failed");
+      assert.match(String(row!["error_message"]), /recorded/i);
+      assert.match(String(row!["error_message"]), why === "window" ? /24-hour/ : /connected/);
+      assert.equal(await reply(db, ai, meta), "duplicate");
+      assert.equal(db.rows("whatsapp_consent_events").length, 2);
+    }
+  });
+
+  test("a non-keyword message on a non-connected number or outside the window still writes nothing", async () => {
+    for (const over of [
+      { connectionStatus: "needs_attention" },
+      { inboundAt: minutesAgo(26 * 60) },
+    ]) {
+      const db = createFakeDb(seed(over), { now: () => NOW });
+      await reply(db);
+      assert.equal(replies(db).length, 0);
+      assert.equal(db.rows("whatsapp_consent_events").length, 0);
+    }
   });
 });
 
 describe("confirmed WhatsApp actions through the reply worker", () => {
   test("YES to an open proposal is executed by the server (not the model) with the sender's verified number", async () => {
-    const s = seed({ content: "yes" });
+    const s = seed({
+      content: "yes",
+      // The reply that showed the customer the proposal was sent.
+      extraMessages: [
+        {
+          id: "out-0",
+          organization_id: "org-a",
+          whatsapp_connection_id: "conn-a",
+          conversation_id: "conv-a",
+          direction: "outbound",
+          message_type: "text",
+          content: "Shall I book it? Reply YES.",
+          status: "sent",
+          reply_to_message_id: "in-0",
+          occurred_at: minutesAgo(3),
+          created_at: minutesAgo(3),
+        },
+      ],
+    });
     (s as Record<string, unknown[]>)["businesses"] = [
       { id: "biz-a", organization_id: "org-a", timezone: "Asia/Kolkata", country: "IN" },
     ];

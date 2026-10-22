@@ -35,7 +35,7 @@ agents, bookings and Razorpay payment flow. It adds:
    - if anything fails, the claim is released and the route answers `500`, so Meta retries.
 4. Meta's error `131050` ("user stopped marketing messages") on a delivery status is recorded as a marketing opt-out.
 5. Meta gets its `200` at once. Replies run in the background (`whatsapp-ai-reply.server.ts`), one per inbound message (a claimed row, unique `reply_to_message_id`):
-   1. **STOP / START.** Recorded in the consent ledger for both scopes and acknowledged. This works even when AI is off or no agent is assigned.
+   1. **STOP / START.** STOP is recorded as an opt-out for both scopes; START only opts back in to booking and payment messages (marketing needs its own explicit opt-in). Recorded even when AI is off, no agent is assigned, the number isn't connected or the 24-hour window has closed; acknowledged only when the number is connected and the window is open.
    2. **Guards.** AI is on for the conversation, an agent from the same organization is assigned, the message is inside the 24-hour window, and the conversation has had at most 5 AI replies in 10 minutes.
    3. **YES / NO.** A clear YES or NO to an open proposal is handled by the server (`whatsapp-actions.server.ts`, below).
    4. **Handoff.** A customer asking for a person turns AI off and closes any open proposal.
@@ -114,7 +114,7 @@ Payment truth is never touched: the worker only reads `payment_requests` and `bo
   - The latest event per business, number and scope wins. On an exact timestamp tie, an **opt-out** wins.
   - Every consent row is read, paged in a stable order, so a large history (or PostgREST's max-rows) can't hide an older opt-out.
 - **Marketing:**
-  - Only to numbers whose **latest marketing consent is an explicit opt-in** (customer START, a staff-attested opt-in with evidence, or an import) and that aren't suppressed.
+  - Only to numbers whose **latest marketing consent is an explicit opt-in** (a staff-attested opt-in with evidence, or an import; a customer's START does not count) and that aren't suppressed.
   - Checked at launch **and again right before each message**.
 - **Campaigns** (`whatsapp-campaigns.server.ts`):
   - APPROVED **MARKETING** templates only.

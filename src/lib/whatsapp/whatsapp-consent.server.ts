@@ -14,7 +14,8 @@
  * whatsapp_suppressions never gets a business-initiated message.
  *
  * Customers manage it themselves by replying STOP / START (see
- * parseConsentKeyword); staff record attested consent through the
+ * parseConsentKeyword; START restores transactional messages only, see
+ * consentScopesForKeyword); staff record attested consent through the
  * dashboard; Meta's own "user stopped marketing messages" signal is
  * recorded as a marketing opt-out.
  */
@@ -241,10 +242,20 @@ export function parseConsentKeyword(text: string): "opt_out" | "opt_in" | null {
   return null;
 }
 
+/**
+ * The scopes a STOP / START keyword changes. STOP opts out of everything.
+ * START only restores booking and payment messages: a bare "start" (often
+ * just how someone opens a chat) is not the explicit marketing opt-in that
+ * campaigns require.
+ */
+export function consentScopesForKeyword(keyword: "opt_out" | "opt_in"): ConsentScope[] {
+  return keyword === "opt_out" ? ["transactional", "marketing"] : ["transactional"];
+}
+
 export const OPT_OUT_ACKNOWLEDGEMENT =
   "You've been unsubscribed and won't receive further messages from us here. Reply START to subscribe again.";
 export const OPT_IN_ACKNOWLEDGEMENT =
-  "You're subscribed again. Reply STOP at any time to unsubscribe.";
+  "You'll receive booking and payment updates from us here again. Reply STOP at any time to unsubscribe.";
 
 export async function writeAuditLog(
   supabaseAdmin: Client,

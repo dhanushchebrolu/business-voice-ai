@@ -8,11 +8,13 @@
  * the recovery sweep for anything that was interrupted.
  *
  * Per inbound text message, at most one reply is ever sent:
- *   1. Guards (no reply, nothing written): the message isn't an inbound
- *      text; the connection isn't connected; the 24-hour window has closed.
+ *   1. Guard (no reply, nothing written): the message isn't an inbound text.
  *   2. STOP / START (whatsapp-consent.server.ts): recorded in the consent
- *      ledger for both scopes and acknowledged — whatever the AI settings.
- *   3. More guards: the conversation was handed to a person
+ *      ledger (STOP for both scopes, START for transactional only) whatever
+ *      the AI settings, the connection status or the 24-hour window, and
+ *      acknowledged when the number is connected and the window is open.
+ *   3. More guards: the connection isn't connected; the 24-hour window has
+ *      closed; the conversation was handed to a person
  *      (ai_enabled = false); no agent, or an agent outside the
  *      connection's own organization; more than MAX_AI_REPLIES_PER_WINDOW
  *      recent replies.
@@ -55,6 +57,7 @@ import type { ChannelTool } from "../shared-agent-reply.server.ts";
 import {
   OPT_IN_ACKNOWLEDGEMENT,
   OPT_OUT_ACKNOWLEDGEMENT,
+  consentScopesForKeyword,
   parseConsentKeyword,
   recordConsentEvent,
   writeAuditLog,
@@ -282,15 +285,18 @@ export async function replyToInboundWhatsAppMessage(
     .eq("organization_id", org)
     .maybeSingle();
   if (connError) throw connError;
-  if (!connection || connection.status !== "connected") return "skipped_no_agent";
-  if (!isWithinCustomerServiceWindow(inbound.occurred_at, now)) return "skipped_window_closed";
+  if (!connection) return "skipped_no_agent";
+  const connected = connection.status === "connected";
+  const windowOpen = isWithinCustomerServiceWindow(inbound.occurred_at, now);
 
-  // STOP / START work whatever the AI settings are.
+  // STOP / START work whatever the AI settings are — and are recorded even
+  // when no acknowledgement can be sent (the number isn't connected right
+  // now, or this message is being processed after the 24-hour window).
   const keyword = connection.business_id ? parseConsentKeyword(inbound.content) : null;
   if (keyword && connection.business_id) {
     const replyRowId = await claimReply(supabaseAdmin, inbound, "consent_ack", now);
     if (!replyRowId) return "duplicate";
-    for (const scope of ["transactional", "marketing"] as const) {
+    for (const scope of consentScopesForKeyword(keyword)) {
       await recordConsentEvent(supabaseAdmin, {
         organizationId: org,
         businessId: connection.business_id,
@@ -310,6 +316,20 @@ export async function replyToInboundWhatsAppMessage(
       subjectId: conversation.id,
       details: { source: "customer_keyword" },
     });
+    if (!connected || !windowOpen) {
+      // Settle the reply slot so redeliveries and the recovery sweep stop here.
+      await supabaseAdmin
+        .from("whatsapp_messages")
+        .update({
+          status: "failed",
+          error_message: connected
+            ? "Consent change recorded; no acknowledgement sent because the 24-hour window had closed."
+            : "Consent change recorded; no acknowledgement sent because the number isn't connected.",
+        })
+        .eq("id", replyRowId)
+        .eq("status", "queued");
+      return "consent_updated";
+    }
     const body = keyword === "opt_out" ? OPT_OUT_ACKNOWLEDGEMENT : OPT_IN_ACKNOWLEDGEMENT;
     return (await sendClaimedReply(
       supabaseAdmin,
@@ -324,6 +344,8 @@ export async function replyToInboundWhatsAppMessage(
       : "failed_send";
   }
 
+  if (!connected) return "skipped_no_agent";
+  if (!windowOpen) return "skipped_window_closed";
   if (!conversation.ai_enabled) return "skipped_ai_disabled";
   if (!connection.agent_config_id) return "skipped_no_agent";
   const { data: agent, error: agentError } = await supabaseAdmin
