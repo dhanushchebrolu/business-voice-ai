@@ -83,30 +83,75 @@ interface ConsentRow {
   wa_id: string;
   action: string;
   created_at: string;
+  source?: string | null;
   contact_id?: string | null;
 }
 
+/** Opt-outs that come from the customer (or Meta, on their behalf): only the customer can lift them. */
+const CUSTOMER_OPT_OUT_SOURCES = new Set(["customer_keyword", "customer_form", "meta_signal"]);
+/** Opt-ins the customer gave themselves (START, their own form). */
+const CUSTOMER_OPT_IN_SOURCES = new Set(["customer_keyword", "customer_form"]);
+
+export interface ConsentState {
+  action: ConsentAction;
+  at: number;
+  contactId: string | null;
+  /** The opt-out is the customer's own (or Meta's) and staff can't reverse it. */
+  authoritative: boolean;
+  latest: { action: ConsentAction; at: number };
+  customerOptOutAt: number | null;
+  customerOptInAt: number | null;
+}
+
 /**
- * Folds consent rows into the latest action per number. The newest
+ * Folds consent rows into the current action per number. The newest
  * created_at wins; on an exact tie an opt-out wins, so the answer never
  * depends on row order and an opt-out can't be lost to a same-instant
- * opt-in.
+ * opt-in. One exception: an opt-out the customer gave (STOP, their form,
+ * or Meta's "stopped marketing" signal) stands until the customer opts in
+ * again themselves (START, their form) strictly later — a staff-attested
+ * or imported opt-in doesn't reverse it.
  */
 export function foldLatestConsent(
   rows: Iterable<ConsentRow>,
-  into = new Map<string, { action: ConsentAction; at: number; contactId: string | null }>(),
+  into = new Map<string, ConsentState>(),
 ) {
   for (const row of rows) {
     const at = new Date(row.created_at).getTime();
     const action: ConsentAction = row.action === "opt_out" ? "opt_out" : "opt_in";
+    const source = row.source ?? "";
     const current = into.get(row.wa_id);
+    let latest = current?.latest;
+    let contactId = current?.contactId ?? null;
     if (
-      !current ||
-      at > current.at ||
-      (at === current.at && action === "opt_out" && current.action !== "opt_out")
+      !latest ||
+      at > latest.at ||
+      (at === latest.at && action === "opt_out" && latest.action !== "opt_out")
     ) {
-      into.set(row.wa_id, { action, at, contactId: row.contact_id ?? current?.contactId ?? null });
+      latest = { action, at };
+      contactId = row.contact_id ?? contactId;
     }
+    let customerOptOutAt = current?.customerOptOutAt ?? null;
+    let customerOptInAt = current?.customerOptInAt ?? null;
+    if (action === "opt_out" && CUSTOMER_OPT_OUT_SOURCES.has(source)) {
+      customerOptOutAt = Math.max(customerOptOutAt ?? at, at);
+    }
+    if (action === "opt_in" && CUSTOMER_OPT_IN_SOURCES.has(source)) {
+      customerOptInAt = Math.max(customerOptInAt ?? at, at);
+    }
+    const customerOptOutStands =
+      customerOptOutAt !== null &&
+      !(customerOptInAt !== null && customerOptInAt > customerOptOutAt);
+    const resolved: ConsentAction = customerOptOutStands ? "opt_out" : latest.action;
+    into.set(row.wa_id, {
+      action: resolved,
+      at: latest.at,
+      contactId,
+      authoritative: resolved === "opt_out" && customerOptOutStands,
+      latest,
+      customerOptOutAt,
+      customerOptInAt,
+    });
   }
   return into;
 }
@@ -127,7 +172,7 @@ async function readAllConsentRows(
   for (let offset = 0; ; offset += CONSENT_PAGE_SIZE) {
     let query = supabaseAdmin
       .from("whatsapp_consent_events")
-      .select("wa_id, action, created_at, contact_id")
+      .select("wa_id, action, created_at, source, contact_id")
       .eq("business_id", businessId)
       .eq("scope", scope);
     if (waIds) query = query.in("wa_id", waIds);
@@ -148,7 +193,7 @@ export async function latestConsent(
   scope: ConsentScope,
   waIds: string[],
 ): Promise<Map<string, ConsentAction>> {
-  const folded = new Map<string, { action: ConsentAction; at: number; contactId: string | null }>();
+  const folded = new Map<string, ConsentState>();
   for (let i = 0; i < waIds.length; i += WA_ID_CHUNK) {
     foldLatestConsent(
       await readAllConsentRows(supabaseAdmin, businessId, scope, waIds.slice(i, i + WA_ID_CHUNK)),
@@ -188,6 +233,22 @@ export async function suppressedWaIds(
     for (const row of data ?? []) result.add(row.wa_id);
   }
   return result;
+}
+
+/**
+ * True while the customer's own opt-out (STOP, their form) or Meta's
+ * opt-out signal stands for this number and scope: a staff-attested opt-in
+ * can't reverse it, so the dashboard refuses to record one.
+ */
+export async function customerOptOutBlocksStaffOptIn(
+  supabaseAdmin: Client,
+  businessId: string,
+  scope: ConsentScope,
+  waId: string,
+): Promise<boolean> {
+  const rows = await readAllConsentRows(supabaseAdmin, businessId, scope, [waId]);
+  const state = foldLatestConsent(rows).get(waId);
+  return Boolean(state && state.action === "opt_out" && state.authoritative);
 }
 
 export type SendPermission =

@@ -214,6 +214,43 @@ describe("booking notifications", () => {
     }
   });
 
+  test("a booking moved back to an earlier time: only the newest reschedule notice is sent", async () => {
+    // A → B, then B → C, then C → B: the A → B and C → B notices both name
+    // the current time B; the customer must get one message, from the newest.
+    const db = createFakeDb(
+      {
+        ...seed({ booking: { status: "RESCHEDULED", start_at: inHours(30) } }),
+        whatsapp_notifications: [
+          notification("booking_rescheduled", {
+            id: "n-ab",
+            dedupe_key: "booking_rescheduled:bk-1:A:B",
+            payload: { start_at: inHours(30) },
+            created_at: ago(30),
+          }),
+          notification("booking_rescheduled", {
+            id: "n-bc",
+            dedupe_key: "booking_rescheduled:bk-1:B:C",
+            payload: { start_at: inHours(40) },
+            created_at: ago(20),
+          }),
+          notification("booking_rescheduled", {
+            id: "n-cb",
+            dedupe_key: "booking_rescheduled:bk-1:C:B",
+            payload: { start_at: inHours(30) },
+            created_at: ago(10),
+          }),
+        ],
+      },
+      { now: () => NOW },
+    );
+    const meta = fakeMeta();
+    await run(db, meta);
+    assert.equal(meta.sent.length, 1);
+    assert.equal(row(db, "n-cb")["status"], "sent");
+    assert.equal(row(db, "n-ab")["status"], "skipped");
+    assert.equal(row(db, "n-bc")["status"], "skipped");
+  });
+
   test("cancellation and reschedule messages are sent for the current state", async () => {
     for (const [kind, booking] of [
       ["booking_cancelled", { status: "CANCELLED" }],

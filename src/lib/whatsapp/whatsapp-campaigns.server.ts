@@ -610,6 +610,20 @@ async function dispatchCampaign(
     if (error) throw error;
 
     for (const row of due ?? []) {
+      // Staff can pause or cancel while a batch is running: the campaign is
+      // re-read before every send, so at most the message already in
+      // flight goes out after they do.
+      const { data: live, error: liveError } = await supabaseAdmin
+        .from("whatsapp_campaigns")
+        .select("status")
+        .eq("id", campaign.id)
+        .eq("organization_id", campaign.organization_id)
+        .maybeSingle();
+      if (liveError) throw liveError;
+      if (live?.status !== "running") {
+        summary.status = live?.status ?? summary.status;
+        return summary;
+      }
       if (!(await claimRecipient(supabaseAdmin, row, now))) continue;
       const attempts = row.attempts + 1;
       const finish = async (

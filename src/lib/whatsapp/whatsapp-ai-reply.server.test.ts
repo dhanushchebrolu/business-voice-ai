@@ -478,6 +478,80 @@ describe("replyToInboundWhatsAppMessages / recoverPendingWhatsAppReplies", () =>
     const result = await recoverPendingWhatsAppReplies(db.client, { now: () => NOW });
     assert.equal(result.examined, 0);
   });
+
+  test("a message skipped because AI was off, no agent was assigned, or the chat was rate-limited never gets a late AI reply", async () => {
+    const recentReplies = Array.from({ length: MAX_AI_REPLIES_PER_WINDOW }, (_, i) => ({
+      id: `out-r${i}`,
+      organization_id: "org-a",
+      whatsapp_connection_id: "conn-a",
+      conversation_id: "conv-a",
+      direction: "outbound",
+      message_type: "text",
+      content: "earlier reply",
+      status: "sent",
+      reply_to_message_id: `in-old-${i}`,
+      occurred_at: minutesAgo(3),
+      created_at: minutesAgo(3),
+    }));
+    const cases: [
+      Parameters<typeof seed>[0],
+      string,
+      (db: ReturnType<typeof createFakeDb>) => void,
+      number,
+    ][] = [
+      // AI turned back on five minutes later.
+      [
+        { aiEnabled: false },
+        "skipped_ai_disabled",
+        (db) => (db.rows("whatsapp_conversations")[0]!["ai_enabled"] = true),
+        5,
+      ],
+      // An agent assigned five minutes later.
+      [
+        { agentConfigId: null },
+        "skipped_no_agent",
+        (db) => (db.rows("whatsapp_connections")[0]!["agent_config_id"] = "agent-a"),
+        5,
+      ],
+      // The rate-limit window has passed by the next sweep.
+      [{ extraMessages: recentReplies }, "skipped_rate_limited", () => {}, 12],
+    ];
+    for (const [over, expected, later, minutesLater] of cases) {
+      const db = createFakeDb(seed(over), { now: () => NOW });
+      assert.equal(await reply(db), expected);
+      later(db);
+      const ai = okAi();
+      const meta = fakeMeta();
+      const sweepAt = new Date(NOW.getTime() + minutesLater * 60_000);
+      await recoverPendingWhatsAppReplies(db.client, {
+        generateReply: ai.generateReply,
+        fetchImpl: meta.fetchImpl,
+        sleep: async () => {},
+        now: () => sweepAt,
+      });
+      assert.equal(ai.calls.length, 0, expected);
+      assert.equal(meta.sent.length, 0, expected);
+      // A direct retry (e.g. a redelivery) doesn't answer it either.
+      await replyToInboundWhatsAppMessage(db.client, "in-1", {
+        generateReply: ai.generateReply,
+        fetchImpl: meta.fetchImpl,
+        sleep: async () => {},
+        now: () => sweepAt,
+      });
+      assert.equal(meta.sent.length, 0, expected);
+    }
+  });
+
+  test("a message whose reply was merely interrupted is still recovered", async () => {
+    const db = createFakeDb(seed(), { now: () => NOW });
+    const meta = fakeMeta();
+    await recoverPendingWhatsAppReplies(db.client, {
+      generateReply: okAi().generateReply,
+      fetchImpl: meta.fetchImpl,
+      now: () => new Date(NOW.getTime() + 5 * 60_000),
+    });
+    assert.equal(meta.sent.length, 1);
+  });
 });
 
 describe("STOP / START keywords", () => {

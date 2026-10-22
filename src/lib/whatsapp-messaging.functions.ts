@@ -295,10 +295,19 @@ export const recordWhatsAppContactConsent = createServerFn({ method: "POST" })
     if (contactError) throw contactError;
     if (businessError) throw businessError;
     if (!contact || !business) throw new Error("Contact or business not found.");
-    const { toWaId, recordConsentEvent, writeAuditLog } =
+    const { toWaId, recordConsentEvent, writeAuditLog, customerOptOutBlocksStaffOptIn } =
       await import("@/lib/whatsapp/whatsapp-consent.server");
     const waId = toWaId(contact.phone, business.country);
     if (!waId) throw new Error("This contact's phone number isn't a valid WhatsApp number.");
+    // A customer's own opt-out (STOP, or Meta's signal) can only be reversed by the customer.
+    if (
+      data.action === "opt_in" &&
+      (await customerOptOutBlocksStaffOptIn(supabaseAdmin, business.id, data.scope, waId))
+    ) {
+      throw new Error(
+        "This customer opted out themselves, so only they can opt back in (for example by replying START, or through your sign-up form).",
+      );
+    }
     await recordConsentEvent(supabaseAdmin, {
       organizationId: org,
       businessId: business.id,

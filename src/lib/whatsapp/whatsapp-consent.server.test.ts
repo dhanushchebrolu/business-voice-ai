@@ -10,6 +10,7 @@ import {
   recordConsentEvent,
   latestConsentForBusiness,
   foldLatestConsent,
+  customerOptOutBlocksStaffOptIn,
 } from "./whatsapp-consent.server.ts";
 import { createFakeDb } from "./whatsapp-test-db.ts";
 
@@ -68,6 +69,111 @@ describe("consentScopesForKeyword", () => {
   test("STOP opts out of everything; START only restores transactional messages", () => {
     assert.deepEqual(consentScopesForKeyword("opt_out"), ["transactional", "marketing"]);
     assert.deepEqual(consentScopesForKeyword("opt_in"), ["transactional"]);
+  });
+});
+
+describe("consent precedence: a customer's own opt-out outranks staff", () => {
+  const from = (source: string, ...args: Parameters<typeof event>) => ({
+    ...event(...args),
+    source,
+  });
+
+  test("a staff-attested or imported opt-in never overrides a customer's STOP or Meta's opt-out", async () => {
+    const db = createFakeDb({
+      whatsapp_consent_events: [
+        from("customer_keyword", "911", "marketing", "opt_out", 60), // STOP
+        from("staff_attested", "911", "marketing", "opt_in", 10),
+        from("meta_signal", "912", "marketing", "opt_out", 60), // Meta 131050
+        from("import", "912", "marketing", "opt_in", 10),
+        from("customer_form", "913", "transactional", "opt_out", 60),
+        from("staff_attested", "913", "transactional", "opt_in", 10),
+      ],
+    });
+    const marketing = await latestConsent(db.client, "biz-a", "marketing", ["911", "912"]);
+    assert.equal(marketing.get("911"), "opt_out");
+    assert.equal(marketing.get("912"), "opt_out");
+    assert.equal(
+      (await latestConsent(db.client, "biz-a", "transactional", ["913"])).get("913"),
+      "opt_out",
+    );
+    assert.deepEqual(await checkSendPermission(db.client, "biz-a", "911", "marketing"), {
+      allowed: false,
+      reason: "opted_out",
+    });
+    assert.deepEqual(await checkSendPermission(db.client, "biz-a", "913", "transactional"), {
+      allowed: false,
+      reason: "opted_out",
+    });
+    // Campaign audiences use the same rule.
+    const audience = await latestConsentForBusiness(db.client, "biz-a", "marketing");
+    assert.equal(audience.get("911")!.action, "opt_out");
+    assert.equal(audience.get("912")!.action, "opt_out");
+  });
+
+  test("only the customer can reverse their own opt-out (START, or their own form)", async () => {
+    const db = createFakeDb({
+      whatsapp_consent_events: [
+        from("customer_keyword", "911", "transactional", "opt_out", 60),
+        from("customer_keyword", "911", "transactional", "opt_in", 30), // START
+        from("customer_keyword", "912", "marketing", "opt_out", 60),
+        from("customer_form", "912", "marketing", "opt_in", 30),
+        // After the customer re-opted in, staff records are ordinary again.
+        from("staff_attested", "912", "marketing", "opt_in", 10),
+      ],
+    });
+    assert.equal(
+      (await latestConsent(db.client, "biz-a", "transactional", ["911"])).get("911"),
+      "opt_in",
+    );
+    assert.equal(
+      (await latestConsent(db.client, "biz-a", "marketing", ["912"])).get("912"),
+      "opt_in",
+    );
+  });
+
+  test("a later customer opt-out wins again, and an opt-in at the same instant as a customer opt-out doesn't reverse it", async () => {
+    const db = createFakeDb({
+      whatsapp_consent_events: [
+        from("customer_form", "911", "marketing", "opt_in", 60),
+        from("customer_keyword", "911", "marketing", "opt_out", 30),
+        from("staff_attested", "911", "marketing", "opt_in", 10),
+        from("customer_keyword", "912", "marketing", "opt_out", 30),
+        from("customer_form", "912", "marketing", "opt_in", 30),
+      ],
+    });
+    const latest = await latestConsent(db.client, "biz-a", "marketing", ["911", "912"]);
+    assert.equal(latest.get("911"), "opt_out");
+    assert.equal(latest.get("912"), "opt_out");
+  });
+
+  test("customerOptOutBlocksStaffOptIn: true only while a customer's or Meta's opt-out stands", async () => {
+    const db = createFakeDb({
+      whatsapp_consent_events: [
+        from("customer_keyword", "911", "marketing", "opt_out", 60),
+        from("staff_attested", "912", "marketing", "opt_out", 60),
+        from("meta_signal", "913", "marketing", "opt_out", 60),
+        from("customer_form", "913", "marketing", "opt_in", 10),
+      ],
+    });
+    const blocks = (waId: string) =>
+      customerOptOutBlocksStaffOptIn(db.client, "biz-a", "marketing", waId);
+    assert.equal(await blocks("911"), true);
+    assert.equal(await blocks("912"), false, "a staff opt-out can be corrected by staff");
+    assert.equal(await blocks("913"), false, "the customer opted back in themselves");
+    assert.equal(await blocks("914"), false, "no history");
+  });
+
+  test("a staff-recorded opt-out can still be corrected by staff", async () => {
+    const db = createFakeDb({
+      whatsapp_consent_events: [
+        from("staff_attested", "911", "marketing", "opt_out", 60),
+        from("staff_attested", "911", "marketing", "opt_in", 10),
+      ],
+    });
+    assert.equal(
+      (await latestConsent(db.client, "biz-a", "marketing", ["911"])).get("911"),
+      "opt_in",
+    );
   });
 });
 

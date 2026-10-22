@@ -343,6 +343,34 @@ describe("outbox triggers", () => {
   });
 
   pgTest(
+    "a booking moved A → B → C → B gets a notification for every move, including back to B",
+    () => {
+      const id = voiceBooking();
+      const base = Date.now();
+      const at = (h: number) => new Date(base + h * 3_600_000).toISOString();
+      const move = (h: number) =>
+        assert.equal(
+          sql(
+            `UPDATE public.bookings SET start_at = '${at(h)}', end_at = '${at(h + 0.5)}', status = 'RESCHEDULED' WHERE id = '${id}';`,
+          ).status,
+          0,
+        );
+      move(210); // A → B
+      move(220); // B → C
+      move(210); // C → B
+      move(210); // a repeat of the same move adds nothing
+      const moves = rows(
+        `SELECT (payload->>'start_at')::timestamptz::text || '|' || dedupe_key FROM public.whatsapp_notifications
+       WHERE booking_id = '${id}' AND kind = 'booking_rescheduled' ORDER BY created_at, id;`,
+      );
+      assert.equal(moves.length, 3, moves.join("\n"));
+      assert.equal(new Set(moves.map((m) => m.split("|")[1])).size, 3, "distinct dedupe keys");
+      const startOf = (m: string) => new Date(m.split("|")[0]!).getTime();
+      assert.equal(startOf(moves[2]!), startOf(moves[0]!), "the last move is back to B");
+    },
+  );
+
+  pgTest(
     "a hold confirmed by payment isn't confirmed twice (the payment notification covers it)",
     () => {
       const start = new Date(Date.now() + 300 * 3_600_000).toISOString();

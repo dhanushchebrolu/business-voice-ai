@@ -36,7 +36,7 @@ agents, bookings and Razorpay payment flow. It adds:
 4. Meta's error `131050` ("user stopped marketing messages") on a delivery status is recorded as a marketing opt-out.
 5. Meta gets its `200` at once. Replies run in the background (`whatsapp-ai-reply.server.ts`), one per inbound message (a claimed row, unique `reply_to_message_id`):
    1. **STOP / START.** STOP is recorded as an opt-out for both scopes; START only opts back in to booking and payment messages (marketing needs its own explicit opt-in). Recorded even when AI is off, no agent is assigned, the number isn't connected or the 24-hour window has closed; acknowledged only when the number is connected and the window is open.
-   2. **Guards.** AI is on for the conversation, an agent from the same organization is assigned, the message is inside the 24-hour window, and the conversation has had at most 5 AI replies in 10 minutes.
+   2. **Guards.** AI is on for the conversation, an agent from the same organization is assigned, the message is inside the 24-hour window, and the conversation has had at most 5 AI replies in 10 minutes. A message skipped because AI was off, no agent was assigned or the rate limit was hit is marked (`metadata.ai_reply_skipped`) and never answered later, by the recovery sweep or a retry.
    3. **YES / NO.** A clear YES or NO to an open proposal is handled by the server (`whatsapp-actions.server.ts`, below).
    4. **Handoff.** A customer asking for a person turns AI off and closes any open proposal.
    5. **Reply.** Otherwise the shared agent replies: last 20 messages, 25 s timeout, one retry.
@@ -69,7 +69,7 @@ Database triggers add one row per logical notification to `whatsapp_notification
 | Kind                                                                                     | When                                                                                                                               | Template purpose (body params)                                    |
 | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
 | `booking_confirmed`                                                                      | a booking is created active (CONFIRMED / RESCHEDULED / CALENDAR_SYNC_FAILED), or moves to active from DRAFT / PENDING_CONFIRMATION | `booking_confirmed` (3: first name, business, date-time)          |
-| `booking_rescheduled`                                                                    | an active booking's start time changes (one per new time)                                                                          | `booking_rescheduled` (3)                                         |
+| `booking_rescheduled`                                                                    | an active booking's start time changes (one per move, including a move back to an earlier time; only the newest is sent)           | `booking_rescheduled` (3)                                         |
 | `booking_cancelled`                                                                      | an active or held booking is cancelled                                                                                             | `booking_cancelled` (3)                                           |
 | `booking_reminder`                                                                       | ~24 h before (enqueued by the cron sweep; one per start time)                                                                      | `booking_reminder` (3)                                            |
 | `payment_link`                                                                           | a payment request with a link is created (recovery for `request_payment`'s inline send)                                            | `payment_link` (1: the full message incl. link)                   |
@@ -112,6 +112,7 @@ Payment truth is never touched: the worker only reads `payment_requests` and `bo
   - Transactional messages don't need a per-recipient opt-in event; the recorded basis covers that. Requiring one would block voice-booking confirmations until opt-ins are captured.
 - **Which event counts:**
   - The latest event per business, number and scope wins. On an exact timestamp tie, an **opt-out** wins.
+  - Except: a customer's own opt-out (STOP, their own form) or Meta's "stopped marketing" signal stands until the **customer** opts in again (START, their own form). A staff-attested or imported opt-in never reverses it, and the dashboard refuses to record one. A staff-recorded opt-out can still be corrected by staff.
   - Every consent row is read, paged in a stable order, so a large history (or PostgREST's max-rows) can't hide an older opt-out.
 - **Marketing:**
   - Only to numbers whose **latest marketing consent is an explicit opt-in** (a staff-attested opt-in with evidence, or an import; a customer's START does not count) and that aren't suppressed.
@@ -121,6 +122,7 @@ Payment truth is never touched: the worker only reads `payment_requests` and `bo
   - Parameters come from fixed text, the contact's first name, or the business name.
   - Audience is "everyone opted in" or a contact list, which is filtered the same way. Ineligible numbers are recorded as `skipped` with the reason.
   - Rate: `max_per_minute` (≤ 80) and a send window (`schedule`, with a valid IANA time zone; an existing campaign with an invalid one is auto-paused with the reason).
+  - Pause and cancel take effect within a running batch: the campaign is re-read before every send, so at most the message already in flight goes out.
   - Dispatch is fair: each cron tick takes the least recently dispatched running campaigns, at most 5 per organization and 20 in total, so one tenant's campaigns (or ones waiting for their window) can't block others. A campaign with nothing left completes even while its window is closed.
   - Resumable and idempotent per `(campaign, number)`.
   - Auto-paused if the template stops being APPROVED or most of a batch fails.
@@ -183,7 +185,7 @@ Templates with named parameters aren't supported.
 
 ## Database migrations
 
-Two new files, both additive and idempotent. **Neither has been applied anywhere.** Production state is unverified: no production database access was used.
+Four new files on this branch, all additive and idempotent: `20261013090000` (server-role grants on the integration tables), `20261019090000`, `20261020090000` and `20261022090000`. This work did not apply any of them anywhere, and production state is unverified: no production database access was used.
 
 ### `20261019090000_whatsapp_ai_replies.sql`
 
@@ -246,11 +248,18 @@ Two new files, both additive and idempotent. **Neither has been applied anywhere
        DROP COLUMN IF EXISTS notifications_enabled_by;
      ```
 
+### `20261022090000_whatsapp_reschedule_notification_key.sql`
+
+- **Changes:** redefines `whatsapp_booking_notification_trigger()` (`CREATE OR REPLACE`; the trigger stays bound) so the reschedule dedupe key names the move and its transaction (`booking_rescheduled:<booking>:<old start>:<new start>:<txid>`). A booking moved A → B → C → B now gets a notice for the last move. Nothing else in the function changes.
+- **Impact:** none on existing rows (their keys stay as they are); no locks beyond replacing a function.
+- **Order:** after `20261020090000`. Safe whether or not `20261020090000` has already been applied somewhere.
+- **Rollback:** re-run the function definition from `20261020090000`. The worker's newest-only rule works with either key format.
+
 **Approval gate:** apply only after explicit approval. Order:
 
 1. Back up.
 2. Apply to a non-production branch/project and run the pre-checks and tests there.
-3. Apply to production in order (20261019 then 20261020).
+3. Apply to production in order (20261013, 20261019, 20261020, then 20261022).
 4. Deploy the code.
 5. Turn on notifications for one business.
 

@@ -449,6 +449,42 @@ describe("dispatchWhatsAppCampaigns", () => {
     assert.equal(recipients(db2)["919800000001"]!["status"], "failed");
   });
 
+  test("pausing during a running batch stops further sends from that batch", async () => {
+    const s = seed();
+    s.whatsapp_consent_events.push(
+      consent("919800000006", "opt_in", 100),
+      consent("919800000007", "opt_in", 100),
+    );
+    const db = createFakeDb(s, { now: () => NOW });
+    await launch(db);
+    const pending = () =>
+      db.rows("whatsapp_campaign_recipients").filter((r) => r["status"] === "pending").length;
+    assert.equal(pending(), 4);
+    const meta = fakeMeta();
+    // Staff press Pause while the first message is being sent.
+    let pausedOnce = false;
+    const fetchImpl = (async (url: string, init: RequestInit) => {
+      const res = await meta.fetchImpl(url, init);
+      if (pausedOnce) return res;
+      pausedOnce = true;
+      await changeCampaignStatus(db.client, {
+        organizationId: "org-a",
+        campaignId: "camp-1",
+        action: "pause",
+        actorUserId: "user-1",
+      });
+      return res;
+    }) as typeof fetch;
+    await dispatchWhatsAppCampaigns(db.client, {
+      fetchImpl,
+      sleep: async () => {},
+      now: () => NOW,
+    });
+    assert.equal(meta.sent.length, 1, "only the message already in flight");
+    assert.equal(db.rows("whatsapp_campaigns")[0]!["status"], "paused");
+    assert.equal(pending(), 3, "the rest wait for Resume, unclaimed");
+  });
+
   test("a template paused at Meta pauses the campaign before anything is sent", async () => {
     const db = createFakeDb(seed(), { now: () => NOW });
     await launch(db);
@@ -592,6 +628,23 @@ describe("syncTemplates", () => {
 });
 
 describe("hardening", () => {
+  test("a customer's STOP isn't undone by a later staff opt-in: never queued, never sent", async () => {
+    const s = seed();
+    s.whatsapp_consent_events.push(
+      { ...consent("919800000002", "opt_out", 50), source: "customer_keyword" },
+      { ...consent("919800000002", "opt_in", 10), source: "staff_attested" },
+    );
+    const db = createFakeDb(s, { now: () => NOW });
+    await launch(db);
+    assert.notEqual(recipients(db)["919800000002"]?.["status"], "pending");
+    const meta = fakeMeta();
+    await dispatch(db, meta);
+    assert.deepEqual(
+      meta.sent.map((m) => m["to"]),
+      ["919800000001"],
+    );
+  });
+
   test("the audience reads every consent page: an older opt-out behind 1,000+ newer rows still excludes that number", async () => {
     const s = seed() as unknown as Record<string, Record<string, unknown>[]>;
     for (let i = 0; i < 1200; i++) {

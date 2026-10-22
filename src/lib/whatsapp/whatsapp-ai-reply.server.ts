@@ -17,7 +17,8 @@
  *      closed; the conversation was handed to a person
  *      (ai_enabled = false); no agent, or an agent outside the
  *      connection's own organization; more than MAX_AI_REPLIES_PER_WINDOW
- *      recent replies.
+ *      recent replies. A message skipped for AI off, no agent or the rate
+ *      limit is marked (metadata.ai_reply_skipped) and never answered later.
  *   4. Claim: an outbound row with reply_to_message_id = the inbound id is
  *      inserted ('queued') BEFORE the model or Meta is called. The partial
  *      unique index on reply_to_message_id makes that insert the lock: a
@@ -73,6 +74,13 @@ import {
 type Client = SupabaseClient<Database>;
 
 export const HISTORY_LIMIT = 20;
+/** Set on an inbound message the AI deliberately didn't answer; it is never answered later. */
+export const AI_REPLY_SKIPPED_KEY = "ai_reply_skipped";
+const SETTLED_SKIPS = new Set<ReplyOutcome>([
+  "skipped_ai_disabled",
+  "skipped_no_agent",
+  "skipped_rate_limited",
+]);
 export const AI_REPLY_TIMEOUT_MS = 25_000;
 export const AI_REPLY_ATTEMPTS = 2;
 export const STALE_CLAIM_MS = 2 * 60_000;
@@ -256,7 +264,7 @@ export async function replyToInboundWhatsAppMessage(
   const { data: inbound, error: inboundError } = await supabaseAdmin
     .from("whatsapp_messages")
     .select(
-      "id, organization_id, whatsapp_connection_id, conversation_id, direction, message_type, content, occurred_at",
+      "id, organization_id, whatsapp_connection_id, conversation_id, direction, message_type, content, occurred_at, metadata",
     )
     .eq("id", inboundMessageId)
     .maybeSingle();
@@ -344,10 +352,35 @@ export async function replyToInboundWhatsAppMessage(
       : "failed_send";
   }
 
+  // A message the AI deliberately didn't answer (AI off, no agent, rate
+  // limit) is never answered later: turning AI back on, assigning an agent
+  // or the rate window passing must not produce stale replies through the
+  // recovery sweep or a retry.
+  const inboundMeta = (inbound.metadata ?? {}) as Record<string, unknown>;
+  const skippedBefore = inboundMeta[AI_REPLY_SKIPPED_KEY];
+  if (typeof skippedBefore === "string" && SETTLED_SKIPS.has(skippedBefore as ReplyOutcome)) {
+    return skippedBefore as ReplyOutcome;
+  }
+  const settleSkip = async (reason: ReplyOutcome): Promise<ReplyOutcome> => {
+    const { error: markError } = await supabaseAdmin
+      .from("whatsapp_messages")
+      .update({
+        metadata: {
+          ...inboundMeta,
+          [AI_REPLY_SKIPPED_KEY]: reason,
+          ai_reply_skipped_at: now.toISOString(),
+        } as Json,
+      })
+      .eq("id", inbound.id)
+      .eq("organization_id", org);
+    if (markError) throw markError;
+    return reason;
+  };
+
   if (!connected) return "skipped_no_agent";
   if (!windowOpen) return "skipped_window_closed";
-  if (!conversation.ai_enabled) return "skipped_ai_disabled";
-  if (!connection.agent_config_id) return "skipped_no_agent";
+  if (!conversation.ai_enabled) return settleSkip("skipped_ai_disabled");
+  if (!connection.agent_config_id) return settleSkip("skipped_no_agent");
   const { data: agent, error: agentError } = await supabaseAdmin
     .from("agent_configs")
     .select("id, business_id, organization_id")
@@ -355,7 +388,7 @@ export async function replyToInboundWhatsAppMessage(
     .eq("organization_id", org)
     .maybeSingle();
   if (agentError) throw agentError;
-  if (!agent) return "skipped_no_agent";
+  if (!agent) return settleSkip("skipped_no_agent");
 
   const { count: recentReplies, error: countError } = await supabaseAdmin
     .from("whatsapp_messages")
@@ -368,7 +401,7 @@ export async function replyToInboundWhatsAppMessage(
   if (countError) throw countError;
   if ((recentReplies ?? 0) >= MAX_AI_REPLIES_PER_WINDOW) {
     console.warn("whatsapp_ai_reply:rate_limited", { conversationId: conversation.id });
-    return "skipped_rate_limited";
+    return settleSkip("skipped_rate_limited");
   }
 
   const handoff = isHandoffRequest(inbound.content);
@@ -623,6 +656,7 @@ export async function recoverPendingWhatsAppReplies(
     .select("id")
     .eq("direction", "inbound")
     .eq("message_type", "text")
+    .is(`metadata->>${AI_REPLY_SKIPPED_KEY}`, null)
     .gte("occurred_at", new Date(now.getTime() - RECOVERY_LOOKBACK_MS).toISOString())
     .lte("occurred_at", new Date(now.getTime() - 60_000).toISOString())
     .order("occurred_at", { ascending: true })

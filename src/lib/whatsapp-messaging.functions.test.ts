@@ -107,6 +107,13 @@ describe("consent and policy", () => {
       /data\.action === "opt_in" && \(!data\.evidence \|\| data\.evidence\.length < 10\)/,
     );
   });
+  test("a staff opt-in is refused while the customer's own opt-out stands", () => {
+    const body = handler("recordWhatsAppContactConsent");
+    const check = body.indexOf("customerOptOutBlocksStaffOptIn(");
+    const insert = body.indexOf("recordConsentEvent(");
+    assert.ok(check > -1 && insert > -1 && check < insert);
+    assert.match(body, /data\.action === "opt_in"[\s\S]*?customerOptOutBlocksStaffOptIn\(/);
+  });
   test("campaigns only use APPROVED MARKETING templates", () => {
     assert.match(
       handler("createWhatsAppCampaign"),

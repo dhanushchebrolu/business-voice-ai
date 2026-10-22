@@ -200,6 +200,21 @@ async function processBookingNotification(
         ? active && future
         : active && future && sameInstant(payload["start_at"], booking.start_at);
   if (!current) return { status: "skipped", reason: "superseded" };
+  if (kind === "booking_rescheduled") {
+    // A booking moved A → B → C → B has two notices naming B: only the
+    // newest one is sent.
+    const { data: newer, error: newerError } = await supabaseAdmin
+      .from("whatsapp_notifications")
+      .select("id")
+      .eq("organization_id", row.organization_id)
+      .eq("booking_id", booking.id)
+      .eq("kind", "booking_rescheduled")
+      .gt("created_at", row.created_at)
+      .limit(1)
+      .maybeSingle();
+    if (newerError) throw newerError;
+    if (newer) return { status: "skipped", reason: "superseded" };
+  }
 
   const { data: business, error: businessError } = await supabaseAdmin
     .from("businesses")
