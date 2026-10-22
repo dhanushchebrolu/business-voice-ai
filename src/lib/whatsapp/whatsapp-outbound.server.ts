@@ -235,7 +235,13 @@ export type SendConversationMessageOutcome =
         | "template_unverified";
       detail?: string | undefined;
     }
-  | { outcome: "failed"; messageRowId: string; error: string };
+  | {
+      outcome: "failed";
+      messageRowId: string;
+      error: string;
+      /** Meta may already have the message: the row stays 'queued' and the key stays blocked. */
+      ambiguous?: boolean | undefined;
+    };
 
 /**
  * A staff template outside the window is business-initiated: it needs an
@@ -385,7 +391,12 @@ export async function sendWhatsAppConversationMessage(
     deps,
   );
   if (result.outcome === "failed") {
-    return { outcome: "failed", messageRowId: row.id, error: result.error };
+    return {
+      outcome: "failed",
+      messageRowId: row.id,
+      error: result.error,
+      ...(result.ambiguous ? { ambiguous: true } : {}),
+    };
   }
   await supabaseAdmin
     .from("whatsapp_conversations")

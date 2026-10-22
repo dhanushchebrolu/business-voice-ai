@@ -271,6 +271,49 @@ async function latestInboundAt(
   return data ? new Date(data.occurred_at).getTime() : null;
 }
 
+/** Connected numbers considered for one business (more is a misconfiguration, not a use case). */
+const MAX_CONNECTIONS_PER_BUSINESS = 10;
+
+type CandidateConnection = {
+  id: string;
+  notifications_enabled: boolean | null;
+};
+
+/**
+ * Picks the number to send from when a business has several connected:
+ * for booking and payment notifications only numbers with notifications
+ * turned on (if any); then the number this customer already talks to (most
+ * recent conversation); otherwise the earliest connected one. Always the
+ * same answer for the same state.
+ */
+async function chooseConnection<C extends CandidateConnection>(
+  supabaseAdmin: Client,
+  input: BusinessMessageInput,
+  candidates: C[],
+  waId: string,
+): Promise<C> {
+  let pool = candidates;
+  if (input.scope === "transactional") {
+    const enabled = candidates.filter((c) => c.notifications_enabled === true);
+    if (enabled.length > 0) pool = enabled;
+  }
+  if (pool.length === 1) return pool[0]!;
+  const { data: conversation, error } = await supabaseAdmin
+    .from("whatsapp_conversations")
+    .select("whatsapp_connection_id")
+    .eq("organization_id", input.organizationId)
+    .eq("wa_id", waId)
+    .in(
+      "whatsapp_connection_id",
+      pool.map((c) => c.id),
+    )
+    .order("last_inbound_at", { ascending: false, nullsFirst: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return pool.find((c) => c.id === conversation?.whatsapp_connection_id) ?? pool[0]!;
+}
+
 export async function sendBusinessWhatsAppMessage(
   supabaseAdmin: Client,
   input: BusinessMessageInput,
@@ -288,6 +331,8 @@ export async function sendBusinessWhatsAppMessage(
     };
   }
 
+  // A business can have more than one connected number: every one is a
+  // candidate, in a fixed order (earliest connected first).
   let connectionQuery = supabaseAdmin
     .from("whatsapp_connections")
     .select(
@@ -297,9 +342,13 @@ export async function sendBusinessWhatsAppMessage(
     .eq("business_id", input.businessId)
     .eq("status", "connected");
   if (input.connectionId) connectionQuery = connectionQuery.eq("id", input.connectionId);
-  const { data: connection, error: connError } = await connectionQuery.maybeSingle();
+  const { data: candidates, error: connError } = await connectionQuery
+    .order("created_at", { ascending: true })
+    .order("id", { ascending: true })
+    .limit(MAX_CONNECTIONS_PER_BUSINESS);
   if (connError) throw connError;
-  if (!connection) return { outcome: "skipped", reason: "no_connection" };
+  if (!candidates || candidates.length === 0)
+    return { outcome: "skipped", reason: "no_connection" };
 
   const { data: business, error: businessError } = await supabaseAdmin
     .from("businesses")
@@ -311,10 +360,17 @@ export async function sendBusinessWhatsAppMessage(
   const waId = toWaId(input.customerPhone, business?.country ?? null);
   if (!waId) return { outcome: "skipped", reason: "invalid_phone" };
 
+  const connection = await chooseConnection(supabaseAdmin, input, candidates, waId);
+
+  // The key is checked across every candidate number, so a retry that would
+  // pick a different number now still finds the earlier send.
   const { data: existing, error: dupError } = await supabaseAdmin
     .from("whatsapp_messages")
     .select("id, status")
-    .eq("whatsapp_connection_id", connection.id)
+    .in(
+      "whatsapp_connection_id",
+      candidates.map((c) => c.id),
+    )
     .eq("metadata->>idempotency_key", input.idempotencyKey)
     .in("status", ["queued", "sent", "delivered", "read"])
     .limit(1)

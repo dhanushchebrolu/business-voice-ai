@@ -53,14 +53,14 @@ On WhatsApp the model can't call `book_appointment`, `reschedule_appointment`, `
   - a priced service, for an agent allowed to take payments, becomes a payment hold at the **service's** price, never a model-chosen amount.
 - **`propose_reschedule`:** only for a booking that the sender's number owns (`callerOwnsBooking`, the voice rule).
 
-The customer's next clear **YES**:
+The customer's next clear **YES** — only if the reply that showed them the proposal was actually sent (`sent`, `delivered` or `read`):
 
 - claims the action once;
 - runs it through the existing tool layer (`executeAiTool`), so capability checks and the database's atomic availability re-check still apply;
 - sets the booking phone to the verified sender;
 - for a reschedule, passes exactly the confirmed move through `guardBookingOwnership`.
 
-The reply is composed by the server from the real result. **NO** declines, anything else leaves the proposal open, and proposals expire after 15 minutes. Cancellations aren't automated on WhatsApp: the AI hands them to staff.
+The reply is composed by the server from the real result. **NO** declines, anything else leaves the proposal open, and proposals expire after 15 minutes. A proposal whose reply never reached the customer (the AI failed, timed out or returned nothing, or the send failed or is unconfirmed) is closed instead, and a timed-out AI attempt can't store one late. Cancellations aren't automated on WhatsApp: the AI hands them to staff.
 
 ## Notifications (outbox)
 
@@ -83,8 +83,8 @@ The worker (`whatsapp-notifications.server.ts`, run by the dispatch cron):
 - **Re-reads current state** before sending. A confirmation for a booking cancelled since, a superseded reschedule or reminder, or a link for a paid/closed request is `skipped` with a reason.
 - **Sends** through `sendBusinessWhatsAppMessage` (`whatsapp-business-message.server.ts`), the one path for every business-initiated message. In order, and nothing is written or sent until all pass:
   1. **Purpose and scope agree:** marketing only with the marketing consent scope; booking/payment only with the transactional scope.
-  2. **The business's own connected number:** organization + business, and the exact connection when the caller pins one (campaigns).
-  3. **A unique live idempotency key** per number, so the inline sender and the worker can't both deliver.
+  2. **The business's own connected number:** organization + business, and the exact connection when the caller pins one (campaigns). If a business has several connected numbers, one is chosen deterministically: for booking/payment messages only numbers with notifications on (if any), then the number the customer already talks to, otherwise the earliest connected.
+  3. **A unique live idempotency key**, checked across all of the business's connected numbers, so the inline sender and the worker can't both deliver.
   4. **Recipient consent and suppression** (below).
   5. **Business notification settings, re-read at send time:**
      - Booking notifications always need notifications on and a recorded consent basis (20+ characters).
@@ -99,10 +99,10 @@ The worker (`whatsapp-notifications.server.ts`, run by the dispatch cron):
   Database errors in any of these checks throw (fail closed): nothing is sent.
 
 - **Retries** with exponential backoff, up to 5 attempts, only when safe (Meta answered 429/5xx, or a transient DB error). A rejection is never repeated.
-- **Unknown outcomes** (a timeout after the request left, or a 2xx without a message id): the message row **stays `queued`**, with "Delivery outcome unknown" in `error_message`. It therefore keeps blocking every later attempt with the same idempotency key (inline sender, outbox, campaign), so it is never sent twice. It needs a person to check.
+- **Unknown outcomes** (a timeout after the request left, or a 2xx without a message id): the message row **stays `queued`**, with "Delivery outcome unknown" in `error_message`. It therefore keeps blocking every later attempt with the same idempotency key (inline sender, outbox, campaign), so it is never sent twice. It needs a person to check. A staff reply in this state is shown as "Delivery unknown" (not "Not sent"), and sending the same draft again reuses its request id, so it can't go out twice.
 - **Skips stale rows:** anything older than 48 h is skipped, never sent late.
 
-Payment truth is never touched: the worker only reads `payment_requests` and `bookings`. A WhatsApp failure never undoes a capture. The webhook's inline consumer now records `whatsapp_error` (instead of a misleading `whatsapp_dispatched_at`) and the outbox retries.
+Payment truth is never touched: the worker only reads `payment_requests` and `bookings`. Payment messages are re-checked against the current state before sending: "payment didn't go through, try again" only while the request is still payable (`CREATED`/`PENDING`), and no "booking confirmed" for a booking cancelled meanwhile. A WhatsApp failure never undoes a capture. The webhook's inline consumer now records `whatsapp_error` (instead of a misleading `whatsapp_dispatched_at`) and the outbox retries.
 
 ## Consent, suppression and campaigns
 

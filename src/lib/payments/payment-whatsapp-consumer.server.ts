@@ -24,6 +24,9 @@ function formatAmount(amountMinorUnits: number, currency: string): string {
   return `${currency} ${major}`;
 }
 
+/** A payment request the customer can still pay (a failed attempt leaves it open). */
+const OPEN_PAYMENT_STATUSES = new Set(["CREATED", "PENDING"]);
+
 export interface PaymentNotification {
   purpose: PaymentMessagePurpose;
   bodyText: string;
@@ -33,7 +36,8 @@ export interface PaymentNotification {
 /**
  * What to tell the customer for a payment event, from the booking and
  * payment_request rows as they are NOW. Null when there's nothing to send
- * (no phone on file, no payment request, an unknown event type). Shared by
+ * (no phone on file, no payment request, an unknown event type, or the
+ * event no longer matches the current state). Shared by
  * the in-process consumer below and the notification worker's recovery
  * path, so both always say the same thing.
  */
@@ -43,7 +47,7 @@ export async function composePaymentNotification(
 ): Promise<PaymentNotification | null> {
   const { data: booking, error: bookingError } = await supabaseAdmin
     .from("bookings")
-    .select("id, customer_phone, start_at, timezone")
+    .select("id, customer_phone, start_at, timezone, status")
     .eq("id", event.booking_id)
     .maybeSingle();
   if (bookingError) throw bookingError;
@@ -51,11 +55,19 @@ export async function composePaymentNotification(
 
   const { data: paymentRequest, error: prError } = await supabaseAdmin
     .from("payment_requests")
-    .select("amount_minor_units, currency, payment_link_url")
+    .select("amount_minor_units, currency, payment_link_url, status")
     .eq("id", event.payment_request_id)
     .maybeSingle();
   if (prError) throw prError;
   if (!paymentRequest) return null;
+
+  // A message can be sent well after its event (the outbox retries it), so
+  // it must still be true now: "try again" only while the link is still
+  // payable, and never "your booking is confirmed" for a cancelled booking.
+  if (event.event_type === "PAYMENT_FAILED" && !OPEN_PAYMENT_STATUSES.has(paymentRequest.status)) {
+    return null;
+  }
+  if (event.event_type === "PAYMENT_CAPTURED" && booking.status === "CANCELLED") return null;
 
   const amountText = formatAmount(paymentRequest.amount_minor_units, paymentRequest.currency);
   const when = new Date(booking.start_at).toLocaleString("en-IN", { timeZone: booking.timezone });

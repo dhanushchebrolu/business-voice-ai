@@ -90,4 +90,17 @@ describe("staff replies", () => {
     assert.match(body, /\.update\(\{ ai_enabled: false \}\)/);
     assert.match(code, /body: z\.string\(\)\.trim\(\)\.min\(1\)\.max\(4096\)/);
   });
+
+  test("an unconfirmed delivery is reported as 'delivery unknown' (never 'Not sent … retry') and still pauses the AI", () => {
+    const body = handler("sendWhatsAppStaffReply");
+    const ambiguous = body.indexOf("result.ambiguous");
+    const notSent = body.indexOf("`Not sent: ${result.error}`");
+    assert.ok(ambiguous > -1 && notSent > -1 && ambiguous < notSent);
+    const branch = body.slice(ambiguous, notSent);
+    assert.match(branch, /deliveryUnknown: true/);
+    assert.match(branch, /may (already )?have reached/i);
+    assert.doesNotMatch(branch, /retry/i);
+    assert.match(branch, /pauseAi\(\)/);
+    assert.match(body, /const pauseAi = \(\) =>[\s\S]*?\.update\(\{ ai_enabled: false \}\)/);
+  });
 });

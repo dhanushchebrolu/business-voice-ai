@@ -302,6 +302,28 @@ describe("sendWhatsAppConversationMessage", () => {
     assert.equal(db.rows("whatsapp_messages").length, 1);
   });
 
+  test("an unknown delivery outcome is reported as ambiguous, and a retry with the same key sends nothing", async () => {
+    for (const r of ["timeout", "network"] as const) {
+      const db = createFakeDb(seed());
+      const meta = fakeMeta([r, 200]);
+      const first = await send(db, {}, meta);
+      assert.equal(first.outcome, "failed", r);
+      assert.equal((first as { ambiguous?: boolean }).ambiguous, true, r);
+      assert.equal(db.rows("whatsapp_messages")[0]!["status"], "queued", r);
+      // Staff pressing Send again on the same draft reuses its request id.
+      assert.deepEqual(await send(db, {}, meta), { outcome: "duplicate" }, r);
+      assert.equal(meta.calls.length, 1, r);
+      assert.equal(db.rows("whatsapp_messages").length, 1, r);
+    }
+  });
+
+  test("a definite failure is not reported as ambiguous", async () => {
+    const db = createFakeDb(seed());
+    const result = await send(db, {}, fakeMeta([400]));
+    assert.equal(result.outcome, "failed");
+    assert.notEqual((result as { ambiguous?: boolean }).ambiguous, true);
+  });
+
   test("a failed send does not block a retry with the same key", async () => {
     const db = createFakeDb(seed());
     assert.equal((await send(db, {}, fakeMeta([400]))).outcome, "failed");

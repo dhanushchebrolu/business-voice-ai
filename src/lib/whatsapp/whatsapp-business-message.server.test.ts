@@ -557,6 +557,88 @@ describe("idempotency and delivery", () => {
   });
 });
 
+describe("a business with more than one connected number", () => {
+  /** A second number for biz-a, connected later, with its own synced templates. */
+  function twoNumbers(
+    over: Parameters<typeof seed>[0] = {},
+    second: Row = {},
+    conversations: Row[] = [],
+  ) {
+    const s = seed(over);
+    s["whatsapp_connections"]![0]!["created_at"] = ago(10_000);
+    s["whatsapp_connections"]!.push({
+      id: "conn-a2",
+      organization_id: "org-a",
+      business_id: "biz-a",
+      phone_number_id: "PN_A2",
+      status: "connected",
+      access_token_ciphertext: encryptCredential("token-a2"),
+      notifications_enabled: true,
+      transactional_consent_basis: BASIS,
+      created_at: ago(100),
+      ...second,
+    });
+    s["whatsapp_templates"]!.push(
+      template("booking_ok_2", {
+        id: "tpl-booking_ok_2",
+        whatsapp_connection_id: "conn-a2",
+        purpose: "booking_confirmed",
+      }),
+    );
+    s["whatsapp_conversations"]!.push(...conversations);
+    return createFakeDb(s, { now: () => NOW });
+  }
+  const sentFrom = (db: ReturnType<typeof createFakeDb>) =>
+    outbound(db).map((m) => m["whatsapp_connection_id"]);
+
+  test("notifications still go out, from one deterministic number (the earliest connected)", async () => {
+    for (let i = 0; i < 2; i++) {
+      const db = twoNumbers();
+      const meta = fakeMeta();
+      const r = await send(db, BOOKING, meta);
+      assert.equal(r.outcome, "sent");
+      assert.deepEqual(sentFrom(db), ["conn-a"]);
+      assert.equal(meta.sent.length, 1);
+    }
+  });
+
+  test("the number the customer is already talking to is used", async () => {
+    const db = twoNumbers({}, {}, [
+      {
+        id: "conv-a2",
+        organization_id: "org-a",
+        whatsapp_connection_id: "conn-a2",
+        wa_id: WA,
+        last_inbound_at: ago(30),
+      },
+    ]);
+    assert.equal((await send(db, BOOKING)).outcome, "sent");
+    assert.deepEqual(sentFrom(db), ["conn-a2"]);
+  });
+
+  test("booking and payment notifications only go from a number with notifications turned on", async () => {
+    const db = twoNumbers({ notificationsEnabled: false });
+    assert.equal((await send(db, BOOKING)).outcome, "sent");
+    assert.deepEqual(sentFrom(db), ["conn-a2"]);
+  });
+
+  test("the idempotency key covers every number: a retry after the customer messages the other number sends nothing more", async () => {
+    const db = twoNumbers();
+    const meta = fakeMeta();
+    assert.equal((await send(db, BOOKING, meta)).outcome, "sent");
+    db.rows("whatsapp_conversations").push({
+      id: "conv-a2",
+      organization_id: "org-a",
+      whatsapp_connection_id: "conn-a2",
+      wa_id: WA,
+      last_inbound_at: ago(5),
+    });
+    const again = await send(db, BOOKING, meta);
+    assert.equal(again.outcome, "skipped_duplicate");
+    assert.equal(meta.sent.length, 1);
+  });
+});
+
 describe("tenant isolation", () => {
   test("a business that isn't the organization's has no number to send from", async () => {
     const db = world();

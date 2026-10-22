@@ -31,6 +31,10 @@ function makeFakeSupabase(script: { table: string; op: string; result: unknown }
         return chain;
       },
       maybeSingle: () => Promise.resolve(next(table, "select.maybeSingle", filters)),
+      // A list query awaited directly (e.g. the sender's connection candidates).
+      then(resolve: (v: unknown) => unknown, reject: (e: unknown) => unknown) {
+        return Promise.resolve(next(table, "select", filters)).then(resolve, reject);
+      },
     };
     return chain;
   }

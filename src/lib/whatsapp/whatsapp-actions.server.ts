@@ -9,7 +9,8 @@
  *   - propose_booking / propose_reschedule: validate, check permission and
  *     ownership, and store ONE pending action for the conversation
  *     (whatsapp_pending_actions), then tell the model to ask for YES/NO.
- * When the customer's next message is a clear YES, handlePendingActionReply
+ * When the customer's next message is a clear YES — and the reply that showed
+ * them the proposal was actually sent — handlePendingActionReply
  * executes exactly that stored action (claimed once: awaiting → executing)
  * through the existing tool layer (executeAiTool — same capability checks,
  * same atomic availability/overlap re-check in the database), and the
@@ -101,7 +102,13 @@ async function storeProposal(
   action: "book" | "book_with_payment" | "reschedule",
   params: Record<string, unknown>,
   summary: string,
+  isActive?: () => boolean,
 ) {
+  // A reply attempt that has already been abandoned (it timed out and the
+  // worker moved on) must not leave a proposal behind that nobody was shown.
+  if (isActive && !isActive()) {
+    return refuse("REPLY_ABANDONED", "This reply attempt was abandoned; nothing was proposed.");
+  }
   // One open proposal per conversation: a new one replaces the old.
   const { error: supersedeError } = await supabaseAdmin
     .from("whatsapp_pending_actions")
@@ -152,6 +159,12 @@ export interface WhatsAppActionDeps {
     callerE164: string;
     country: string | null;
   }) => Promise<boolean>;
+  /**
+   * Whether the reply this tool call belongs to is still live. Set by the
+   * reply worker per generation attempt; a proposal is refused once the
+   * attempt was abandoned (e.g. timed out).
+   */
+  isActive?: (() => boolean) | undefined;
   guardOwnership?: (
     ctx: {
       organizationId: string;
@@ -280,6 +293,7 @@ export function buildWhatsAppActionTools(
             currency: needsPayment ? service!.currency : null,
           },
           summary,
+          deps.isActive,
         );
       },
     },
@@ -328,6 +342,7 @@ export function buildWhatsAppActionTools(
           "reschedule",
           { bookingId, newStartIso: range.startIso, newEndIso: range.endIso },
           `Move your booking to ${formatWhen(range.startIso, ctx.timezone)}`,
+          deps.isActive,
         );
       },
     },
@@ -415,6 +430,31 @@ export async function handlePendingActionReply(
   if (pending.proposed_in_message_id === ctx.inboundMessageId) return { handled: false };
   const answer = parseConfirmation(ctx.messageText);
   if (!answer) return { handled: false };
+  // Only a proposal the customer was actually shown can be confirmed: the
+  // reply to the message that produced it must have been sent. A reply that
+  // failed, was never generated, or whose delivery is unknown leaves
+  // nothing to say YES to.
+  let shown = false;
+  if (pending.proposed_in_message_id) {
+    const { data: shownReply, error: shownError } = await supabaseAdmin
+      .from("whatsapp_messages")
+      .select("id")
+      .eq("reply_to_message_id", pending.proposed_in_message_id)
+      .eq("organization_id", ctx.organizationId)
+      .in("status", ["sent", "delivered", "read"])
+      .limit(1)
+      .maybeSingle();
+    if (shownError) throw shownError;
+    shown = Boolean(shownReply);
+  }
+  if (!shown) {
+    await supabaseAdmin
+      .from("whatsapp_pending_actions")
+      .update({ status: "superseded" })
+      .eq("id", pending.id)
+      .eq("status", "awaiting_confirmation");
+    return { handled: false };
+  }
 
   const { data: claimed, error: claimError } = await supabaseAdmin
     .from("whatsapp_pending_actions")

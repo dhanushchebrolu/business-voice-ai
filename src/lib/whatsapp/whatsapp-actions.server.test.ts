@@ -45,6 +45,22 @@ function seed(capabilities: Record<string, boolean>, services: Record<string, un
       currency: "INR",
       ...s,
     })),
+    // The AI's reply to the proposing message (in-1) was sent, so the
+    // customer saw the proposal.
+    whatsapp_messages: [shownReply("sent")],
+  };
+}
+
+function shownReply(status: string) {
+  return {
+    id: "out-1",
+    organization_id: "org-a",
+    conversation_id: "conv-a",
+    direction: "outbound",
+    message_type: "text",
+    content: "Shall I book it? Reply YES to confirm.",
+    status,
+    reply_to_message_id: "in-1",
   };
 }
 
@@ -253,6 +269,46 @@ describe("handlePendingActionReply", () => {
     const results = await Promise.all([reply(db, deps, "yes"), reply(db, deps, "yes")]);
     assert.equal(calls.length, 1);
     assert.equal(results.filter((r) => r.handled && r.status === "completed").length, 1);
+  });
+
+  test("a proposal whose reply never reached the customer can't be confirmed, and is closed", async () => {
+    for (const status of ["failed", "queued", null]) {
+      const { db, calls, deps } = await withProposal(
+        { calendar_book: true },
+        { startIso: inHours(26), endIso: inHours(27) },
+      );
+      const messages = db.rows("whatsapp_messages");
+      if (status === null) messages.splice(0, messages.length);
+      else messages[0]!["status"] = status;
+      assert.deepEqual(await reply(db, deps, "yes"), { handled: false }, String(status));
+      assert.equal(calls.length, 0, String(status));
+      assert.equal(db.rows("whatsapp_pending_actions")[0]!["status"], "superseded");
+    }
+  });
+
+  test("a delivered or read reply still allows the YES", async () => {
+    for (const status of ["delivered", "read"]) {
+      const { db, calls, deps } = await withProposal(
+        { calendar_book: true },
+        { startIso: inHours(26), endIso: inHours(27) },
+      );
+      db.rows("whatsapp_messages")[0]!["status"] = status;
+      const out = await reply(db, deps, "yes");
+      assert.ok(out.handled && out.status === "completed", status);
+      assert.equal(calls.length, 1);
+    }
+  });
+
+  test("an abandoned reply attempt can't store a proposal", async () => {
+    const db = createFakeDb(seed({ calendar_book: true }));
+    const out = parse(
+      await tool(db, "propose_booking", { isActive: () => false }).execute({
+        startIso: inHours(26),
+        endIso: inHours(27),
+      }),
+    );
+    assert.equal(out["success"], false);
+    assert.equal(db.rows("whatsapp_pending_actions").length, 0);
   });
 
   test("the message that produced the proposal can't confirm it", async () => {

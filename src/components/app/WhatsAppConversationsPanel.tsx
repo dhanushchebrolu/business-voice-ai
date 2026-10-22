@@ -29,6 +29,9 @@ export function WhatsAppConversationsPanel({ orgId }: { orgId: string }) {
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  // One idempotency key per draft: sending the same draft again (e.g. after
+  // "delivery unknown") can never deliver it twice.
+  const [requestId, setRequestId] = useState(() => crypto.randomUUID());
   const [sending, setSending] = useState(false);
   const [togglingAi, setTogglingAi] = useState(false);
 
@@ -72,11 +75,18 @@ export function WhatsAppConversationsPanel({ orgId }: { orgId: string }) {
     setSending(true);
     try {
       const result = await sendReply({
-        data: { conversationId: selected.id, body: draft, clientRequestId: crypto.randomUUID() },
+        data: { conversationId: selected.id, body: draft, clientRequestId: requestId },
       });
       if (result.ok) {
         setDraft("");
-        toast.success("Reply sent. AI replies are paused for this chat.");
+        setRequestId(crypto.randomUUID());
+        toast.success(
+          result.duplicate
+            ? "This reply was already sent (or is still waiting for WhatsApp to confirm it)."
+            : "Reply sent. AI replies are paused for this chat.",
+        );
+      } else if ("deliveryUnknown" in result && result.deliveryUnknown) {
+        toast.warning(result.message);
       } else {
         toast.error(result.message);
       }
@@ -106,7 +116,10 @@ export function WhatsAppConversationsPanel({ orgId }: { orgId: string }) {
               <li key={c.id}>
                 <button
                   type="button"
-                  onClick={() => setSelectedId(c.id)}
+                  onClick={() => {
+                    if (c.id !== selectedId) setRequestId(crypto.randomUUID());
+                    setSelectedId(c.id);
+                  }}
                   className={`w-full rounded-lg border px-3 py-2 text-left text-sm ${
                     c.id === selectedId ? "border-primary bg-primary/5" : "border-border"
                   }`}
@@ -182,7 +195,10 @@ export function WhatsAppConversationsPanel({ orgId }: { orgId: string }) {
               <div className="flex gap-2">
                 <Textarea
                   value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
+                  onChange={(e) => {
+                    setDraft(e.target.value);
+                    setRequestId(crypto.randomUUID());
+                  }}
                   maxLength={4096}
                   placeholder={selected.windowOpen ? "Type a reply…" : "Reply window closed"}
                   disabled={!selected.windowOpen || sending}

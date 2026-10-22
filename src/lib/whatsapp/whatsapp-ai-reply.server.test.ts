@@ -633,6 +633,116 @@ describe("confirmed WhatsApp actions through the reply worker", () => {
     assert.equal(replies(db).length, 1);
   });
 
+  test("a proposal made by a reply that never reached the customer can't be confirmed by a later 'ok'", async () => {
+    // The model proposes a booking, then: the AI fails / times out / returns
+    // nothing, or the send itself fails.
+    const scenarios = [
+      ["error", fakeMeta(), "failed_ai"],
+      ["empty", fakeMeta(), "skipped_empty_reply"],
+      ["send_fails", fakeMeta(400), "failed_send"],
+    ] as const;
+    for (const [mode, meta, expected] of scenarios) {
+      const s = seed({ content: "Can I come tomorrow at 10?" });
+      (s as Record<string, unknown[]>)["agent_configs"]![0] = {
+        id: "agent-a",
+        organization_id: "org-a",
+        business_id: "biz-a",
+        capabilities: { calendar_book: true },
+      };
+      const db = createFakeDb(s, { now: () => NOW });
+      const ai = fakeAi(async () => {
+        const call = ai.calls[ai.calls.length - 1]!;
+        const tools = call.ctx["extraTools"] as {
+          schema: { name: string };
+          execute: (i: Record<string, unknown>) => Promise<unknown>;
+        }[];
+        await tools
+          .find((t) => t.schema.name === "propose_booking")!
+          .execute({ startIso: "2026-10-19T04:30:00.000Z", endIso: "2026-10-19T05:00:00.000Z" });
+        if (mode === "error") throw new Error("model failed");
+        return { reply: mode === "empty" ? "  " : "Shall I book 10am tomorrow? Reply YES." };
+      });
+      assert.equal(await reply(db, ai, meta), expected, mode);
+      assert.equal(db.rows("whatsapp_pending_actions").length > 0, true, mode);
+      assert.ok(
+        db.rows("whatsapp_pending_actions").every((p) => p["status"] !== "awaiting_confirmation"),
+        mode,
+      );
+
+      // The customer, having seen nothing, sends "ok".
+      db.rows("whatsapp_messages").push({
+        id: "in-2",
+        organization_id: "org-a",
+        whatsapp_connection_id: "conn-a",
+        conversation_id: "conv-a",
+        wa_message_id: "wamid.IN2",
+        direction: "inbound",
+        message_type: "text",
+        content: "ok",
+        status: "received",
+        occurred_at: minutesAgo(1),
+        created_at: minutesAgo(1),
+      });
+      const executed: string[] = [];
+      await replyToInboundWhatsAppMessage(db.client, "in-2", {
+        generateReply: okAi().generateReply,
+        fetchImpl: fakeMeta().fetchImpl,
+        sleep: async () => {},
+        now: () => NOW,
+        actions: {
+          executeTool: async (_ctx, name) => {
+            executed.push(name);
+            return { content: JSON.stringify({ success: true, data: { id: "bk-x" } }) };
+          },
+        },
+      });
+      assert.deepEqual(executed, [], mode);
+    }
+  });
+
+  test("a timed-out AI attempt that proposes late leaves no open proposal", async () => {
+    const s = seed({ content: "Can I come tomorrow at 10?" });
+    (s as Record<string, unknown[]>)["agent_configs"]![0] = {
+      id: "agent-a",
+      organization_id: "org-a",
+      business_id: "biz-a",
+      capabilities: { calendar_book: true },
+    };
+    const db = createFakeDb(s, { now: () => NOW });
+    let late: Promise<unknown> = Promise.resolve();
+    const ai = fakeAi(async (n) => {
+      if (n === 1) {
+        const tools = ai.calls[0]!.ctx["extraTools"] as {
+          schema: { name: string };
+          execute: (i: Record<string, unknown>) => Promise<unknown>;
+        }[];
+        late = new Promise((r) => setTimeout(r, 30)).then(() =>
+          tools
+            .find((t) => t.schema.name === "propose_booking")!
+            .execute({ startIso: "2026-10-19T04:30:00.000Z", endIso: "2026-10-19T05:00:00.000Z" }),
+        );
+        await late;
+        return { reply: "too late" };
+      }
+      return { reply: "We have 10am free tomorrow — would you like it?" };
+    });
+    const meta = fakeMeta();
+    const outcome = await replyToInboundWhatsAppMessage(db.client, "in-1", {
+      generateReply: ai.generateReply,
+      fetchImpl: meta.fetchImpl,
+      sleep: async () => {},
+      now: () => NOW,
+      aiTimeoutMs: 5,
+    });
+    assert.equal(outcome, "replied");
+    await late;
+    assert.equal(
+      db.rows("whatsapp_pending_actions").filter((p) => p["status"] === "awaiting_confirmation")
+        .length,
+      0,
+    );
+  });
+
   test("a handoff request closes any open proposal", async () => {
     const s = seed({ content: "I want to talk to a person" });
     (s as Record<string, unknown[]>)["whatsapp_pending_actions"] = [

@@ -516,6 +516,63 @@ describe("payment notifications", () => {
     }
   });
 
+  test("payment failed: 'try again' is sent only while the link is still payable — never after the customer has paid", async () => {
+    process.env["WHATSAPP_TEMPLATE_PAYMENT_FAILED_NAME"] = "payment_ok_v1";
+    try {
+      const open = createFakeDb(
+        {
+          ...paymentSeed("PENDING", "PENDING_PAYMENT"),
+          whatsapp_notifications: [prNotification("payment_failed")],
+        },
+        { now: () => NOW },
+      );
+      const meta = fakeMeta();
+      await run(open, meta);
+      assert.equal(meta.sent.length, 1);
+
+      // A retried outbox row processed after the customer paid on the same
+      // link (or after the request was closed) must not say it failed.
+      for (const [pr, booking] of [
+        ["CAPTURED", "CONFIRMED"],
+        ["CANCELLED", "CANCELLED"],
+        ["EXPIRED", "PAYMENT_EXPIRED"],
+      ]) {
+        const db = createFakeDb(
+          {
+            ...paymentSeed(pr!, booking!),
+            whatsapp_notifications: [prNotification("payment_failed")],
+          },
+          { now: () => NOW },
+        );
+        const m = fakeMeta();
+        await run(db, m);
+        assert.equal(m.sent.length, 0, pr);
+        assert.equal(row(db, "n-payment_failed")["status"], "skipped", pr);
+      }
+    } finally {
+      delete process.env["WHATSAPP_TEMPLATE_PAYMENT_FAILED_NAME"];
+    }
+  });
+
+  test("payment captured on a booking that was cancelled meanwhile: no 'your booking is confirmed'", async () => {
+    process.env["WHATSAPP_TEMPLATE_PAYMENT_CONFIRMATION_NAME"] = "payment_ok_v1";
+    try {
+      const db = createFakeDb(
+        {
+          ...paymentSeed("CAPTURED", "CANCELLED"),
+          whatsapp_notifications: [prNotification("payment_captured")],
+        },
+        { now: () => NOW },
+      );
+      const meta = fakeMeta();
+      await run(db, meta);
+      assert.equal(meta.sent.length, 0);
+      assert.equal(row(db, "n-payment_captured")["status"], "skipped");
+    } finally {
+      delete process.env["WHATSAPP_TEMPLATE_PAYMENT_CONFIRMATION_NAME"];
+    }
+  });
+
   test("payment captured: the confirmation reads current state and is sent once", async () => {
     process.env["WHATSAPP_TEMPLATE_PAYMENT_CONFIRMATION_NAME"] = "payment_ok_v1";
     try {

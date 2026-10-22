@@ -382,6 +382,18 @@ export async function replyToInboundWhatsAppMessage(
       .eq("id", replyRowId)
       .eq("status", "queued");
   };
+  // A proposal made while answering this message, whose reply never reached
+  // the customer, must not stay open for a later "ok" to confirm.
+  const closeUnshownProposals = async () => {
+    const { error: closeError } = await supabaseAdmin
+      .from("whatsapp_pending_actions")
+      .update({ status: "superseded" })
+      .eq("conversation_id", conversation.id)
+      .eq("organization_id", org)
+      .eq("proposed_in_message_id", inbound.id)
+      .eq("status", "awaiting_confirmation");
+    if (closeError) throw closeError;
+  };
 
   const { data: business, error: businessError } = await supabaseAdmin
     .from("businesses")
@@ -443,13 +455,18 @@ export async function replyToInboundWhatsAppMessage(
   } else {
     const history = await loadHistory(supabaseAdmin, org, conversation.id);
     const generate = deps.generateReply ?? defaultGenerateReply;
-    const extraTools = buildWhatsAppActionTools(supabaseAdmin, actionCtx, {
-      fetchImpl: deps.fetchImpl,
-      ...deps.actions,
-    });
     let reply = "";
     let lastError = "";
+    // Only the attempt in progress may store a proposal: a timed-out attempt
+    // keeps running in the background and must not leave one behind.
+    let liveAttempt = 0;
     for (let attempt = 1; attempt <= AI_REPLY_ATTEMPTS; attempt++) {
+      liveAttempt = attempt;
+      const extraTools = buildWhatsAppActionTools(supabaseAdmin, actionCtx, {
+        fetchImpl: deps.fetchImpl,
+        ...deps.actions,
+        isActive: () => liveAttempt === attempt,
+      });
       try {
         const result = await withTimeout(
           generate(
@@ -468,9 +485,11 @@ export async function replyToInboundWhatsAppMessage(
         );
         reply = result.reply.trim();
         lastError = "";
+        liveAttempt = 0;
         break;
       } catch (err) {
         lastError = err instanceof AiTimeoutError ? "timeout" : "error";
+        liveAttempt = 0;
         console.warn("whatsapp_ai_reply:generation_failed", {
           inboundMessageId,
           attempt,
@@ -479,6 +498,7 @@ export async function replyToInboundWhatsAppMessage(
       }
     }
     if (lastError) {
+      await closeUnshownProposals();
       await failRow(
         lastError === "timeout"
           ? "The AI reply timed out."
@@ -487,13 +507,14 @@ export async function replyToInboundWhatsAppMessage(
       return "failed_ai";
     }
     if (!reply) {
+      await closeUnshownProposals();
       await failRow("The AI returned an empty reply.");
       return "skipped_empty_reply";
     }
     body = reply.slice(0, 4096); // WhatsApp's text body limit
   }
 
-  return (await sendClaimedReply(
+  const sent = await sendClaimedReply(
     supabaseAdmin,
     replyRowId,
     connection,
@@ -501,9 +522,12 @@ export async function replyToInboundWhatsAppMessage(
     body,
     now,
     deps,
-  ))
-    ? outcome
-    : "failed_send";
+  );
+  if (!sent) {
+    await closeUnshownProposals();
+    return "failed_send";
+  }
+  return outcome;
 }
 
 /** Writes the reply text onto the claimed row, sends it, and updates the conversation preview. */
