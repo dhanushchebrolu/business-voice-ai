@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import { isValidTimeZone } from "@/lib/campaign-schedule";
 
 /**
  * Dashboard server functions for WhatsApp notifications, templates,
@@ -412,7 +413,7 @@ const createCampaignSchema = z.object({
         .regex(/^\d{2}:\d{2}$/)
         .optional(),
       days: z.array(z.number().int().min(0).max(6)).optional(),
-      timezone: z.string().max(64).optional(),
+      timezone: z.string().max(64).refine(isValidTimeZone, "Unknown time zone.").optional(),
     })
     .default({}),
   scheduledAt: z.string().datetime().nullable().optional(),

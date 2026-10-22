@@ -99,7 +99,7 @@ The worker (`whatsapp-notifications.server.ts`, run by the dispatch cron):
   Database errors in any of these checks throw (fail closed): nothing is sent.
 
 - **Retries** with exponential backoff, up to 5 attempts, only when safe (Meta answered 429/5xx, or a transient DB error). A rejection is never repeated.
-- **Unknown outcomes** (a timeout after the request left, or a 2xx without a message id): the message row **stays `queued`**, with "Delivery outcome unknown" in `error_message`. It therefore keeps blocking every later attempt with the same idempotency key (inline sender, outbox, campaign), so it is never sent twice. It needs a person to check. A staff reply in this state is shown as "Delivery unknown" (not "Not sent"), and sending the same draft again reuses its request id, so it can't go out twice.
+- **Unknown outcomes** (a timeout after the request left, or a 2xx without a message id): the message row **stays `queued`**, with "Delivery outcome unknown" in `error_message`. It therefore keeps blocking every later attempt with the same idempotency key (inline sender, outbox, campaign), so it is never sent twice. It needs a person to check. A staff reply in this state is shown as "Delivery unknown" (not "Not sent"), and sending the same draft again reuses its request id, so it can't go out twice. A campaign recipient stuck this way is marked failed ("Delivery unknown") after its attempts run out, so the campaign can complete.
 - **Skips stale rows:** anything older than 48 h is skipped, never sent late.
 
 Payment truth is never touched: the worker only reads `payment_requests` and `bookings`. Payment messages are re-checked against the current state before sending: "payment didn't go through, try again" only while the request is still payable (`CREATED`/`PENDING`), and no "booking confirmed" for a booking cancelled meanwhile. A WhatsApp failure never undoes a capture. The webhook's inline consumer now records `whatsapp_error` (instead of a misleading `whatsapp_dispatched_at`) and the outbox retries.
@@ -120,7 +120,8 @@ Payment truth is never touched: the worker only reads `payment_requests` and `bo
   - APPROVED **MARKETING** templates only.
   - Parameters come from fixed text, the contact's first name, or the business name.
   - Audience is "everyone opted in" or a contact list, which is filtered the same way. Ineligible numbers are recorded as `skipped` with the reason.
-  - Rate: `max_per_minute` (≤ 80) and a send window (`schedule`).
+  - Rate: `max_per_minute` (≤ 80) and a send window (`schedule`, with a valid IANA time zone; an existing campaign with an invalid one is auto-paused with the reason).
+  - Dispatch is fair: each cron tick takes the least recently dispatched running campaigns, at most 5 per organization and 20 in total, so one tenant's campaigns (or ones waiting for their window) can't block others. A campaign with nothing left completes even while its window is closed.
   - Resumable and idempotent per `(campaign, number)`.
   - Auto-paused if the template stops being APPROVED or most of a batch fails.
   - Analytics combine recipient outcomes with Meta's delivery/read statuses.

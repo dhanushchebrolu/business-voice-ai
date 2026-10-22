@@ -1,6 +1,15 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { isWithinCallingWindow } from "./campaign-schedule.ts";
+import { isWithinCallingWindow, isValidTimeZone } from "./campaign-schedule.ts";
+
+describe("isValidTimeZone", () => {
+  test("IANA zones only", () => {
+    for (const tz of ["UTC", "Asia/Kolkata", "America/New_York"])
+      assert.equal(isValidTimeZone(tz), true, tz);
+    for (const tz of ["x", "Mars/Olympus", "", "GMT+99"])
+      assert.equal(isValidTimeZone(tz), false, tz);
+  });
+});
 
 describe("isWithinCallingWindow", () => {
   test("allows any time when the schedule is empty", () => {

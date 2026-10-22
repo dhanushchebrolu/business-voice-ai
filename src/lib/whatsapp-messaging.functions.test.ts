@@ -113,6 +113,9 @@ describe("consent and policy", () => {
       /template\.status !== "APPROVED" \|\| template\.category !== "MARKETING"/,
     );
   });
+  test("a campaign's time zone must be a real IANA zone", () => {
+    assert.match(code, /timezone: z\.string\(\)\.max\(64\)\.refine\(isValidTimeZone/);
+  });
   test("writes are audited", () => {
     for (const name of WRITES.filter(
       (n) => n !== "syncWhatsAppTemplates" && n !== "changeWhatsAppCampaign",

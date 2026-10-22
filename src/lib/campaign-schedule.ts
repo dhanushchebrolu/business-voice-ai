@@ -15,6 +15,17 @@ export interface CampaignSchedule {
   timezone?: string | undefined; // IANA zone, e.g. "Asia/Kolkata"
 }
 
+/** Whether `timezone` is an IANA zone this runtime knows (e.g. "Asia/Kolkata"). */
+export function isValidTimeZone(timezone: string): boolean {
+  if (!timezone) return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: timezone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Local wall-clock parts of `now` in `timezone`, computed via Intl (no date library dependency). */
 function localParts(now: Date, timezone: string) {
   const formatter = new Intl.DateTimeFormat("en-US", {

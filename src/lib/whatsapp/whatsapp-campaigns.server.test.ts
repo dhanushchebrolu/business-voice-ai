@@ -324,6 +324,111 @@ describe("dispatchWhatsAppCampaigns", () => {
     assert.equal(db.rows("whatsapp_campaigns")[0]!["status"], "running");
   });
 
+  test("one organization's running campaigns can't starve another's (fair, rotating selection)", async () => {
+    const s = seed();
+    // 25 running campaigns from another organization, launched earlier,
+    // whose send window is closed for now (or never opens).
+    s.whatsapp_connections.push({
+      id: "conn-b",
+      organization_id: "org-b",
+      business_id: "biz-b",
+      waba_id: "WABA_B",
+      phone_number_id: "PN_B",
+      status: "connected",
+      access_token_ciphertext: encryptCredential("token-b"),
+    });
+    s.whatsapp_templates.push({
+      ...s.whatsapp_templates[0]!,
+      id: "tpl-b",
+      organization_id: "org-b",
+      whatsapp_connection_id: "conn-b",
+    });
+    for (let i = 0; i < 25; i++) {
+      s.whatsapp_campaigns.push({
+        ...s.whatsapp_campaigns[0]!,
+        id: `camp-b${i}`,
+        organization_id: "org-b",
+        business_id: "biz-b",
+        whatsapp_connection_id: "conn-b",
+        template_id: "tpl-b",
+        status: "running",
+        launched_at: ago(600 - i),
+        updated_at: ago(600 - i),
+        schedule: { windowStart: "18:00", windowEnd: "21:00", timezone: "Asia/Kolkata" },
+      } as never);
+    }
+    const db = createFakeDb(s, { now: () => NOW });
+    await launch(db);
+    const meta = fakeMeta();
+    await dispatch(db, meta);
+    assert.ok(meta.sent.length > 0, "org-a's campaign is dispatched in the first tick");
+    // Every running campaign is visited within a few ticks.
+    for (let t = 1; t <= 5; t++) await dispatch(db, meta, new Date(NOW.getTime() + t * 60_000));
+    const touched = db
+      .rows("whatsapp_campaigns")
+      .filter((c) => c["organization_id"] === "org-b")
+      .filter((c) => String(c["updated_at"]) >= NOW.toISOString());
+    assert.equal(touched.length, 25);
+  });
+
+  test("a campaign with an invalid time zone is paused with the reason, not left running forever", async () => {
+    const db = createFakeDb(seed({ campaign: { schedule: { timezone: "Mars/Olympus" } } }), {
+      now: () => NOW,
+    });
+    await launch(db);
+    const meta = fakeMeta();
+    await dispatch(db, meta);
+    assert.equal(meta.sent.length, 0);
+    const c = db.rows("whatsapp_campaigns")[0]!;
+    assert.equal(c["status"], "paused");
+    assert.match(String(c["paused_reason"]), /time zone/i);
+  });
+
+  test("a campaign with nothing left completes even while its send window is closed", async () => {
+    const db = createFakeDb(
+      seed({
+        campaign: {
+          schedule: { windowStart: "18:00", windowEnd: "21:00", timezone: "Asia/Kolkata" },
+        },
+      }),
+      { now: () => NOW },
+    );
+    await launch(db);
+    // Everything left was cancelled or settled elsewhere.
+    for (const r of db.rows("whatsapp_campaign_recipients")) {
+      if (r["status"] === "pending") r["status"] = "skipped";
+    }
+    await dispatch(db, fakeMeta());
+    assert.equal(db.rows("whatsapp_campaigns")[0]!["status"], "completed");
+  });
+
+  test("a recipient whose earlier message is stuck 'queued' (delivery unknown) is not retried forever", async () => {
+    const db = createFakeDb(seed(), { now: () => NOW });
+    await launch(db);
+    db.rows("whatsapp_messages").push({
+      id: "msg-stuck",
+      organization_id: "org-a",
+      whatsapp_connection_id: "conn-a",
+      direction: "outbound",
+      message_type: "template",
+      status: "queued",
+      metadata: { idempotency_key: "campaign:camp-1:919800000001" },
+      created_at: ago(30),
+    });
+    const meta = fakeMeta();
+    let t = NOW.getTime();
+    for (let i = 0; i < MAX_RECIPIENT_ATTEMPTS + 2; i++) {
+      await dispatch(db, meta, new Date(t));
+      t += 10 * 60_000;
+    }
+    const asha = recipients(db)["919800000001"]!;
+    assert.equal(asha["status"], "failed");
+    assert.match(String(asha["error"]), /unknown/i);
+    assert.ok(Number(asha["attempts"]) <= MAX_RECIPIENT_ATTEMPTS);
+    assert.ok(!meta.sent.some((m) => m["to"] === "919800000001"), "never sent a second time");
+    assert.equal(db.rows("whatsapp_campaigns")[0]!["status"], "completed");
+  });
+
   test("Meta 5xx: retried later, bounded; a rejection fails the recipient without retry", async () => {
     const db = createFakeDb(seed(), { now: () => NOW });
     await launch(db);

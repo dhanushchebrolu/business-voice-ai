@@ -40,7 +40,11 @@ import {
   toWaId,
   writeAuditLog,
 } from "./whatsapp-consent.server.ts";
-import { isWithinCallingWindow, type CampaignSchedule } from "../campaign-schedule.ts";
+import {
+  isValidTimeZone,
+  isWithinCallingWindow,
+  type CampaignSchedule,
+} from "../campaign-schedule.ts";
 
 type Client = SupabaseClient<Database>;
 type CampaignRow = Database["public"]["Tables"]["whatsapp_campaigns"]["Row"];
@@ -51,6 +55,9 @@ const ANALYTICS_PAGE_SIZE = 1000;
 export const MAX_RECIPIENT_ATTEMPTS = 3;
 export const MAX_SENDS_PER_TICK = 80;
 export const RECIPIENT_CLAIM_TIMEOUT_MS = 5 * 60_000;
+/** Campaigns dispatched per cron tick, and at most this many from one organization. */
+export const MAX_CAMPAIGNS_PER_TICK = 20;
+export const MAX_CAMPAIGNS_PER_ORG_PER_TICK = 5;
 const PAUSE_MIN_FAILURES = 10;
 const PAUSE_FAILURE_RATE = 0.5;
 
@@ -536,6 +543,24 @@ async function dispatchCampaign(
     retried: 0,
     status: campaign.status,
   };
+  // Nothing left to send: completed, whatever the send window says.
+  const completeIfDone = async () => {
+    const { count: remaining, error: remainingError } = await supabaseAdmin
+      .from("whatsapp_campaign_recipients")
+      .select("id", { count: "exact", head: true })
+      .eq("campaign_id", campaign.id)
+      .in("status", ["pending", "sending"]);
+    if (remainingError) throw remainingError;
+    if ((remaining ?? 0) === 0) {
+      await supabaseAdmin
+        .from("whatsapp_campaigns")
+        .update({ status: "completed", completed_at: now.toISOString() })
+        .eq("id", campaign.id)
+        .eq("status", "running");
+      summary.status = "completed";
+    }
+    return summary;
+  };
   const specs = parseParamSpecs(campaign.template_params);
   const template = await loadTemplate(supabaseAdmin, campaign);
   const problem = campaignTemplateProblem(template, specs.length);
@@ -544,7 +569,18 @@ async function dispatchCampaign(
     summary.status = "paused";
     return summary;
   }
-  if (!isWithinCallingWindow((campaign.schedule ?? {}) as CampaignSchedule, now)) return summary;
+  const schedule = (campaign.schedule ?? {}) as CampaignSchedule;
+  if (schedule.timezone && !isValidTimeZone(schedule.timezone)) {
+    // The window could never open: say so instead of holding a dispatch slot forever.
+    await pauseCampaign(
+      supabaseAdmin,
+      campaign,
+      `Paused: "${schedule.timezone}" isn't a valid time zone. Fix the schedule and resume.`,
+    );
+    summary.status = "paused";
+    return summary;
+  }
+  if (!isWithinCallingWindow(schedule, now)) return completeIfDone();
 
   const { count: sentLastMinute, error: countError } = await supabaseAdmin
     .from("whatsapp_campaign_recipients")
@@ -636,6 +672,15 @@ async function dispatchCampaign(
           if (result.existingStatus && result.existingStatus !== "queued") {
             await finish({ status: "sent", sent_at: now.toISOString() });
             summary.sent++;
+          } else if (attempts >= MAX_RECIPIENT_ATTEMPTS) {
+            // An earlier send is still unconfirmed ('queued'): it may have
+            // reached the customer, so it is never sent again — and the
+            // campaign can't wait for it forever.
+            await finish({
+              status: "failed",
+              error: "Delivery unknown: an earlier send was never confirmed by WhatsApp.",
+            });
+            summary.failed++;
           } else {
             await finish({
               status: "pending",
@@ -674,21 +719,7 @@ async function dispatchCampaign(
     return summary;
   }
 
-  const { count: remaining, error: remainingError } = await supabaseAdmin
-    .from("whatsapp_campaign_recipients")
-    .select("id", { count: "exact", head: true })
-    .eq("campaign_id", campaign.id)
-    .in("status", ["pending", "sending"]);
-  if (remainingError) throw remainingError;
-  if ((remaining ?? 0) === 0) {
-    await supabaseAdmin
-      .from("whatsapp_campaigns")
-      .update({ status: "completed", completed_at: now.toISOString() })
-      .eq("id", campaign.id)
-      .eq("status", "running");
-    summary.status = "completed";
-  }
-  return summary;
+  return completeIfDone();
 }
 
 export async function dispatchWhatsAppCampaigns(
@@ -704,16 +735,36 @@ export async function dispatchWhatsAppCampaigns(
     .lte("scheduled_at", now.toISOString());
   if (startError) throw startError;
 
-  const { data: campaigns, error } = await supabaseAdmin
+  // Least recently dispatched first, and only a few per organization, so
+  // every running campaign gets its turn: one tenant's campaigns (or ones
+  // waiting for their send window) can't hold every slot. Each dispatched
+  // campaign's updated_at is touched, which moves it to the back.
+  const { data: candidates, error } = await supabaseAdmin
     .from("whatsapp_campaigns")
     .select("*")
     .eq("status", "running")
-    .order("launched_at", { ascending: true })
-    .limit(20);
+    .order("updated_at", { ascending: true })
+    .order("id", { ascending: true })
+    .limit(1000);
   if (error) throw error;
+  const perOrg = new Map<string, number>();
+  const campaigns: CampaignRow[] = [];
+  for (const c of candidates ?? []) {
+    if (campaigns.length >= MAX_CAMPAIGNS_PER_TICK) break;
+    const n = perOrg.get(c.organization_id) ?? 0;
+    if (n >= MAX_CAMPAIGNS_PER_ORG_PER_TICK) continue;
+    perOrg.set(c.organization_id, n + 1);
+    campaigns.push(c);
+  }
   const summaries: CampaignTickSummary[] = [];
-  for (const campaign of campaigns ?? []) {
+  for (const campaign of campaigns) {
     try {
+      const { error: touchError } = await supabaseAdmin
+        .from("whatsapp_campaigns")
+        .update({ updated_at: now.toISOString() })
+        .eq("id", campaign.id)
+        .eq("status", "running");
+      if (touchError) throw touchError;
       summaries.push(await dispatchCampaign(supabaseAdmin, campaign, deps, now));
     } catch (err) {
       console.error("whatsapp_campaigns:dispatch_failed", {
