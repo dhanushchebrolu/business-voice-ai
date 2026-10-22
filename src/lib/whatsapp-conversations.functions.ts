@@ -129,6 +129,8 @@ const REFUSAL_MESSAGES: Record<string, string> = {
   rate_limited: "Too many messages to this customer in the last minute. Please wait a moment.",
   empty: "Type a message first.",
   template_unverified: "That template isn't an approved template for this number.",
+  opted_out:
+    "This customer opted out (replied STOP), so nothing can be sent until they message you again or opt back in.",
 };
 
 /** A staff reply. Sending one takes the conversation over from the AI (ai_enabled = false). */

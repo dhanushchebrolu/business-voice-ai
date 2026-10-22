@@ -30,7 +30,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/integrations/supabase/types";
 import { timingSafeEqual } from "node:crypto";
 import { verifyMetaWebhookSignature } from "../meta/meta-webhook-signature.server.ts";
-import { recordConsentEvent } from "./whatsapp-consent.server.ts";
+import { consentEventTime, recordConsentEvent } from "./whatsapp-consent.server.ts";
 
 type Client = SupabaseClient<Database>;
 
@@ -71,6 +71,7 @@ interface MetaStatusUpdate {
   id?: string;
   status?: string;
   recipient_id?: string;
+  timestamp?: string;
   errors?: { code?: number; title?: string }[];
 }
 interface MetaInboundMessage {
@@ -200,6 +201,7 @@ async function applyStatusUpdate(
         action: "opt_out",
         source: "meta_signal",
         evidence: `meta_error:${META_MARKETING_OPT_OUT_ERROR}:${status.id}`,
+        occurredAt: consentEventTime(status.timestamp, new Date()),
       });
     }
   }

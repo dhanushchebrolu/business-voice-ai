@@ -11,6 +11,7 @@ import {
   latestConsentForBusiness,
   foldLatestConsent,
   customerOptOutBlocksStaffOptIn,
+  consentEventTime,
 } from "./whatsapp-consent.server.ts";
 import { createFakeDb } from "./whatsapp-test-db.ts";
 
@@ -73,6 +74,7 @@ describe("consentScopesForKeyword", () => {
 });
 
 describe("consent precedence: a customer's own opt-out outranks staff", () => {
+  const SAME = at(30);
   const from = (source: string, ...args: Parameters<typeof event>) => ({
     ...event(...args),
     source,
@@ -137,8 +139,9 @@ describe("consent precedence: a customer's own opt-out outranks staff", () => {
         from("customer_form", "911", "marketing", "opt_in", 60),
         from("customer_keyword", "911", "marketing", "opt_out", 30),
         from("staff_attested", "911", "marketing", "opt_in", 10),
-        from("customer_keyword", "912", "marketing", "opt_out", 30),
-        from("customer_form", "912", "marketing", "opt_in", 30),
+        // Exactly the same instant (one fixed timestamp, not two clock reads).
+        { ...from("customer_keyword", "912", "marketing", "opt_out", 30), created_at: SAME },
+        { ...from("customer_form", "912", "marketing", "opt_in", 30), created_at: SAME },
       ],
     });
     const latest = await latestConsent(db.client, "biz-a", "marketing", ["911", "912"]);
@@ -174,6 +177,39 @@ describe("consent precedence: a customer's own opt-out outranks staff", () => {
       (await latestConsent(db.client, "biz-a", "marketing", ["911"])).get("911"),
       "opt_in",
     );
+  });
+});
+
+describe("consentEventTime (the source event's own time)", () => {
+  const now = new Date("2026-10-22T12:00:00.000Z");
+  test("Meta's Unix seconds (string or number) and ISO strings", () => {
+    assert.equal(consentEventTime("1792656000", now), "2026-10-22T08:00:00.000Z");
+    assert.equal(consentEventTime(1792656000, now), "2026-10-22T08:00:00.000Z");
+    assert.equal(consentEventTime("2026-10-22T08:00:00.123Z", now), "2026-10-22T08:00:00.123Z");
+  });
+  test("unusable values give null (the database's own time is used)", () => {
+    for (const raw of [
+      undefined,
+      null,
+      "",
+      "abc",
+      "0",
+      0,
+      -5,
+      "NaN",
+      "12abc",
+      // Lenient Date.parse would read these as dates in 2001 / 1970.
+      "-5",
+      "5",
+      "2026",
+      "Tue",
+      "2026-13-40T00:00:00Z",
+    ]) {
+      assert.equal(consentEventTime(raw as never, now), null, String(raw));
+    }
+  });
+  test("a time in the future (clock skew) is capped at now", () => {
+    assert.equal(consentEventTime("2026-10-22T13:00:00.000Z", now), now.toISOString());
   });
 });
 
@@ -230,6 +266,20 @@ describe("latestConsent / checkSendPermission", () => {
       allowed: false,
       reason: "suppressed",
     });
+  });
+
+  test("recordConsentEvent stores the source event's time when given one", async () => {
+    const db = createFakeDb();
+    await recordConsentEvent(db.client, {
+      organizationId: "org-a",
+      businessId: "biz-a",
+      waId: "911",
+      scope: "marketing",
+      action: "opt_out",
+      source: "customer_keyword",
+      occurredAt: "2026-10-22T08:00:00.000Z",
+    });
+    assert.equal(db.rows("whatsapp_consent_events")[0]!["created_at"], "2026-10-22T08:00:00.000Z");
   });
 
   test("recordConsentEvent appends (never updates) and truncates evidence", async () => {

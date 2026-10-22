@@ -58,6 +58,7 @@ import type { ChannelTool } from "../shared-agent-reply.server.ts";
 import {
   OPT_IN_ACKNOWLEDGEMENT,
   OPT_OUT_ACKNOWLEDGEMENT,
+  consentEventTime,
   consentScopesForKeyword,
   parseConsentKeyword,
   recordConsentEvent,
@@ -313,6 +314,7 @@ export async function replyToInboundWhatsAppMessage(
         action: keyword,
         source: "customer_keyword",
         evidence: `whatsapp_message:${inbound.id}`,
+        occurredAt: consentEventTime(inbound.occurred_at, now),
       });
     }
     await writeAuditLog(supabaseAdmin, {
@@ -400,8 +402,22 @@ export async function replyToInboundWhatsAppMessage(
     .gte("created_at", new Date(now.getTime() - AI_REPLY_RATE_WINDOW_MS).toISOString());
   if (countError) throw countError;
   if ((recentReplies ?? 0) >= MAX_AI_REPLIES_PER_WINDOW) {
-    console.warn("whatsapp_ai_reply:rate_limited", { conversationId: conversation.id });
-    return settleSkip("skipped_rate_limited");
+    // The count may include this message's own reply claim (a worker that
+    // got in under the limit and is still working, or crashed). Then it is
+    // not rate-limited: the claim below answers "duplicate" while that claim
+    // is live and takes it over once abandoned, so it is still answered once.
+    const { data: ownClaim, error: ownClaimError } = await supabaseAdmin
+      .from("whatsapp_messages")
+      .select("id")
+      .eq("reply_to_message_id", inbound.id)
+      .eq("organization_id", org)
+      .limit(1)
+      .maybeSingle();
+    if (ownClaimError) throw ownClaimError;
+    if (!ownClaim) {
+      console.warn("whatsapp_ai_reply:rate_limited", { conversationId: conversation.id });
+      return settleSkip("skipped_rate_limited");
+    }
   }
 
   const handoff = isHandoffRequest(inbound.content);

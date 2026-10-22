@@ -293,6 +293,100 @@ describe("sendWhatsAppConversationMessage", () => {
     });
   });
 
+  describe("after the customer's own opt-out (STOP) or Meta's", () => {
+    const at = (minutesAgo: number) => new Date(NOW.getTime() - minutesAgo * 60_000).toISOString();
+    const event = (scope: string, action: string, source: string, minutesAgo: number) => ({
+      organization_id: "org-a",
+      business_id: "biz-a",
+      wa_id: "919876543210",
+      scope,
+      action,
+      source,
+      created_at: at(minutesAgo),
+    });
+    const stopAt = 30;
+    // The STOP message is the customer's latest message: it opened the window.
+    const afterStop = (lastInboundMinutesAgo = stopAt, extra: Record<string, unknown>[] = []) => {
+      const db = createFakeDb(seed({ lastInboundAt: at(lastInboundMinutesAgo) }));
+      db.rows("whatsapp_consent_events").push(
+        event("transactional", "opt_out", "customer_keyword", stopAt),
+        event("marketing", "opt_out", "customer_keyword", stopAt),
+        ...extra,
+      );
+      return db;
+    };
+    const template = {
+      kind: "template",
+      name: "appointment_reminder",
+      languageCode: "en",
+      bodyParams: ["Asha"],
+    };
+
+    test("staff free text and templates are refused, even inside the 24-hour window", async () => {
+      for (const payload of [{ kind: "text", body: "Special offer just for you!" }, template]) {
+        const db = afterStop();
+        const meta = fakeMeta([200]);
+        assert.deepEqual(await send(db, { payload }, meta), {
+          outcome: "refused",
+          reason: "opted_out",
+        });
+        assert.equal(meta.calls.length, 0);
+        assert.equal(db.rows("whatsapp_messages").length, 0);
+      }
+    });
+
+    test("a system-origin conversation message is refused too, and so is every retry", async () => {
+      const db = afterStop();
+      const meta = fakeMeta([200]);
+      for (let i = 0; i < 3; i++) {
+        assert.equal(
+          (await send(db, { origin: "system", idempotencyKey: `system:${i}` }, meta)).outcome,
+          "refused",
+        );
+      }
+      assert.equal(meta.calls.length, 0);
+    });
+
+    test("a later message from the customer re-opens the conversation", async () => {
+      const db = afterStop(stopAt - 5);
+      assert.equal((await send(db)).outcome, "sent");
+    });
+
+    test("the customer's own later opt-in (their form) clears it", async () => {
+      const db = afterStop(stopAt, [
+        event("transactional", "opt_in", "customer_form", stopAt - 10),
+        event("marketing", "opt_in", "customer_form", stopAt - 10),
+      ]);
+      assert.equal((await send(db)).outcome, "sent");
+    });
+
+    test("a staff-attested opt-in does not clear it", async () => {
+      const db = afterStop(stopAt, [
+        event("transactional", "opt_in", "staff_attested", stopAt - 10),
+        event("marketing", "opt_in", "staff_attested", stopAt - 10),
+      ]);
+      assert.equal((await send(db)).outcome, "refused");
+    });
+
+    test("Meta's 'stopped marketing' signal blocks staff messages until the customer writes again", async () => {
+      const signal = (lastInbound: number) => {
+        const db = createFakeDb(seed({ lastInboundAt: at(lastInbound) }));
+        db.rows("whatsapp_consent_events").push(event("marketing", "opt_out", "meta_signal", 20));
+        return db;
+      };
+      assert.equal((await send(signal(60))).outcome, "refused");
+      assert.equal((await send(signal(10))).outcome, "sent");
+    });
+
+    test("a staff-recorded opt-out doesn't block customer-service replies (unchanged)", async () => {
+      const db = createFakeDb(seed({ lastInboundAt: at(30) }));
+      db.rows("whatsapp_consent_events").push(
+        event("transactional", "opt_out", "staff_attested", 20),
+      );
+      assert.equal((await send(db)).outcome, "sent");
+    });
+  });
+
   test("the same idempotency key is sent once (double-submit)", async () => {
     const db = createFakeDb(seed());
     const meta = fakeMeta([200]);

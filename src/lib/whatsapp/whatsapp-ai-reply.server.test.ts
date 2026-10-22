@@ -14,6 +14,7 @@ import {
   AI_REPLY_ATTEMPTS,
 } from "./whatsapp-ai-reply.server.ts";
 import { encryptCredential } from "./whatsapp-token-crypto.server.ts";
+import { latestConsent } from "./whatsapp-consent.server.ts";
 import { createFakeDb } from "./whatsapp-test-db.ts";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -542,6 +543,64 @@ describe("replyToInboundWhatsAppMessages / recoverPendingWhatsAppReplies", () =>
     }
   });
 
+  test("a message whose own reply claim is in flight is never marked rate-limited; a crashed claim is taken over once", async () => {
+    const others = Array.from({ length: MAX_AI_REPLIES_PER_WINDOW }, (_, i) => ({
+      id: `out-r${i}`,
+      organization_id: "org-a",
+      whatsapp_connection_id: "conn-a",
+      conversation_id: "conv-a",
+      direction: "outbound",
+      message_type: "text",
+      content: "earlier reply",
+      status: "sent",
+      reply_to_message_id: `in-old-${i}`,
+      occurred_at: minutesAgo(3),
+      created_at: minutesAgo(3),
+    }));
+    // The webhook's worker claimed the reply for in-1 (within the limit at
+    // the time) and is still generating it.
+    const claim = (claimedAt: string) => ({
+      id: "claim-1",
+      organization_id: "org-a",
+      whatsapp_connection_id: "conn-a",
+      conversation_id: "conv-a",
+      direction: "outbound",
+      message_type: "text",
+      content: null,
+      status: "queued",
+      reply_to_message_id: "in-1",
+      metadata: { origin: "ai", claimed_at: claimedAt, takeovers: 0 },
+      created_at: claimedAt,
+    });
+    const db = createFakeDb(seed({ extraMessages: [...others, claim(minutesAgo(1))] }), {
+      now: () => NOW,
+    });
+    const ai = okAi();
+    const meta = fakeMeta();
+    const sweep = (minutesLater: number) =>
+      recoverPendingWhatsAppReplies(db.client, {
+        generateReply: ai.generateReply,
+        fetchImpl: meta.fetchImpl,
+        sleep: async () => {},
+        now: () => new Date(NOW.getTime() + minutesLater * 60_000),
+      });
+    const inbound = () => db.rows("whatsapp_messages").find((m) => m["id"] === "in-1")!;
+    const skipped = () =>
+      (inbound()["metadata"] as Record<string, unknown> | null)?.["ai_reply_skipped"];
+
+    // The recovery sweep sees it while the claim is still active.
+    await sweep(0);
+    assert.equal(skipped(), undefined, "not marked rate-limited");
+    assert.equal(meta.sent.length, 0, "the claim's owner is still working on it");
+
+    // The owner crashed; once the claim is stale, the sweep takes it over and replies once.
+    await sweep(STALE_CLAIM_MS / 60_000 + 1);
+    await sweep(STALE_CLAIM_MS / 60_000 + 2);
+    assert.equal(meta.sent.length, 1);
+    assert.equal(replies(db).length, 1, "no second reply row");
+    assert.equal(skipped(), undefined);
+  });
+
   test("a message whose reply was merely interrupted is still recovered", async () => {
     const db = createFakeDb(seed(), { now: () => NOW });
     const meta = fakeMeta();
@@ -624,6 +683,82 @@ describe("STOP / START keywords", () => {
       assert.match(String(row!["error_message"]), why === "window" ? /24-hour/ : /connected/);
       assert.equal(await reply(db, ai, meta), "duplicate");
       assert.equal(db.rows("whatsapp_consent_events").length, 2);
+    }
+  });
+
+  test("consent is ordered by when the customer sent the keyword: a delayed START can't override a later STOP", async () => {
+    const stop = {
+      id: "in-2",
+      organization_id: "org-a",
+      whatsapp_connection_id: "conn-a",
+      conversation_id: "conv-a",
+      wa_message_id: "wamid.IN2",
+      direction: "inbound",
+      message_type: "text",
+      content: "STOP",
+      status: "received",
+      occurred_at: minutesAgo(5),
+      created_at: minutesAgo(5),
+    };
+    const db = createFakeDb(
+      seed({ content: "START", inboundAt: minutesAgo(10), extraMessages: [stop] }),
+      {
+        now: () => NOW,
+      },
+    );
+    const at = (m: number) => ({
+      sleep: async () => {},
+      fetchImpl: fakeMeta().fetchImpl,
+      now: () => new Date(NOW.getTime() + m * 60_000),
+    });
+    // STOP is processed right away; START's reply was interrupted and the recovery sweep runs it later.
+    assert.equal(await replyToInboundWhatsAppMessage(db.client, "in-2", at(0)), "consent_updated");
+    assert.equal(await replyToInboundWhatsAppMessage(db.client, "in-1", at(2)), "consent_updated");
+    const latest = await latestConsent(db.client, "biz-a", "transactional", ["919876543210"]);
+    assert.equal(latest.get("919876543210"), "opt_out");
+    // Each event carries its message's own time, not the processing time.
+    const times = db
+      .rows("whatsapp_consent_events")
+      .map((e) => [e["action"], e["scope"], e["created_at"]])
+      .sort();
+    assert.deepEqual(times, [
+      ["opt_in", "transactional", minutesAgo(10)],
+      ["opt_out", "marketing", minutesAgo(5)],
+      ["opt_out", "transactional", minutesAgo(5)],
+    ]);
+  });
+
+  test("STOP and START sent in the same second: the opt-out wins, whichever is processed first", async () => {
+    for (const order of [
+      ["in-1", "in-2"],
+      ["in-2", "in-1"],
+    ]) {
+      const sameSecond = new Date(NOW.getTime() - 5 * 60_000).toISOString();
+      const db = createFakeDb(
+        seed({
+          content: "START",
+          inboundAt: sameSecond,
+          extraMessages: [
+            {
+              id: "in-2",
+              organization_id: "org-a",
+              whatsapp_connection_id: "conn-a",
+              conversation_id: "conv-a",
+              wa_message_id: "wamid.IN2",
+              direction: "inbound",
+              message_type: "text",
+              content: "STOP",
+              status: "received",
+              occurred_at: sameSecond,
+              created_at: sameSecond,
+            },
+          ],
+        }),
+        { now: () => NOW },
+      );
+      for (const id of order) await reply(db, okAi(), fakeMeta(), id);
+      const latest = await latestConsent(db.client, "biz-a", "transactional", ["919876543210"]);
+      assert.equal(latest.get("919876543210"), "opt_out", order.join(","));
     }
   });
 

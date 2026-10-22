@@ -91,6 +91,10 @@ describe("staff replies", () => {
     assert.match(code, /body: z\.string\(\)\.trim\(\)\.min\(1\)\.max\(4096\)/);
   });
 
+  test("a refusal after the customer's opt-out says why", () => {
+    assert.match(code, /opted_out:\s*"[^"]*opted out[^"]*"/i);
+  });
+
   test("an unconfirmed delivery is reported as 'delivery unknown' (never 'Not sent … retry') and still pauses the AI", () => {
     const body = handler("sendWhatsAppStaffReply");
     const ambiguous = body.indexOf("result.ambiguous");

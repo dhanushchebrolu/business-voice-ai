@@ -251,6 +251,71 @@ describe("booking notifications", () => {
     assert.equal(row(db, "n-bc")["status"], "skipped");
   });
 
+  test("overlapping reschedules: a stale move created later can't suppress the notice for the booking's current time", async () => {
+    // Two transactions moved the booking; the one that finished last (to the
+    // current time, 50h) started first, so its notice has the EARLIER
+    // created_at (PostgreSQL now() is the transaction's start time).
+    const db = createFakeDb(
+      {
+        ...seed({ booking: { status: "RESCHEDULED", start_at: inHours(50) } }),
+        whatsapp_notifications: [
+          notification("booking_rescheduled", {
+            id: "n-final",
+            dedupe_key: "booking_rescheduled:bk-1:x:final",
+            payload: { start_at: inHours(50) },
+            created_at: ago(10),
+          }),
+          notification("booking_rescheduled", {
+            id: "n-stale",
+            dedupe_key: "booking_rescheduled:bk-1:x:stale",
+            payload: { start_at: inHours(40) },
+            created_at: ago(9),
+          }),
+        ],
+      },
+      { now: () => NOW },
+    );
+    const meta = fakeMeta();
+    await run(db, meta);
+    assert.equal(meta.sent.length, 1, "the customer is told the current time once");
+    assert.equal(row(db, "n-final")["status"], "sent");
+    assert.equal(row(db, "n-stale")["status"], "skipped");
+  });
+
+  test("two notices both naming the current time, created in inverted order: still exactly one message", async () => {
+    const db = createFakeDb(
+      {
+        ...seed({ booking: { status: "RESCHEDULED", start_at: inHours(50) } }),
+        whatsapp_notifications: [
+          notification("booking_rescheduled", {
+            id: "n-1",
+            dedupe_key: "booking_rescheduled:bk-1:1",
+            payload: { start_at: inHours(50) },
+            created_at: ago(10),
+          }),
+          notification("booking_rescheduled", {
+            id: "n-2",
+            dedupe_key: "booking_rescheduled:bk-1:2",
+            payload: { start_at: inHours(50) },
+            created_at: ago(9),
+          }),
+          notification("booking_rescheduled", {
+            id: "n-3",
+            dedupe_key: "booking_rescheduled:bk-1:3",
+            payload: { start_at: inHours(40) },
+            created_at: ago(8),
+          }),
+        ],
+      },
+      { now: () => NOW },
+    );
+    const meta = fakeMeta();
+    await run(db, meta);
+    await run(db, meta);
+    assert.equal(meta.sent.length, 1);
+    assert.equal(row(db, "n-2")["status"], "sent");
+  });
+
   test("cancellation and reschedule messages are sent for the current state", async () => {
     for (const [kind, booking] of [
       ["booking_cancelled", { status: "CANCELLED" }],

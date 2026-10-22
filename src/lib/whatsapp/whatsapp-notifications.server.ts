@@ -38,6 +38,8 @@ import type { PaymentDomainEventType } from "../payments/payment-events.server.t
 
 type Client = SupabaseClient<Database>;
 type NotificationRow = Database["public"]["Tables"]["whatsapp_notifications"]["Row"];
+/** Newer reschedule notices read for one booking (a booking is never moved this often between ticks). */
+const NEWER_RESCHEDULES_CHECKED = 50;
 
 export const MAX_ATTEMPTS = 5;
 export const CLAIM_TIMEOUT_MS = 5 * 60_000;
@@ -202,18 +204,23 @@ async function processBookingNotification(
   if (!current) return { status: "skipped", reason: "superseded" };
   if (kind === "booking_rescheduled") {
     // A booking moved A → B → C → B has two notices naming B: only the
-    // newest one is sent.
+    // newest one is sent. Only newer notices that also name the booking's
+    // current time count: overlapping reschedules can give a stale move the
+    // later created_at (PostgreSQL's now() is when a transaction started),
+    // and that must not suppress the notice for the current time.
     const { data: newer, error: newerError } = await supabaseAdmin
       .from("whatsapp_notifications")
-      .select("id")
+      .select("id, payload")
       .eq("organization_id", row.organization_id)
       .eq("booking_id", booking.id)
       .eq("kind", "booking_rescheduled")
       .gt("created_at", row.created_at)
-      .limit(1)
-      .maybeSingle();
+      .limit(NEWER_RESCHEDULES_CHECKED);
     if (newerError) throw newerError;
-    if (newer) return { status: "skipped", reason: "superseded" };
+    const newerForCurrentTime = (newer ?? []).some((n) =>
+      sameInstant(((n.payload ?? {}) as Record<string, unknown>)["start_at"], booking.start_at),
+    );
+    if (newerForCurrentTime) return { status: "skipped", reason: "superseded" };
   }
 
   const { data: business, error: businessError } = await supabaseAdmin

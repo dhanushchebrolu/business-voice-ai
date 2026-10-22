@@ -377,6 +377,7 @@ describe("Meta's 'user stopped marketing messages' signal", () => {
             id: "wamid.MKT",
             status: "failed",
             recipient_id: "919876543210",
+            timestamp: "1792656000",
             errors: [{ code: 131050, title: "User has stopped marketing messages" }],
           },
         ],
@@ -388,6 +389,8 @@ describe("Meta's 'user stopped marketing messages' signal", () => {
         .map((e) => [e["business_id"], e["wa_id"], e["scope"], e["action"], e["source"]]),
       [["biz-a", "919876543210", "marketing", "opt_out", "meta_signal"]],
     );
+    // Ordered by when Meta reported it, not when the webhook was processed.
+    assert.equal(db.rows("whatsapp_consent_events")[0]!["created_at"], "2026-10-22T08:00:00.000Z");
   });
 
   test("other failures record nothing", async () => {

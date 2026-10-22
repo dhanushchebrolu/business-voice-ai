@@ -35,7 +35,11 @@ import type { Database, Json } from "@/integrations/supabase/types";
 import { MetaWhatsAppClient, MetaApiError } from "./meta-client.server.ts";
 import { resolveMetaWhatsAppConfig } from "./meta-config.server.ts";
 import { decryptCredential, CredentialCryptoError } from "./whatsapp-token-crypto.server.ts";
-import { checkSendPermission, latestConsent } from "./whatsapp-consent.server.ts";
+import {
+  checkSendPermission,
+  customerOptOutBlocksConversation,
+  latestConsent,
+} from "./whatsapp-consent.server.ts";
 import { TEMPLATE_COLUMNS, templateProblem } from "./whatsapp-templates.server.ts";
 
 type Client = SupabaseClient<Database>;
@@ -232,7 +236,8 @@ export type SendConversationMessageOutcome =
         | "no_opt_in"
         | "rate_limited"
         | "empty"
-        | "template_unverified";
+        | "template_unverified"
+        | "opted_out";
       detail?: string | undefined;
     }
   | {
@@ -316,6 +321,20 @@ export async function sendWhatsAppConversationMessage(
   if (connError) throw connError;
   if (!connection || connection.status !== "connected") {
     return { outcome: "refused", reason: "not_connected" };
+  }
+
+  // The customer's own STOP (or Meta's opt-out) holds for staff too, even
+  // inside the 24-hour window, until they write again or opt back in.
+  if (
+    connection.business_id &&
+    (await customerOptOutBlocksConversation(
+      supabaseAdmin,
+      connection.business_id,
+      conversation.wa_id,
+      conversation.last_inbound_at,
+    ))
+  ) {
+    return { outcome: "refused", reason: "opted_out" };
   }
 
   if (!isWithinCustomerServiceWindow(conversation.last_inbound_at, now)) {

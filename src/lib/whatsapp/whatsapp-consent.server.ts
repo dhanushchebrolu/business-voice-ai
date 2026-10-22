@@ -58,9 +58,16 @@ export async function recordConsentEvent(
     evidence?: string | null | undefined;
     contactId?: string | null | undefined;
     actorUserId?: string | null | undefined;
+    /**
+     * When the customer or Meta actually expressed it (the message or status
+     * time), so a keyword processed late can't overtake a newer one. From
+     * consentEventTime; omitted, the database's own time is used.
+     */
+    occurredAt?: string | null | undefined;
   },
 ): Promise<void> {
   const { error } = await supabaseAdmin.from("whatsapp_consent_events").insert({
+    ...(input.occurredAt ? { created_at: input.occurredAt } : {}),
     organization_id: input.organizationId,
     business_id: input.businessId,
     wa_id: input.waId,
@@ -72,6 +79,32 @@ export async function recordConsentEvent(
     actor_user_id: input.actorUserId ?? null,
   });
   if (error) throw error;
+}
+
+const ISO_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/;
+const EARLIEST_EVENT_MS = Date.UTC(2020, 0, 1);
+
+/**
+ * A consent source event's own time as an ISO string: Meta's Unix seconds
+ * (string or number) or an ISO timestamp. Null when it isn't usable (the
+ * database's own time is used then). Never later than `now`, so a skewed
+ * clock can't push an event ahead of genuinely newer ones.
+ */
+export function consentEventTime(
+  raw: string | number | null | undefined,
+  now: Date,
+): string | null {
+  let ms: number;
+  if (typeof raw === "number" || (typeof raw === "string" && /^\d+$/.test(raw))) {
+    ms = Number(raw) * 1000;
+  } else if (typeof raw === "string" && ISO_DATE_TIME.test(raw)) {
+    ms = Date.parse(raw);
+  } else {
+    return null;
+  }
+  // Nothing in this system predates 2020: anything earlier is a bad value.
+  if (!Number.isFinite(ms) || ms < EARLIEST_EVENT_MS) return null;
+  return new Date(Math.min(ms, now.getTime())).toISOString();
 }
 
 /** Rows read per request: at or below PostgREST's default max-rows, so a page is never silently cut short. */
@@ -249,6 +282,31 @@ export async function customerOptOutBlocksStaffOptIn(
   const rows = await readAllConsentRows(supabaseAdmin, businessId, scope, [waId]);
   const state = foldLatestConsent(rows).get(waId);
   return Boolean(state && state.action === "opt_out" && state.authoritative);
+}
+
+/**
+ * Business-side messages into a conversation (staff replies, system notices)
+ * after the customer's own opt-out (STOP, their form) or Meta's: refused
+ * while that opt-out stands in either scope, until the customer opts back
+ * in for it or writes to the business again (a message strictly after the
+ * opt-out — the STOP message itself doesn't count).
+ */
+export async function customerOptOutBlocksConversation(
+  supabaseAdmin: Client,
+  businessId: string,
+  waId: string,
+  lastInboundAt: string | null,
+): Promise<boolean> {
+  const lastInbound = lastInboundAt ? Date.parse(lastInboundAt) : Number.NaN;
+  for (const scope of ["transactional", "marketing"] as const) {
+    const state = foldLatestConsent(
+      await readAllConsentRows(supabaseAdmin, businessId, scope, [waId]),
+    ).get(waId);
+    if (state?.authoritative && state.customerOptOutAt !== null) {
+      if (!(lastInbound > state.customerOptOutAt)) return true;
+    }
+  }
+  return false;
 }
 
 export type SendPermission =

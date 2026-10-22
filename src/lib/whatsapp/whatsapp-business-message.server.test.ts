@@ -405,6 +405,48 @@ describe("recipient consent", () => {
   });
 });
 
+describe("a customer's STOP outranks staff opt-ins on every business-initiated path", () => {
+  test("booking and payment notifications and campaign messages are skipped, on every retry", async () => {
+    const db = world({ inboundMinutesAgo: 5 });
+    db.rows("whatsapp_consent_events").push(
+      ...["transactional", "marketing"].flatMap((scope, i) => [
+        {
+          id: `stop-${i}`,
+          organization_id: "org-a",
+          business_id: "biz-a",
+          wa_id: WA,
+          scope,
+          action: "opt_out",
+          source: "customer_keyword",
+          created_at: ago(30),
+        },
+        {
+          id: `staff-${i}`,
+          organization_id: "org-a",
+          business_id: "biz-a",
+          wa_id: WA,
+          scope,
+          action: "opt_in",
+          source: "staff_attested",
+          evidence: "Customer said yes on the phone",
+          created_at: ago(10),
+        },
+      ]),
+    );
+    const meta = fakeMeta();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      for (const input of [BOOKING, PAYMENT, MARKETING]) {
+        assert.deepEqual(
+          await send(db, input, meta),
+          { outcome: "skipped", reason: "opted_out" },
+          `${input.purpose} attempt ${attempt}`,
+        );
+      }
+    }
+    assert.equal(meta.sent.length, 0);
+  });
+});
+
 describe("templates must be verifiably approved for this number and purpose", () => {
   const cases: [string, Parameters<typeof seed>[0], BusinessMessageInput, string][] = [
     [
