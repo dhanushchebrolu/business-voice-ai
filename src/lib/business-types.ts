@@ -41,11 +41,21 @@ export const BUSINESS_TYPES: BusinessTypeDef[] = [
     customerLabel: "Patients",
     itemFields: [
       { key: "doctor", label: "Doctor", placeholder: "Dr. Meera Rao" },
-      { key: "preparation", label: "Preparation instructions", placeholder: "Avoid eating 2 hours before" },
+      {
+        key: "preparation",
+        label: "Preparation instructions",
+        placeholder: "Avoid eating 2 hours before",
+      },
     ],
     suggestedFaqs: [
-      { question: "Do you accept walk-ins?", answer: "We prefer appointments, but we keep two walk-in slots each day." },
-      { question: "Do you offer EMI or insurance?", answer: "We accept cashless insurance from major providers and offer 3-month EMI." },
+      {
+        question: "Do you accept walk-ins?",
+        answer: "We prefer appointments, but we keep two walk-in slots each day.",
+      },
+      {
+        question: "Do you offer EMI or insurance?",
+        answer: "We accept cashless insurance from major providers and offer 3-month EMI.",
+      },
     ],
     suggestedRules: [
       "Never provide a medical diagnosis over the phone.",
@@ -66,7 +76,11 @@ export const BUSINESS_TYPES: BusinessTypeDef[] = [
       { key: "specialty", label: "Specialty", placeholder: "General medicine" },
     ],
     suggestedFaqs: [
-      { question: "What are your consultation charges?", answer: "First consultation is charged at the listed rate; follow-ups within 7 days are free." },
+      {
+        question: "What are your consultation charges?",
+        answer:
+          "First consultation is charged at the listed rate; follow-ups within 7 days are free.",
+      },
     ],
     suggestedRules: [
       "Never provide a medical diagnosis or prescribe medication.",
@@ -86,7 +100,10 @@ export const BUSINESS_TYPES: BusinessTypeDef[] = [
       { key: "amenities", label: "Amenities", placeholder: "AC, breakfast, balcony" },
     ],
     suggestedFaqs: [
-      { question: "What are your check-in and check-out times?", answer: "Check-in is from 2:00 PM and check-out is by 11:00 AM." },
+      {
+        question: "What are your check-in and check-out times?",
+        answer: "Check-in is from 2:00 PM and check-out is by 11:00 AM.",
+      },
       { question: "Is breakfast included?", answer: "Breakfast is included with all room types." },
     ],
     suggestedRules: [
@@ -107,7 +124,10 @@ export const BUSINESS_TYPES: BusinessTypeDef[] = [
       { key: "portion", label: "Portion", placeholder: "Serves 2" },
     ],
     suggestedFaqs: [
-      { question: "Do you deliver?", answer: "We deliver within a 5 km radius; delivery takes about 40 minutes." },
+      {
+        question: "Do you deliver?",
+        answer: "We deliver within a 5 km radius; delivery takes about 40 minutes.",
+      },
     ],
     suggestedRules: [
       "Never promise a table without confirming seating availability.",
@@ -127,7 +147,10 @@ export const BUSINESS_TYPES: BusinessTypeDef[] = [
       { key: "configuration", label: "Configuration", placeholder: "3 BHK, 1750 sq ft" },
     ],
     suggestedFaqs: [
-      { question: "Can I schedule a site visit?", answer: "Yes, site visits run daily between 10 AM and 6 PM." },
+      {
+        question: "Can I schedule a site visit?",
+        answer: "Yes, site visits run daily between 10 AM and 6 PM.",
+      },
     ],
     suggestedRules: [
       "Never quote a price outside the listed range without human approval.",
@@ -143,7 +166,12 @@ export const BUSINESS_TYPES: BusinessTypeDef[] = [
     itemLabelPlural: "Services",
     customerLabel: "Clients",
     itemFields: [{ key: "stylist", label: "Stylist", placeholder: "Any available" }],
-    suggestedFaqs: [{ question: "Do I need an appointment?", answer: "Walk-ins are welcome, but appointments get priority." }],
+    suggestedFaqs: [
+      {
+        question: "Do I need an appointment?",
+        answer: "Walk-ins are welcome, but appointments get priority.",
+      },
+    ],
     suggestedRules: ["Always confirm the stylist and time before booking."],
     usesReservations: true,
   },
@@ -155,7 +183,9 @@ export const BUSINESS_TYPES: BusinessTypeDef[] = [
     itemLabelPlural: "Plans",
     customerLabel: "Members",
     itemFields: [{ key: "term", label: "Term", placeholder: "3 months" }],
-    suggestedFaqs: [{ question: "Do you offer a free trial?", answer: "Yes, one free trial session per person." }],
+    suggestedFaqs: [
+      { question: "Do you offer a free trial?", answer: "Yes, one free trial session per person." },
+    ],
     suggestedRules: ["Never offer discounts that are not listed in the plans."],
     usesReservations: true,
   },
@@ -167,7 +197,12 @@ export const BUSINESS_TYPES: BusinessTypeDef[] = [
     itemLabelPlural: "Courses",
     customerLabel: "Students",
     itemFields: [{ key: "batch", label: "Batch timing", placeholder: "Mon/Wed/Fri 6 PM" }],
-    suggestedFaqs: [{ question: "When does the next batch start?", answer: "New batches start on the first Monday of every month." }],
+    suggestedFaqs: [
+      {
+        question: "When does the next batch start?",
+        answer: "New batches start on the first Monday of every month.",
+      },
+    ],
     suggestedRules: ["Always capture the student's name, course interest and phone number."],
     usesReservations: false,
   },
@@ -179,7 +214,12 @@ export const BUSINESS_TYPES: BusinessTypeDef[] = [
     itemLabelPlural: "Packages",
     customerLabel: "Travellers",
     itemFields: [{ key: "duration", label: "Duration", placeholder: "5 nights / 6 days" }],
-    suggestedFaqs: [{ question: "Are flights included?", answer: "Flights are quoted separately based on the travel date." }],
+    suggestedFaqs: [
+      {
+        question: "Are flights included?",
+        answer: "Flights are quoted separately based on the travel date.",
+      },
+    ],
     suggestedRules: ["Never confirm fares; fares change daily and must be quoted by a human."],
     usesReservations: false,
   },
@@ -191,7 +231,12 @@ export const BUSINESS_TYPES: BusinessTypeDef[] = [
     itemLabelPlural: "Models & services",
     customerLabel: "Customers",
     itemFields: [{ key: "variant", label: "Variant", placeholder: "Petrol / AT" }],
-    suggestedFaqs: [{ question: "Can I book a test drive?", answer: "Yes, test drives are available at the showroom daily." }],
+    suggestedFaqs: [
+      {
+        question: "Can I book a test drive?",
+        answer: "Yes, test drives are available at the showroom daily.",
+      },
+    ],
     suggestedRules: ["Never commit to on-road pricing or delivery timelines."],
     usesReservations: true,
   },
@@ -203,7 +248,12 @@ export const BUSINESS_TYPES: BusinessTypeDef[] = [
     itemLabelPlural: "Practice areas",
     customerLabel: "Clients",
     itemFields: [{ key: "counsel", label: "Counsel", placeholder: "Adv. S. Rao" }],
-    suggestedFaqs: [{ question: "What is the consultation fee?", answer: "The first consultation is 30 minutes at the listed fee." }],
+    suggestedFaqs: [
+      {
+        question: "What is the consultation fee?",
+        answer: "The first consultation is 30 minutes at the listed fee.",
+      },
+    ],
     suggestedRules: [
       "Never give legal advice or an opinion on a case.",
       "Only collect the caller's contact details and the nature of the matter.",
@@ -217,8 +267,15 @@ export const BUSINESS_TYPES: BusinessTypeDef[] = [
     itemLabel: "Service",
     itemLabelPlural: "Services",
     customerLabel: "Customers",
-    itemFields: [{ key: "visit_charge", label: "Visit charge", placeholder: "₹199, waived on booking" }],
-    suggestedFaqs: [{ question: "How soon can a technician visit?", answer: "Usually the same day for calls before 3 PM." }],
+    itemFields: [
+      { key: "visit_charge", label: "Visit charge", placeholder: "₹199, waived on booking" },
+    ],
+    suggestedFaqs: [
+      {
+        question: "How soon can a technician visit?",
+        answer: "Usually the same day for calls before 3 PM.",
+      },
+    ],
     suggestedRules: ["Always capture the full service address and preferred slot."],
     usesReservations: true,
   },
@@ -230,7 +287,12 @@ export const BUSINESS_TYPES: BusinessTypeDef[] = [
     itemLabelPlural: "Products",
     customerLabel: "Customers",
     itemFields: [{ key: "brand", label: "Brand", placeholder: "In-house" }],
-    suggestedFaqs: [{ question: "Do you have parking?", answer: "Yes, free customer parking is available at the store." }],
+    suggestedFaqs: [
+      {
+        question: "Do you have parking?",
+        answer: "Yes, free customer parking is available at the store.",
+      },
+    ],
     suggestedRules: ["Never confirm stock availability without checking with staff."],
     usesReservations: false,
   },
@@ -242,7 +304,12 @@ export const BUSINESS_TYPES: BusinessTypeDef[] = [
     itemLabelPlural: "Products",
     customerLabel: "Customers",
     itemFields: [{ key: "sku", label: "SKU", placeholder: "VN-1042" }],
-    suggestedFaqs: [{ question: "What is your return window?", answer: "Returns are accepted within 7 days of delivery." }],
+    suggestedFaqs: [
+      {
+        question: "What is your return window?",
+        answer: "Returns are accepted within 7 days of delivery.",
+      },
+    ],
     suggestedRules: ["Never share order details without verifying the order ID and phone number."],
     usesReservations: false,
   },
@@ -254,7 +321,13 @@ export const BUSINESS_TYPES: BusinessTypeDef[] = [
     itemLabelPlural: "Services",
     customerLabel: "Customers",
     itemFields: [],
-    suggestedFaqs: [{ question: "What are your working hours?", answer: "Our hours are listed on this page and the assistant reads them from your schedule." }],
+    suggestedFaqs: [
+      {
+        question: "What are your working hours?",
+        answer:
+          "Our hours are listed on this page and the assistant reads them from your schedule.",
+      },
+    ],
     suggestedRules: ["Never invent information that is not in the business profile."],
     usesReservations: false,
   },
@@ -265,11 +338,23 @@ export function getBusinessType(id: string | null | undefined): BusinessTypeDef 
 }
 
 export const OBJECTIVES: { id: string; label: string; description: string }[] = [
-  { id: "answer_questions", label: "Answer questions", description: "Handle general questions about the business" },
-  { id: "book_appointments", label: "Book appointments", description: "Collect date, time and contact details" },
+  {
+    id: "answer_questions",
+    label: "Answer questions",
+    description: "Handle general questions about the business",
+  },
+  {
+    id: "book_appointments",
+    label: "Book appointments",
+    description: "Collect date, time and contact details",
+  },
   { id: "take_reservations", label: "Take reservations", description: "Tables, rooms or slots" },
   { id: "capture_leads", label: "Capture leads", description: "Record every enquiry as a lead" },
-  { id: "provide_pricing", label: "Quote pricing", description: "Only from your configured price list" },
+  {
+    id: "provide_pricing",
+    label: "Quote pricing",
+    description: "Only from your configured price list",
+  },
   { id: "handle_faqs", label: "Handle FAQs", description: "Answer from your FAQ list" },
   { id: "transfer_to_human", label: "Transfer to a human", description: "Escalate to your team" },
   { id: "take_messages", label: "Take messages", description: "Record callbacks after hours" },
@@ -289,16 +374,60 @@ export const CAPABILITIES: CapabilityDef[] = [
   { id: "quote_prices", label: "Quote prices", description: "Only prices you entered" },
   { id: "check_hours", label: "Check business hours", description: "Uses your weekly schedule" },
   { id: "capture_lead", label: "Capture lead", description: "Saves caller details to Leads" },
-  { id: "collect_details", label: "Collect customer information", description: "Name, phone, requirement" },
-  { id: "book_appointment", label: "Book appointments", description: "Needs a connected calendar", requires: "calendar" },
-  { id: "cancel_appointment", label: "Cancel appointments", description: "Needs a connected calendar", requires: "calendar" },
-  { id: "reschedule_appointment", label: "Reschedule appointments", description: "Needs a connected calendar", requires: "calendar" },
-  { id: "check_availability", label: "Check availability", description: "Needs a connected calendar", requires: "calendar" },
-  { id: "send_sms", label: "Send SMS confirmation", description: "Needs an SMS provider", requires: "sms" },
-  { id: "send_whatsapp", label: "Send WhatsApp message", description: "Needs WhatsApp Business", requires: "whatsapp" },
-  { id: "transfer_to_human", label: "Transfer to a human", description: "Needs a live phone connection", requires: "telephony" },
+  {
+    id: "collect_details",
+    label: "Collect customer information",
+    description: "Name, phone, requirement",
+  },
+  {
+    id: "book_appointment",
+    label: "Book appointments",
+    description: "Needs a connected calendar",
+    requires: "calendar",
+  },
+  {
+    id: "cancel_appointment",
+    label: "Cancel appointments",
+    description: "Needs a connected calendar",
+    requires: "calendar",
+  },
+  {
+    id: "reschedule_appointment",
+    label: "Reschedule appointments",
+    description: "Needs a connected calendar",
+    requires: "calendar",
+  },
+  {
+    id: "check_availability",
+    label: "Check availability",
+    description: "Needs a connected calendar",
+    requires: "calendar",
+  },
+  {
+    id: "send_sms",
+    label: "Send SMS confirmation",
+    description: "Needs an SMS provider",
+    requires: "sms",
+  },
+  {
+    id: "send_whatsapp",
+    label: "Send WhatsApp message",
+    description: "Needs WhatsApp Business",
+    requires: "whatsapp",
+  },
+  {
+    id: "transfer_to_human",
+    label: "Transfer to a human",
+    description: "Needs a live phone connection",
+    requires: "telephony",
+  },
   { id: "take_callback", label: "Take callback request", description: "Saves a callback task" },
-  { id: "create_ticket", label: "Create support ticket", description: "Needs a CRM connection", requires: "crm" },
+  {
+    id: "create_ticket",
+    label: "Create support ticket",
+    description: "Needs a CRM connection",
+    requires: "crm",
+  },
 ];
 
 /**

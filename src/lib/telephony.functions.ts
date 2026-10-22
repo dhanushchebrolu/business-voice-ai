@@ -30,7 +30,15 @@ export const searchAvailableNumbers = createServerFn({ method: "POST" })
         results: [],
       };
     // A configured provider would be queried here for live inventory.
-    return { ok: true as const, results: [] as { e164: string; monthlyPrice: number; setupFee: number; capabilities: string[] }[] };
+    return {
+      ok: true as const,
+      results: [] as {
+        e164: string;
+        monthlyPrice: number;
+        setupFee: number;
+        capabilities: string[];
+      }[],
+    };
   });
 
 export const testTelephonyConnection = createServerFn({ method: "POST" })

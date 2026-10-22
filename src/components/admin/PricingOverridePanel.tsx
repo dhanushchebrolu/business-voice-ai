@@ -2,7 +2,11 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { toast } from "sonner";
-import { listPricingRules, listPricingOverrides, setPricingOverride } from "@/lib/admin-finance.functions";
+import {
+  listPricingRules,
+  listPricingOverrides,
+  setPricingOverride,
+} from "@/lib/admin-finance.functions";
 import { SectionCard } from "@/components/app/primitives";
 import { formatMoney } from "@/lib/pricing";
 import { Button } from "@/components/ui/button";
@@ -18,7 +22,10 @@ export function PricingOverridePanel({ orgId }: { orgId: string }) {
   const save = useServerFn(setPricingOverride);
 
   const rules = useQuery({ queryKey: ["pricing-rules"], queryFn: () => fetchRules() });
-  const overrides = useQuery({ queryKey: ["pricing-overrides", orgId], queryFn: () => fetchOverrides({ data: { orgId } }) });
+  const overrides = useQuery({
+    queryKey: ["pricing-overrides", orgId],
+    queryFn: () => fetchOverrides({ data: { orgId } }),
+  });
 
   const [target, setTarget] = useState<{ key: string; label: string } | null>(null);
   const [price, setPrice] = useState("");
@@ -57,18 +64,24 @@ export function PricingOverridePanel({ orgId }: { orgId: string }) {
                   </td>
                   <td className="py-2.5 tabular">{formatMoney(customer)}</td>
                   <td className="py-2.5 tabular text-muted-foreground">{formatMoney(provider)}</td>
-                  <td className={`py-2.5 tabular ${margin < 0 ? "text-destructive" : "text-success"}`}>
+                  <td
+                    className={`py-2.5 tabular ${margin < 0 ? "text-destructive" : "text-success"}`}
+                  >
                     {formatMoney(margin)}
                     {customer > 0 ? ` · ${((margin / customer) * 100).toFixed(1)}%` : ""}
                   </td>
-                  <td className="py-2.5 text-xs text-muted-foreground">{ov ? "Customer override" : "Platform rule"}</td>
+                  <td className="py-2.5 text-xs text-muted-foreground">
+                    {ov ? "Customer override" : "Platform rule"}
+                  </td>
                   <td className="py-2.5 text-right">
                     <Button
                       size="sm"
                       variant="outline"
                       onClick={() => {
                         setTarget({ key: rule.key, label: rule.label });
-                        setPrice(ov?.customer_amount != null ? String(ov.customer_amount / 100) : "");
+                        setPrice(
+                          ov?.customer_amount != null ? String(ov.customer_amount / 100) : "",
+                        );
                         setCost(ov?.provider_cost != null ? String(ov.provider_cost / 100) : "");
                       }}
                     >
@@ -90,13 +103,27 @@ export function PricingOverridePanel({ orgId }: { orgId: string }) {
         confirmLabel="Save override"
         extra={
           <div className="grid gap-2 sm:grid-cols-2">
-            <Input placeholder="Customer price ₹" value={price} onChange={(e) => setPrice(e.target.value)} />
-            <Input placeholder="Provider cost ₹" value={cost} onChange={(e) => setCost(e.target.value)} />
+            <Input
+              placeholder="Customer price ₹"
+              value={price}
+              onChange={(e) => setPrice(e.target.value)}
+            />
+            <Input
+              placeholder="Provider cost ₹"
+              value={cost}
+              onChange={(e) => setCost(e.target.value)}
+            />
           </div>
         }
         onConfirm={async (reason) => {
           await save({
-            data: { orgId, key: target!.key, customerAmount: toPaise(price), providerCost: toPaise(cost), reason },
+            data: {
+              orgId,
+              key: target!.key,
+              customerAmount: toPaise(price),
+              providerCost: toPaise(cost),
+              reason,
+            },
           });
           toast.success("Pricing updated");
           setTarget(null);

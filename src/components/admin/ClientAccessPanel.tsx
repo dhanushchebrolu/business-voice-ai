@@ -15,7 +15,13 @@ import { ReasonDialog } from "@/components/admin/ReasonDialog";
  * stored — the raw values are shown once here and can never be read back,
  * not from the database and not from any API.
  */
-export function ClientAccessPanel({ orgId, defaultEmail }: { orgId: string; defaultEmail: string | null }) {
+export function ClientAccessPanel({
+  orgId,
+  defaultEmail,
+}: {
+  orgId: string;
+  defaultEmail: string | null;
+}) {
   const fetchInvites = useServerFn(listInvitations);
   const create = useServerFn(createInvitation);
   const revoke = useServerFn(revokeInvitation);
@@ -59,7 +65,11 @@ export function ClientAccessPanel({ orgId, defaultEmail }: { orgId: string; defa
       <div className="grid gap-3 sm:grid-cols-[1fr_auto_auto] sm:items-end">
         <div className="space-y-1.5">
           <Label className="text-xs text-muted-foreground">Invitation email</Label>
-          <Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="owner@business.in" />
+          <Input
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="owner@business.in"
+          />
         </div>
         <label className="flex items-center gap-2 pb-2 text-xs text-muted-foreground">
           <input type="checkbox" checked={withPin} onChange={(e) => setWithPin(e.target.checked)} />
@@ -72,23 +82,30 @@ export function ClientAccessPanel({ orgId, defaultEmail }: { orgId: string; defa
 
       {issued ? (
         <div className="mt-4 space-y-2 rounded-lg border border-primary/30 bg-primary/8 p-3 text-sm">
-          <p className="text-xs text-muted-foreground">Shown once. Send it to the customer through a channel you trust.</p>
+          <p className="text-xs text-muted-foreground">
+            Shown once. Send it to the customer through a channel you trust.
+          </p>
           <div className="flex items-center gap-2">
-            <code className="min-w-0 flex-1 truncate rounded bg-muted px-2 py-1 text-xs">{issued.link}</code>
+            <code className="min-w-0 flex-1 truncate rounded bg-muted px-2 py-1 text-xs">
+              {issued.link}
+            </code>
             <Button size="sm" variant="outline" onClick={() => copy(issued.link)}>
               <Copy className="size-3.5" />
             </Button>
           </div>
           {issued.pin ? (
             <div className="flex items-center gap-2">
-              <code className="rounded bg-muted px-2 py-1 text-xs tracking-[0.3em]">{issued.pin}</code>
+              <code className="rounded bg-muted px-2 py-1 text-xs tracking-[0.3em]">
+                {issued.pin}
+              </code>
               <Button size="sm" variant="outline" onClick={() => copy(issued.pin!)}>
                 <Copy className="size-3.5" />
               </Button>
             </div>
           ) : null}
           <p className="text-xs text-muted-foreground">
-            Automatic invitation email is not available yet — no email provider is connected to this project.
+            Automatic invitation email is not available yet — no email provider is connected to this
+            project.
           </p>
         </div>
       ) : null}
@@ -105,13 +122,18 @@ export function ClientAccessPanel({ orgId, defaultEmail }: { orgId: string; defa
                     ? { tone: "error" as const, label: "Expired" }
                     : { tone: "ready" as const, label: "Pending" };
               return (
-                <li key={inv.id} className="flex flex-wrap items-center justify-between gap-2 py-2.5 text-sm">
+                <li
+                  key={inv.id}
+                  className="flex flex-wrap items-center justify-between gap-2 py-2.5 text-sm"
+                >
                   <span>{inv.email}</span>
                   <span className="text-xs text-muted-foreground tabular">
                     expires {new Date(inv.expires_at).toLocaleString()}
                   </span>
                   <span className="text-xs text-muted-foreground">
-                    {inv.failed_attempts > 0 ? `${inv.failed_attempts} failed attempts` : "no failed attempts"}
+                    {inv.failed_attempts > 0
+                      ? `${inv.failed_attempts} failed attempts`
+                      : "no failed attempts"}
                   </span>
                   <StatusPill tone={state.tone}>{state.label}</StatusPill>
                   {!inv.accepted_at && !inv.revoked_at ? (
@@ -124,7 +146,10 @@ export function ClientAccessPanel({ orgId, defaultEmail }: { orgId: string; defa
             })}
           </ul>
         ) : (
-          <EmptyState title="No invitations issued" description="Generate one when the workspace is ready." />
+          <EmptyState
+            title="No invitations issued"
+            description="Generate one when the workspace is ready."
+          />
         )}
       </div>
 

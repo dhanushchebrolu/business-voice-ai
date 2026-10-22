@@ -136,7 +136,12 @@ describe("existing agent onboarding still works — every column app.onboarding.
       insertBlockMatch,
       "expected to find the agent_configs insert call in app.onboarding.tsx",
     );
-    const usedColumns = [...insertBlockMatch![1]!.matchAll(/^\s*(\w+):/gm)].map((m) => m[1]!);
+    // Only the insert's own top-level keys are columns; keys of a nested
+    // object (e.g. capabilities: { answer_faqs: true, ... } wrapped across
+    // lines by Prettier) are deeper-indented and aren't.
+    const keyLines = [...insertBlockMatch![1]!.matchAll(/^([ \t]*)(\w+):/gm)];
+    const topIndent = Math.min(...keyLines.map((m) => m[1]!.length));
+    const usedColumns = keyLines.filter((m) => m[1]!.length === topIndent).map((m) => m[2]!);
     assert.ok(usedColumns.length > 0, "expected to parse at least one column from the insert call");
 
     const grantMatch = migrationSrc.match(/GRANT INSERT \(([\s\S]*?)\) ON public\.agent_configs/);

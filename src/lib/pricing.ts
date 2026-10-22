@@ -33,7 +33,10 @@ export const pricingQuery = () =>
     queryKey: ["platform-pricing"],
     staleTime: 5 * 60_000,
     queryFn: async (): Promise<PriceMap> => {
-      const { data, error } = await supabase.from("platform_settings").select("key, value").like("key", "pricing.%");
+      const { data, error } = await supabase
+        .from("platform_settings")
+        .select("key, value")
+        .like("key", "pricing.%");
       if (error) throw error;
       const map: PriceMap = {};
       for (const row of data ?? []) {

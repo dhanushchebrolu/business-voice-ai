@@ -47,7 +47,13 @@ function AdminPricing() {
   });
 
   if (isLoading) return <LoadingState label="Loading pricing" />;
-  if (error) return <ErrorState message={error instanceof Error ? error.message : "Could not load pricing"} onRetry={() => void refetch()} />;
+  if (error)
+    return (
+      <ErrorState
+        message={error instanceof Error ? error.message : "Could not load pricing"}
+        onRetry={() => void refetch()}
+      />
+    );
 
   const map = new Map((data ?? []).map((s) => [s.key, s.value as unknown as PriceValue]));
 
@@ -58,12 +64,18 @@ function AdminPricing() {
         description="Every charge in the product reads these values at runtime. Changing a price never needs a deployment."
       />
 
-      <SectionCard title="Price list" description="Amounts are stored in paise and shown in rupees. Currency: INR.">
+      <SectionCard
+        title="Price list"
+        description="Amounts are stored in paise and shown in rupees. Currency: INR."
+      >
         <ul className="divide-y divide-border">
           {KNOWN_PRICES.map((price) => {
             const value = map.get(price.key);
             return (
-              <li key={price.key} className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between">
+              <li
+                key={price.key}
+                className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between"
+              >
                 <div>
                   <p className="text-sm font-medium">{value?.label ?? price.label}</p>
                   <p className="font-mono text-[11px] text-muted-foreground">{price.key}</p>
@@ -95,7 +107,13 @@ function AdminPricing() {
         title={`Update ${editing?.label ?? ""}`}
         description="The new price applies immediately to every new charge across the platform. Historic payments are untouched."
         confirmLabel="Save price"
-        extra={<Input placeholder="Amount in ₹" value={amount} onChange={(e) => setAmount(e.target.value)} />}
+        extra={
+          <Input
+            placeholder="Amount in ₹"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+          />
+        }
         onConfirm={async (reason) => {
           const rupees = Number(amount);
           if (!Number.isFinite(rupees) || rupees < 0) throw new Error("Enter a valid amount");
@@ -103,7 +121,11 @@ function AdminPricing() {
           await saveSetting({
             data: {
               key: editing!.key,
-              value: { amount: Math.round(rupees * 100), currency: existing?.currency ?? "INR", label: existing?.label ?? editing!.label },
+              value: {
+                amount: Math.round(rupees * 100),
+                currency: existing?.currency ?? "INR",
+                label: existing?.label ?? editing!.label,
+              },
               reason,
             },
           });

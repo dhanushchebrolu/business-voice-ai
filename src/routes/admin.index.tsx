@@ -4,7 +4,14 @@ import { useServerFn } from "@tanstack/react-start";
 import { useState } from "react";
 import { toast } from "sonner";
 import { getAdminOverview, updatePlatformSetting } from "@/lib/admin.functions";
-import { PageHeader, SectionCard, StatCard, LoadingState, ErrorState, StatusPill } from "@/components/app/primitives";
+import {
+  PageHeader,
+  SectionCard,
+  StatCard,
+  LoadingState,
+  ErrorState,
+  StatusPill,
+} from "@/components/app/primitives";
 import { formatMoney } from "@/lib/pricing";
 import { Button } from "@/components/ui/button";
 import {
@@ -39,7 +46,12 @@ function AdminOverview() {
 
   if (isLoading) return <LoadingState label="Loading platform metrics" />;
   if (error || !data)
-    return <ErrorState message={error instanceof Error ? error.message : "Could not load metrics"} onRetry={() => void refetch()} />;
+    return (
+      <ErrorState
+        message={error instanceof Error ? error.message : "Could not load metrics"}
+        onRetry={() => void refetch()}
+      />
+    );
 
   const enforcement = data.paymentEnforcement;
 
@@ -50,7 +62,9 @@ function AdminOverview() {
     }
     setSaving(true);
     try {
-      await saveSetting({ data: { key: "billing.payment_required", value: { enabled: !enforcement }, reason } });
+      await saveSetting({
+        data: { key: "billing.payment_required", value: { enabled: !enforcement }, reason },
+      });
       toast.success(enforcement ? "Payment enforcement disabled" : "Payment enforcement enabled");
       setConfirming(false);
       setReason("");
@@ -64,12 +78,19 @@ function AdminOverview() {
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Platform overview" description="Live operational state across every customer organization." />
+      <PageHeader
+        title="Platform overview"
+        description="Live operational state across every customer organization."
+      />
 
       <SectionCard
         title="Payment enforcement"
         description="Global switch. When off, every customer uses the product without paying — enforced server-side, no redeploy."
-        actions={<StatusPill tone={enforcement ? "live" : "idle"}>{enforcement ? "Enabled" : "Disabled"}</StatusPill>}
+        actions={
+          <StatusPill tone={enforcement ? "live" : "idle"}>
+            {enforcement ? "Enabled" : "Disabled"}
+          </StatusPill>
+        }
       >
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <p className="max-w-2xl text-sm text-muted-foreground">
@@ -84,31 +105,57 @@ function AdminOverview() {
       </SectionCard>
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <button className="text-left" onClick={() => navigate({ to: "/admin/customers", search: { status: "all" } })}>
+        <button
+          className="text-left"
+          onClick={() => navigate({ to: "/admin/customers", search: { status: "all" } })}
+        >
           <StatCard label="Customers" value={data.customers.total} />
         </button>
-        <button className="text-left" onClick={() => navigate({ to: "/admin/customers", search: { status: "active" } })}>
+        <button
+          className="text-left"
+          onClick={() => navigate({ to: "/admin/customers", search: { status: "active" } })}
+        >
           <StatCard label="Active" value={data.customers.active} tone="accent" />
         </button>
-        <button className="text-left" onClick={() => navigate({ to: "/admin/customers", search: { status: "payment_required" } })}>
+        <button
+          className="text-left"
+          onClick={() =>
+            navigate({ to: "/admin/customers", search: { status: "payment_required" } })
+          }
+        >
           <StatCard label="Payment required" value={data.customers.paymentRequired} />
         </button>
-        <button className="text-left" onClick={() => navigate({ to: "/admin/customers", search: { status: "suspended" } })}>
+        <button
+          className="text-left"
+          onClick={() => navigate({ to: "/admin/customers", search: { status: "suspended" } })}
+        >
           <StatCard label="Suspended" value={data.customers.suspended} />
         </button>
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard label="Revenue today" value={formatMoney(data.revenue.today)} />
-        <StatCard label="Revenue this month" value={formatMoney(data.revenue.month)} tone="accent" />
+        <StatCard
+          label="Revenue this month"
+          value={formatMoney(data.revenue.month)}
+          tone="accent"
+        />
         <StatCard label="Revenue all time" value={formatMoney(data.revenue.allTime)} />
         <StatCard label="Failed payments" value={data.revenue.failed} />
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard label="Calls today" value={data.callsToday.total} hint={`${data.callsToday.inbound} in · ${data.callsToday.outbound} out`} />
+        <StatCard
+          label="Calls today"
+          value={data.callsToday.total}
+          hint={`${data.callsToday.inbound} in · ${data.callsToday.outbound} out`}
+        />
         <StatCard label="Minutes today" value={data.callsToday.minutes} />
-        <StatCard label="Phone numbers" value={data.numbers.total} hint={`${data.numbers.assigned} active`} />
+        <StatCard
+          label="Phone numbers"
+          value={data.numbers.total}
+          hint={`${data.numbers.assigned} active`}
+        />
         <StatCard label="AI agents" value={data.agents.total} hint={`${data.agents.live} live`} />
       </div>
 
@@ -122,14 +169,20 @@ function AdminOverview() {
       <AlertDialog open={confirming} onOpenChange={setConfirming}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{enforcement ? "Disable payment enforcement?" : "Enable payment enforcement?"}</AlertDialogTitle>
+            <AlertDialogTitle>
+              {enforcement ? "Disable payment enforcement?" : "Enable payment enforcement?"}
+            </AlertDialogTitle>
             <AlertDialogDescription>
               {enforcement
                 ? "Every customer will get free access to all features immediately, regardless of payment state."
                 : "All customers who do not satisfy the configured payment requirements may be restricted immediately."}
             </AlertDialogDescription>
           </AlertDialogHeader>
-          <Input placeholder="Reason (recorded in the audit log)" value={reason} onChange={(e) => setReason(e.target.value)} />
+          <Input
+            placeholder="Reason (recorded in the audit log)"
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+          />
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction

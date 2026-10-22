@@ -18,10 +18,7 @@ const src = readFileSync(
 
 describe("app.campaigns.tsx — a failed fetch is a real, retryable error, never a silent empty state", () => {
   test("destructures isError/error/refetch from the campaigns query", () => {
-    assert.match(
-      src,
-      /isLoading,\s*isError,\s*error,\s*refetch\s*\} = useQuery\(campaignsQuery/,
-    );
+    assert.match(src, /isLoading,\s*isError,\s*error,\s*refetch\s*\} = useQuery\(campaignsQuery/);
   });
 
   test("renders ErrorState before falling through to the empty/table branch", () => {

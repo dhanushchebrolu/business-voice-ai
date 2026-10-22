@@ -4,7 +4,13 @@ import { useServerFn } from "@tanstack/react-start";
 import { useState } from "react";
 import { toast } from "sonner";
 import { listPlatformAdmins, upsertPlatformAdmin } from "@/lib/admin.functions";
-import { PageHeader, SectionCard, LoadingState, ErrorState, StatusPill } from "@/components/app/primitives";
+import {
+  PageHeader,
+  SectionCard,
+  LoadingState,
+  ErrorState,
+  StatusPill,
+} from "@/components/app/primitives";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ReasonDialog } from "@/components/admin/ReasonDialog";
@@ -31,7 +37,13 @@ function AdminTeam() {
   });
 
   if (isLoading) return <LoadingState label="Loading admin team" />;
-  if (error) return <ErrorState message={error instanceof Error ? error.message : "Could not load the team"} onRetry={() => void refetch()} />;
+  if (error)
+    return (
+      <ErrorState
+        message={error instanceof Error ? error.message : "Could not load the team"}
+        onRetry={() => void refetch()}
+      />
+    );
 
   return (
     <div className="space-y-6">
@@ -41,16 +53,24 @@ function AdminTeam() {
         actions={<Button onClick={() => setOpen(true)}>Grant access</Button>}
       />
 
-      <SectionCard title="Administrators" description="Role decides which privileged actions the server will accept.">
+      <SectionCard
+        title="Administrators"
+        description="Role decides which privileged actions the server will accept."
+      >
         <ul className="divide-y divide-border">
           {(data ?? []).map((a) => (
-            <li key={a.user_id} className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <li
+              key={a.user_id}
+              className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between"
+            >
               <div>
                 <p className="text-sm font-medium">{a.name ?? a.email ?? a.user_id}</p>
                 <p className="text-xs text-muted-foreground">{a.email}</p>
               </div>
               <div className="flex items-center gap-2">
-                <StatusPill tone={a.is_active ? "live" : "idle"}>{a.is_active ? "Active" : "Revoked"}</StatusPill>
+                <StatusPill tone={a.is_active ? "live" : "idle"}>
+                  {a.is_active ? "Active" : "Revoked"}
+                </StatusPill>
                 <StatusPill tone="accent">{a.role.replace("_", " ")}</StatusPill>
               </div>
             </li>
@@ -66,14 +86,20 @@ function AdminTeam() {
         confirmLabel="Grant access"
         extra={
           <div className="space-y-2">
-            <Input placeholder="Email address" value={email} onChange={(e) => setEmail(e.target.value)} />
+            <Input
+              placeholder="Email address"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+            />
             <div className="flex flex-wrap gap-1.5">
               {ROLES.map((r) => (
                 <button
                   key={r}
                   onClick={() => setRole(r)}
                   className={`rounded-full border px-3 py-1 text-xs capitalize ${
-                    role === r ? "border-primary/40 bg-primary/12 text-primary" : "border-border text-muted-foreground"
+                    role === r
+                      ? "border-primary/40 bg-primary/12 text-primary"
+                      : "border-border text-muted-foreground"
                   }`}
                 >
                   {r.replace("_", " ")}

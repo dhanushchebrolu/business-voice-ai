@@ -30,14 +30,46 @@ export interface VoiceDef {
 }
 
 const MALE = [
-  "Shubh", "Aditya", "Rahul", "Rohan", "Amit", "Dev", "Ratan", "Varun", "Manan", "Sumit",
-  "Kabir", "Aayan", "Ashutosh", "Advait", "Anand", "Tarun", "Sunny", "Mani", "Gokul",
-  "Vijay", "Mohit", "Rehan", "Soham",
+  "Shubh",
+  "Aditya",
+  "Rahul",
+  "Rohan",
+  "Amit",
+  "Dev",
+  "Ratan",
+  "Varun",
+  "Manan",
+  "Sumit",
+  "Kabir",
+  "Aayan",
+  "Ashutosh",
+  "Advait",
+  "Anand",
+  "Tarun",
+  "Sunny",
+  "Mani",
+  "Gokul",
+  "Vijay",
+  "Mohit",
+  "Rehan",
+  "Soham",
 ];
 
 const FEMALE = [
-  "Ritu", "Priya", "Neha", "Pooja", "Simran", "Kavya", "Ishita", "Shreya", "Roopa",
-  "Tanya", "Shruti", "Suhani", "Kavitha", "Rupali",
+  "Ritu",
+  "Priya",
+  "Neha",
+  "Pooja",
+  "Simran",
+  "Kavya",
+  "Ishita",
+  "Shreya",
+  "Roopa",
+  "Tanya",
+  "Shruti",
+  "Suhani",
+  "Kavitha",
+  "Rupali",
 ];
 
 /** Bulbul v3 speakers. IDs are stored lowercase. */

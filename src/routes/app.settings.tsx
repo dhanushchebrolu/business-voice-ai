@@ -41,7 +41,10 @@ function SettingsPage() {
   async function save() {
     if (!ws?.organization) return;
     setSaving(true);
-    const { error } = await supabase.from("organizations").update({ name, timezone }).eq("id", ws.organization.id);
+    const { error } = await supabase
+      .from("organizations")
+      .update({ name, timezone })
+      .eq("id", ws.organization.id);
     setSaving(false);
     if (error) {
       toast.error("Could not save workspace settings.");

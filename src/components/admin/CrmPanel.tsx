@@ -58,9 +58,17 @@ export function CrmPanel({
         </div>
       </SectionCard>
 
-      <SectionCard title="Notes & follow-up" description="Internal only — customers never see these.">
+      <SectionCard
+        title="Notes & follow-up"
+        description="Internal only — customers never see these."
+      >
         <div className="space-y-3">
-          <Textarea rows={3} placeholder="Add a note…" value={body} onChange={(e) => setBody(e.target.value)} />
+          <Textarea
+            rows={3}
+            placeholder="Add a note…"
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+          />
           <div className="flex flex-wrap items-end gap-3">
             <div className="space-y-1.5">
               <Label className="text-xs text-muted-foreground">Follow-up date</Label>
@@ -73,7 +81,11 @@ export function CrmPanel({
                 setBusy(true);
                 try {
                   await addNote({
-                    data: { orgId, body, followUpAt: followUp ? new Date(followUp).toISOString() : null },
+                    data: {
+                      orgId,
+                      body,
+                      followUpAt: followUp ? new Date(followUp).toISOString() : null,
+                    },
                   });
                   setBody("");
                   toast.success("Note saved");
@@ -99,18 +111,26 @@ export function CrmPanel({
                   <p>{n.body}</p>
                   <p className="mt-1 text-xs text-muted-foreground">
                     {n.admin_email ?? "admin"} · {new Date(n.created_at).toLocaleString()}
-                    {n.follow_up_at ? ` · follow up ${new Date(n.follow_up_at).toLocaleDateString()}` : ""}
+                    {n.follow_up_at
+                      ? ` · follow up ${new Date(n.follow_up_at).toLocaleDateString()}`
+                      : ""}
                   </p>
                 </li>
               ))}
             </ul>
           ) : (
-            <EmptyState title="No notes yet" description="Log calls, emails and commitments here." />
+            <EmptyState
+              title="No notes yet"
+              description="Log calls, emails and commitments here."
+            />
           )}
         </div>
       </SectionCard>
 
-      <SectionCard title="Timeline" description="Recorded automatically as the client moves through their lifecycle.">
+      <SectionCard
+        title="Timeline"
+        description="Recorded automatically as the client moves through their lifecycle."
+      >
         {data?.events.length ? (
           <ul className="space-y-3">
             {data.events.map((e) => (
@@ -127,7 +147,10 @@ export function CrmPanel({
             ))}
           </ul>
         ) : (
-          <EmptyState title="No activity yet" description="Lifecycle changes, payments and access events appear here." />
+          <EmptyState
+            title="No activity yet"
+            description="Lifecycle changes, payments and access events appear here."
+          />
         )}
       </SectionCard>
     </div>

@@ -49,7 +49,11 @@ export function ReasonDialog({
           <AlertDialogDescription>{description}</AlertDialogDescription>
         </AlertDialogHeader>
         {extra}
-        <Input placeholder="Reason (recorded in the audit log)" value={reason} onChange={(e) => setReason(e.target.value)} />
+        <Input
+          placeholder="Reason (recorded in the audit log)"
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+        />
         <AlertDialogFooter>
           <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
           <AlertDialogAction

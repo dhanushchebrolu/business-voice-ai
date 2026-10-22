@@ -5,7 +5,11 @@ export type LifecycleStatus = Database["public"]["Enums"]["lifecycle_status"];
 /** Client-safe lifecycle metadata shared by the admin control centre and the customer app. */
 export const LIFECYCLE: Record<
   LifecycleStatus,
-  { label: string; tone: "live" | "ready" | "idle" | "error" | "info" | "accent"; description: string }
+  {
+    label: string;
+    tone: "live" | "ready" | "idle" | "error" | "info" | "accent";
+    description: string;
+  }
 > = {
   not_provisioned: {
     label: "Not provisioned",
@@ -33,9 +37,17 @@ export const LIFECYCLE: Record<
     description: "Workspace prepared — invitation can be sent.",
   },
   active: { label: "Active", tone: "live", description: "Customer has full dashboard access." },
-  suspended: { label: "Suspended", tone: "error", description: "Access suspended by the platform." },
+  suspended: {
+    label: "Suspended",
+    tone: "error",
+    description: "Access suspended by the platform.",
+  },
   cancelled: { label: "Cancelled", tone: "error", description: "Customer has cancelled." },
-  archived: { label: "Archived", tone: "idle", description: "Archived. Financial history is preserved." },
+  archived: {
+    label: "Archived",
+    tone: "idle",
+    description: "Archived. Financial history is preserved.",
+  },
 };
 
 export const LIFECYCLE_ORDER: LifecycleStatus[] = [

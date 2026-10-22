@@ -12,7 +12,11 @@ export async function loadSnapshot(supabase: Client, businessId: string): Promis
     supabase.from("faqs").select("*").eq("business_id", businessId).order("sort_order"),
     supabase.from("business_rules").select("*").eq("business_id", businessId).order("priority"),
     supabase.from("agent_configs").select("*").eq("business_id", businessId).maybeSingle(),
-    supabase.from("knowledge_documents").select("title, content, status").eq("business_id", businessId).eq("status", "ready"),
+    supabase
+      .from("knowledge_documents")
+      .select("title, content, status")
+      .eq("business_id", businessId)
+      .eq("status", "ready"),
   ]);
 
   if (!business.data) throw new Error("Business not found in your workspace.");
@@ -50,8 +54,16 @@ export async function loadSnapshot(supabase: Client, businessId: string): Promis
       attributes: (s.attributes as unknown as Record<string, string>) ?? {},
       is_active: s.is_active,
     })),
-    faqs: (faqs.data ?? []).map((f) => ({ question: f.question, answer: f.answer, is_active: f.is_active })),
-    rules: (rules.data ?? []).map((r) => ({ rule: r.rule, priority: r.priority, is_active: r.is_active })),
+    faqs: (faqs.data ?? []).map((f) => ({
+      question: f.question,
+      answer: f.answer,
+      is_active: f.is_active,
+    })),
+    rules: (rules.data ?? []).map((r) => ({
+      rule: r.rule,
+      priority: r.priority,
+      is_active: r.is_active,
+    })),
     knowledge: (knowledge.data ?? []).map((k) => ({ title: k.title, content: k.content })),
     agent: {
       agent_name: a?.agent_name ?? "Aria",
@@ -71,8 +83,15 @@ export async function loadSnapshot(supabase: Client, businessId: string): Promis
   };
 }
 
-export async function requireBusinessAccess(supabase: Client, businessId: string): Promise<{ organizationId: string }> {
-  const { data } = await supabase.from("businesses").select("id, organization_id").eq("id", businessId).maybeSingle();
+export async function requireBusinessAccess(
+  supabase: Client,
+  businessId: string,
+): Promise<{ organizationId: string }> {
+  const { data } = await supabase
+    .from("businesses")
+    .select("id, organization_id")
+    .eq("id", businessId)
+    .maybeSingle();
   if (!data) throw new Error("Business not found in your workspace.");
   return { organizationId: data.organization_id };
 }

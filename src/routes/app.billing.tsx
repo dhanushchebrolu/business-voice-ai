@@ -2,7 +2,13 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { Wallet, Receipt } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
-import { workspaceQuery, usageQuery, callsQuery, paymentsQuery, invoicesQuery } from "@/lib/workspace";
+import {
+  workspaceQuery,
+  usageQuery,
+  callsQuery,
+  paymentsQuery,
+  invoicesQuery,
+} from "@/lib/workspace";
 import { pricingQuery, formatMoney } from "@/lib/pricing";
 import { PageHeader, SectionCard, StatCard, EmptyState } from "@/components/app/primitives";
 import { AccountStatusPanel } from "@/components/app/AccountStatusPanel";
@@ -11,7 +17,10 @@ export const Route = createFileRoute("/app/billing")({
   head: () => ({
     meta: [
       { title: "Usage & billing — ClickAI" },
-      { name: "description", content: "Track call minutes, usage costs, payments and invoices for your workspace." },
+      {
+        name: "description",
+        content: "Track call minutes, usage costs, payments and invoices for your workspace.",
+      },
       { name: "robots", content: "noindex" },
     ],
   }),
@@ -38,11 +47,16 @@ function BillingPage() {
 
   const minutes = Math.round((calls ?? []).reduce((s, c) => s + (c.duration_seconds ?? 0), 0) / 60);
   const cost = (usage ?? []).reduce((s, u) => s + Number(u.billable_cost ?? 0), 0);
-  const paid = (payments ?? []).filter((p) => p.status === "captured").reduce((s, p) => s + p.amount, 0);
+  const paid = (payments ?? [])
+    .filter((p) => p.status === "captured")
+    .reduce((s, p) => s + p.amount, 0);
 
   return (
     <div className="space-y-6">
-      <PageHeader title="Usage & billing" description="Your account state, what you have paid, and metered usage from real calls." />
+      <PageHeader
+        title="Usage & billing"
+        description="Your account state, what you have paid, and metered usage from real calls."
+      />
 
       <AccountStatusPanel />
 
@@ -61,7 +75,9 @@ function BillingPage() {
             return (
               <li key={key} className="flex items-center justify-between gap-3 py-2.5 text-sm">
                 <span>{price.label}</span>
-                <span className="tabular font-medium">{formatMoney(price.amount, price.currency)}</span>
+                <span className="tabular font-medium">
+                  {formatMoney(price.amount, price.currency)}
+                </span>
               </li>
             );
           })}
@@ -111,17 +127,26 @@ function BillingPage() {
             {invoices.map((inv) => (
               <li key={inv.id} className="flex items-center justify-between gap-3 py-2.5 text-sm">
                 <span className="font-mono text-xs">{inv.number}</span>
-                <span className="text-xs text-muted-foreground tabular">{new Date(inv.issued_at).toLocaleDateString()}</span>
+                <span className="text-xs text-muted-foreground tabular">
+                  {new Date(inv.issued_at).toLocaleDateString()}
+                </span>
                 <span className="tabular font-medium">{formatMoney(inv.amount, inv.currency)}</span>
               </li>
             ))}
           </ul>
         ) : (
-          <EmptyState icon={Receipt} title="No invoices yet" description="An invoice is generated for every confirmed payment." />
+          <EmptyState
+            icon={Receipt}
+            title="No invoices yet"
+            description="An invoice is generated for every confirmed payment."
+          />
         )}
       </SectionCard>
 
-      <SectionCard title="Usage records" description="Each metered event recorded against your workspace.">
+      <SectionCard
+        title="Usage records"
+        description="Each metered event recorded against your workspace."
+      >
         {usage?.length ? (
           <div className="-mx-5 overflow-x-auto">
             <table className="w-full min-w-[600px] text-sm">
@@ -136,7 +161,9 @@ function BillingPage() {
               <tbody>
                 {usage.map((u) => (
                   <tr key={u.id} className="border-b border-border/60">
-                    <td className="px-5 py-2.5 text-xs text-muted-foreground tabular">{new Date(u.occurred_at).toLocaleString()}</td>
+                    <td className="px-5 py-2.5 text-xs text-muted-foreground tabular">
+                      {new Date(u.occurred_at).toLocaleString()}
+                    </td>
                     <td className="px-3 py-2.5">{u.kind}</td>
                     <td className="px-3 py-2.5 tabular">
                       {u.quantity} {u.unit}

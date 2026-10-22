@@ -35,7 +35,13 @@ describe("public INSERT is column-scoped to the fields the form actually collect
     assert.ok(match, "expected a column-scoped INSERT grant");
     const columns = match![1].split(",").map((c) => c.trim());
     assert.deepEqual(columns.sort(), ["business_name", "email", "message", "name", "phone"].sort());
-    for (const forbidden of ["status", "admin_notes", "converted", "organization_id", "updated_at"]) {
+    for (const forbidden of [
+      "status",
+      "admin_notes",
+      "converted",
+      "organization_id",
+      "updated_at",
+    ]) {
       assert.equal(columns.includes(forbidden), false, `must not grant INSERT on ${forbidden}`);
     }
   });
@@ -83,9 +89,6 @@ describe("conversion tracking", () => {
   });
 
   test("converted=true always requires organization_id to be set", () => {
-    assert.match(
-      sql,
-      /CHECK \(NOT converted OR organization_id IS NOT NULL\)/,
-    );
+    assert.match(sql, /CHECK \(NOT converted OR organization_id IS NOT NULL\)/);
   });
 });

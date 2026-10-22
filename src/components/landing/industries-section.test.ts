@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { BUSINESS_TYPES } from "@/lib/business-types";
+import { BUSINESS_TYPES } from "../../lib/business-types.ts";
 
 const src = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "industries-section.tsx"),
