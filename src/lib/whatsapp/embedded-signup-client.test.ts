@@ -135,6 +135,31 @@ describe("parseEmbeddedSignupMessage", () => {
     assert.equal(result, null);
   });
 
+  test("rejects look-alike, non-https and malformed origins that merely end in facebook.com", () => {
+    for (const origin of [
+      "https://evilfacebook.com",
+      "https://www.evilfacebook.com",
+      "https://facebook.com.evil.example",
+      "http://www.facebook.com",
+      "null",
+      "",
+    ]) {
+      const result = parseEmbeddedSignupMessage({ ...finishMessage("waba-1", "phone-1"), origin });
+      assert.equal(result, null, origin);
+    }
+  });
+
+  test("accepts facebook.com and its https subdomains", () => {
+    for (const origin of [
+      "https://facebook.com",
+      "https://www.facebook.com",
+      "https://web.facebook.com",
+    ]) {
+      const result = parseEmbeddedSignupMessage({ ...finishMessage("waba-1", "phone-1"), origin });
+      assert.notEqual(result, null, origin);
+    }
+  });
+
   test("accepts any subdomain ending in facebook.com (e.g. www.facebook.com)", () => {
     const result = parseEmbeddedSignupMessage(finishMessage("waba-1", "phone-1"));
     assert.notEqual(result, null);

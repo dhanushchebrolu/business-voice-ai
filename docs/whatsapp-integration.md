@@ -133,7 +133,7 @@ Payment truth is never touched: the worker only reads `payment_requests` and `bo
 
 ## Dashboard (`/app/whatsapp`)
 
-- **Connection:** connect a number, assign a bot.
+- **Connection:** connect a number, assign a bot, disconnect (owner/admin only; `whatsapp-access.server.ts`).
 - **Conversations:** the inbox, AI switch and staff replies.
 - **Booking & payment notifications:** on/off per number with the consent basis (owner/admin), plus recent notification outcomes.
 - **Message templates:**
@@ -187,7 +187,7 @@ Templates with named parameters aren't supported.
 
 ## Database migrations
 
-Four new files on this branch, all additive and idempotent: `20261013090000` (server-role grants on the integration tables), `20261019090000`, `20261020090000` and `20261022090000`. This work did not apply any of them anywhere, and production state is unverified: no production database access was used.
+Five new files on this branch, all additive and idempotent: `20261013090000` (server-role grants on the integration tables), `20261019090000`, `20261020090000`, `20261022090000` and `20261026090000` (owner/admin-only bot assignment). This work did not apply any of them anywhere, and production state is unverified: no production database access was used.
 
 ### `20261019090000_whatsapp_ai_replies.sql`
 
@@ -238,17 +238,19 @@ Four new files on this branch, all additive and idempotent: `20261013090000` (se
      DROP TRIGGER IF EXISTS trg_whatsapp_booking_notifications ON bookings;
      DROP TRIGGER IF EXISTS trg_whatsapp_payment_link_notifications ON payment_requests;
      DROP TRIGGER IF EXISTS trg_whatsapp_payment_event_notifications ON payment_domain_events;
+     -- Tables before functions: whatsapp_campaigns' trigger depends on whatsapp_campaign_same_tenant().
+     DROP TABLE IF EXISTS whatsapp_campaign_recipients, whatsapp_campaigns, whatsapp_pending_actions,
+       whatsapp_notifications, whatsapp_templates, whatsapp_suppressions, whatsapp_consent_events, whatsapp_audit_log;
      DROP FUNCTION IF EXISTS whatsapp_booking_notification_trigger(), whatsapp_payment_link_notification_trigger(),
        whatsapp_payment_event_notification_trigger(), whatsapp_campaign_same_tenant(),
        enqueue_whatsapp_notification(uuid, uuid, uuid, uuid, text, text, jsonb, interval),
        whatsapp_notifications_enabled_for(uuid);
-     DROP TABLE IF EXISTS whatsapp_campaign_recipients, whatsapp_campaigns, whatsapp_pending_actions,
-       whatsapp_notifications, whatsapp_templates, whatsapp_suppressions, whatsapp_consent_events, whatsapp_audit_log;
      DROP INDEX IF EXISTS idx_whatsapp_messages_idempotency_live;
      ALTER TABLE whatsapp_connections DROP COLUMN IF EXISTS notifications_enabled,
        DROP COLUMN IF EXISTS transactional_consent_basis, DROP COLUMN IF EXISTS notifications_enabled_at,
        DROP COLUMN IF EXISTS notifications_enabled_by;
      ```
+     Run it in one transaction (`psql --single-transaction`): an error then changes nothing. Verified on a disposable replay of production's 47 migrations: after this rollback the schema matches the 47-migration baseline except for the 20261013 grants.
 
 ### `20261022090000_whatsapp_reschedule_notification_key.sql`
 
@@ -257,11 +259,19 @@ Four new files on this branch, all additive and idempotent: `20261013090000` (se
 - **Order:** after `20261020090000`. Safe whether or not `20261020090000` has already been applied somewhere.
 - **Rollback:** re-run the function definition from `20261020090000`. The worker's newest-only rule works with either key format.
 
+### `20261026090000_whatsapp_connection_manager_policy.sql`
+
+- **Changes:** the RLS policy that lets browsers update `whatsapp_connections.agent_config_id` now requires an owner/admin of the connection's organization (`has_org_role`), instead of any member. The column grant and every other policy are unchanged.
+- **Why:** a staff member or read-only viewer could otherwise change which bot answers customers by calling PostgREST directly, bypassing the dashboard's server function (which now also requires owner/admin: `whatsapp-access.server.ts`).
+- **Impact:** replaces one policy (brief lock on `whatsapp_connections`). Works with the code before and after this change.
+- **Order:** independent of the other WhatsApp migrations; needs only `20260923090000`. Test: `supabase/migrations/whatsapp_connection_manager_policy.pg.test.ts`.
+- **Rollback:** recreate the previous policy (`USING/WITH CHECK (public.is_org_member(organization_id))`); the exact SQL is in the migration's header.
+
 **Approval gate:** apply only after explicit approval. Order:
 
 1. Back up.
 2. Apply to a non-production branch/project and run the pre-checks and tests there.
-3. Apply to production in order (20261013, 20261019, 20261020, then 20261022).
+3. Apply to production in order (20261013, 20261019, 20261020, 20261022, then 20261026).
 4. Deploy the code.
 5. Turn on notifications for one business.
 

@@ -27,9 +27,9 @@ describe("authentication and tenant derivation", () => {
     );
   });
 
-  test("organizationId always comes from organization_members via the RLS-scoped client, never from input", () => {
+  test("list functions take organizationId from organization_members via the RLS-scoped client; management functions derive it from the target (whatsapp-access.server.ts)", () => {
     const occurrences = src.split('.from("organization_members")').length - 1;
-    assert.ok(occurrences >= 4);
+    assert.ok(occurrences >= 2);
     assert.doesNotMatch(src, /organizationId:\s*(data|input)\./);
   });
 
@@ -62,32 +62,16 @@ describe("listWhatsAppConnections", () => {
   });
 });
 
+// Behaviour (roles, tenant checks, bot ownership, idempotent disconnect) is
+// exercised at runtime in whatsapp/whatsapp-access.server.test.ts; these
+// checks only pin the handlers to that tested code.
 describe("assignWhatsAppBot: tenant-safe bot assignment", () => {
-  test("validates the target agentConfigId belongs to the caller's organization before updating", () => {
-    const idx = src.indexOf("export const assignWhatsAppBot");
-    const block = src.slice(idx, idx + 1500);
-    assert.match(block, /\.from\("agent_configs"\)/);
-    assert.match(block, /agentConfig\.organization_id !== organizationId/);
-  });
-
-  test("the update itself is also scoped through the RLS-scoped client, not supabaseAdmin", () => {
+  test("delegates to assignWhatsAppBotForUser with the authenticated user's id", () => {
     const idx = src.indexOf("export const assignWhatsAppBot");
     const end = src.indexOf("export const disconnectWhatsAppConnection");
     const block = src.slice(idx, end);
-    assert.match(
-      block,
-      /context\.supabase\s*\n\s*\.from\("whatsapp_connections"\)\s*\n\s*\.update\(/,
-    );
-  });
-
-  test("only agent_config_id is written — never status, waba_id, or any ciphertext field", () => {
-    const idx = src.indexOf("export const assignWhatsAppBot");
-    const end = src.indexOf("export const disconnectWhatsAppConnection");
-    const block = src.slice(idx, end);
-    const updateMatch = block.match(/\.update\(\{([\s\S]*?)\}\)/);
-    assert.ok(updateMatch, "expected an .update({...}) call");
-    assert.match(updateMatch![1]!, /agent_config_id/);
-    assert.doesNotMatch(updateMatch![1]!, /status|waba_id|ciphertext/);
+    assert.match(block, /assignWhatsAppBotForUser\(supabaseAdmin, context\.userId,/);
+    assert.doesNotMatch(block, /\.update\(/);
   });
 
   test("allows clearing the assignment (agentConfigId: null) — nullable in the schema, not required", () => {
@@ -96,25 +80,17 @@ describe("assignWhatsAppBot: tenant-safe bot assignment", () => {
 });
 
 describe("disconnectWhatsAppConnection: safe disconnect, no data loss", () => {
-  test("never deletes the row — only sets status to 'disconnected'", () => {
+  test("delegates to disconnectWhatsAppConnectionForUser and never deletes", () => {
     const idx = src.indexOf("export const disconnectWhatsAppConnection");
     const block = src.slice(idx);
+    assert.match(block, /disconnectWhatsAppConnectionForUser\(supabaseAdmin, context\.userId,/);
     assert.doesNotMatch(block, /\.delete\(\)/);
-    assert.match(block, /status: "disconnected"/);
-    assert.match(block, /disconnected_at: new Date\(\)\.toISOString\(\)/);
   });
 
-  test("verifies the connection belongs to the caller's organization before writing (uses supabaseAdmin + an explicit ownership check, since status isn't RLS-grantable)", () => {
+  test("writes a customer_events audit row only when the status actually changed", () => {
     const idx = src.indexOf("export const disconnectWhatsAppConnection");
     const block = src.slice(idx);
-    assert.match(block, /connection\.organization_id !== organizationId/);
-    assert.match(block, /supabaseAdmin/);
-  });
-
-  test("writes a customer_events audit row, matching the established convention", () => {
-    const idx = src.indexOf("export const disconnectWhatsAppConnection");
-    const block = src.slice(idx);
-    assert.match(block, /\.from\("customer_events"\)\.insert\(/);
+    assert.match(block, /if \(result\.changed\)[\s\S]*\.from\("customer_events"\)\.insert\(/);
     assert.match(block, /kind: "whatsapp_disconnected"/);
   });
 });

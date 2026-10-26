@@ -150,8 +150,8 @@ before(async () => {
   const seed = sql(`
     INSERT INTO public.organizations (id, name, owner_id) VALUES
       ('${ORG}', 'Smile Dental', '${OWNER}'), ('${OTHER_ORG}', 'Other Clinic', '${OTHER_USER}');
-    INSERT INTO public.organization_members (organization_id, user_id) VALUES
-      ('${ORG}', '${OWNER}'), ('${OTHER_ORG}', '${OTHER_USER}');
+    INSERT INTO public.organization_members (organization_id, user_id, role) VALUES
+      ('${ORG}', '${OWNER}', 'owner'), ('${OTHER_ORG}', '${OTHER_USER}', 'owner');
     INSERT INTO public.businesses (id, organization_id, name, timezone) VALUES
       ('${BIZ}', '${ORG}', 'Smile Dental', 'Asia/Kolkata'),
       ('${OTHER_BIZ}', '${OTHER_ORG}', 'Other Clinic', 'Asia/Kolkata');
@@ -374,13 +374,22 @@ describe("migration: a connection's agent must be in the connection's organizati
   );
 
   pgTest("their own agent, or none, is fine", () => {
-    for (const value of ["NULL", `'${AGENT}'`]) {
+    for (const [value, expected] of [
+      ["NULL", null],
+      [`'${AGENT}'`, AGENT],
+    ] as const) {
       const r = asUser(
         "authenticated",
         OWNER,
         `UPDATE public.whatsapp_connections SET agent_config_id = ${value} WHERE id = '${CONN}';`,
       );
       assert.equal(r.status, 0, r.stderr);
+      assert.deepEqual(
+        rows(
+          `SELECT coalesce(agent_config_id::text, 'none') FROM public.whatsapp_connections WHERE id = '${CONN}';`,
+        ),
+        [expected ?? "none"],
+      );
     }
   });
 

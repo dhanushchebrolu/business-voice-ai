@@ -21,13 +21,18 @@ describe("authentication and tenant derivation", () => {
     assert.match(src, /\.middleware\(\[requireSupabaseAuth\]\)/);
   });
 
-  test("organizationId comes from the authenticated user's own organization_members row via the RLS-scoped client, never from input", () => {
+  test("organizationId comes from requireWhatsAppManager (owner/admin of the chosen business's organization), never from input", () => {
     assert.doesNotMatch(src, /organizationId:\s*(data|input)\./);
-    const idx = src.indexOf('.from("organization_members")');
-    assert.ok(idx > -1);
-    const block = src.slice(idx - 60, idx + 200);
-    assert.match(block, /context\.supabase/);
-    assert.match(block, /eq\("user_id", context\.userId\)/);
+    assert.match(
+      src,
+      /const \{ organizationId \} = await requireWhatsAppManager\(\s*supabaseAdmin,\s*context\.userId,\s*data\.businessId \? \{ businessId: data\.businessId \} : \{ workspace: true \},\s*\)/,
+    );
+    // The feature gate runs on that organization, before any Meta call.
+    const gate = src.indexOf('assertFeatureUnlocked(organizationId, "whatsapp")');
+    assert.ok(
+      gate > src.indexOf("requireWhatsAppManager(") &&
+        gate < src.indexOf("new MetaWhatsAppClient("),
+    );
   });
 
   test("the input schema has no organizationId/businessId-trusting field beyond a validated optional businessId", () => {

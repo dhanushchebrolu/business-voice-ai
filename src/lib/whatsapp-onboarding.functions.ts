@@ -7,6 +7,7 @@ import { resolveMetaWhatsAppConfig } from "@/lib/whatsapp/meta-config.server";
 import { MetaWhatsAppClient } from "@/lib/whatsapp/meta-client.server";
 import { encryptCredential } from "@/lib/whatsapp/whatsapp-token-crypto.server";
 import { completeWhatsAppOnboarding as completeWhatsAppOnboardingCore } from "@/lib/whatsapp/whatsapp-onboarding.server";
+import { requireWhatsAppManager } from "@/lib/whatsapp/whatsapp-access.server";
 
 /**
  * The one customer-facing entry point for WhatsApp Embedded Signup v4
@@ -15,12 +16,11 @@ import { completeWhatsAppOnboarding as completeWhatsAppOnboardingCore } from "@/
  * whatsapp-onboarding.server.ts for the actual sequence).
  *
  * This wrapper's only job is authentication, tenant derivation, and
- * dependency wiring — never business logic. organizationId is derived
- * exclusively from the authenticated user's own organization_members row
- * via the RLS-scoped client (same pattern as telephony-customer.
- * functions.ts's requestPhoneNumber), never trusted from client input —
- * there is deliberately no organizationId field anywhere in this
- * function's input schema.
+ * dependency wiring — never business logic. organizationId is derived from
+ * the chosen business (or the caller's only workspace), and the caller must
+ * be an owner/admin of that organization (whatsapp-access.server.ts) —
+ * never trusted from client input; there is deliberately no organizationId
+ * field anywhere in this function's input schema.
  *
  * Frontend/browser boundary (Phase 3+ builds the actual UI component that
  * calls this): the browser completes Meta's hosted Embedded Signup flow
@@ -50,16 +50,16 @@ export const completeWhatsAppOnboarding = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: CompleteWhatsAppOnboardingInput) => inputSchema.parse(input))
   .handler(async ({ data, context }) => {
-    // Organization resolution: RLS-scoped, keyed by the authenticated
-    // user's own id — never a client-supplied organization id.
-    const { data: membership } = await context.supabase
-      .from("organization_members")
-      .select("organization_id")
-      .eq("user_id", context.userId)
-      .limit(1)
-      .maybeSingle();
-    if (!membership) throw new Error("No workspace found for your account.");
-    const organizationId = membership.organization_id;
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+
+    // Organization resolution: from the chosen business (or the caller's
+    // only workspace), and only for an owner/admin of that organization —
+    // never a client-supplied organization id (whatsapp-access.server.ts).
+    const { organizationId } = await requireWhatsAppManager(
+      supabaseAdmin,
+      context.userId,
+      data.businessId ? { businessId: data.businessId } : { workspace: true },
+    );
 
     await assertFeatureUnlocked(organizationId, "whatsapp");
 
@@ -73,8 +73,6 @@ export const completeWhatsAppOnboarding = createServerFn({ method: "POST" })
       appSecret: config.appSecret,
       graphApiVersion: config.graphApiVersion,
     });
-
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
     let result;
     try {
