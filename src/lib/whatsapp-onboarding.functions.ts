@@ -3,7 +3,10 @@ import { randomInt } from "node:crypto";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { assertFeatureUnlocked } from "@/lib/feature-gate.server";
-import { resolveMetaWhatsAppConfig } from "@/lib/whatsapp/meta-config.server";
+import {
+  resolveMetaWhatsAppConfig,
+  validateMetaWhatsAppEnv,
+} from "@/lib/whatsapp/meta-config.server";
 import { MetaWhatsAppClient } from "@/lib/whatsapp/meta-client.server";
 import { encryptCredential } from "@/lib/whatsapp/whatsapp-token-crypto.server";
 import { completeWhatsAppOnboarding as completeWhatsAppOnboardingCore } from "@/lib/whatsapp/whatsapp-onboarding.server";
@@ -65,6 +68,10 @@ export const completeWhatsAppOnboarding = createServerFn({ method: "POST" })
 
     const config = resolveMetaWhatsAppConfig();
     if (!config) {
+      // Names of the missing Worker secrets only, never a value.
+      console.error("whatsapp_onboarding:not_configured", {
+        missing: validateMetaWhatsAppEnv().missing,
+      });
       throw new Error("WhatsApp is not configured on this deployment yet. Please contact support.");
     }
 

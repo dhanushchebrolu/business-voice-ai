@@ -171,6 +171,11 @@ Server-side (Cloudflare Worker secrets; names already in `.env.example` unless m
 | `WHATSAPP_TEMPLATE_BOOKING_{CONFIRMED,RESCHEDULED,CANCELLED,REMINDER}_NAME` / `_LANGUAGE` | Optional, same rule. Prefer mapping synced templates in the dashboard (per number; Tech Provider customers each have their own WABA).                                                               |
 | `VITE_META_APP_ID`, `VITE_META_WHATSAPP_CONFIG_ID`, `VITE_META_GRAPH_API_VERSION`         | Browser mirrors for Embedded Signup.                                                                                                                                                                |
 
+**"WhatsApp is not configured on this deployment yet."** The Connect button shows this in two cases:
+
+- **Right away, with no Meta popup:** one of `VITE_META_APP_ID`, `VITE_META_WHATSAPP_CONFIG_ID` or `VITE_META_GRAPH_API_VERSION` was missing when the app was built. They're inlined into the browser bundle, so set them as **build** variables in Cloudflare Workers Builds (not the Worker's runtime "Variables and Secrets") and trigger a new build. The build log line `[build-env-diagnostic] WhatsApp Embedded Signup build vars:` names any that are missing.
+- **After the Meta popup finishes:** a Worker secret is missing (`META_APP_ID`, `META_APP_SECRET`, `META_WHATSAPP_CONFIG_ID`, `META_GRAPH_API_VERSION`). The Worker log `whatsapp_onboarding:not_configured` lists the names.
+
 **Cron** (external scheduler, `POST` with `Authorization: Bearer $LOVABLE_CRON_SECRET`):
 
 - `/api/public/cron/whatsapp-dispatch` **every minute**: proposals expiry, reminders, notifications, campaigns.

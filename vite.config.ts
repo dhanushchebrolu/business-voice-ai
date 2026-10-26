@@ -68,6 +68,20 @@ function validateSupabasePublicEnv(): Plugin {
       console.log("[build-env-diagnostic] NODE_ENV:", process.env["NODE_ENV"] ?? "(unset)");
       console.log("[build-env-diagnostic] Vite build mode:", mode);
 
+      // Optional: WhatsApp Embedded Signup's browser config. Missing ones
+      // don't fail the build (a deployment may not offer WhatsApp), but the
+      // Connect button then shows "WhatsApp is not configured on this
+      // deployment yet" — so say which, by name only, in the build log.
+      const metaMissing = [
+        "VITE_META_APP_ID",
+        "VITE_META_WHATSAPP_CONFIG_ID",
+        "VITE_META_GRAPH_API_VERSION",
+      ].filter((name) => !env[name]);
+      console.log(
+        "[build-env-diagnostic] WhatsApp Embedded Signup build vars:",
+        metaMissing.length === 0 ? "present" : `missing ${metaMissing.join(", ")}`,
+      );
+
       if (missing.length === 0) return;
 
       // Names only, never a value — safe to print in a build log.

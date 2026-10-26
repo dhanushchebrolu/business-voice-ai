@@ -92,6 +92,10 @@ describe("Meta client construction", () => {
   test("refuses to proceed (throws) when Meta config is not resolved, rather than silently continuing with undefined credentials", () => {
     const idx = src.indexOf("if (!config) {");
     assert.ok(idx > -1);
-    assert.match(src.slice(idx, idx + 150), /throw new Error/);
+    const block = src.slice(idx, src.indexOf("}", src.indexOf("throw new Error", idx)));
+    assert.match(block, /throw new Error/);
+    // The log names what's missing, never a value.
+    assert.match(block, /missing: validateMetaWhatsAppEnv\(\)\.missing/);
+    assert.doesNotMatch(block, /config\.|process\.env/);
   });
 });
