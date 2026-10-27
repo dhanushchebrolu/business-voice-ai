@@ -14,21 +14,16 @@ import {
   CampaignError,
   MAX_RECIPIENT_ATTEMPTS,
 } from "./whatsapp-campaigns.server.ts";
-import { encryptCredential } from "./whatsapp-token-crypto.server.ts";
 import { createFakeDb } from "./whatsapp-test-db.ts";
 
 const saved: Record<string, string | undefined> = {};
 const ENV = {
-  META_APP_ID: "test-app",
-  META_APP_SECRET: "test-secret",
-  META_WHATSAPP_CONFIG_ID: "test-config",
-  META_GRAPH_API_VERSION: "v23.0",
+  VOBIZ_AUTH_ID: "MA_TEST",
+  VOBIZ_AUTH_TOKEN: "vobiz-test-token",
 };
 beforeEach(() => {
-  for (const k of [...Object.keys(ENV), "WHATSAPP_CREDENTIAL_ENCRYPTION_KEY"])
-    saved[k] = process.env[k];
+  for (const k of Object.keys(ENV)) saved[k] = process.env[k];
   Object.assign(process.env, ENV);
-  process.env["WHATSAPP_CREDENTIAL_ENCRYPTION_KEY"] = randomBytes(32).toString("base64");
 });
 afterEach(() => {
   for (const [k, v] of Object.entries(saved)) {
@@ -62,7 +57,8 @@ function seed(
         waba_id: "WABA_A",
         phone_number_id: "PN_A",
         status: "connected",
-        access_token_ciphertext: encryptCredential("token-a"),
+        provider: "vobiz",
+        vobiz_channel_id: "ch-token-a",
       },
     ],
     whatsapp_templates: [
@@ -124,7 +120,15 @@ function fakeMeta(statuses: number[] = [200]) {
     const status = statuses[Math.min(i++, statuses.length - 1)]!;
     sent.push(JSON.parse(String(init.body)));
     return new Response(
-      JSON.stringify(status === 200 ? { messages: [{ id: `wamid.C${sent.length}` }] } : {}),
+      JSON.stringify(
+        status === 200
+          ? {
+              id: `vmsg.C${sent.length}`,
+              status: "pending",
+              meta_message_id: `wamid.C${sent.length}`,
+            }
+          : {},
+      ),
       {
         status,
       },
@@ -266,7 +270,7 @@ describe("dispatchWhatsAppCampaigns", () => {
     await Promise.all([dispatch(db, meta), dispatch(db, meta)]);
     await dispatch(db, meta, new Date(NOW.getTime() + 120_000));
     assert.equal(meta.sent.length, 2);
-    const asha = meta.sent.find((m) => m["to"] === "919800000001") as {
+    const asha = meta.sent.find((m) => m["to"] === "+919800000001") as {
       type: string;
       template: { name: string; components: { parameters: { text: string }[] }[] };
     };
@@ -290,7 +294,7 @@ describe("dispatchWhatsAppCampaigns", () => {
     await dispatch(db, meta);
     assert.deepEqual(
       meta.sent.map((m) => m["to"]),
-      ["919800000001"],
+      ["+919800000001"],
     );
     assert.equal(recipients(db)["919800000002"]!["skip_reason"], "opted_out");
   });
@@ -335,7 +339,8 @@ describe("dispatchWhatsAppCampaigns", () => {
       waba_id: "WABA_B",
       phone_number_id: "PN_B",
       status: "connected",
-      access_token_ciphertext: encryptCredential("token-b"),
+      provider: "vobiz",
+      vobiz_channel_id: "ch-token-b",
     });
     s.whatsapp_templates.push({
       ...s.whatsapp_templates[0]!,
@@ -425,7 +430,7 @@ describe("dispatchWhatsAppCampaigns", () => {
     assert.equal(asha["status"], "failed");
     assert.match(String(asha["error"]), /unknown/i);
     assert.ok(Number(asha["attempts"]) <= MAX_RECIPIENT_ATTEMPTS);
-    assert.ok(!meta.sent.some((m) => m["to"] === "919800000001"), "never sent a second time");
+    assert.ok(!meta.sent.some((m) => m["to"] === "+919800000001"), "never sent a second time");
     assert.equal(db.rows("whatsapp_campaigns")[0]!["status"], "completed");
   });
 
@@ -572,39 +577,34 @@ describe("syncTemplates", () => {
       body_param_count: 0,
     });
     const db = createFakeDb(s, { now: () => NOW });
-    const urls: string[] = [];
-    const fetchImpl = (async (url: string) => {
-      urls.push(url);
-      const page2 = url.includes("after=CURSOR");
+    const calls: { url: string; method: string }[] = [];
+    // MOCKED Vobiz: POST .../templates/sync then GET .../templates.
+    const fetchImpl = (async (url: string, init: RequestInit) => {
+      calls.push({ url, method: String(init.method) });
+      if (url.endsWith("/templates/sync")) {
+        return new Response(JSON.stringify({ synced: 2 }), { status: 200 });
+      }
       return new Response(
-        JSON.stringify(
-          page2
-            ? {
-                data: [
-                  {
-                    id: "m2",
-                    name: "booking_ok",
-                    language: "en",
-                    status: "APPROVED",
-                    category: "UTILITY",
-                    components: [{ type: "BODY", text: "Hi {{1}}, {{2}} at {{3}}" }],
-                  },
-                ],
-              }
-            : {
-                data: [
-                  {
-                    id: "m1",
-                    name: "diwali_offer",
-                    language: "en",
-                    status: "REJECTED",
-                    category: "MARKETING",
-                    components: [{ type: "BODY", text: "Hi {{1}} {{2}}" }],
-                  },
-                ],
-                paging: { cursors: { after: "CURSOR" }, next: "https://graph.facebook.com/next" },
-              },
-        ),
+        JSON.stringify({
+          data: [
+            {
+              id: "m1",
+              name: "diwali_offer",
+              language: "en",
+              status: "REJECTED",
+              category: "MARKETING",
+              components: [{ type: "BODY", text: "Hi {{1}} {{2}}" }],
+            },
+            {
+              id: "m2",
+              name: "booking_ok",
+              language: "en",
+              status: "APPROVED",
+              category: "UTILITY",
+              components: [{ type: "BODY", text: "Hi {{1}}, {{2}} at {{3}}" }],
+            },
+          ],
+        }),
         { status: 200 },
       );
     }) as unknown as typeof fetch;
@@ -613,9 +613,17 @@ describe("syncTemplates", () => {
       { organizationId: "org-a", connectionId: "conn-a" },
       { fetchImpl },
     );
-    assert.deepEqual(result, { synced: 2, missing: 1 });
-    assert.equal(urls.length, 2);
-    assert.match(urls[0]!, /\/v23\.0\/WABA_A\/message_templates\?/);
+    assert.deepEqual(result, { synced: 2, missing: 1, skipped: 0 });
+    const channel = String(
+      db.rows("whatsapp_connections").find((c) => c["id"] === "conn-a")!["vobiz_channel_id"],
+    );
+    assert.deepEqual(calls, [
+      {
+        url: `https://api.vobiz.ai/api/v1/messaging/channels/${channel}/templates/sync`,
+        method: "POST",
+      },
+      { url: `https://api.vobiz.ai/api/v1/messaging/channels/${channel}/templates`, method: "GET" },
+    ]);
     const byName = Object.fromEntries(db.rows("whatsapp_templates").map((t) => [t["name"], t]));
     assert.equal(byName["diwali_offer"]!["status"], "REJECTED");
     assert.equal(byName["booking_ok"]!["body_param_count"], 3);
@@ -624,6 +632,25 @@ describe("syncTemplates", () => {
       syncTemplates(db.client, { organizationId: "org-b", connectionId: "conn-a" }, { fetchImpl }),
       (e: CampaignError) => e.code === "NOT_CONNECTED",
     );
+  });
+});
+
+describe("syncTemplates: an unreadable Vobiz list changes nothing", () => {
+  test("rows Vobiz returns in an unexpected shape never mark existing templates as deleted", async () => {
+    const db = createFakeDb(seed(), { now: () => NOW });
+    const before = JSON.stringify(db.rows("whatsapp_templates"));
+    const fetchImpl = (async (url: string) =>
+      new Response(
+        JSON.stringify(
+          url.endsWith("/sync") ? { synced: 1 } : { data: [{ title: "no name/status" }] },
+        ),
+        { status: 200 },
+      )) as unknown as typeof fetch;
+    await assert.rejects(
+      syncTemplates(db.client, { organizationId: "org-a", connectionId: "conn-a" }, { fetchImpl }),
+      (e: CampaignError) => e.code === "PROVIDER_ERROR",
+    );
+    assert.equal(JSON.stringify(db.rows("whatsapp_templates")), before);
   });
 });
 
@@ -641,7 +668,7 @@ describe("hardening", () => {
     await dispatch(db, meta);
     assert.deepEqual(
       meta.sent.map((m) => m["to"]),
-      ["919800000001"],
+      ["+919800000001"],
     );
   });
 

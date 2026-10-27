@@ -5,10 +5,10 @@ import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 /**
  * Customer-facing WhatsApp connection management (Phase 3): listing the
  * org's own connections, assigning which bot handles one, and
- * disconnecting. Deliberately does NOT touch Meta or re-implement any
- * part of onboarding — that stays exclusively in whatsapp-onboarding.
- * functions.ts's completeWhatsAppOnboarding (Phase 2). This file is pure
- * data access + tenant validation over rows Phase 2 already wrote.
+ * disconnecting. Deliberately does NOT call Vobiz or re-implement any
+ * part of onboarding — that stays in whatsapp-onboarding.functions.ts (the
+ * three Vobiz connection options). This file is pure data access + tenant
+ * validation over rows onboarding already wrote.
  */
 
 /**

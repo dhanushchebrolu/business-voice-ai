@@ -40,10 +40,12 @@
  * (a WABA was created but no phone number was chosen) and "CANCEL" are
  * both treated as incomplete, never silently coerced into a completion.
  *
- * NEVER calls the Meta Graph API itself and NEVER duplicates Phase 2's
- * onboarding logic. Its only output is the minimal, non-sensitive
- * { code, wabaId, phoneNumberId } tuple the existing Phase 2
- * completeWhatsAppOnboarding server function already accepts.
+ * NEVER calls the Meta Graph API itself. Its only output is the minimal,
+ * non-sensitive { code, wabaId, phoneNumberId } tuple, which the
+ * completeWhatsAppEmbeddedSignup server function hands to Vobiz (ClickAI's
+ * WhatsApp BSP) — Vobiz, not ClickAI, exchanges the code with Meta. The
+ * popup must therefore use the Meta app and Embedded Signup configuration
+ * that Vobiz exchanges codes for (VITE_VOBIZ_WHATSAPP_ES_*).
  */
 
 export interface EmbeddedSignupConfig {

@@ -1,23 +1,26 @@
 /**
- * Inbound Meta WhatsApp webhook processing:
+ * Inbound WhatsApp webhook processing (deliveries from Vobiz, ClickAI's BSP):
  *
- *   1. Authentication: every POST must carry a valid X-Hub-Signature-256
- *      (HMAC of the raw body with META_APP_SECRET) — verified by the route
- *      before anything is parsed or stored (verifyWhatsAppWebhookSignature).
- *   2. Delivery-status updates (sent/delivered/read/failed) for messages
- *      this codebase sent — scoped to the connection the payload names and
- *      never moved backwards (a late "delivered" can't undo "read").
- *   3. Inbound customer messages are persisted (whatsapp_conversations/
- *      whatsapp_messages); the ids of NEW inbound text messages are
- *      returned so the route can hand them to the AI reply worker
- *      (whatsapp-ai-reply.server.ts) without blocking Meta's acknowledgement.
+ *   1. Authentication: every POST must carry a valid X-Webhook-Signature
+ *      (hex HMAC-SHA256 of the raw body with VOBIZ_WHATSAPP_WEBHOOK_SECRET) —
+ *      verified by the route before anything is parsed or stored
+ *      (vobiz-webhook.server.ts).
+ *   2. Delivery-status updates (sent/delivered/read/failed, `message.status`)
+ *      for messages this codebase sent — scoped to the connection the
+ *      payload names and never moved backwards (a late "delivered" can't
+ *      undo "read").
+ *   3. Inbound customer messages (`message.inbound`) are persisted
+ *      (whatsapp_conversations/whatsapp_messages); the ids of NEW inbound
+ *      text messages are returned so the route can hand them to the AI reply
+ *      worker (whatsapp-ai-reply.server.ts) without blocking the
+ *      acknowledgement.
  *
- * Idempotency: the whole payload is claimed in webhook_events
- * (provider='whatsapp', event id = SHA-256 of the raw body) and each message
- * is unique per (connection, wa_message_id). If processing fails part-way,
- * the claim is released and the error propagates (the route answers 5xx) so
- * Meta retries; messages already stored are skipped on the retry, and only
- * messages stored for the first time are passed on for a reply.
+ * Idempotency: the delivery's `event_id` is claimed in webhook_events
+ * (provider='vobiz_whatsapp') and each message is unique per (connection,
+ * wa_message_id). If processing fails part-way, the claim is released and
+ * the error propagates (the route answers 5xx) so Vobiz retries; messages
+ * already stored are skipped on the retry, and only messages stored for the
+ * first time are passed on for a reply.
  *
  * Tenant identity comes only from the connection row matched by the
  * payload's phone_number_id — never from anything else in the payload.
@@ -28,44 +31,13 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/integrations/supabase/types";
-import { timingSafeEqual } from "node:crypto";
-import { verifyMetaWebhookSignature } from "../meta/meta-webhook-signature.server.ts";
 import { consentEventTime, recordConsentEvent } from "./whatsapp-consent.server.ts";
+import { parseVobizWebhookEnvelope } from "./vobiz-webhook.server.ts";
 
 type Client = SupabaseClient<Database>;
 
-export function getWhatsAppWebhookVerifyToken(): string | null {
-  return process.env["WHATSAPP_WEBHOOK_VERIFY_TOKEN"] ?? null;
-}
-
-function constantTimeEquals(a: string, b: string): boolean {
-  const x = Buffer.from(a, "utf8");
-  const y = Buffer.from(b, "utf8");
-  return x.length === y.length && timingSafeEqual(x, y);
-}
-
-/** Meta's GET verification handshake: echo back hub.challenge only if hub.verify_token matches our configured secret. Returns null (caller responds 403) on any mismatch. */
-export function verifyWebhookHandshake(params: {
-  mode: string | null;
-  verifyToken: string | null;
-  challenge: string | null;
-}): string | null {
-  const configuredToken = getWhatsAppWebhookVerifyToken();
-  if (!configuredToken) return null;
-  if (params.mode !== "subscribe") return null;
-  if (params.verifyToken === null || !constantTimeEquals(params.verifyToken, configuredToken)) {
-    return null;
-  }
-  return params.challenge;
-}
-
-/** POST authentication (X-Hub-Signature-256 with META_APP_SECRET). Fails closed when the secret isn't configured. */
-export function verifyWhatsAppWebhookSignature(
-  rawBody: string,
-  signatureHeader: string | null,
-): boolean {
-  return verifyMetaWebhookSignature(rawBody, signatureHeader, process.env["META_APP_SECRET"]);
-}
+/** The provider name under which Vobiz deliveries are claimed in webhook_events. */
+export const VOBIZ_WEBHOOK_PROVIDER = "vobiz_whatsapp";
 
 interface MetaStatusUpdate {
   id?: string;
@@ -114,27 +86,6 @@ function mapInboundMessageType(metaType: string | undefined): string {
     default:
       return "unsupported";
   }
-}
-
-function extractValues(rawBody: string): MetaWebhookValue[] {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(rawBody);
-  } catch {
-    return [];
-  }
-  const body = (parsed ?? {}) as Record<string, unknown>;
-  const entries = Array.isArray(body["entry"]) ? (body["entry"] as unknown[]) : [];
-  const values: MetaWebhookValue[] = [];
-  for (const entry of entries) {
-    const changes = (entry as Record<string, unknown> | null)?.["changes"];
-    if (!Array.isArray(changes)) continue;
-    for (const change of changes) {
-      const value = (change as Record<string, unknown> | null)?.["value"];
-      if (value && typeof value === "object") values.push(value as MetaWebhookValue);
-    }
-  }
-  return values;
 }
 
 async function resolveConnectionByPhoneNumberId(
@@ -280,21 +231,51 @@ export interface ProcessInboundWebhookResult {
   newInboundTextMessageIds: string[];
 }
 
-/** Process one already signature-verified webhook delivery. Throws (after releasing its claim) if anything fails, so the caller can ask Meta to retry. */
-export async function processInboundWhatsAppWebhook(
+/**
+ * Process one already signature-verified Vobiz delivery
+ * (vobiz-webhook.server.ts). The envelope's `event_id` is claimed in
+ * webhook_events, so a redelivery is a duplicate; each message is also
+ * unique per (connection, wa_message_id), so the same message in another
+ * event is stored once. Only `message.inbound` and `message.status` carry
+ * WhatsApp data; other events (`call.*`) are acknowledged and ignored.
+ * Throws (after releasing the claim) if anything fails, so the caller can
+ * answer 5xx and Vobiz retries.
+ */
+export async function processVobizWhatsAppWebhook(
   supabaseAdmin: Client,
-  input: { rawBody: string; eventId: string },
+  input: { rawBody: string },
+): Promise<ProcessInboundWebhookResult & { eventType: string | null }> {
+  const envelope = parseVobizWebhookEnvelope(input.rawBody);
+  if (!envelope) return { outcome: "ignored", newInboundTextMessageIds: [], eventType: null };
+  if (envelope.eventType !== "message.inbound" && envelope.eventType !== "message.status") {
+    return { outcome: "ignored", newInboundTextMessageIds: [], eventType: envelope.eventType };
+  }
+  const result = await processWhatsAppWebhookValues(supabaseAdmin, {
+    provider: VOBIZ_WEBHOOK_PROVIDER,
+    eventId: envelope.eventId,
+    eventType: envelope.eventType,
+    payload: envelope.payload as Json,
+    values: [envelope.payload as MetaWebhookValue],
+  });
+  return { ...result, eventType: envelope.eventType };
+}
+
+/** Claims the event, then applies each WhatsApp Cloud API change value (statuses, then messages). */
+async function processWhatsAppWebhookValues(
+  supabaseAdmin: Client,
+  input: {
+    provider: string;
+    eventId: string;
+    eventType: string;
+    payload: Json;
+    values: MetaWebhookValue[];
+  },
 ): Promise<ProcessInboundWebhookResult> {
   const { error: dedupeError } = await supabaseAdmin.from("webhook_events").insert({
-    provider: "whatsapp",
+    provider: input.provider,
     event_id: input.eventId,
-    payload: (() => {
-      try {
-        return JSON.parse(input.rawBody) as Json;
-      } catch {
-        return { raw: input.rawBody.slice(0, 2000) } as Json;
-      }
-    })(),
+    event_type: input.eventType,
+    payload: input.payload,
   });
   if (dedupeError) {
     if (dedupeError.code === "23505") return { outcome: "duplicate", newInboundTextMessageIds: [] };
@@ -304,7 +285,7 @@ export async function processInboundWhatsAppWebhook(
   const newInboundTextMessageIds: string[] = [];
   let didAnything = false;
   try {
-    for (const value of extractValues(input.rawBody)) {
+    for (const value of input.values) {
       const phoneNumberId = value.metadata?.phone_number_id;
       if (!phoneNumberId) continue;
       const connection = await resolveConnectionByPhoneNumberId(supabaseAdmin, phoneNumberId);
@@ -330,12 +311,12 @@ export async function processInboundWhatsAppWebhook(
       }
     }
   } catch (err) {
-    // Release the claim so Meta's retry is processed rather than skipped as
+    // Release the claim so Vobiz's retry is processed rather than skipped as
     // a duplicate. Messages already stored are idempotent on the retry.
     await supabaseAdmin
       .from("webhook_events")
       .delete()
-      .eq("provider", "whatsapp")
+      .eq("provider", input.provider)
       .eq("event_id", input.eventId);
     throw err;
   }
@@ -343,7 +324,7 @@ export async function processInboundWhatsAppWebhook(
   await supabaseAdmin
     .from("webhook_events")
     .update({ processed_at: new Date().toISOString() })
-    .eq("provider", "whatsapp")
+    .eq("provider", input.provider)
     .eq("event_id", input.eventId);
 
   return { outcome: didAnything ? "processed" : "ignored", newInboundTextMessageIds };

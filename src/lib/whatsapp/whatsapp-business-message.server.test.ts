@@ -7,7 +7,6 @@ import {
   requiresNotificationSettings,
   type BusinessMessageInput,
 } from "./whatsapp-business-message.server.ts";
-import { encryptCredential } from "./whatsapp-token-crypto.server.ts";
 import { createFakeDb, type FakeDbOptions } from "./whatsapp-test-db.ts";
 
 /**
@@ -16,11 +15,8 @@ import { createFakeDb, type FakeDbOptions } from "./whatsapp-test-db.ts";
  */
 
 const ENV_KEYS = [
-  "WHATSAPP_CREDENTIAL_ENCRYPTION_KEY",
-  "META_APP_ID",
-  "META_APP_SECRET",
-  "META_WHATSAPP_CONFIG_ID",
-  "META_GRAPH_API_VERSION",
+  "VOBIZ_AUTH_ID",
+  "VOBIZ_AUTH_TOKEN",
   "WHATSAPP_TEMPLATE_BOOKING_CONFIRMED_NAME",
   "WHATSAPP_TEMPLATE_BOOKING_CONFIRMED_LANGUAGE",
 ];
@@ -30,11 +26,8 @@ beforeEach(() => {
     saved[k] = process.env[k];
     delete process.env[k];
   }
-  process.env["WHATSAPP_CREDENTIAL_ENCRYPTION_KEY"] = randomBytes(32).toString("base64");
-  process.env["META_APP_ID"] = "test-app";
-  process.env["META_APP_SECRET"] = "test-secret";
-  process.env["META_WHATSAPP_CONFIG_ID"] = "test-config";
-  process.env["META_GRAPH_API_VERSION"] = "v23.0";
+  process.env["VOBIZ_AUTH_ID"] = "MA_TEST";
+  process.env["VOBIZ_AUTH_TOKEN"] = "vobiz-test-token";
 });
 afterEach(() => {
   for (const k of ENV_KEYS) {
@@ -89,7 +82,8 @@ function seed(
         business_id: "biz-a",
         phone_number_id: "PN_A",
         status: "connected",
-        access_token_ciphertext: encryptCredential("token-a"),
+        provider: "vobiz",
+        vobiz_channel_id: "ch-token-a",
         notifications_enabled: over.notificationsEnabled ?? true,
         transactional_consent_basis: over.basis === undefined ? BASIS : over.basis,
       },
@@ -99,7 +93,8 @@ function seed(
         business_id: "biz-b",
         phone_number_id: "PN_B",
         status: "connected",
-        access_token_ciphertext: encryptCredential("token-b"),
+        provider: "vobiz",
+        vobiz_channel_id: "ch-token-b",
         notifications_enabled: true,
         transactional_consent_basis: BASIS,
       },
@@ -157,7 +152,15 @@ function fakeMeta(responses: (number | "timeout" | "no-id")[] = [200]) {
     }
     if (r === "no-id") return new Response(JSON.stringify({ messages: [] }), { status: 200 });
     return new Response(
-      JSON.stringify(r === 200 ? { messages: [{ id: `wamid.${sent.length}` }] } : {}),
+      JSON.stringify(
+        r === 200
+          ? {
+              id: `vmsg.${sent.length}`,
+              status: "pending",
+              meta_message_id: `wamid.${sent.length}`,
+            }
+          : {},
+      ),
       { status: r },
     );
   }) as unknown as typeof fetch;
@@ -614,7 +617,8 @@ describe("a business with more than one connected number", () => {
       business_id: "biz-a",
       phone_number_id: "PN_A2",
       status: "connected",
-      access_token_ciphertext: encryptCredential("token-a2"),
+      provider: "vobiz",
+      vobiz_channel_id: "ch-token-a2",
       notifications_enabled: true,
       transactional_consent_basis: BASIS,
       created_at: ago(100),
@@ -712,7 +716,7 @@ describe("valid flows still work", () => {
       to: string;
       template: { name: string; components: { parameters: { text: string }[] }[] };
     };
-    assert.equal(body.to, WA);
+    assert.equal(body.to, `+${WA}`);
     assert.equal(body.template.name, "booking_ok");
     assert.deepEqual(
       body.template.components[0]!.parameters.map((p) => p.text),

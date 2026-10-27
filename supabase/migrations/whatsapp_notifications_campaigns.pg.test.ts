@@ -1,6 +1,6 @@
 import { test, describe, before, after, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { createHmac, randomBytes, randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { createServer, request, type Server } from "node:http";
@@ -24,7 +24,6 @@ import {
   dispatchWhatsAppCampaigns,
   campaignAnalytics,
 } from "../../src/lib/whatsapp/whatsapp-campaigns.server.ts";
-import { encryptCredential } from "../../src/lib/whatsapp/whatsapp-token-crypto.server.ts";
 
 /**
  * 20261020090000_whatsapp_notifications_and_campaigns.sql on a real
@@ -140,12 +139,8 @@ before(async () => {
       return;
     }
   }
-  process.env["META_APP_ID"] = "test-app";
-  process.env["META_APP_SECRET"] = "test-secret";
-  process.env["META_WHATSAPP_CONFIG_ID"] = "test-config";
-  process.env["META_GRAPH_API_VERSION"] = "v23.0";
-  process.env["WHATSAPP_CREDENTIAL_ENCRYPTION_KEY"] = randomBytes(32).toString("base64");
-  const token = encryptCredential("test-access-token");
+  process.env["VOBIZ_AUTH_ID"] = "MA_TEST";
+  process.env["VOBIZ_AUTH_TOKEN"] = "vobiz-test-token";
 
   const seed = sql(`
     INSERT INTO public.organizations (id, name, owner_id) VALUES
@@ -161,13 +156,13 @@ before(async () => {
       FROM (VALUES ('${ORG}'::uuid, '${BIZ}'::uuid), ('${ORG}'::uuid, '${QUIET_BIZ}'::uuid)) t(o, b),
            generate_series(0, 6) d;
     INSERT INTO public.whatsapp_connections
-      (id, organization_id, business_id, waba_id, phone_number_id, status, access_token_ciphertext,
+      (id, organization_id, business_id, waba_id, phone_number_id, status, provider, vobiz_channel_id,
        notifications_enabled, transactional_consent_basis)
     VALUES
-      ('${CONN}', '${ORG}', '${BIZ}', 'waba-1', 'pn-${CONN}', 'connected', '${token}', true,
+      ('${CONN}', '${ORG}', '${BIZ}', 'waba-1', 'pn-${CONN}', 'connected', 'vobiz', 'ch-1', true,
        'Customers agree to WhatsApp updates when booking'),
-      ('${QUIET_CONN}', '${ORG}', '${QUIET_BIZ}', 'waba-2', 'pn-${QUIET_CONN}', 'connected', '${token}', false, NULL),
-      ('${OTHER_CONN}', '${OTHER_ORG}', '${OTHER_BIZ}', 'waba-3', 'pn-${OTHER_CONN}', 'connected', '${token}', true, 'x');
+      ('${QUIET_CONN}', '${ORG}', '${QUIET_BIZ}', 'waba-2', 'pn-${QUIET_CONN}', 'connected', 'vobiz', 'ch-2', false, NULL),
+      ('${OTHER_CONN}', '${OTHER_ORG}', '${OTHER_BIZ}', 'waba-3', 'pn-${OTHER_CONN}', 'connected', 'vobiz', 'ch-3', true, 'x');
     INSERT INTO public.razorpay_connections (id, organization_id, business_id, connection_status)
       VALUES ('${RZP}', '${ORG}', '${BIZ}', 'CONNECTED');
     INSERT INTO public.whatsapp_templates
@@ -569,9 +564,16 @@ function fakeMeta() {
   const sent: { to: string; template?: { name: string } }[] = [];
   const fetchImpl = (async (_url: string, init: RequestInit) => {
     sent.push(JSON.parse(String(init.body)));
-    return new Response(JSON.stringify({ messages: [{ id: `wamid.${randomUUID()}` }] }), {
-      status: 200,
-    });
+    return new Response(
+      JSON.stringify({
+        id: `vmsg.${randomUUID()}`,
+        status: "pending",
+        meta_message_id: `wamid.${randomUUID()}`,
+      }),
+      {
+        status: 200,
+      },
+    );
   }) as unknown as typeof fetch;
   return { fetchImpl, sent };
 }

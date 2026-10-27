@@ -1,34 +1,16 @@
 /**
- * Shared HTTP/error-handling base for every Meta Graph API client in this
+ * Shared HTTP/error-handling base for the Meta Graph API clients in this
  * codebase — the generic request plumbing (`graph.facebook.com/{version}`,
  * bearer auth, timeout/abort, JSON parsing, Meta's `{error:{message,...}}`
- * envelope) that every product-specific client (WhatsApp, Instagram) needs
- * identically. Extracted from meta-client.server.ts (Phase 2, WhatsApp)
- * during Phase 5 so Instagram's client does not duplicate this logic —
- * per the approved Phase 5 architecture:
+ * envelope) plus the authorization-code exchange at
+ * GET /{v}/oauth/access_token and the long-lived-token exchange.
  *
  *   MetaGraphClientBase
- *       ├── MetaWhatsAppClient   (meta-client.server.ts)
  *       └── MetaInstagramClient  (meta-instagram-client.server.ts)
  *
- * This extraction is a pure refactor: MetaWhatsAppClient's public API,
- * request shapes, and error mapping are unchanged byte-for-byte from
- * before this file existed — meta-client.server.test.ts (Phase 2) passes
- * unmodified against it, which is the regression guard for "do not
- * unnecessarily rewrite existing WhatsApp behavior."
- *
- * Also carries the one piece of OAuth mechanics genuinely shared by both
- * products: the authorization-code exchange at GET /{v}/oauth/access_token
- * (same endpoint, same request shape, for any Meta app — WhatsApp's
- * Embedded Signup code exchange and Instagram's Facebook Login code
- * exchange both call it identically) and the long-lived-token exchange at
- * the same endpoint with grant_type=fb_exchange_token (Instagram-only in
- * this codebase today, but not WhatsApp-specific — Meta's own
- * general-purpose token-exchange mechanism for any app, well-documented
- * and stable). Only WhatsApp-specific endpoints (phone number lookup,
- * register, subscribe, send) stay in MetaWhatsAppClient; only
- * Instagram-specific endpoints (Page/IG account discovery, comment reply,
- * DM send) go in MetaInstagramClient.
+ * WhatsApp no longer talks to Meta directly: it goes through Vobiz, ClickAI's
+ * WhatsApp BSP (src/lib/whatsapp/vobiz-whatsapp-client.server.ts), so the
+ * former MetaWhatsAppClient was removed. Instagram still uses this base.
  *
  * `fetchImpl` is always injectable (defaults to global fetch) — no
  * automated test in this codebase makes a real Meta API call.

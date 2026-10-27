@@ -42,11 +42,11 @@ import {
   assignWhatsAppBot,
   disconnectWhatsAppConnection,
 } from "@/lib/whatsapp-connection.functions";
-import { completeWhatsAppOnboarding } from "@/lib/whatsapp-onboarding.functions";
 import {
-  startWhatsAppEmbeddedSignup,
-  type EmbeddedSignupWindow,
-} from "@/lib/whatsapp/embedded-signup-client";
+  listDisconnectedWhatsAppNumbers,
+  reconnectWhatsAppConnection,
+} from "@/lib/whatsapp-onboarding.functions";
+import { WhatsAppConnectOptions } from "@/components/app/WhatsAppConnectOptions";
 
 export const Route = createFileRoute("/app/whatsapp")({
   head: () => ({
@@ -61,32 +61,6 @@ export const Route = createFileRoute("/app/whatsapp")({
   }),
   component: WhatsAppPage,
 });
-
-/**
- * Appends the Facebook JS SDK script tag once and resolves when it's
- * loaded — the real (non-test) implementation of embedded-signup-
- * client.ts's injectable `loadScript`. Kept in this route file, not the
- * shared client module, because it's genuinely DOM-mutating and the
- * shared module is deliberately kept free of any direct `document`
- * dependency so it stays testable under plain Node (see embedded-signup-
- * client.test.ts).
- */
-function loadFacebookSdkScript(src: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (document.querySelector(`script[src="${src}"]`)) {
-      resolve();
-      return;
-    }
-    const script = document.createElement("script");
-    script.src = src;
-    script.async = true;
-    script.defer = true;
-    script.crossOrigin = "anonymous";
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error("Meta's SDK failed to load."));
-    document.body.appendChild(script);
-  });
-}
 
 const connectionsQuery = (
   orgId: string | undefined,
@@ -142,7 +116,8 @@ function WhatsAppPage() {
   const getBusinesses = useServerFn(listOrgBusinessesForWhatsApp);
   const assignBot = useServerFn(assignWhatsAppBot);
   const disconnectConnection = useServerFn(disconnectWhatsAppConnection);
-  const completeOnboarding = useServerFn(completeWhatsAppOnboarding);
+  const getDisconnected = useServerFn(listDisconnectedWhatsAppNumbers);
+  const reconnect = useServerFn(reconnectWhatsAppConnection);
   const queryClient = useQueryClient();
 
   const { data: connections, isLoading: loadingConnections } = useQuery(
@@ -152,54 +127,36 @@ function WhatsAppPage() {
     businessesQuery(whatsappLocked ? undefined : orgId, getBusinesses),
   );
 
-  const [connecting, setConnecting] = useState(false);
-  const [connectError, setConnectError] = useState<string | null>(null);
+  const { data: disconnected } = useQuery({
+    queryKey: ["whatsapp-disconnected", orgId],
+    enabled: Boolean(orgId) && !whatsappLocked,
+    queryFn: () => getDisconnected(),
+    retry: false,
+  });
+  const [reconnectingId, setReconnectingId] = useState<string | null>(null);
   const [selectedBusinessId, setSelectedBusinessId] = useState<string | undefined>(undefined);
   const [assigningId, setAssigningId] = useState<string | null>(null);
   const [disconnectingId, setDisconnectingId] = useState<string | null>(null);
 
-  const refreshConnections = () =>
-    queryClient.invalidateQueries({ queryKey: ["whatsapp-connections", orgId] });
+  const refreshConnections = async () => {
+    await queryClient.invalidateQueries({ queryKey: ["whatsapp-connections", orgId] });
+    await queryClient.invalidateQueries({ queryKey: ["whatsapp-disconnected", orgId] });
+  };
+  // With several businesses the number must be attached to a chosen one.
+  const targetBusinessId =
+    (businesses?.length ?? 0) === 1 ? (businesses?.[0]?.id ?? null) : (selectedBusinessId ?? null);
+  const needsBusinessChoice = (businesses?.length ?? 0) > 1 && !selectedBusinessId;
 
-  const onConnect = async () => {
-    setConnectError(null);
-    const appId = import.meta.env["VITE_META_APP_ID"] as string | undefined;
-    const configId = import.meta.env["VITE_META_WHATSAPP_CONFIG_ID"] as string | undefined;
-    const graphApiVersion = import.meta.env["VITE_META_GRAPH_API_VERSION"] as string | undefined;
-    if (!appId || !configId || !graphApiVersion) {
-      setConnectError("WhatsApp is not configured on this deployment yet. Please contact support.");
-      return;
-    }
-
-    setConnecting(true);
+  const onReconnect = async (connectionId: string) => {
+    setReconnectingId(connectionId);
     try {
-      const outcome = await startWhatsAppEmbeddedSignup(
-        { appId, configId, graphApiVersion },
-        { win: window as unknown as EmbeddedSignupWindow, loadScript: loadFacebookSdkScript },
-      );
-      if (!outcome.ok) {
-        if (outcome.reason !== "cancelled") setConnectError(outcome.message);
-        return;
-      }
-
-      // The browser hands the server ONLY the minimum non-sensitive
-      // result Meta returned (code, wabaId, phoneNumberId) plus the
-      // business it picked. completeWhatsAppOnboarding (Phase 2) does
-      // everything privileged from here — the browser never sees the
-      // exchanged access token, the registration PIN, or any Meta secret.
-      const result = await completeOnboarding({
-        data: { ...outcome.result, businessId: selectedBusinessId ?? null },
-      });
-      toast.success(
-        result.status === "connected"
-          ? "WhatsApp connected."
-          : "WhatsApp connected, but needs attention — see the connection below.",
-      );
+      await reconnect({ data: { connectionId } });
+      toast.success("WhatsApp reconnected.");
       await refreshConnections();
     } catch (error) {
-      setConnectError(error instanceof Error ? error.message : "Could not connect WhatsApp.");
+      toast.error(error instanceof Error ? error.message : "Could not reconnect WhatsApp.");
     } finally {
-      setConnecting(false);
+      setReconnectingId(null);
     }
   };
 
@@ -243,22 +200,7 @@ function WhatsAppPage() {
       ) : (
         <SectionCard
           title="Connect WhatsApp"
-          description="Uses Meta's official Embedded Signup — you authorize with your own Meta Business account, never with a token pasted here."
-          actions={
-            <Button
-              size="sm"
-              disabled={connecting || (businesses?.length ?? 0) === 0}
-              onClick={onConnect}
-            >
-              {connecting ? (
-                <>
-                  <Loader2 className="mr-1.5 size-3.5 animate-spin" /> Connecting…
-                </>
-              ) : (
-                "Connect WhatsApp"
-              )}
-            </Button>
-          }
+          description="Connected through Vobiz, our WhatsApp provider. Bring your own number, buy one, or use Meta's Embedded Signup. Owners and admins can connect numbers."
         >
           {(businesses?.length ?? 0) > 1 ? (
             <div className="mb-4 max-w-sm space-y-1.5">
@@ -287,9 +229,46 @@ function WhatsAppPage() {
             </p>
           ) : null}
 
-          {connectError ? (
-            <div className="mb-4 rounded-lg border border-destructive/25 bg-destructive/12 px-3 py-2 text-xs text-destructive">
-              {connectError}
+          {orgId && (businesses?.length ?? 0) > 0 ? (
+            <div className="mb-6 rounded-lg border border-border p-4">
+              <WhatsAppConnectOptions
+                orgId={orgId}
+                businessId={targetBusinessId}
+                disabled={needsBusinessChoice}
+                onConnected={refreshConnections}
+              />
+              {needsBusinessChoice ? (
+                <p className="mt-3 text-xs text-muted-foreground">
+                  Choose which business this number is for first.
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+
+          {disconnected && disconnected.length > 0 ? (
+            <div className="mb-6 space-y-2">
+              <p className="text-xs font-medium text-muted-foreground">Disconnected numbers</p>
+              {disconnected.map((d) => (
+                <div
+                  key={d.id}
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border p-3"
+                >
+                  <span className="font-mono text-sm">
+                    {d.display_phone_number ?? d.phone_number_id}
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={reconnectingId !== null}
+                    onClick={() => onReconnect(d.id)}
+                  >
+                    {reconnectingId === d.id ? (
+                      <Loader2 className="mr-1.5 size-3.5 animate-spin" />
+                    ) : null}
+                    Reconnect
+                  </Button>
+                </div>
+              ))}
             </div>
           ) : null}
 
