@@ -1205,10 +1205,12 @@ test("startRuntimeSession: concurrent calls for the same call_id do not start tw
  * arms the timer, every place the caller actually speaks disarms it, and
  * cleanup never leaves a timer running past the session's lifetime.
  */
+// Normalize CRLF so the "\n"-anchored patterns below match on a Windows
+// (core.autocrlf) checkout as well as on LF ones.
 const src = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "voice-runtime.server.ts"),
   "utf8",
-);
+).replace(/\r\n/g, "\n");
 
 describe("silence/timeout handling — wiring", () => {
   test("two-stage thresholds: a prompt before a hangup, not the other way round", () => {
@@ -1330,7 +1332,12 @@ describe("silence/timeout handling — wiring", () => {
     const fnBody = src.slice(fnStart, src.indexOf("\n}\n", fnStart));
     assert.match(fnBody, /await finishCall\(session, \{/);
     assert.match(fnBody, /reason: "caller_silence_timeout"/);
-    assert.match(fnBody, /message: CLOSING_MESSAGES\.silence/);
+    // Spoken in the call's language; CLOSING_MESSAGES.silence is the English
+    // entry of the same table (voice-fallback-messages.ts).
+    assert.match(
+      fnBody,
+      /message: localizedFallback\("silenceHangup", responseLanguageFor\(session\)\)/,
+    );
     const finishStart = src.indexOf("async function finishCall(");
     const finishBody = src.slice(finishStart, src.indexOf("\n}\n", finishStart));
     assert.match(

@@ -102,7 +102,6 @@ function AgentPage() {
     primary_language: "en-IN",
     voice_id: "simran",
     speaking_pace: 1,
-    multilingual: true,
     after_hours_behavior: "take_message",
     transfer_number: "",
     custom_personality: "",
@@ -123,7 +122,6 @@ function AgentPage() {
         primary_language: agent.primary_language,
         voice_id: agent.voice_id,
         speaking_pace: agent.speaking_pace,
-        multilingual: agent.multilingual,
         after_hours_behavior: agent.after_hours_behavior,
         transfer_number: agent.transfer_number ?? "",
         custom_personality: agent.custom_personality ?? "",
@@ -189,7 +187,6 @@ function AgentPage() {
           primary_language: form.primary_language,
           voice_id: form.voice_id,
           speaking_pace: form.speaking_pace,
-          multilingual: form.multilingual,
           after_hours_behavior: form.after_hours_behavior,
           transfer_number: form.transfer_number || null,
           custom_personality: form.custom_personality || null,
@@ -368,18 +365,11 @@ function AgentPage() {
                   onValueChange={(vals) => setForm({ ...form, speaking_pace: vals[0] ?? 1 })}
                 />
               </FieldRow>
-              <label className="flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2.5">
-                <span className="text-sm">
-                  Switch language automatically
-                  <span className="block text-xs text-muted-foreground">
-                    Replies in whichever language the caller uses.
-                  </span>
-                </span>
-                <Switch
-                  checked={form.multilingual}
-                  onCheckedChange={(v) => setForm({ ...form, multilingual: v })}
-                />
-              </label>
+              <p className="text-xs text-muted-foreground">
+                Callers are answered automatically in the language they speak — English, Hindi,
+                Bengali, Tamil, Telugu, Gujarati, Kannada, Malayalam, Marathi, Punjabi or Odia. The
+                primary language is used for the greeting and until the caller's language is clear.
+              </p>
             </div>
           </SectionCard>
         </TabsContent>

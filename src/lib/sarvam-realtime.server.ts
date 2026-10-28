@@ -229,6 +229,12 @@
  * "bulbul:v3") were not part of that change and remain as they were.
  */
 
+import {
+  normalizeVoiceLanguageCode,
+  parseLanguageConfidence,
+  sttRealtimeLanguageCode,
+} from "./voice-languages.ts";
+
 const STT_WS_URL = "wss://api.sarvam.ai/speech-to-text-realtime/ws";
 const TTS_WS_URL = "wss://api.sarvam.ai/text-to-speech/ws";
 
@@ -252,10 +258,45 @@ function authSubprotocol(): string {
 }
 
 export class SarvamRealtimeError extends Error {
-  code: "not_configured" | "auth_failed" | "connect_failed" | "timeout" | "protocol_error";
+  code:
+    | "not_configured"
+    | "auth_failed"
+    | "quota_or_auth"
+    | "rejected_request"
+    | "connect_failed"
+    | "timeout"
+    | "protocol_error";
   constructor(code: SarvamRealtimeError["code"], message: string) {
     super(message);
     this.code = code;
+  }
+}
+
+/** The connect-time error for a socket Sarvam closed before it opened. */
+function sarvamCloseError(info: ReturnType<typeof classifySarvamClose>): SarvamRealtimeError {
+  switch (info.kind) {
+    case "auth_failed":
+      return new SarvamRealtimeError(
+        "auth_failed",
+        "The AI voice provider rejected the platform credentials.",
+      );
+    case "auth_or_quota":
+      return new SarvamRealtimeError(
+        "quota_or_auth",
+        "The AI voice provider refused the connection (rate limit, quota, or credentials).",
+      );
+    case "rejected_request":
+      return new SarvamRealtimeError(
+        "rejected_request",
+        "The AI voice provider rejected the connection settings.",
+      );
+    case "inactivity_timeout":
+      return new SarvamRealtimeError("timeout", "Timed out connecting to the AI voice provider.");
+    default:
+      return new SarvamRealtimeError(
+        "connect_failed",
+        "Could not connect to the AI voice provider.",
+      );
   }
 }
 
@@ -389,17 +430,20 @@ async function openSocket(
       "close",
       (ev) => {
         clearTimeout(timer);
-        if (ev.code === 1008 || ev.code === 4001 || ev.code === 4003) {
-          logHandshakeStep("auth_failed");
-          reject(
-            new SarvamRealtimeError(
-              "auth_failed",
-              "The AI voice provider rejected the platform credentials.",
-            ),
-          );
-        } else {
-          logHandshakeStep("closed_before_open");
-        }
+        // A close before "open" always rejects (a no-op if "error" already
+        // did), instead of leaving the caller waiting out the full connect
+        // timeout. 1008 is Sarvam's inactivity timeout, not an auth failure —
+        // see classifySarvamClose.
+        const closeInfo = classifySarvamClose(ev.code, ev.reason);
+        logHandshakeStep(closeInfo.kind === "normal" ? "closed_before_open" : closeInfo.kind);
+        console.info("voice_runtime:sarvam_closed_before_open", {
+          label,
+          code: ev.code,
+          kind: closeInfo.kind,
+          retryable: closeInfo.retryable,
+          reason: closeInfo.reason,
+        });
+        reject(sarvamCloseError(closeInfo));
       },
       { once: true },
     );
@@ -411,16 +455,81 @@ async function openSocket(
 /* ------------------------------------------------------------------ */
 
 export type SttEvent =
-  | { type: "partial_transcript"; text: string; language?: string | undefined }
-  | { type: "final_transcript"; text: string; language?: string | undefined }
+  | {
+      type: "partial_transcript";
+      text: string;
+      language?: string | undefined;
+      languageConfidence?: number;
+    }
+  | {
+      type: "final_transcript";
+      text: string;
+      language?: string | undefined;
+      languageConfidence?: number;
+    }
   | { type: "speech_start" }
   | { type: "speech_end" }
   | { type: "session_begin" }
   | { type: "session_end" }
   | { type: "language_detected"; language: string }
-  | { type: "error"; message: string; raw?: unknown }
+  | { type: "error"; message: string; raw?: unknown; code?: string; fatal?: boolean }
   | { type: "closed"; code: number; reason: string }
   | { type: "unknown"; raw: unknown };
+
+/**
+ * A detected language as the rest of the runtime should see it: the
+ * canonical code (`or-IN` → `od-IN`, see voice-languages.ts) when it's a
+ * supported language, otherwise Sarvam's own value unchanged — so a
+ * recognised-but-unsupported language (e.g. `ur-IN`) is still visible in the
+ * logs, and resolveResponseLanguage falls back for it.
+ */
+function detectedLanguageCode(raw: unknown): string | undefined {
+  if (typeof raw !== "string" || !raw.trim()) return undefined;
+  return normalizeVoiceLanguageCode(raw) ?? raw.trim();
+}
+
+/**
+ * Classifies a Sarvam WebSocket close code, per the realtime STT reference
+ * (docs.sarvam.ai/api-reference/speech-to-text/transcribe/realtime/ws):
+ *   1000        normal close
+ *   1003        rate limit / quota exceeded / invalid subscription key
+ *   1008        inactivity timeout
+ *   1011        Sarvam internal error (retry with backoff)
+ *   4000        application rejection: invalid model, unsupported
+ *               language_code or query parameter, beta access not enabled
+ *   4001/4003   kept as auth failures, as this file always treated them
+ * The TTS reference documents no close codes of its own; the same table is
+ * applied to it. `retryable` says whether reconnecting with the same
+ * parameters could plausibly succeed — never true for a 4000, which will
+ * fail identically until the request itself changes.
+ */
+export function classifySarvamClose(
+  code: number,
+  reason = "",
+): {
+  kind:
+    | "normal"
+    | "auth_or_quota"
+    | "auth_failed"
+    | "inactivity_timeout"
+    | "server_error"
+    | "rejected_request"
+    | "abnormal";
+  retryable: boolean;
+  reason: string;
+} {
+  // Sarvam caps the close reason at 123 bytes; it is its own diagnostic
+  // text, never our credentials.
+  const trimmed = reason.slice(0, 123);
+  if (code === 1000) return { kind: "normal", retryable: false, reason: trimmed };
+  if (code === 1003) return { kind: "auth_or_quota", retryable: false, reason: trimmed };
+  if (code === 4001 || code === 4003)
+    return { kind: "auth_failed", retryable: false, reason: trimmed };
+  if (code === 1008) return { kind: "inactivity_timeout", retryable: true, reason: trimmed };
+  if (code === 1011) return { kind: "server_error", retryable: true, reason: trimmed };
+  if (code === 4000) return { kind: "rejected_request", retryable: false, reason: trimmed };
+  return { kind: "abnormal", retryable: true, reason: trimmed };
+}
 
 export interface SttSession {
   sendAudioFrame(data: Uint8Array): void;
@@ -457,7 +566,20 @@ export function normalizeSttMessage(raw: unknown): SttEvent {
 
   if (kind === "error") {
     const message = extractErrorDetail(msg) ?? "Speech recognition error";
-    return { type: "error", message, raw: msg };
+    // Realtime protocol: top-level `code` (string) and `is_fatal` (boolean);
+    // `invalid_config` is the one documented non-fatal code.
+    const errData = (msg["data"] as Record<string, unknown> | undefined) ?? msg;
+    const rawCode = errData["code"] ?? msg["code"];
+    const rawFatal = errData["is_fatal"] ?? msg["is_fatal"];
+    return {
+      type: "error",
+      message,
+      raw: msg,
+      ...(typeof rawCode === "string" || typeof rawCode === "number"
+        ? { code: String(rawCode) }
+        : {}),
+      ...(typeof rawFatal === "boolean" ? { fatal: rawFatal } : {}),
+    };
   }
 
   // `text` is the current realtime protocol's field name for transcript.partial/
@@ -475,15 +597,27 @@ export function normalizeSttMessage(raw: unknown): SttEvent {
       Boolean(data["is_final"] ?? msg["is_final"]) ||
       kind === "final_transcript" ||
       kind === "transcript.final";
-    const language =
-      typeof data["language_code"] === "string" ? (data["language_code"] as string) : undefined;
+    // The realtime endpoint reports the detected language as `language`
+    // (only when connected with language_code=auto), plus
+    // `language_confidence` — a string-typed 0.0–1.0 float — on
+    // transcript.final only (docs.sarvam.ai/api-reference/speech-to-text/
+    // transcribe/realtime/ws). Reading only `language_code`, the legacy
+    // streaming API's name, meant no detected language ever reached the
+    // runtime, so every reply stayed in the agent's primary language.
+    // `language_code` is still read as a fallback for that legacy shape.
+    const language = detectedLanguageCode(data["language"] ?? data["language_code"]);
+    const languageConfidence = parseLanguageConfidence(
+      data["language_confidence"] ?? data["language_probability"],
+    );
+    const extra = languageConfidence === undefined ? {} : { languageConfidence };
     return isFinal
-      ? { type: "final_transcript", text: transcript, language }
-      : { type: "partial_transcript", text: transcript, language };
+      ? { type: "final_transcript", text: transcript, language, ...extra }
+      : { type: "partial_transcript", text: transcript, language, ...extra };
   }
 
-  if (kind === "language_detected" && typeof msg["language_code"] === "string") {
-    return { type: "language_detected", language: msg["language_code"] as string };
+  if (kind === "language_detected") {
+    const language = detectedLanguageCode(msg["language"] ?? msg["language_code"]);
+    if (language) return { type: "language_detected", language };
   }
 
   return { type: "unknown", raw };
@@ -492,7 +626,13 @@ export function normalizeSttMessage(raw: unknown): SttEvent {
 export async function connectSarvamStt(opts: ConnectSttOptions): Promise<SttSession> {
   const url = new URL(STT_WS_URL);
   url.searchParams.set("model", SARVAM_REALTIME_MODELS.stt);
-  url.searchParams.set("language_code", opts.language);
+  // "auto" passes through; a pinned language is sent in the realtime
+  // endpoint's own spelling (Odia is `or-IN` there, `od-IN` everywhere else
+  // — see voice-languages.ts).
+  url.searchParams.set(
+    "language_code",
+    opts.language === "auto" ? "auto" : (sttRealtimeLanguageCode(opts.language) ?? opts.language),
+  );
   url.searchParams.set("sample_rate", String(opts.sampleRateHz));
   url.searchParams.set("encoding", opts.encoding);
   // Server-driven VAD (the documented default) — no manual speech_start/end framing needed.
@@ -688,13 +828,21 @@ export async function connectSarvamStt(opts: ConnectSttOptions): Promise<SttSess
       dataKeys: Object.keys(data),
       transcriptFieldPresent: typeof data["transcript"] === "string",
       extractedTextPresent: typeof extractedText === "string",
-      language: typeof data["language_code"] === "string" ? data["language_code"] : null,
+      language:
+        typeof data["language"] === "string"
+          ? data["language"]
+          : typeof data["language_code"] === "string"
+            ? data["language_code"]
+            : null,
+      languageConfidence: parseLanguageConfidence(data["language_confidence"]) ?? null,
       confidence,
       timestamp: now,
       timeSinceLastAudioFrameMs: lastAudioSentAt !== null ? now - lastAudioSentAt : null,
       timeSinceSpeechStartMs: lastSpeechStartAt !== null ? now - lastSpeechStartAt : null,
       isError: eventType === "error",
-      errorCode: typeof data["code"] === "number" ? data["code"] : null,
+      errorCode:
+        typeof data["code"] === "number" || typeof data["code"] === "string" ? data["code"] : null,
+      errorFatal: typeof data["is_fatal"] === "boolean" ? data["is_fatal"] : null,
       errorMessage: eventType === "error" ? (extractErrorDetail(msg) ?? null) : null,
     });
     sttEventsReceived += 1;
@@ -960,7 +1108,9 @@ export async function connectSarvamTts(opts: ConnectTtsOptions): Promise<TtsSess
   const configPayload = {
     type: "config",
     data: {
-      language_code: opts.language,
+      // bulbul:v3's enum spells Odia `od-IN`; `or-IN` (the realtime STT
+      // spelling) is rejected, so normalize whatever the caller passed.
+      language_code: normalizeVoiceLanguageCode(opts.language) ?? opts.language,
       speaker: opts.voiceId,
       pace: Math.min(2, Math.max(0.5, opts.pace)),
       output_audio_codec: opts.outputCodec,

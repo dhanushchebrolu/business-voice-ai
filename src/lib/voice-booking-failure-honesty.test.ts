@@ -14,6 +14,7 @@ import { createHarness, type Harness } from "./telephony/voice-runtime-test-harn
 import type { AgentSnapshot } from "./agent-instructions.ts";
 import type { ServiceRow } from "./service-matching.ts";
 import type { ClaudeTool } from "./claude.server.ts";
+import { callOutcomeLine } from "./voice-call-outcomes.ts";
 
 /**
  * When a booking fails, the caller is never told it was booked — whatever
@@ -312,7 +313,10 @@ describe("a failed booking is never announced as booked, whatever the model says
     await upToBookingQuestion(turn);
     const spoken = await turn("हाँ, book it", LYING(), "hi-IN");
     assert.doesNotMatch(spoken, /बुकिंग हो गई/, spoken);
-    assert.match(spoken, /that time was just taken/i, "the truthful canned reply instead");
+    // The truthful outcome, as the runtime's own Hindi sentence (never the
+    // English one, which a Hindi caller may not follow).
+    assert.ok(spoken.includes(callOutcomeLine("hi-IN", "bookingSlotTaken")!), spoken);
+    assert.doesNotMatch(spoken, /that time was just taken/i, spoken);
     await terminateRuntimeSession(callId, "test cleanup");
   });
 
@@ -328,7 +332,7 @@ describe("a failed booking is never announced as booked, whatever the model says
     await upToBookingQuestion(turn);
     const spoken = await turn("हाँ, book it", LYING(), "hi-IN");
     assert.doesNotMatch(spoken, /बुक नहीं हो पाया/, spoken);
-    assert.match(spoken, /that time was just taken, so I couldn't book it/i, spoken);
+    assert.ok(spoken.includes(callOutcomeLine("hi-IN", "bookingSlotTaken")!), spoken);
     await terminateRuntimeSession(callId, "test cleanup");
   });
 });
@@ -535,7 +539,10 @@ describe("languages the runtime can't check: model wording never reports an unsu
       const spoken = await turn("Yes, book it", LYING(), lang.code);
       assert.equal(calls("book_appointment").length, 1);
       assert.ok(!spoken.includes(lang.falseClaim), `${lang.name} false claim spoken: ${spoken}`);
-      assert.match(spoken, /that time was just taken, so I couldn't book it/i, spoken);
+      assert.ok(
+        spoken.includes(callOutcomeLine(lang.code, "bookingSlotTaken")!),
+        `${lang.name}: expected the runtime's own sentence in ${lang.name}: ${spoken}`,
+      );
       await terminateRuntimeSession(callId, "test cleanup");
     });
 
@@ -549,7 +556,17 @@ describe("languages the runtime can't check: model wording never reports an unsu
       );
       assert.equal(calls("book_appointment").length, 0);
       assert.ok(!spoken.includes(lang.falseClaim), `${lang.name} false claim spoken: ${spoken}`);
-      assert.match(spoken, /I haven't booked anything yet/i, spoken);
+      // Every detail is known, so the runtime's own sentence reads them back
+      // and asks to book (a question a bare "yes" can answer).
+      const readBack = callOutcomeLine(lang.code, "notBookedYetConfirm", {
+        service: KNOWN.service,
+        date: KNOWN.preferred_date,
+        time: KNOWN.preferred_time,
+      })!;
+      assert.ok(
+        spoken.includes(readBack),
+        `${lang.name}: expected the runtime's own sentence in ${lang.name}: ${spoken}`,
+      );
       await terminateRuntimeSession(callId, "test cleanup");
     });
 
@@ -589,7 +606,7 @@ describe("languages the runtime can't check: model wording never reports an unsu
     await terminateRuntimeSession(callId, "test cleanup");
   });
 
-  test("Telugu: after a REAL booking, the model's Telugu confirmation is spoken (the claim is true)", async () => {
+  test("Telugu: after a REAL booking, the runtime's own Telugu confirmation is spoken — not the model's unchecked wording", async () => {
     const { callId, turn, calls } = await openCall({
       wording: (facts) =>
         /\bIS available\b/.test(facts)
@@ -601,7 +618,9 @@ describe("languages the runtime can't check: model wording never reports an unsu
     await upToBookingQuestion(turn);
     const spoken = await turn("Yes, book it", LYING(), "te-IN");
     assert.equal(calls("book_appointment").length, 1);
-    assert.match(spoken, /బుక్ అయింది/, spoken);
+    assert.match(spoken, /నిర్ధారణ అయింది/, spoken);
+    assert.doesNotMatch(spoken, /బుక్ అయింది/, "the model's wording is not used");
+    assert.match(spoken, /ఇంకేమైనా సహాయం కావాలా\?/, spoken);
     await terminateRuntimeSession(callId, "test cleanup");
   });
 

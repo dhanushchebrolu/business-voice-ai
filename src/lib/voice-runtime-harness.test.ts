@@ -465,7 +465,9 @@ describe("LLM request/error diagnostics", () => {
     assert.ok(line, "expected an llm_request diagnostic");
     assert.equal(typeof line["messageCount"], "number");
     assert.ok((line["messageCount"] as number) >= 2);
-    assert.deepEqual(line["roles"], ["system", "assistant", "user"]);
+    // Instructions, then the per-turn reply-language note
+    // (responseLanguageInstruction), then the conversation.
+    assert.deepEqual(line["roles"], ["system", "system", "assistant", "user"]);
 
     const serialized = JSON.stringify(logs);
     assert.doesNotMatch(serialized, /caller question nobody should see/);

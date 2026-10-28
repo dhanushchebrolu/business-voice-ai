@@ -84,6 +84,28 @@ function validateSupabasePublicEnv(): Plugin {
   };
 }
 
+/**
+ * Which Cloudflare Worker this build's generated wrangler config names.
+ * Unset (every existing build: Workers Builds, Lovable, CI, local) means
+ * production — wrangler.json's own "klyro", with no override at all.
+ * CLICKAI_DEPLOY_TARGET=staging names the separate "clickai-staging" Worker
+ * instead, through Nitro's `cloudflare.wrangler` option, which wins over
+ * wrangler.json in writeWranglerConfig's merge. A wrangler.json `env`
+ * block can't do this: Nitro copies it into the generated config, and
+ * Wrangler rejects environments in a generated config (production deploys
+ * included). Any other value fails the build rather than guess.
+ */
+function cloudflareWorkerOverride(): { wrangler: { name: string } } | undefined {
+  const target = process.env["CLICKAI_DEPLOY_TARGET"];
+  if (!target) return undefined;
+  if (target === "staging") return { wrangler: { name: "clickai-staging" } };
+  throw new Error(
+    `Unknown CLICKAI_DEPLOY_TARGET "${target}": use "staging", or leave it unset for production.`,
+  );
+}
+
+const workerOverride = cloudflareWorkerOverride();
+
 export default defineConfig({
   tanstackStart: {
     // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
@@ -114,5 +136,6 @@ export default defineConfig({
   // hence the cast.
   nitro: {
     compatibilityDate: "2026-09-16",
+    ...(workerOverride ? { cloudflare: workerOverride } : {}),
   } as NonNullable<LovableViteTanstackOptions["nitro"]>,
 });

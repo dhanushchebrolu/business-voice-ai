@@ -41,7 +41,8 @@ before(() => {
   // so this self-test skips too, with the same honesty the real suite
   // applies to itself.
   const pgBinDir = findPgBinDir();
-  if (!pgBinDir) {
+  // "" means "found on PATH" — a valid result, not a miss.
+  if (pgBinDir === null) {
     skipReason =
       "no PostgreSQL installation found — cannot exercise the real skip-vs-fail path without a real cluster";
     return;
@@ -140,7 +141,9 @@ describe("harness self-test — deliberately broken setup SQL must FAIL the suit
     const { NODE_TEST_CONTEXT, ...childEnv } = process.env;
     const run = spawnSync(
       process.execPath,
-      ["--experimental-strip-types", "--test", fixtureTestPath],
+      // TAP explicitly: Node 23+ defaults to the "spec" reporter even when
+      // piped, and the assertions below read TAP ("not ok", "# SKIP").
+      ["--experimental-strip-types", "--test", "--test-reporter=tap", fixtureTestPath],
       { encoding: "utf8", env: childEnv },
     );
     const combined = `${run.stdout}\n${run.stderr}`;

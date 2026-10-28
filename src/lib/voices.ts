@@ -1,26 +1,20 @@
+import { VOICE_LANGUAGES, voiceLanguageName } from "./voice-languages.ts";
+
 export interface LanguageDef {
   code: string;
   label: string;
   native: string;
 }
 
-/** Languages currently supported by the Sarvam speech stack. */
-export const LANGUAGES: LanguageDef[] = [
-  { code: "en-IN", label: "English", native: "English" },
-  { code: "hi-IN", label: "Hindi", native: "हिन्दी" },
-  { code: "bn-IN", label: "Bengali", native: "বাংলা" },
-  { code: "ta-IN", label: "Tamil", native: "தமிழ்" },
-  { code: "te-IN", label: "Telugu", native: "తెలుగు" },
-  { code: "gu-IN", label: "Gujarati", native: "ગુજરાતી" },
-  { code: "kn-IN", label: "Kannada", native: "ಕನ್ನಡ" },
-  { code: "ml-IN", label: "Malayalam", native: "മലയാളം" },
-  { code: "mr-IN", label: "Marathi", native: "मराठी" },
-  { code: "pa-IN", label: "Punjabi", native: "ਪੰਜਾਬੀ" },
-  { code: "od-IN", label: "Odia", native: "ଓଡ଼ିଆ" },
-];
+/** Languages the voice agent supports end to end — see voice-languages.ts. */
+export const LANGUAGES: LanguageDef[] = VOICE_LANGUAGES.map((l) => ({
+  code: l.code,
+  label: l.name,
+  native: l.native,
+}));
 
 export function languageLabel(code: string): string {
-  return LANGUAGES.find((l) => l.code === code)?.label ?? code;
+  return voiceLanguageName(code);
 }
 
 export interface VoiceDef {

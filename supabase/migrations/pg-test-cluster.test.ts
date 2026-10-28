@@ -17,19 +17,27 @@ describe("pg-test-cluster argument handling", () => {
     assert.deepEqual(args.slice(-1), ["start"]);
   });
 
-  test("shellQuote round-trips every argument unchanged through /bin/sh (the su path)", () => {
-    const args = [
-      "-k /tmp/x/sock -h ''",
-      "plain",
-      "with space",
-      "it's",
-      '"double"',
-      "$HOME `x` \\ ;|&",
-      "",
-    ];
-    const command = ["printf", "%s\\0", ...args].map(shellQuote).join(" ");
-    const out = spawnSync("/bin/sh", ["-c", command], { encoding: "utf8" });
-    assert.equal(out.status, 0, out.stderr);
-    assert.deepEqual(out.stdout.split("\0").slice(0, -1), args);
-  });
+  // shellQuote only feeds `su postgres -c`, a POSIX-only path; native
+  // Windows has no /bin/sh to round-trip through.
+  test(
+    "shellQuote round-trips every argument unchanged through /bin/sh (the su path)",
+    {
+      skip: process.platform === "win32" ? "POSIX-only: no /bin/sh on Windows" : false,
+    },
+    () => {
+      const args = [
+        "-k /tmp/x/sock -h ''",
+        "plain",
+        "with space",
+        "it's",
+        '"double"',
+        "$HOME `x` \\ ;|&",
+        "",
+      ];
+      const command = ["printf", "%s\\0", ...args].map(shellQuote).join(" ");
+      const out = spawnSync("/bin/sh", ["-c", command], { encoding: "utf8" });
+      assert.equal(out.status, 0, out.stderr);
+      assert.deepEqual(out.stdout.split("\0").slice(0, -1), args);
+    },
+  );
 });

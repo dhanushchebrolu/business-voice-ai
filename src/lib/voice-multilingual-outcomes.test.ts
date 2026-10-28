@@ -1,0 +1,894 @@
+import { test, describe } from "node:test";
+import assert from "node:assert/strict";
+import {
+  callerAuthorizesBooking,
+  startRuntimeSession,
+  terminateRuntimeSession,
+  type StartRuntimeSessionInput,
+} from "./voice-runtime.server.ts";
+import { createHarness, type Harness } from "./telephony/voice-runtime-test-harness.ts";
+import {
+  callOutcomeLine,
+  anythingElseQuestion,
+  callerBookingIntentAnyLanguage,
+} from "./voice-call-outcomes.ts";
+import { FALLBACK_MESSAGES } from "./voice-fallback-messages.ts";
+import type { AgentSnapshot } from "./agent-instructions.ts";
+import type { ServiceRow } from "./service-matching.ts";
+import type { CallerBooking } from "./calendar/caller-bookings.server.ts";
+
+/**
+ * Booking, rescheduling and call-closing outcomes on non-English calls, end
+ * to end through the real runtime: what the caller actually hears, which
+ * TTS voice said it, and what the transcript records — never the model's
+ * unchecked wording, and never English to a caller speaking another
+ * language.
+ *
+ * Voice attribution: the fake TTS records every chunk in one list across
+ * connections, so trackVoices notes where each successful (re)connection
+ * took over. The runtime only ever forwards the ACTIVE connection's audio
+ * (stale connections are dropped — voice-runtime.server.ts onTtsEvent), so
+ * every chunk after a takeover point was said by that voice.
+ */
+
+const agent: AgentSnapshot["agent"] = {
+  agent_name: "Aria",
+  persona: "professional",
+  custom_personality: null,
+  objectives: ["answer_questions"],
+  capabilities: {},
+  primary_language: "en-IN",
+  extra_languages: [],
+  multilingual: false,
+  voice_id: "ritu",
+  speaking_pace: 1,
+  greetings: { "en-IN": "Hello, thanks for calling Smile Dental. How can I help you today?" },
+  transfer_number: null,
+  after_hours_behavior: "take_message",
+};
+
+const SERVICES: ServiceRow[] = [
+  { id: "svc-root-canal", name: "Root Canal Treatment", duration_minutes: 30 },
+];
+const CALLER = "+919876543210";
+const DATE = "2030-10-14";
+const SLOT_7PM = { start: `${DATE}T19:00:00.000Z`, end: `${DATE}T19:30:00.000Z` };
+const SLOT_8PM = { start: `${DATE}T20:00:00.000Z`, end: `${DATE}T20:30:00.000Z` };
+const KNOWN = {
+  service: "Root Canal Treatment",
+  customer_name: "Dhanush",
+  preferred_date: DATE,
+  preferred_time: "19:00",
+};
+
+type ToolResult = { content: string; isError?: boolean };
+const ok = (data: Record<string, unknown>): ToolResult => ({
+  content: JSON.stringify({ success: true, data }),
+});
+const err = (code: string): ToolResult => ({
+  content: JSON.stringify({ success: false, error: { code, message: code } }),
+  isError: true,
+});
+const BOOKED: ToolResult = {
+  content: JSON.stringify({
+    success: true,
+    data: { id: "booking-1", status: "CONFIRMED", startAt: SLOT_7PM.start, endAt: SLOT_7PM.end },
+    bookingOutcome: "confirmed",
+  }),
+};
+
+function marker(state: Record<string, unknown>): string {
+  return `<<<APPT_STATE:${JSON.stringify({
+    service: null,
+    customer_name: null,
+    phone: null,
+    email: null,
+    preferred_date: null,
+    preferred_time: null,
+    preferred_period: null,
+    wants_next_available: false,
+    checking_availability: false,
+    ready_to_book: false,
+    ...state,
+  })}>>>`;
+}
+/** The model claims success and asks to book; only the stored outcome may be spoken. */
+const LYING = `Great news, you're all booked and confirmed!\n${marker({ ...KNOWN, ready_to_book: true })}`;
+
+async function drain(hops = 300) {
+  for (let i = 0; i < hops; i++) await Promise.resolve();
+}
+
+/** Where each successful TTS (re)connection took over, by index into the spoken-chunk list. */
+function trackVoices(h: Harness): { voice: string; from: number }[] {
+  const takeovers: { voice: string; from: number }[] = [];
+  const connect = h.deps.connectTts;
+  h.deps.connectTts = async (opts) => {
+    const session = await connect(opts);
+    takeovers.push({ voice: opts.language, from: h.tts.sentTexts.length });
+    return session;
+  };
+  return takeovers;
+}
+
+/** Chunks [from, to) with the voice that said each one. */
+function spokenWithVoices(
+  h: Harness,
+  takeovers: { voice: string; from: number }[],
+  from: number,
+): { voice: string; text: string }[] {
+  return h.tts.sentTexts.slice(from).map((text, i) => {
+    const index = from + i;
+    const owner = [...takeovers].reverse().find((t) => t.from <= index);
+    return { voice: owner?.voice ?? "unknown", text };
+  });
+}
+
+const joined = (chunks: { text: string }[]) =>
+  chunks
+    .map((c) => c.text)
+    .join(" ")
+    .replace(/\s+/g, " ");
+const squash = (s: string) => s.replace(/\s+/g, " ");
+
+interface BookingScript {
+  availability?: ToolResult[];
+  booking?: ToolResult[];
+  /** The separate phrasing model (composeHonestBookingReply) — counted, and may throw. */
+  wording?: (facts: string) => string;
+}
+
+async function openBookingCall(script: BookingScript = {}) {
+  const h = createHarness();
+  const takeovers = trackVoices(h);
+  const availability = script.availability ?? [ok({ slots: [SLOT_7PM, SLOT_8PM] })];
+  const booking = script.booking ?? [BOOKED];
+  let a = 0;
+  let b = 0;
+  const record = h.deps.executeTool!;
+  h.deps.executeTool = async (name, toolInput, ctx) => {
+    await record(name, toolInput, ctx);
+    if (name === "check_calendar_availability") {
+      return availability[Math.min(a++, availability.length - 1)]!;
+    }
+    if (name === "book_appointment") return booking[Math.min(b++, booking.length - 1)]!;
+    return ok({});
+  };
+  let phrasingCalls = 0;
+  const conversational = h.deps.generateReply;
+  h.deps.generateReply = async (messages) => {
+    if (/a phone receptionist\. Respond in language code/.test(messages[0]?.content ?? "")) {
+      phrasingCalls++;
+      const wording =
+        script.wording ??
+        ((facts: string) =>
+          /\bIS available\b/.test(facts)
+            ? "Good news — that time is available. Would you like me to book it?"
+            : "Great news, you're all booked and confirmed!");
+      return { reply: wording(messages.at(-1)?.content ?? "") };
+    }
+    return conversational(messages);
+  };
+  const callId = `outcomes-${crypto.randomUUID()}`;
+  const input: StartRuntimeSessionInput = {
+    callId,
+    organizationId: "00000000-0000-0000-0000-000000000000",
+    businessId: "00000000-0000-0000-0000-000000000001",
+    agentConfigId: "00000000-0000-0000-0000-000000000002",
+    agentVersion: 3,
+    instructions: "You are Aria, a helpful receptionist for Smile Dental.",
+    snapshotAgent: agent,
+    businessName: "Smile Dental",
+    bridge: h.bridge,
+    businessCountry: "IN",
+    callerNumber: CALLER,
+    services: SERVICES,
+  };
+  await startRuntimeSession(input, h.deps);
+  let emitted = 0;
+  /** One caller turn; returns what was spoken during it, chunk by chunk, with its voice. */
+  const turn = async (said: string, reply: string, language = "en-IN") => {
+    while (emitted < h.tts.sentTexts.length) {
+      h.tts.emit({ type: "flushed" });
+      emitted++;
+    }
+    h.llm.setNextReply(reply);
+    const before = h.tts.sentTexts.length;
+    h.stt.emit({ type: "speech_start" });
+    h.stt.emit({ type: "final_transcript", text: said, language, languageConfidence: 0.95 });
+    await drain();
+    return spokenWithVoices(h, takeovers, before);
+  };
+  const calls = (name: string) => h.tools.calls.filter((c) => c.name === name);
+  const transcript = () => h.persistence.records.at(-1)?.turns.map((t) => t.text) ?? [];
+  return { h, callId, turn, calls, transcript, phrasingCalls: () => phrasingCalls };
+}
+
+/** English set-up: root canal tonight at 7 PM, caller-ID consent, name — the slot is offered. */
+async function upToBookingQuestion(turn: Awaited<ReturnType<typeof openBookingCall>>["turn"]) {
+  await turn(
+    "Root canal treatment today at 7 PM",
+    `Sure. May I use the number you're calling from?\n${marker({ ...KNOWN, customer_name: null })}`,
+  );
+  await turn(
+    "Yes, use the number I'm calling from",
+    `Thanks. May I have your name?\n${marker({ ...KNOWN, customer_name: null })}`,
+  );
+  // The completed details trigger the real availability check, which asks
+  // the caller whether to book (the question a bare "yes" can answer).
+  const asked = await turn("I am Dhanush", `Thanks.\n${marker({ ...KNOWN })}`);
+  assert.match(joined(asked), /would you like me to book it\?/i, joined(asked));
+}
+
+describe("booking outcomes in the caller's language, by the matching voice", () => {
+  test("Hindi: a real booking is confirmed with the stored date and time, in Hindi, by the Hindi voice", async () => {
+    const { callId, turn, calls, transcript, phrasingCalls } = await openBookingCall();
+    await upToBookingQuestion(turn);
+    const phrasingBefore = phrasingCalls();
+    const chunks = await turn("हाँ, बुक कर दो प्लीज़", LYING, "hi-IN");
+
+    assert.equal(calls("book_appointment").length, 1);
+    const expected = callOutcomeLine("hi-IN", "bookingConfirmed", {
+      service: "Root Canal Treatment",
+      date: DATE,
+      time: "19:00",
+    })!;
+    const said = joined(chunks);
+    assert.ok(said.includes(squash(expected)), said);
+    assert.ok(said.includes(squash(anythingElseQuestion("hi-IN"))), said);
+    assert.doesNotMatch(said, /all booked|you're all set|anything else/i, said);
+    for (const c of chunks) assert.equal(c.voice, "hi-IN", `said by ${c.voice}: ${c.text}`);
+    assert.equal(phrasingCalls(), phrasingBefore, "no unchecked model wording was requested");
+    await terminateRuntimeSession(callId, "test cleanup");
+    assert.ok(
+      transcript().some((t) => squash(t).includes(squash(expected))),
+      "the transcript records what was said",
+    );
+  });
+
+  test("Telugu: a slot taken at booking time is reported truthfully in Telugu by the Telugu voice", async () => {
+    const { callId, turn, calls } = await openBookingCall({
+      booking: [err("SLOT_NO_LONGER_AVAILABLE")],
+    });
+    await upToBookingQuestion(turn);
+    const chunks = await turn("సరే, బుక్ చేయండి దయచేసి", LYING, "te-IN");
+
+    assert.equal(calls("book_appointment").length, 1);
+    const said = joined(chunks);
+    assert.ok(said.includes(squash(callOutcomeLine("te-IN", "bookingSlotTaken")!)), said);
+    assert.doesNotMatch(said, /all booked|confirmed|that time was just taken/i, said);
+    for (const c of chunks) assert.equal(c.voice, "te-IN", `said by ${c.voice}: ${c.text}`);
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("a failing phrasing model can't mislead a Hindi caller: the outcome needs no model at all", async () => {
+    const { callId, turn } = await openBookingCall({
+      booking: [err("SLOT_NO_LONGER_AVAILABLE")],
+      wording: () => {
+        throw new Error("phrasing model down");
+      },
+    });
+    await upToBookingQuestion(turn);
+    const chunks = await turn("हाँ, बुक कर दो प्लीज़", LYING, "hi-IN");
+    const said = joined(chunks);
+    assert.ok(said.includes(squash(callOutcomeLine("hi-IN", "bookingSlotTaken")!)), said);
+    assert.doesNotMatch(said, /all booked|something went wrong/i, said);
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("Hindi: an unavailable slot offers exactly the calendar's real alternatives, formatted in Hindi", async () => {
+    const { callId, turn, calls } = await openBookingCall({
+      availability: [ok({ slots: [SLOT_7PM, SLOT_8PM] }), ok({ slots: [SLOT_8PM] })],
+    });
+    await upToBookingQuestion(turn);
+    const chunks = await turn("हाँ, बुक कर दो प्लीज़", LYING, "hi-IN");
+    assert.equal(calls("book_appointment").length, 0, "an unavailable slot is never booked");
+    const expected = callOutcomeLine("hi-IN", "slotUnavailableAlternatives", {
+      slotStarts: [SLOT_8PM.start],
+      timeZone: "UTC",
+    })!;
+    const said = joined(chunks);
+    assert.ok(said.includes(squash(expected)), said);
+    assert.match(said, /8:00/, "the one real alternative");
+    for (const c of chunks) assert.equal(c.voice, "hi-IN");
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("English is unchanged: the verbatim English confirmation, by the English voice", async () => {
+    const { callId, turn } = await openBookingCall();
+    await upToBookingQuestion(turn);
+    const chunks = await turn("Yes, book it", LYING);
+    const said = joined(chunks);
+    assert.match(said, /You're all set — your Root Canal Treatment at Smile Dental is confirmed/);
+    assert.match(said, /Is there anything else I can help you with\?/);
+    for (const c of chunks) assert.equal(c.voice, "en-IN");
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Booking authorization: only the runtime's own question counts         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * English set-up, then the caller gives their name in `language`: the call
+ * switches language and the completed details trigger the real
+ * availability check, which asks the runtime's own localized booking
+ * question. Returns that question.
+ */
+async function upToLocalizedBookingQuestion(
+  turn: Awaited<ReturnType<typeof openBookingCall>>["turn"],
+  language: "hi-IN" | "te-IN",
+  name: string,
+): Promise<string> {
+  await turn(
+    "Root canal treatment today at 7 PM",
+    `Sure. May I use the number you're calling from?\n${marker({ ...KNOWN, customer_name: null })}`,
+  );
+  await turn(
+    "Yes, use the number I'm calling from",
+    `Thanks. May I have your name?\n${marker({ ...KNOWN, customer_name: null })}`,
+  );
+  const asked = await turn(name, `${marker({ ...KNOWN })}`, language);
+  const question = callOutcomeLine(language, "slotAvailable", { date: DATE, time: "19:00" })!;
+  assert.ok(joined(asked).includes(squash(question)), joined(asked));
+  for (const c of asked) assert.equal(c.voice, language, `said by ${c.voice}: ${c.text}`);
+  return question;
+}
+
+const HINDI_NAME = "जी मेरा नाम धनुष है";
+const TELUGU_NAME = "నా పేరు ధనుష్ అండి";
+
+describe("callerAuthorizesBooking: a bare yes in another language needs the runtime's own question", () => {
+  const hindiQuestion = callOutcomeLine("hi-IN", "slotAvailable", { date: DATE, time: "19:00" })!;
+  const teluguQuestion = callOutcomeLine("te-IN", "slotAvailable", { date: DATE, time: "19:00" })!;
+
+  test("a bare Hindi or Telugu yes answers the runtime's booking question it was asked", () => {
+    assert.equal(callerAuthorizesBooking("हाँ", hindiQuestion, hindiQuestion), true);
+    assert.equal(callerAuthorizesBooking("అవును", teluguQuestion, teluguQuestion), true);
+    // An acknowledgement spoken before the same question doesn't hide it.
+    assert.equal(callerAuthorizesBooking("हाँ", `ठीक है। ${hindiQuestion}`, hindiQuestion), true);
+  });
+
+  test("model wording about booking that ends in '?' is not a booking question", () => {
+    for (const asked of [
+      "बुकिंग के बारे में कुछ और जानना है?",
+      "क्या आप बुकिंग की जानकारी सुनना चाहेंगे?",
+      "బుకింగ్ గురించి ఇంకా ఏమైనా తెలుసుకోవాలా?",
+    ]) {
+      for (const runtimeQuestion of [null, hindiQuestion]) {
+        assert.equal(callerAuthorizesBooking("हाँ", asked, runtimeQuestion), false, asked);
+        assert.equal(callerAuthorizesBooking("అవును", asked, runtimeQuestion), false, asked);
+      }
+    }
+  });
+
+  test("the runtime's 'that time was taken — another time?' and 'anything else?' are not booking questions", () => {
+    const taken = callOutcomeLine("hi-IN", "bookingSlotTaken")!;
+    assert.equal(callerAuthorizesBooking("हाँ", taken, hindiQuestion), false);
+    const anythingElse = anythingElseQuestion("te-IN");
+    assert.equal(callerAuthorizesBooking("అవును", anythingElse, teluguQuestion), false);
+  });
+
+  test("an explicit command stands alone; a refusal or a wait never counts", () => {
+    assert.equal(callerAuthorizesBooking("बुक कर दो", "जी, बताइए।"), true);
+    assert.equal(callerAuthorizesBooking("సరే, బుక్ చేయండి", "సరే."), true);
+    for (const said of ["नहीं, अभी बुक मत करो", "रुकिए, एक मिनट", "లేదు, ఇప్పుడు వద్దు", "ఆగండి"]) {
+      assert.equal(callerAuthorizesBooking(said, hindiQuestion, hindiQuestion), false, said);
+    }
+  });
+
+  test("English is unchanged: its question patterns still work with no recorded question", () => {
+    assert.equal(
+      callerAuthorizesBooking(
+        "Yes",
+        "Good news — 7 PM is available. Would you like me to book it?",
+      ),
+      true,
+    );
+    assert.equal(callerAuthorizesBooking("Yes", "Would you like to hear our prices?"), false);
+  });
+});
+
+describe("booking authorization through the runtime, in any language", () => {
+  test("1. Hindi: a bare 'हाँ' to the runtime's own Hindi booking question books the asked slot", async () => {
+    const { callId, turn, calls } = await openBookingCall();
+    await upToLocalizedBookingQuestion(turn, "hi-IN", HINDI_NAME);
+    const chunks = await turn("हाँ", LYING, "hi-IN");
+    assert.equal(calls("book_appointment").length, 1, joined(chunks));
+    assert.equal(calls("book_appointment")[0]!.input["startIso"], SLOT_7PM.start);
+    const expected = callOutcomeLine("hi-IN", "bookingConfirmed", {
+      service: "Root Canal Treatment",
+      date: DATE,
+      time: "19:00",
+    })!;
+    assert.ok(joined(chunks).includes(squash(expected)), joined(chunks));
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("2. Hindi: a bare 'हाँ' after a generic question about booking information books nothing", async () => {
+    // Model wording about a booking reaches the caller only once a booking
+    // is confirmed (until then the runtime says its own line instead), so
+    // the generic question is asked after the first booking.
+    const { callId, turn, calls } = await openBookingCall();
+    await upToLocalizedBookingQuestion(turn, "hi-IN", HINDI_NAME);
+    await turn("हाँ", LYING, "hi-IN");
+    assert.equal(calls("book_appointment").length, 1);
+    const generic = "बुकिंग के बारे में कुछ और जानना है?";
+    const asked = await turn("एक और सवाल है जी", `${generic}\n${marker({ ...KNOWN })}`, "hi-IN");
+    assert.ok(joined(asked).includes(generic), joined(asked));
+    const chunks = await turn("हाँ", LYING, "hi-IN");
+    assert.equal(calls("book_appointment").length, 1, `no second booking: ${joined(chunks)}`);
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("2a. before any booking, model wording about booking is replaced by the runtime's own read-back question", async () => {
+    const { callId, turn, calls } = await openBookingCall();
+    await upToLocalizedBookingQuestion(turn, "hi-IN", HINDI_NAME);
+    const said = await turn(
+      "पहले बताइए फीस कितनी लगेगी",
+      `फीस पाँच सौ रुपये है। बुकिंग के बारे में कुछ और जानना है?\n${marker({ ...KNOWN })}`,
+      "hi-IN",
+    );
+    // The caller never hears the generic question — only the runtime's
+    // explicit booking question — so a "yes" to it is real consent.
+    assert.doesNotMatch(joined(said), /कुछ और जानना है/, joined(said));
+    const readBack = callOutcomeLine("hi-IN", "notBookedYetConfirm", {
+      service: "Root Canal Treatment",
+      date: DATE,
+      time: "19:00",
+    })!;
+    assert.ok(joined(said).includes(squash(readBack)), joined(said));
+    assert.equal(calls("book_appointment").length, 0);
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("2b. Hindi: a bare 'हाँ' to 'that time was just taken — another time?' doesn't book again", async () => {
+    const { callId, turn, calls } = await openBookingCall({
+      booking: [err("SLOT_NO_LONGER_AVAILABLE")],
+    });
+    await upToLocalizedBookingQuestion(turn, "hi-IN", HINDI_NAME);
+    const taken = await turn("हाँ", LYING, "hi-IN");
+    assert.equal(calls("book_appointment").length, 1);
+    assert.ok(joined(taken).includes(squash(callOutcomeLine("hi-IN", "bookingSlotTaken")!)));
+    // "Yes, another time" is not "book that one again".
+    const chunks = await turn("हाँ", LYING, "hi-IN");
+    assert.equal(calls("book_appointment").length, 1, joined(chunks));
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("3. Telugu: 'అవును' after 'anything else?' books nothing", async () => {
+    const { callId, turn, calls } = await openBookingCall();
+    await upToLocalizedBookingQuestion(turn, "te-IN", TELUGU_NAME);
+    await turn(
+      "క్లినిక్ ఎక్కడ ఉంది చెప్పండి",
+      `మేము ఎంజీ రోడ్‌లో ఉన్నాము. ${anythingElseQuestion("te-IN")}\n${marker({ ...KNOWN })}`,
+      "te-IN",
+    );
+    const chunks = await turn("అవును", LYING, "te-IN");
+    assert.equal(calls("book_appointment").length, 0, joined(chunks));
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("4. an explicit Hindi or Telugu command books, with every detail known and the slot available", async () => {
+    for (const [language, name, command] of [
+      ["hi-IN", HINDI_NAME, "ठीक है, बुक कर दो"],
+      ["te-IN", TELUGU_NAME, "సరే, బుక్ చేయండి"],
+    ] as const) {
+      const { callId, turn, calls } = await openBookingCall();
+      await upToLocalizedBookingQuestion(turn, language, name);
+      // An unrelated exchange first, so only the command itself can authorize.
+      await turn(
+        language === "hi-IN" ? "पार्किंग की सुविधा है क्या" : "పార్కింగ్ సౌకర్యం ఉందా చెప్పండి",
+        `${language === "hi-IN" ? "जी, पार्किंग है।" : "అవును, పార్కింగ్ ఉంది."}\n${marker({ ...KNOWN })}`,
+        language,
+      );
+      await turn(command, LYING, language);
+      assert.equal(calls("book_appointment").length, 1, language);
+      await terminateRuntimeSession(callId, "test cleanup");
+    }
+  });
+
+  test("5. a refusal or a request to wait after the runtime's question books nothing", async () => {
+    for (const said of ["नहीं, अभी बुक मत करो", "रुकिए, एक मिनट"]) {
+      const { callId, turn, calls } = await openBookingCall();
+      await upToLocalizedBookingQuestion(turn, "hi-IN", HINDI_NAME);
+      const chunks = await turn(said, LYING, "hi-IN");
+      assert.equal(calls("book_appointment").length, 0, `${said}: ${joined(chunks)}`);
+      await terminateRuntimeSession(callId, "test cleanup");
+    }
+  });
+
+  test("6a. missing details: an explicit Hindi command books nothing without the caller's name", async () => {
+    const { callId, turn, calls } = await openBookingCall();
+    await turn(
+      "Root canal treatment today at 7 PM",
+      `Sure. May I use the number you're calling from?\n${marker({ ...KNOWN, customer_name: null })}`,
+    );
+    await turn(
+      "Yes, use the number I'm calling from",
+      `Thanks. May I have your name?\n${marker({ ...KNOWN, customer_name: null })}`,
+    );
+    const lyingWithoutName = `Great news, you're all booked!\n${marker({ ...KNOWN, customer_name: null, ready_to_book: true })}`;
+    const chunks = await turn("बस अभी बुक कर दो", lyingWithoutName, "hi-IN");
+    assert.equal(calls("book_appointment").length, 0, joined(chunks));
+    assert.doesNotMatch(joined(chunks), /all booked/i);
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("6b. an unavailable slot: a bare 'हाँ' to the alternatives question books nothing", async () => {
+    const { callId, turn, calls } = await openBookingCall({
+      availability: [ok({ slots: [SLOT_8PM] })],
+    });
+    await turn(
+      "Root canal treatment today at 7 PM",
+      `Sure. May I use the number you're calling from?\n${marker({ ...KNOWN, customer_name: null })}`,
+    );
+    await turn(
+      "Yes, use the number I'm calling from",
+      `Thanks. May I have your name?\n${marker({ ...KNOWN, customer_name: null })}`,
+    );
+    const offered = await turn(HINDI_NAME, `${marker({ ...KNOWN })}`, "hi-IN");
+    const alternatives = callOutcomeLine("hi-IN", "slotUnavailableAlternatives", {
+      slotStarts: [SLOT_8PM.start],
+      timeZone: "UTC",
+    })!;
+    assert.ok(joined(offered).includes(squash(alternatives)), joined(offered));
+    const chunks = await turn("हाँ", LYING, "hi-IN");
+    assert.equal(calls("book_appointment").length, 0, joined(chunks));
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("7a. switching language mid-answer keeps an authorization the runtime's question earned", async () => {
+    const { callId, turn, calls } = await openBookingCall();
+    await upToLocalizedBookingQuestion(turn, "hi-IN", HINDI_NAME);
+    // Asked in Hindi, answered with a clear Telugu yes. (Whole-utterance
+    // answers only: a longer sentence that contains "అవును" isn't consent.)
+    await turn("అవును", LYING, "te-IN");
+    assert.equal(calls("book_appointment").length, 1);
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("7b. switching language never carries an old question forward as authorization", async () => {
+    const { callId, turn, calls } = await openBookingCall();
+    await upToLocalizedBookingQuestion(turn, "hi-IN", HINDI_NAME);
+    // The caller switches to English about something else; the model asks a
+    // non-booking question. The recorded Hindi question is no longer the
+    // last thing asked, so a bare "yes" books nothing.
+    await turn(
+      "Actually, what are your opening hours today?",
+      `We're open until 9 PM. Would you like to hear our prices?\n${marker({ ...KNOWN })}`,
+      "en-IN",
+    );
+    const chunks = await turn("Yes", LYING, "en-IN");
+    assert.equal(calls("book_appointment").length, 0, joined(chunks));
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+describe("'not booked yet' with every detail known asks a question a bare yes can answer", () => {
+  /** Hindi set-up up to the runtime's own question, then an unrelated turn, then the model claims a booking nobody authorized. */
+  async function upToNotBookedYet(language: "hi-IN" | "te-IN", name: string) {
+    const call = await openBookingCall();
+    await upToLocalizedBookingQuestion(call.turn, language, name);
+    await call.turn(
+      language === "hi-IN" ? "पहले बताइए फीस कितनी लगेगी" : "ముందు ఫీజు ఎంత అవుతుందో చెప్పండి",
+      `${language === "hi-IN" ? "फीस पाँच सौ रुपये है।" : "ఫీజు ఐదు వందల రూపాయలు."}\n${marker({ ...KNOWN })}`,
+      language,
+    );
+    const said = await call.turn(language === "hi-IN" ? "ठीक है जी" : "సరే అండి", LYING, language);
+    return { ...call, said };
+  }
+  const readBack = (language: string) =>
+    callOutcomeLine(language, "notBookedYetConfirm", {
+      service: "Root Canal Treatment",
+      date: DATE,
+      time: "19:00",
+    })!;
+
+  test("the caller hears the details read back with the runtime's booking question, and nothing is booked", async () => {
+    const { callId, calls, said } = await upToNotBookedYet("hi-IN", HINDI_NAME);
+    assert.equal(calls("book_appointment").length, 0);
+    assert.ok(joined(said).includes(squash(readBack("hi-IN"))), joined(said));
+    assert.doesNotMatch(joined(said), /all booked|Shall I book/i);
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("a bare 'हाँ' to it books — no loop of 'nothing booked yet'", async () => {
+    const { callId, turn, calls } = await upToNotBookedYet("hi-IN", HINDI_NAME);
+    const chunks = await turn("हाँ", LYING, "hi-IN");
+    assert.equal(calls("book_appointment").length, 1, joined(chunks));
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("'confirm it' in Hindi or Telugu books; 'don't confirm' never does", async () => {
+    for (const [language, name, said, books] of [
+      ["hi-IN", HINDI_NAME, "कन्फर्म कर दीजिए", 1],
+      ["te-IN", TELUGU_NAME, "నిర్ధారించండి", 1],
+      ["hi-IN", HINDI_NAME, "नहीं, अभी कन्फर्म मत कीजिए", 0],
+    ] as const) {
+      const { callId, turn, calls } = await upToNotBookedYet(language, name);
+      const chunks = await turn(said, LYING, language);
+      assert.equal(calls("book_appointment").length, books, `${said}: ${joined(chunks)}`);
+      await terminateRuntimeSession(callId, "test cleanup");
+    }
+  });
+
+  test("with a detail still missing, the plain line is said and a bare yes books nothing", async () => {
+    const { callId, turn, calls } = await openBookingCall();
+    await turn(
+      "Root canal treatment today at 7 PM",
+      `Sure. May I use the number you're calling from?\n${marker({ ...KNOWN, customer_name: null })}`,
+    );
+    await turn(
+      "Yes, use the number I'm calling from",
+      `Thanks. May I have your name?\n${marker({ ...KNOWN, customer_name: null })}`,
+    );
+    const noName = `Great news, you're all booked!\n${marker({ ...KNOWN, customer_name: null, ready_to_book: true })}`;
+    const said = await turn("ठीक है जी बताइए", noName, "hi-IN");
+    assert.ok(
+      joined(said).includes(squash(callOutcomeLine("hi-IN", "notBookedYet")!)),
+      joined(said),
+    );
+    const chunks = await turn("हाँ", noName, "hi-IN");
+    assert.equal(calls("book_appointment").length, 0, joined(chunks));
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+describe("callerBookingIntentAnyLanguage: 'confirm it' as an instruction", () => {
+  test("a confirm command in every supported language is an explicit instruction", () => {
+    for (const said of [
+      "कन्फर्म कर दीजिए",
+      "पुष्टि कीजिए",
+      "खात्री करा",
+      "নিশ্চিত করুন",
+      "உறுதிசெய்யுங்கள்",
+      "కన్ఫర్మ్ చేయండి",
+      "నిర్ధారించండి",
+      "પુષ્ટિ કરો",
+      "ಖಚಿತಪಡಿಸಿ",
+      "ഉറപ്പാക്കുക",
+      "ਪੁਸ਼ਟੀ ਕਰੋ",
+      "ନିଶ୍ଚିତ କରନ୍ତୁ",
+      "confirm kar dijiye",
+    ]) {
+      assert.equal(callerBookingIntentAnyLanguage(said), "instruct", said);
+    }
+  });
+
+  test("a mention, a question or a 'not confirmed' form is not an instruction", () => {
+    for (const said of [
+      "क्या मेरी बुकिंग कन्फर्म हुई?",
+      "ಖಚಿತಪಡಿಸಿಲ್ಲ",
+      "ఇంకా నిర్ధారించలేదు",
+      "पुष्टि करता हूँ",
+    ]) {
+      assert.notEqual(callerBookingIntentAnyLanguage(said), "instruct", said);
+    }
+    for (const said of ["पुष्टि मत कीजिए", "కన్ఫర్మ్ చేయవద్దు"]) {
+      assert.equal(callerBookingIntentAnyLanguage(said), "decline", said);
+    }
+  });
+
+  test("every language's read-back question names the service and time, and ends as a question", () => {
+    for (const language of [
+      "hi-IN",
+      "bn-IN",
+      "ta-IN",
+      "te-IN",
+      "gu-IN",
+      "kn-IN",
+      "ml-IN",
+      "mr-IN",
+      "pa-IN",
+      "od-IN",
+    ]) {
+      const line = callOutcomeLine(language, "notBookedYetConfirm", {
+        service: "Root Canal Treatment",
+        date: DATE,
+        time: "19:00",
+      })!;
+      assert.match(line, /Root Canal Treatment/, language);
+      assert.match(line, /\?$/, language);
+      assert.notEqual(line, callOutcomeLine(language, "notBookedYet"), language);
+    }
+  });
+});
+
+describe("closing the call after 'anything else?', in any language", () => {
+  const cases = [
+    { language: "hi-IN", yes: "हाँ, बुक कर दो प्लीज़", no: "नहीं, धन्यवाद" },
+    { language: "te-IN", yes: "సరే, బుక్ చేయండి దయచేసి", no: "లేదు, ధన్యవాదాలు" },
+    { language: "en-IN", yes: "Yes, book it", no: "No, thanks" },
+  ] as const;
+  for (const { language, yes, no } of cases) {
+    test(`${language}: "${no}" after the booking ends the call with a goodbye in that language`, async () => {
+      const { callId, turn } = await openBookingCall();
+      await upToBookingQuestion(turn);
+      await turn(yes, LYING, language);
+      const chunks = await turn(no, "Anything else?", language);
+      const goodbye =
+        language === "en-IN"
+          ? "Thank you for calling Smile Dental. Goodbye!"
+          : FALLBACK_MESSAGES[language].farewell("Smile Dental");
+      assert.ok(joined(chunks).includes(squash(goodbye)), joined(chunks));
+      for (const c of chunks) assert.equal(c.voice, language);
+      await terminateRuntimeSession(callId, "test cleanup");
+    });
+  }
+});
+
+describe("the repeated-question response sets the same closing state in every language", () => {
+  for (const language of ["hi-IN", "te-IN", "en-IN"] as const) {
+    test(`${language}: after the same answer three times, the alternative is offered and a 'no' then ends the call`, async () => {
+      const { callId, turn } = await openBookingCall();
+      // Three differently worded questions (an identical transcript inside
+      // the duplicate-delivery window is dropped as a redelivery), answered
+      // with the same reply each time.
+      const questions =
+        language === "hi-IN"
+          ? ["आपकी कीमत क्या है बताइए", "कीमत कितनी है जी", "फीस कितनी लगेगी बताइए"]
+          : language === "te-IN"
+            ? ["మీ ధర ఎంత చెప్పండి దయచేసి", "ధర ఎంత అవుతుంది చెప్పండి", "ఫీజు ఎంత ఉంటుంది దయచేసి"]
+            : ["what is your price please", "how much does it cost", "tell me the fee please"];
+      const sameReply =
+        language === "hi-IN"
+          ? "हमारी कीमत पाँच सौ रुपये है।"
+          : language === "te-IN"
+            ? "మా ధర ఐదు వందల రూపాయలు."
+            : "Our price is five hundred rupees.";
+      let last: { voice: string; text: string }[] = [];
+      for (const question of questions) last = await turn(question, sameReply, language);
+      const alternative =
+        language === "en-IN"
+          ? "I'm sorry, I don't seem to be able to sort this out on this call."
+          : FALLBACK_MESSAGES[language].repeatedQuestion("");
+      assert.ok(joined(last).includes(squash(alternative)), joined(last));
+      for (const c of last) assert.equal(c.voice, language);
+
+      const no = language === "hi-IN" ? "नहीं" : language === "te-IN" ? "లేదు" : "No";
+      const end = await turn(no, "Anything else?", language);
+      const goodbye =
+        language === "en-IN"
+          ? "Thank you for calling Smile Dental. Goodbye!"
+          : FALLBACK_MESSAGES[language].farewell("Smile Dental");
+      assert.ok(joined(end).includes(squash(goodbye)), joined(end));
+      await terminateRuntimeSession(callId, "test cleanup");
+    });
+  }
+});
+
+describe("mixed-language text and the active voice", () => {
+  test("Hinglish in Latin script — names, numbers, English terms — is spoken as written by the Hindi voice", async () => {
+    const { callId, turn } = await openBookingCall();
+    await turn("मुझे जानकारी चाहिए", "जी, बताइए।", "hi-IN");
+    const reply = "Dhanush ji, aapka root canal 7 PM ko hai, fee ₹500 hai.";
+    const chunks = await turn("मेरा अपॉइंटमेंट कब है", reply, "hi-IN");
+    assert.ok(joined(chunks).includes(reply), joined(chunks));
+    for (const c of chunks) assert.equal(c.voice, "hi-IN");
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("a reply in another Indian script never reaches the Hindi voice", async () => {
+    const { callId, turn, transcript } = await openBookingCall();
+    await turn("मुझे जानकारी चाहिए", "जी, बताइए।", "hi-IN");
+    // No booking words, so it is the script check — not the booking guard —
+    // that stops it.
+    const tamil = "நாளை காலை பத்து மணிக்கு வாருங்கள்.";
+    const chunks = await turn("क्लिनिक कब खुलता है", tamil, "hi-IN");
+    const said = joined(chunks);
+    assert.doesNotMatch(said, /வாருங்கள்/, said);
+    assert.ok(said.includes(squash(FALLBACK_MESSAGES["hi-IN"].toolTurnRetry(""))), said);
+    await terminateRuntimeSession(callId, "test cleanup");
+    assert.ok(!transcript().includes(tamil), "the unspoken text is not recorded");
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Rescheduling                                                         */
+/* ------------------------------------------------------------------ */
+
+interface StoredBooking {
+  id: string;
+  startAt: string;
+  endAt: string;
+  timezone: string;
+  status: string;
+}
+
+async function openRescheduleCall() {
+  const h = createHarness();
+  const takeovers = trackVoices(h);
+  const booking: StoredBooking = {
+    id: "b-1",
+    startAt: `${DATE}T06:30:00.000Z`, // 12:00 IST
+    endAt: `${DATE}T07:00:00.000Z`,
+    timezone: "Asia/Kolkata",
+    status: "CONFIRMED",
+  };
+  h.deps.findCallerBookings = async (): Promise<CallerBooking[]> => [
+    {
+      id: booking.id,
+      startAt: booking.startAt,
+      endAt: booking.endAt,
+      timezone: booking.timezone,
+      status: booking.status,
+      serviceId: null,
+      serviceName: "Root Canal Treatment",
+      customerName: "Dhanush Kumar",
+    },
+  ];
+  const record = h.deps.executeTool!;
+  h.deps.executeTool = async (name, toolInput, ctx) => {
+    await record(name, toolInput, ctx);
+    if (name === "reschedule_appointment") {
+      booking.startAt = String(toolInput["newStartIso"]);
+      booking.endAt = String(toolInput["newEndIso"]);
+      booking.status = "RESCHEDULED";
+      return ok({ id: booking.id, status: "RESCHEDULED", startAt: booking.startAt });
+    }
+    return ok({});
+  };
+  const callId = `reschedule-ml-${crypto.randomUUID()}`;
+  await startRuntimeSession(
+    {
+      callId,
+      organizationId: "00000000-0000-0000-0000-000000000000",
+      businessId: "00000000-0000-0000-0000-000000000001",
+      agentConfigId: "00000000-0000-0000-0000-000000000002",
+      agentVersion: 3,
+      instructions: "You are Aria, a helpful receptionist for Smile Dental.",
+      snapshotAgent: agent,
+      businessName: "Smile Dental",
+      bridge: h.bridge,
+      businessCountry: "IN",
+      callerNumber: CALLER,
+      services: SERVICES,
+    },
+    h.deps,
+  );
+  let emitted = 0;
+  const turn = async (said: string, language: string) => {
+    while (emitted < h.tts.sentTexts.length) {
+      h.tts.emit({ type: "flushed" });
+      emitted++;
+    }
+    h.llm.setNextReply("ठीक है।");
+    const before = h.tts.sentTexts.length;
+    h.stt.emit({ type: "speech_start" });
+    h.stt.emit({ type: "final_transcript", text: said, language, languageConfidence: 0.95 });
+    await drain();
+    return spokenWithVoices(h, takeovers, before);
+  };
+  const calls = (name: string) => h.tools.calls.filter((c) => c.name === name);
+  return { h, callId, turn, calls, booking };
+}
+
+describe("rescheduling on a Hindi call", () => {
+  test("the stored appointment is described, and the move confirmed, in Hindi by the Hindi voice", async () => {
+    const { callId, turn, calls, booking } = await openRescheduleCall();
+    const ask = await turn("mujhe apna appointment reschedule karna hai", "hi-IN");
+    const expectedAsk = callOutcomeLine("hi-IN", "rescheduleAskNewTime", {
+      appointment: { service: "Root Canal Treatment", startIso: `${DATE}T06:30:00.000Z` },
+      timeZone: "Asia/Kolkata",
+    })!;
+    assert.ok(joined(ask).includes(squash(expectedAsk)), joined(ask));
+    for (const c of ask) assert.equal(c.voice, "hi-IN");
+
+    const done = await turn("1 PM pe kar dijiye please", "hi-IN");
+    assert.equal(calls("reschedule_appointment").length, 1);
+    assert.equal(booking.startAt, `${DATE}T07:30:00.000Z`, "moved to 1 PM IST");
+    const expectedDone = callOutcomeLine("hi-IN", "rescheduleMoved", {
+      date: DATE,
+      time: "13:00",
+      timeZone: "Asia/Kolkata",
+    })!;
+    const said = joined(done);
+    assert.ok(said.includes(squash(expectedDone)), said);
+    assert.ok(said.includes(squash(anythingElseQuestion("hi-IN"))), said);
+    assert.doesNotMatch(said, /moved to|Done,/, said);
+    for (const c of done) assert.equal(c.voice, "hi-IN");
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});

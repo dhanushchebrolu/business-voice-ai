@@ -180,11 +180,16 @@ export function agentSaidGoodbye(reply: string): boolean {
   );
 }
 
-/** Normalised form of a reply for "said the same thing again" detection. */
+/**
+ * Normalised form of a reply for "said the same thing again" detection.
+ * Letters, digits and combining marks of every script are kept (Indic vowel
+ * signs are marks): with only a-z0-9 kept, any non-English reply normalised
+ * to "", so a Hindi or Telugu agent could repeat itself indefinitely.
+ */
 export function normalizeReplyForRepeat(reply: string): string {
   return reply
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/[^\p{L}\p{N}\p{M}]+/gu, " ")
     .trim();
 }
 

@@ -1,4 +1,9 @@
 import { DAYS } from "./business-types.ts";
+import {
+  VOICE_LANGUAGES,
+  normalizeVoiceLanguageCode,
+  resolvePrimaryLanguage,
+} from "./voice-languages.ts";
 
 /**
  * The common set Sarvam's realtime STT (Saaras), LLM
@@ -10,20 +15,22 @@ import { DAYS } from "./business-types.ts";
  * fully-supported intersection. See voice-runtime.server.ts's
  * resolveResponseLanguage, which falls back to the agent's own
  * primary_language whenever STT detects something outside this set.
+ * Derived from voice-languages.ts, the single registry (which also records
+ * how each stage spells each code).
  */
-export const SUPPORTED_VOICE_LANGUAGES = [
-  { code: "en-IN", name: "English" },
-  { code: "hi-IN", name: "Hindi" },
-  { code: "bn-IN", name: "Bengali" },
-  { code: "ta-IN", name: "Tamil" },
-  { code: "te-IN", name: "Telugu" },
-  { code: "gu-IN", name: "Gujarati" },
-  { code: "kn-IN", name: "Kannada" },
-  { code: "ml-IN", name: "Malayalam" },
-  { code: "mr-IN", name: "Marathi" },
-  { code: "pa-IN", name: "Punjabi" },
-  { code: "od-IN", name: "Odia" },
-] as const;
+export const SUPPORTED_VOICE_LANGUAGES = VOICE_LANGUAGES.map(({ code, name }) => ({ code, name }));
+
+/**
+ * The # LANGUAGE section — the same for every agent: callers are answered in
+ * whichever supported language they speak. There is no per-agent setting;
+ * the legacy `multilingual` / `extra_languages` columns are not read. The
+ * runtime decides each reply's language (nextCallLanguage in
+ * voice-languages.ts) and names it in a per-turn system note.
+ */
+function languageSection(a: AgentSnapshot["agent"]): string {
+  const primary = resolvePrimaryLanguage(a.primary_language);
+  return `The caller may speak any of these languages, or a natural code-mixed combination of them (e.g. Hinglish, Tanglish): ${SUPPORTED_VOICE_LANGUAGES.map((l) => `${l.name} (${l.code})`).join(", ")}. Detect the caller's language (or code-mixed style) from what they actually say, and respond naturally in that same language or style. If the caller explicitly asks you to switch language ("Can you speak Telugu?", "Hindi mein baat karo"), switch immediately and keep responding in that language for the rest of the call unless they ask to switch again. A change of language never resets the conversation: keep everything the caller already told you (their name, number, the service, date and time) and carry on from where you were. Never refuse a call or claim you can only help in English — that is never true for this line. Your default language is ${primary} — use it for your own opening greeting and whenever the caller's language is unclear or you have no other signal yet. When a system note names the language for your next reply, follow it — that is the language your reply will be spoken in.`;
+}
 
 export interface AgentSnapshot {
   business: {
@@ -202,7 +209,7 @@ ${rules.length ? rules.map((r, i) => `${i + 1}. ${r.rule}`).join("\n") : "1. Onl
 ${a.transfer_number ? `Transfer to ${a.transfer_number} when the caller asks for a human, is upset, describes an emergency, or asks something outside this document.` : "No transfer number configured — take a message and record the caller's contact details instead of transferring."}
 
 # LANGUAGE
-The caller may speak any of these languages, or a natural code-mixed combination of them (e.g. Hinglish, Tanglish): ${SUPPORTED_VOICE_LANGUAGES.map((l) => `${l.name} (${l.code})`).join(", ")}. Detect the caller's language (or code-mixed style) from what they actually say, and respond naturally in that same language or style. If the caller explicitly asks you to switch language ("Can you speak Telugu?", "Hindi mein baat karo"), switch immediately and keep responding in that language for the rest of the call unless they ask to switch again. Never refuse a call or claim you can only help in English — that is never true for this line. Your default language is ${a.primary_language} — use it for your own opening greeting and whenever the caller's language is unclear or you have no other signal yet.
+${languageSection(a)}
 ${
   canBook
     ? `
@@ -249,6 +256,11 @@ export function validateAgentConfig(s: AgentSnapshot): { field: string; message:
   if (!s.agent.voice_id) issues.push({ field: "Voice", message: "Choose a voice." });
   if (!s.agent.primary_language)
     issues.push({ field: "Language", message: "Choose a primary language." });
+  else if (!normalizeVoiceLanguageCode(s.agent.primary_language))
+    issues.push({
+      field: "Language",
+      message: "Choose one of the supported languages as the primary language.",
+    });
   if (!s.agent.greetings?.[s.agent.primary_language]?.trim())
     issues.push({ field: "Greeting", message: "Write a call greeting for your primary language." });
   if (!s.hours.length)

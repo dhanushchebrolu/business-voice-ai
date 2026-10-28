@@ -172,7 +172,8 @@ export function pgCtlStartArgs(dataDir: string, sockDir: string, logFile: string
  */
 export function bootstrapCluster(): BootstrapResult {
   const pgBinDir = findPgBinDir();
-  if (!pgBinDir) {
+  // "" means "found on PATH" — a valid result, not a miss.
+  if (pgBinDir === null) {
     return {
       ok: false,
       reason:
