@@ -33,7 +33,9 @@
  *   - the target isn't exactly "clickai-staging" (never "klyro");
  *   - any value mentions the production Supabase project;
  *   - the server and browser Supabase URLs name different projects;
- *   - a required name is empty (WhatsApp, voice, telephony and calendar);
+ *   - a required name is empty (WhatsApp, plus the four voice settings an
+ *     inbound Vobiz call needs; Google Calendar and outbound-only settings
+ *     are optional, but validated whenever they are set);
  *   - the telephony webhook base or a calendar URL isn't the staging
  *     Worker's own https://clickai-staging.<subdomain>.workers.dev host, or
  *     any URL setting points at klyro;
@@ -74,23 +76,23 @@ const SERVER_REQUIRED = [
   "LOVABLE_CRON_SECRET",
 ];
 /**
- * The voice agent's server settings: speech (Sarvam), telephony (Vobiz),
- * media-stream tokens and the booking calendar. Required, so a staging
- * Worker never goes out half-configured for calls.
+ * What an inbound Vobiz call needs to be answered by the voice agent:
+ * speech and the language model (sarvam-realtime.server.ts and
+ * sarvam.server.ts read SARVAM_API_KEY), and the Vobiz adapter, which
+ * telephony.server.ts refuses to create without all three VOBIZ_ values.
  */
 const VOICE_REQUIRED = [
   "SARVAM_API_KEY",
-  "TELEPHONY_WEBHOOK_BASE_URL",
-  "MEDIA_SESSION_TOKEN_SECRET",
   "VOBIZ_AUTH_ID",
   "VOBIZ_AUTH_TOKEN",
-  "VOBIZ_PHONE_NUMBER",
   "VOBIZ_WEBHOOK_VERIFY_TOKEN",
-  "GOOGLE_CALENDAR_CLIENT_ID",
-  "GOOGLE_CALENDAR_CLIENT_SECRET",
-  "GOOGLE_CALENDAR_REDIRECT_URI",
-  "GOOGLE_CALENDAR_CREDENTIAL_ENCRYPTION_KEY",
 ];
+/**
+ * Uploaded when set, and validated when set. None is read on the inbound
+ * Vobiz path: TELEPHONY_WEBHOOK_BASE_URL and VOBIZ_PHONE_NUMBER serve
+ * outbound calls, MEDIA_SESSION_TOKEN_SECRET only Exotel's media stream,
+ * and Google Calendar is optional (bookings fall back to the database).
+ */
 const SERVER_OPTIONAL = [
   "ANTHROPIC_API_KEY",
   "VOICE_LLM_PROVIDER",
@@ -100,7 +102,21 @@ const SERVER_OPTIONAL = [
   "SARVAM_WEBHOOK_SECRET",
   "VOBIZ_BASE_URL",
   "VOBIZ_REQUIRE_SIGNATURE",
+  "VOBIZ_PHONE_NUMBER",
+  "TELEPHONY_WEBHOOK_BASE_URL",
+  "MEDIA_SESSION_TOKEN_SECRET",
+  "GOOGLE_CALENDAR_CLIENT_ID",
+  "GOOGLE_CALENDAR_CLIENT_SECRET",
+  "GOOGLE_CALENDAR_REDIRECT_URI",
+  "GOOGLE_CALENDAR_CREDENTIAL_ENCRYPTION_KEY",
   "GOOGLE_CALENDAR_WEBHOOK_URL",
+];
+/** Google Calendar works only with all four set (google-calendar-config.server.ts and google-calendar-crypto.server.ts). */
+const GOOGLE_CALENDAR_SET = [
+  "GOOGLE_CALENDAR_CLIENT_ID",
+  "GOOGLE_CALENDAR_CLIENT_SECRET",
+  "GOOGLE_CALENDAR_REDIRECT_URI",
+  "GOOGLE_CALENDAR_CREDENTIAL_ENCRYPTION_KEY",
 ];
 /**
  * Settings that must stay unset on staging: payments stay off (no Razorpay
@@ -203,8 +219,29 @@ function stagingProblems(env) {
   }
   const hostOf = (n) => (isStagingWorkerUrl(env[n]) ? new URL(env[n]).host : null);
   const base = hostOf("TELEPHONY_WEBHOOK_BASE_URL");
-  if (base && !/^\/?$/.test(new URL(env.TELEPHONY_WEBHOOK_BASE_URL).pathname)) {
-    problems.push("TELEPHONY_WEBHOOK_BASE_URL must be the bare Worker origin, with no path");
+  // The code appends "/api/..." to it as text, so even a trailing "/" breaks
+  // every callback URL ("//api/...").
+  if (base && env.TELEPHONY_WEBHOOK_BASE_URL !== new URL(env.TELEPHONY_WEBHOOK_BASE_URL).origin) {
+    problems.push(
+      "TELEPHONY_WEBHOOK_BASE_URL must be the bare Worker origin, with no path or trailing slash",
+    );
+  }
+  const googleSet = GOOGLE_CALENDAR_SET.filter((n) => env[n]);
+  if (googleSet.length > 0 && googleSet.length < GOOGLE_CALENDAR_SET.length) {
+    const missing = GOOGLE_CALENDAR_SET.filter((n) => !env[n]);
+    problems.push(
+      `Google Calendar is half-configured: set all four or none (missing ${missing.join(", ")})`,
+    );
+  }
+  // Sent in every Vobiz callback URL as ?verify_token=, so it must survive a
+  // URL unencoded and be long enough not to be guessed.
+  if (
+    env.VOBIZ_WEBHOOK_VERIFY_TOKEN &&
+    !/^[A-Za-z0-9_-]{32,}$/.test(env.VOBIZ_WEBHOOK_VERIFY_TOKEN)
+  ) {
+    problems.push(
+      "VOBIZ_WEBHOOK_VERIFY_TOKEN must be at least 32 URL-safe characters (letters, digits, - or _)",
+    );
   }
   for (const name of ["GOOGLE_CALENDAR_REDIRECT_URI", "GOOGLE_CALENDAR_WEBHOOK_URL"]) {
     const host = hostOf(name);

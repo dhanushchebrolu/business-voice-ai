@@ -80,19 +80,29 @@ test("a complete staging file is READY, shows only the project ref, and prints n
 });
 
 // --- voice, telephony, calendar and payment guards ---
+/** What an inbound Vobiz call needs: Sarvam plus the three values the Vobiz adapter requires. */
 const VOICE_REQUIRED = [
   "SARVAM_API_KEY",
-  "TELEPHONY_WEBHOOK_BASE_URL",
-  "MEDIA_SESSION_TOKEN_SECRET",
   "VOBIZ_AUTH_ID",
   "VOBIZ_AUTH_TOKEN",
-  "VOBIZ_PHONE_NUMBER",
   "VOBIZ_WEBHOOK_VERIFY_TOKEN",
+];
+/** Optional for a voice-only staging Worker: outbound-only, Exotel-only and Google Calendar settings. */
+const VOICE_OPTIONAL = [
+  "TELEPHONY_WEBHOOK_BASE_URL",
+  "MEDIA_SESSION_TOKEN_SECRET",
+  "VOBIZ_PHONE_NUMBER",
   "GOOGLE_CALENDAR_CLIENT_ID",
   "GOOGLE_CALENDAR_CLIENT_SECRET",
   "GOOGLE_CALENDAR_REDIRECT_URI",
   "GOOGLE_CALENDAR_CREDENTIAL_ENCRYPTION_KEY",
 ];
+/** A complete file without any optional voice setting: the minimum for a voice-only test. */
+function voiceOnly(overrides = {}) {
+  const env = complete();
+  for (const name of VOICE_OPTIONAL) delete env[name];
+  return { ...env, ...overrides };
+}
 
 /** check is NOT READY with `message`, deploy --yes is refused, and no value is printed. */
 function assertRefused(overrides, message, extraProcessEnv = {}) {
@@ -107,10 +117,92 @@ function assertRefused(overrides, message, extraProcessEnv = {}) {
   assert.doesNotMatch(deploy.out, new RegExp(SECRET_MARKER), label);
 }
 
-test("every voice, telephony and calendar setting is required", () => {
+test("each of the four voice settings an inbound call needs is required", () => {
   for (const name of VOICE_REQUIRED) {
     assertRefused({ [name]: "" }, new RegExp(`MISSING {2}${name}\\b`));
+    // Also from the minimal voice-only file.
+    const r = runWith(voiceOnly({ [name]: "" }), ["check"]);
+    assert.equal(r.status, 2, `${name}: ${r.out}`);
+    assert.match(r.out, new RegExp(`MISSING {2}${name}\\b`));
   }
+});
+
+test("a voice-only file without Google, outbound or Exotel settings is READY; those are listed as optional", () => {
+  const r = runWith(voiceOnly(), ["check"]);
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, /READY/);
+  assert.doesNotMatch(r.out, /PROBLEM/);
+  for (const name of VOICE_OPTIONAL) {
+    assert.match(r.out, new RegExp(`MISSING {2}${name} \\(optional\\)`), name);
+  }
+  assert.doesNotMatch(r.out, new RegExp(SECRET_MARKER));
+});
+
+test("optional settings are still validated when set", () => {
+  for (const [overrides, message] of [
+    [{ TELEPHONY_WEBHOOK_BASE_URL: `${STAGING_WORKER_URL}/` }, /no path or trailing slash/],
+    [{ TELEPHONY_WEBHOOK_BASE_URL: "https://klyro.aiblaze-io.workers.dev" }, /klyro/],
+    [{ VOBIZ_PHONE_NUMBER: "09876543210" }, /E\.164/],
+    [{ MEDIA_SESSION_TOKEN_SECRET: "short" }, /shorter than 32/],
+    [
+      { GOOGLE_CALENDAR_CLIENT_ID: "test-client.apps.googleusercontent.com" },
+      /half-configured: set all four or none \(missing GOOGLE_CALENDAR_CLIENT_SECRET, GOOGLE_CALENDAR_REDIRECT_URI, GOOGLE_CALENDAR_CREDENTIAL_ENCRYPTION_KEY\)/,
+    ],
+  ]) {
+    const label = Object.keys(overrides).join(", ");
+    const r = runWith(voiceOnly(overrides), ["check"]);
+    assert.equal(r.status, 2, `${label}: ${r.out}`);
+    assert.match(r.out, message, label);
+    assert.doesNotMatch(r.out, new RegExp(SECRET_MARKER), label);
+    const deploy = runWith(voiceOnly(overrides), ["deploy", "--yes"]);
+    assert.equal(deploy.status, 1, `${label}: ${deploy.out}`);
+    assert.match(deploy.out, /REFUSED/);
+  }
+  // A half-configured Google set is refused from the full file too.
+  assertRefused({ GOOGLE_CALENDAR_CLIENT_SECRET: "" }, /Google Calendar is half-configured/);
+});
+
+test("the Vobiz verify token must be long and URL-safe, since it travels in the callback URL", () => {
+  for (const value of [
+    "short-token",
+    `${"a".repeat(31)}`,
+    `${"a".repeat(32)}&x=1`,
+    `${"a".repeat(32)} b`,
+  ]) {
+    assertRefused(
+      { VOBIZ_WEBHOOK_VERIFY_TOKEN: value },
+      /VOBIZ_WEBHOOK_VERIFY_TOKEN must be at least 32 URL-safe/,
+    );
+  }
+  assert.equal(
+    runWith(voiceOnly({ VOBIZ_WEBHOOK_VERIFY_TOKEN: "A-z_0".repeat(8) }), ["check"]).status,
+    0,
+  );
+});
+
+test("a voice-only file keeps every production and klyro guard", () => {
+  for (const [overrides, message] of [
+    [{ SUPABASE_URL: "https://eorazvlmqwunmhwviocn.supabase.co" }, /production Supabase project/],
+    [
+      { VITE_SUPABASE_URL: "https://eorazvlmqwunmhwviocn.supabase.co" },
+      /production Supabase project/,
+    ],
+    [{ VOBIZ_AUTH_TOKEN: "token-eorazvlmqwunmhwviocn" }, /production Supabase project/],
+    [{ RAZORPAY_KEY_ID: "rzp_test_placeholder" }, /must stay unset/],
+    [{ VOBIZ_REQUIRE_SIGNATURE: "false" }, /signature checks stay on/],
+  ]) {
+    const label = Object.keys(overrides).join(", ");
+    const r = runWith(voiceOnly(overrides), ["check"]);
+    assert.equal(r.status, 2, `${label}: ${r.out}`);
+    assert.match(r.out, message, label);
+    const deploy = runWith(voiceOnly(overrides), ["deploy", "--yes"]);
+    assert.equal(deploy.status, 1, label);
+    assert.match(deploy.out, /REFUSED/);
+  }
+  // The Worker name guard: any argument naming klyro is refused before anything runs.
+  const klyro = runWith(voiceOnly(), ["deploy", "--yes", "--name", "klyro"]);
+  assert.equal(klyro.status, 1);
+  assert.match(klyro.out, /never the production Worker/);
 });
 
 test("the telephony webhook and calendar URLs must be the staging Worker's own host", () => {

@@ -6,19 +6,21 @@ How the staging helper guards a voice-agent deploy, which settings it needs, and
 
 ## Settings (names only; values live in the gitignored `.env.staging.local`)
 
-| Group           | Required                                                                                                                                            | Optional                                                                                                                                                   |
-| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Speech          | `SARVAM_API_KEY`                                                                                                                                    | `VOICE_LLM_PROVIDER` (`sarvam` or `claude`), `SARVAM_ORG_ID`, `SARVAM_WORKSPACE_ID`, `SARVAM_CONTEXT_SECRET`, `SARVAM_WEBHOOK_SECRET`, `ANTHROPIC_API_KEY` |
-| Telephony       | `TELEPHONY_WEBHOOK_BASE_URL`, `MEDIA_SESSION_TOKEN_SECRET`, `VOBIZ_AUTH_ID`, `VOBIZ_AUTH_TOKEN`, `VOBIZ_PHONE_NUMBER`, `VOBIZ_WEBHOOK_VERIFY_TOKEN` | `VOBIZ_BASE_URL`, `VOBIZ_REQUIRE_SIGNATURE`                                                                                                                |
-| Calendar        | `GOOGLE_CALENDAR_CLIENT_ID`, `GOOGLE_CALENDAR_CLIENT_SECRET`, `GOOGLE_CALENDAR_REDIRECT_URI`, `GOOGLE_CALENDAR_CREDENTIAL_ENCRYPTION_KEY`           | `GOOGLE_CALENDAR_WEBHOOK_URL`                                                                                                                              |
-| Must stay unset | `RAZORPAY_*` (live and test), `EXOTEL_*`, `TWILIO_*`, `TELEPHONY_ALLOW_MOCK`                                                                        |                                                                                                                                                            |
+| Group           | Required for an inbound test call                                            | Optional (validated when set)                                                                                                                                                               |
+| --------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Speech          | `SARVAM_API_KEY`                                                             | `VOICE_LLM_PROVIDER` (`sarvam` or `claude`), `SARVAM_ORG_ID`, `SARVAM_WORKSPACE_ID`, `SARVAM_CONTEXT_SECRET`, `SARVAM_WEBHOOK_SECRET`, `ANTHROPIC_API_KEY`                                  |
+| Telephony       | `VOBIZ_AUTH_ID`, `VOBIZ_AUTH_TOKEN`, `VOBIZ_WEBHOOK_VERIFY_TOKEN`            | `VOBIZ_BASE_URL`, `VOBIZ_REQUIRE_SIGNATURE`; outbound only: `TELEPHONY_WEBHOOK_BASE_URL`, `VOBIZ_PHONE_NUMBER`; Exotel only: `MEDIA_SESSION_TOKEN_SECRET`                                   |
+| Calendar        | none: without Google, bookings use the database                              | `GOOGLE_CALENDAR_CLIENT_ID`, `GOOGLE_CALENDAR_CLIENT_SECRET`, `GOOGLE_CALENDAR_REDIRECT_URI`, `GOOGLE_CALENDAR_CREDENTIAL_ENCRYPTION_KEY` (all four or none), `GOOGLE_CALENDAR_WEBHOOK_URL` |
+| Must stay unset | `RAZORPAY_*` (live and test), `EXOTEL_*`, `TWILIO_*`, `TELEPHONY_ALLOW_MOCK` |                                                                                                                                                                                             |
 
-The Supabase, Meta and cron names are listed in the WhatsApp sandbox doc.
+The four required voice settings are exactly what the code needs to answer an inbound Vobiz call: the speech and language-model path reads `SARVAM_API_KEY`, and the Vobiz adapter isn't created without all three `VOBIZ_` values. The Supabase, Meta and cron names are listed in the WhatsApp sandbox doc.
 
 ## What `node scripts/staging/staging.mjs check` refuses
 
 - Any required name above that is empty.
-- `TELEPHONY_WEBHOOK_BASE_URL`, `GOOGLE_CALENDAR_REDIRECT_URI` or `GOOGLE_CALENDAR_WEBHOOK_URL` that isn't `https://clickai-staging.<subdomain>.workers.dev`. All of them must name the same Worker, and the webhook base must be the bare origin.
+- `TELEPHONY_WEBHOOK_BASE_URL`, `GOOGLE_CALENDAR_REDIRECT_URI` or `GOOGLE_CALENDAR_WEBHOOK_URL` that isn't `https://clickai-staging.<subdomain>.workers.dev`. All of them must name the same Worker, and the webhook base must be the bare origin, with no trailing slash.
+- Google Calendar half-configured: some of its four settings set but not all.
+- A `VOBIZ_WEBHOOK_VERIFY_TOKEN` shorter than 32 characters or containing anything but letters, digits, `-` and `_`. It travels in every Vobiz callback URL.
 - Any `*_URL` or `*_URI` value pointing at `klyro`.
 - Any payment, mock-telephony or other-provider setting, and any value containing a live Razorpay key.
 - `VOBIZ_REQUIRE_SIGNATURE` set to anything but `true`. Unset already means "on".
@@ -40,7 +42,7 @@ The Supabase, Meta and cron names are listed in the WhatsApp sandbox doc.
 1. Confirm in the dashboards that `klyro` uses `eorazvlmqwunmhwviocn`, and that the staging project and Worker are separate.
 2. `check` prints `READY`, with production fingerprints supplied.
 3. The Vobiz test number's answer URL points only at the staging Worker. The test number is dedicated: no customer calls it.
-4. The Google OAuth client allows exactly the staging `GOOGLE_CALENDAR_REDIRECT_URI`, and the connected calendar is a test calendar.
+4. Only if Google Calendar is configured: the Google OAuth client allows exactly the staging `GOOGLE_CALENDAR_REDIRECT_URI`, and the connected calendar is a test calendar.
 5. Migrations: `migrate --ref <staging ref>` dry run first; push only on approval.
 6. Then `deploy --yes`.
 
