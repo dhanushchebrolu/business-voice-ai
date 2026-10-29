@@ -1,7 +1,7 @@
 /**
  * Server-side WhatsApp sending for conversations (AI replies and staff
  * replies). Payment notifications keep their own path
- * (whatsapp-payments.server.ts); both send through MetaWhatsAppClient.
+ * (whatsapp-payments.server.ts); both send through Vobiz (vobiz-whatsapp-client.server.ts).
  *
  * Rules enforced here, server-side, for every send:
  *   - Customer-service window: free-form text only within 24 hours of the
@@ -18,23 +18,28 @@
  *     never from the browser.
  *   - Throughput: at most OUTBOUND_PER_MINUTE_PER_CONVERSATION sends per
  *     conversation per minute (a runaway loop or a stuck button can't spam
- *     a customer); Meta's own 429s are retried with backoff.
- *   - Reliability: a 'queued' row is written before calling Meta; each send
+ *     a customer); Vobiz's 429s are retried with backoff.
+ *   - Reliability: a 'queued' row is written before calling Vobiz; each send
  *     has a timeout and at most WHATSAPP_SEND_MAX_ATTEMPTS attempts, retried
- *     only when Meta answered 429 or 5xx — never for a rejection, and never
+ *     only when Vobiz answered 429 or 5xx — never for a rejection, and never
  *     when the outcome is unknown (a timeout, a dropped connection, or a
- *     2xx without a message id), since Meta may already have delivered it
- *     and WhatsApp has no idempotency key. The row ends 'sent' (with Meta's
- *     message id) or 'failed' (with a customer-safe reason).
+ *     2xx without a message id), since Vobiz may already have sent it
+ *     and WhatsApp has no idempotency key. The row ends 'sent' (accepted by
+ *     Vobiz: Vobiz's message id in metadata.vobiz_message_id, and the wamid
+ *     in wa_message_id once Vobiz returns it) or 'failed' (with a
+ *     customer-safe reason). 'delivered'/'read' only ever come from Vobiz's
+ *     message.status webhook.
  *
- * The access token is decrypted only here, held in memory for the request,
- * and never logged, stored in plaintext or returned.
+ * Vobiz holds the Meta credentials. ClickAI's Vobiz API credentials are read
+ * from the environment at send time and never logged or stored.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/integrations/supabase/types";
-import { MetaWhatsAppClient, MetaApiError } from "./meta-client.server.ts";
-import { resolveMetaWhatsAppConfig } from "./meta-config.server.ts";
-import { decryptCredential, CredentialCryptoError } from "./whatsapp-token-crypto.server.ts";
+import {
+  VobizApiError,
+  VobizWhatsAppClient,
+  resolveVobizWhatsAppConfig,
+} from "./vobiz-whatsapp-client.server.ts";
 import {
   checkSendPermission,
   customerOptOutBlocksConversation,
@@ -58,9 +63,15 @@ export interface OutboundConnection {
   id: string;
   organization_id: string;
   phone_number_id: string;
-  access_token_ciphertext: string | null;
+  waba_id: string;
   status: string;
+  provider: string;
+  vobiz_channel_id: string | null;
 }
+
+/** Columns every sender loads for a connection it may send through. */
+export const OUTBOUND_CONNECTION_COLUMNS =
+  "id, organization_id, business_id, phone_number_id, waba_id, status, provider, vobiz_channel_id";
 
 export interface DeliveryDeps {
   fetchImpl?: typeof fetch | undefined;
@@ -76,11 +87,9 @@ export function isWithinCustomerServiceWindow(lastInboundAt: string | null, now:
   return Number.isFinite(at) && now.getTime() - at < WHATSAPP_WINDOW_MS;
 }
 
-/** Retry only when Meta actually answered with 429/5xx (so it didn't accept the message). */
-function isRetryable(err: unknown, httpStatus: number | null): boolean {
-  return (
-    err instanceof MetaApiError && httpStatus !== null && (httpStatus === 429 || httpStatus >= 500)
-  );
+/** Retry only when Vobiz actually answered with 429/5xx (so it didn't accept the message). */
+function isRetryable(err: unknown): boolean {
+  return err instanceof VobizApiError && err.isRetryable;
 }
 
 /**
@@ -97,7 +106,7 @@ export async function deliverWhatsAppMessage(
   },
   deps: DeliveryDeps = {},
 ): Promise<
-  | { outcome: "sent"; waMessageId: string }
+  | { outcome: "sent"; waMessageId: string | null; providerMessageId: string }
   | { outcome: "failed"; error: string; retryable: boolean; ambiguous?: boolean }
 > {
   const fail = async (error: string, attempts: number, retryable = false) => {
@@ -113,7 +122,7 @@ export async function deliverWhatsAppMessage(
     return { outcome: "failed" as const, error, retryable };
   };
   /**
-   * The request may have reached Meta (no response, or a 2xx without a
+   * The request may have reached Vobiz (no response, or a 2xx without a
    * message id). The row stays 'queued' — still a live message for its
    * idempotency key — so no later attempt with the same key can send it
    * again; the error says why it was never confirmed.
@@ -122,7 +131,7 @@ export async function deliverWhatsAppMessage(
     const { error: writeError } = await supabaseAdmin
       .from("whatsapp_messages")
       .update({
-        error_message: `Delivery outcome unknown (${error}); not retried, Meta may already have delivered it.`,
+        error_message: `Delivery outcome unknown (${error}); not retried, Vobiz may already have delivered it.`,
         attempts,
       })
       .eq("id", input.messageRowId);
@@ -134,35 +143,19 @@ export async function deliverWhatsAppMessage(
     return { outcome: "failed" as const, error, retryable: false, ambiguous: true };
   };
 
-  const config = resolveMetaWhatsAppConfig();
+  const config = resolveVobizWhatsAppConfig();
   if (!config) return fail("WhatsApp is not configured on this deployment.", 0, true);
   if (input.connection.status !== "connected") {
     return fail("This WhatsApp number is not connected.", 0);
   }
-  let accessToken: string;
-  try {
-    if (!input.connection.access_token_ciphertext) {
-      throw new CredentialCryptoError("No credential stored.");
-    }
-    accessToken = decryptCredential(input.connection.access_token_ciphertext);
-  } catch {
-    return fail("Could not decrypt the stored WhatsApp credential.", 0);
+  if (input.connection.provider !== "vobiz" || !input.connection.vobiz_channel_id) {
+    return fail("This WhatsApp number must be connected again through Vobiz.", 0);
   }
+  const channelId = input.connection.vobiz_channel_id;
 
-  // Records Meta's HTTP status for the latest attempt (null: no response).
-  let httpStatus: number | null = null;
-  const baseFetch = deps.fetchImpl ?? fetch;
-  const trackingFetch: typeof fetch = async (...args) => {
-    httpStatus = null;
-    const res = await baseFetch(...args);
-    httpStatus = res.status;
-    return res;
-  };
-  const client = new MetaWhatsAppClient({
-    appId: config.appId,
-    appSecret: config.appSecret,
-    graphApiVersion: config.graphApiVersion,
-    fetchImpl: trackingFetch,
+  const client = new VobizWhatsAppClient({
+    ...config,
+    fetchImpl: deps.fetchImpl,
     timeoutMs: SEND_TIMEOUT_MS,
   });
   const sleep = deps.sleep ?? defaultSleep;
@@ -170,53 +163,52 @@ export async function deliverWhatsAppMessage(
   let lastError = "Unknown WhatsApp send error.";
   for (let attempt = 1; attempt <= WHATSAPP_SEND_MAX_ATTEMPTS; attempt++) {
     try {
-      const { messageId } =
-        input.payload.kind === "text"
-          ? await client.sendTextMessage(
-              input.connection.phone_number_id,
-              input.to,
-              input.payload.body,
-              accessToken,
-            )
-          : await client.sendTemplateMessage(
-              input.connection.phone_number_id,
-              input.to,
-              input.payload.name,
-              input.payload.languageCode,
-              input.payload.bodyParams,
-              accessToken,
-            );
+      const sent = await client.sendMessage({
+        channelId,
+        wabaId: input.connection.waba_id,
+        to: input.to,
+        payload: input.payload,
+      });
+      // Vobiz accepted it (201, status "pending"). The wamid that delivery
+      // statuses refer to may still be null; Vobiz's own id is always kept.
+      const { data: current } = await supabaseAdmin
+        .from("whatsapp_messages")
+        .select("metadata")
+        .eq("id", input.messageRowId)
+        .maybeSingle();
+      const metadata = (current?.metadata ?? {}) as Record<string, Json>;
       const { error: writeError } = await supabaseAdmin
         .from("whatsapp_messages")
         .update({
           status: "sent",
-          wa_message_id: messageId,
+          wa_message_id: sent.metaMessageId,
           attempts: attempt,
           error_message: null,
+          metadata: { ...metadata, vobiz_message_id: sent.id } as Json,
         })
         .eq("id", input.messageRowId);
       if (writeError) {
-        // Delivered by Meta, but not recorded: say so in the logs (ids only).
+        // Accepted by Vobiz, but not recorded: say so in the logs (ids only).
         console.error("whatsapp_outbound:sent_but_unrecorded", {
           messageRowId: input.messageRowId,
-          waMessageId: messageId,
+          vobizMessageId: sent.id,
         });
       }
-      return { outcome: "sent", waMessageId: messageId };
+      return { outcome: "sent", waMessageId: sent.metaMessageId, providerMessageId: sent.id };
     } catch (err) {
-      lastError = err instanceof MetaApiError ? err.message : "Unknown WhatsApp send error.";
-      if (!isRetryable(err, httpStatus) || attempt === WHATSAPP_SEND_MAX_ATTEMPTS) {
+      lastError = err instanceof VobizApiError ? err.message : "Unknown WhatsApp send error.";
+      if (!isRetryable(err) || attempt === WHATSAPP_SEND_MAX_ATTEMPTS) {
         console.warn("whatsapp_outbound:send_failed", {
           messageRowId: input.messageRowId,
           attempt,
-          status: httpStatus,
+          status: err instanceof VobizApiError ? err.status : null,
         });
-        const status: number | null = httpStatus;
-        if (status === null || (status >= 200 && status < 300)) {
+        // No response, or a 2xx without a message id: Vobiz may have taken it.
+        if (!(err instanceof VobizApiError) || err.kind !== "http") {
           return unknownOutcome(lastError, attempt);
         }
-        // Retryable later only when Meta answered 429/5xx: it didn't accept the message.
-        return fail(lastError, attempt, isRetryable(err, status));
+        // Retryable later only when Vobiz answered 429/5xx: it didn't accept the message.
+        return fail(lastError, attempt, isRetryable(err));
       }
       await sleep(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));
     }
@@ -244,7 +236,7 @@ export type SendConversationMessageOutcome =
       outcome: "failed";
       messageRowId: string;
       error: string;
-      /** Meta may already have the message: the row stays 'queued' and the key stays blocked. */
+      /** Vobiz may already have the message: the row stays 'queued' and the key stays blocked. */
       ambiguous?: boolean | undefined;
     };
 
@@ -314,7 +306,7 @@ export async function sendWhatsAppConversationMessage(
 
   const { data: connection, error: connError } = await supabaseAdmin
     .from("whatsapp_connections")
-    .select("id, organization_id, business_id, phone_number_id, access_token_ciphertext, status")
+    .select(OUTBOUND_CONNECTION_COLUMNS)
     .eq("id", conversation.whatsapp_connection_id)
     .eq("organization_id", input.organizationId)
     .maybeSingle();

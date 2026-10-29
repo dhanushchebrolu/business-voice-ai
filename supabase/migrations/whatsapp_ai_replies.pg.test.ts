@@ -1,6 +1,6 @@
 import { test, describe, before, after, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { createHmac, randomBytes, randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { createServer, request, type Server } from "node:http";
@@ -15,14 +15,13 @@ import {
   type Cluster,
   type RunResult,
 } from "./pg-test-cluster.ts";
-import { processInboundWhatsAppWebhook } from "../../src/lib/whatsapp/whatsapp-inbound.server.ts";
+import { processVobizWhatsAppWebhook } from "../../src/lib/whatsapp/whatsapp-inbound.server.ts";
 import { sendWhatsAppConversationMessage } from "../../src/lib/whatsapp/whatsapp-outbound.server.ts";
 import {
   replyToInboundWhatsAppMessage,
   recoverPendingWhatsAppReplies,
   STALE_CLAIM_MS,
 } from "../../src/lib/whatsapp/whatsapp-ai-reply.server.ts";
-import { encryptCredential } from "../../src/lib/whatsapp/whatsapp-token-crypto.server.ts";
 
 /**
  * 20261019090000_whatsapp_ai_replies.sql on a real PostgreSQL with every
@@ -140,28 +139,24 @@ before(async () => {
     }
   }
 
-  process.env["META_APP_ID"] = "test-app";
-  process.env["META_APP_SECRET"] = "test-secret";
-  process.env["META_WHATSAPP_CONFIG_ID"] = "test-config";
-  process.env["META_GRAPH_API_VERSION"] = "v23.0";
-  process.env["WHATSAPP_CREDENTIAL_ENCRYPTION_KEY"] = randomBytes(32).toString("base64");
-  const ciphertext = encryptCredential("test-access-token");
+  process.env["VOBIZ_AUTH_ID"] = "MA_TEST";
+  process.env["VOBIZ_AUTH_TOKEN"] = "vobiz-test-token";
 
   const seed = sql(`
     INSERT INTO public.organizations (id, name, owner_id) VALUES
       ('${ORG}', 'Smile Dental', '${OWNER}'), ('${OTHER_ORG}', 'Other Clinic', '${OTHER_USER}');
-    INSERT INTO public.organization_members (organization_id, user_id) VALUES
-      ('${ORG}', '${OWNER}'), ('${OTHER_ORG}', '${OTHER_USER}');
+    INSERT INTO public.organization_members (organization_id, user_id, role) VALUES
+      ('${ORG}', '${OWNER}', 'owner'), ('${OTHER_ORG}', '${OTHER_USER}', 'owner');
     INSERT INTO public.businesses (id, organization_id, name, timezone) VALUES
       ('${BIZ}', '${ORG}', 'Smile Dental', 'Asia/Kolkata'),
       ('${OTHER_BIZ}', '${OTHER_ORG}', 'Other Clinic', 'Asia/Kolkata');
     INSERT INTO public.agent_configs (id, organization_id, business_id) VALUES
       ('${AGENT}', '${ORG}', '${BIZ}'), ('${OTHER_AGENT}', '${OTHER_ORG}', '${OTHER_BIZ}');
     INSERT INTO public.whatsapp_connections
-      (id, organization_id, business_id, agent_config_id, waba_id, phone_number_id, status, access_token_ciphertext)
+      (id, organization_id, business_id, agent_config_id, waba_id, phone_number_id, status, provider, vobiz_channel_id)
     VALUES
-      ('${CONN}', '${ORG}', '${BIZ}', '${AGENT}', 'waba-1', '${PN}', 'connected', '${ciphertext}'),
-      ('${OTHER_CONN}', '${OTHER_ORG}', '${OTHER_BIZ}', '${OTHER_AGENT}', 'waba-2', '${OTHER_PN}', 'connected', '${ciphertext}');
+      ('${CONN}', '${ORG}', '${BIZ}', '${AGENT}', 'waba-1', '${PN}', 'connected', 'vobiz', 'ch-1'),
+      ('${OTHER_CONN}', '${OTHER_ORG}', '${OTHER_BIZ}', '${OTHER_AGENT}', 'waba-2', '${OTHER_PN}', 'connected', 'vobiz', 'ch-2');
   `);
   if (seed.status !== 0) {
     setupFailure = `seed failed: ${seed.stderr}`;
@@ -374,13 +369,22 @@ describe("migration: a connection's agent must be in the connection's organizati
   );
 
   pgTest("their own agent, or none, is fine", () => {
-    for (const value of ["NULL", `'${AGENT}'`]) {
+    for (const [value, expected] of [
+      ["NULL", null],
+      [`'${AGENT}'`, AGENT],
+    ] as const) {
       const r = asUser(
         "authenticated",
         OWNER,
         `UPDATE public.whatsapp_connections SET agent_config_id = ${value} WHERE id = '${CONN}';`,
       );
       assert.equal(r.status, 0, r.stderr);
+      assert.deepEqual(
+        rows(
+          `SELECT coalesce(agent_config_id::text, 'none') FROM public.whatsapp_connections WHERE id = '${CONN}';`,
+        ),
+        [expected ?? "none"],
+      );
     }
   });
 
@@ -471,7 +475,13 @@ function fakeMeta(status = 200) {
     sent.push({ to: payload.to, body: payload.text?.body ?? payload.template?.name });
     return new Response(
       JSON.stringify(
-        status === 200 ? { messages: [{ id: `wamid.out.${randomUUID()}` }] } : { error: {} },
+        status === 200
+          ? {
+              id: `vmsg.${randomUUID()}`,
+              status: "pending",
+              meta_message_id: `wamid.out.${randomUUID()}`,
+            }
+          : { error: {} },
       ),
       { status },
     );
@@ -480,24 +490,25 @@ function fakeMeta(status = 200) {
 }
 const okAi = (async () => ({ reply: "We open at 9am." })) as never;
 
-function webhookBody(messages: unknown[], phoneNumberId = PN, statuses: unknown[] = []) {
+/** A Vobiz delivery wrapping one Cloud API change value; pass eventId to model a redelivery. */
+function webhookBody(
+  messages: unknown[],
+  phoneNumberId = PN,
+  statuses: unknown[] = [],
+  eventId: string = randomUUID(),
+) {
   return JSON.stringify({
-    object: "whatsapp_business_account",
-    entry: [
-      {
-        changes: [
-          {
-            field: "messages",
-            value: {
-              metadata: { phone_number_id: phoneNumberId },
-              contacts: [{ wa_id: "919800000001", profile: { name: "Asha" } }],
-              messages,
-              statuses,
-            },
-          },
-        ],
-      },
-    ],
+    event_id: eventId,
+    event_type: statuses.length > 0 ? "message.status" : "message.inbound",
+    account_id: "MA_TEST",
+    occurred_at: new Date().toISOString(),
+    payload: {
+      messaging_product: "whatsapp",
+      metadata: { phone_number_id: phoneNumberId },
+      contacts: [{ wa_id: "919800000001", profile: { name: "Asha" } }],
+      messages,
+      statuses,
+    },
   });
 }
 const text = (id: string, body: string, ts: number, from = "919800000001") => ({
@@ -515,14 +526,12 @@ describe("real PostgREST: inbound webhook", () => {
       const now = Math.floor(Date.now() / 1000);
       const newer = `wamid.${randomUUID()}`;
       const older = `wamid.${randomUUID()}`;
-      const first = await processInboundWhatsAppWebhook(client, {
+      const first = await processVobizWhatsAppWebhook(client, {
         rawBody: webhookBody([text(newer, "newer", now - 60)]),
-        eventId: randomUUID(),
       });
       assert.equal(first.newInboundTextMessageIds.length, 1);
-      const late = await processInboundWhatsAppWebhook(client, {
+      const late = await processVobizWhatsAppWebhook(client, {
         rawBody: webhookBody([text(older, "older", now - 600), text(newer, "newer", now - 60)]),
-        eventId: randomUUID(),
       });
       assert.equal(late.newInboundTextMessageIds.length, 1, "only the late message is new");
       assert.deepEqual(
@@ -531,11 +540,10 @@ describe("real PostgREST: inbound webhook", () => {
         ),
         [`${now - 60}|newer`],
       );
-      const evt = randomUUID();
-      const body = webhookBody([text(`wamid.${randomUUID()}`, "x", now)]);
-      await processInboundWhatsAppWebhook(client, { rawBody: body, eventId: evt });
+      const body = webhookBody([text(`wamid.${randomUUID()}`, "x", now)], PN, [], randomUUID());
+      await processVobizWhatsAppWebhook(client, { rawBody: body });
       assert.equal(
-        (await processInboundWhatsAppWebhook(client, { rawBody: body, eventId: evt })).outcome,
+        (await processVobizWhatsAppWebhook(client, { rawBody: body })).outcome,
         "duplicate",
       );
     },
@@ -547,9 +555,8 @@ describe("real PostgREST: inbound webhook", () => {
     sql(`INSERT INTO public.whatsapp_messages (organization_id, whatsapp_connection_id, conversation_id, wa_message_id, direction, status)
          VALUES ('${ORG}', '${CONN}', '${conv}', '${wamid}', 'outbound', 'sent');`);
     const status = (s: string, pn = PN) =>
-      processInboundWhatsAppWebhook(client, {
+      processVobizWhatsAppWebhook(client, {
         rawBody: webhookBody([], pn, [{ id: wamid, status: s }]),
-        eventId: randomUUID(),
       });
     await status("read", OTHER_PN);
     const current = () =>

@@ -1,95 +1,13 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import {
-  verifyWebhookHandshake,
-  verifyWhatsAppWebhookSignature,
-  processInboundWhatsAppWebhook,
-} from "./whatsapp-inbound.server.ts";
-import { signMetaWebhookBody } from "../meta/meta-webhook-signature.server.ts";
+import { processVobizWhatsAppWebhook } from "./whatsapp-inbound.server.ts";
 import { createFakeDb } from "./whatsapp-test-db.ts";
 
-const ORIGINAL_ENV = { ...process.env };
-
-function resetEnv() {
-  for (const key of Object.keys(process.env)) {
-    if (!(key in ORIGINAL_ENV)) delete process.env[key];
-  }
-  Object.assign(process.env, ORIGINAL_ENV);
-}
-
-describe("verifyWebhookHandshake", () => {
-  test("returns the challenge when mode is subscribe and the token matches", () => {
-    process.env["WHATSAPP_WEBHOOK_VERIFY_TOKEN"] = "secret-token";
-    try {
-      const result = verifyWebhookHandshake({
-        mode: "subscribe",
-        verifyToken: "secret-token",
-        challenge: "12345",
-      });
-      assert.equal(result, "12345");
-    } finally {
-      resetEnv();
-    }
-  });
-
-  test("returns null when the token does not match", () => {
-    process.env["WHATSAPP_WEBHOOK_VERIFY_TOKEN"] = "secret-token";
-    try {
-      const result = verifyWebhookHandshake({
-        mode: "subscribe",
-        verifyToken: "wrong-token",
-        challenge: "12345",
-      });
-      assert.equal(result, null);
-    } finally {
-      resetEnv();
-    }
-  });
-
-  test("returns null when mode is not subscribe", () => {
-    process.env["WHATSAPP_WEBHOOK_VERIFY_TOKEN"] = "secret-token";
-    try {
-      const result = verifyWebhookHandshake({
-        mode: "unsubscribe",
-        verifyToken: "secret-token",
-        challenge: "12345",
-      });
-      assert.equal(result, null);
-    } finally {
-      resetEnv();
-    }
-  });
-
-  test("returns null when the env var is not configured, never accidentally matching an empty token", () => {
-    delete process.env["WHATSAPP_WEBHOOK_VERIFY_TOKEN"];
-    const result = verifyWebhookHandshake({
-      mode: "subscribe",
-      verifyToken: "",
-      challenge: "12345",
-    });
-    assert.equal(result, null);
-  });
-});
-
-describe("verifyWhatsAppWebhookSignature", () => {
-  test("verifies against META_APP_SECRET and fails closed without it", () => {
-    const body = '{"entry":[]}';
-    process.env["META_APP_SECRET"] = "app-secret";
-    try {
-      assert.equal(
-        verifyWhatsAppWebhookSignature(body, signMetaWebhookBody(body, "app-secret")),
-        true,
-      );
-      assert.equal(verifyWhatsAppWebhookSignature(body, signMetaWebhookBody(body, "nope")), false);
-      assert.equal(verifyWhatsAppWebhookSignature(body, null), false);
-    } finally {
-      resetEnv();
-    }
-    delete process.env["META_APP_SECRET"];
-    assert.equal(verifyWhatsAppWebhookSignature(body, signMetaWebhookBody(body, "")), false);
-    resetEnv();
-  });
-});
+/**
+ * Inbound processing of Vobiz deliveries: the envelope (event_id,
+ * event_type, payload) wraps the WhatsApp Cloud API change value. The
+ * signature check itself is in vobiz-webhook.server.test.ts and the route.
+ */
 
 const ORG_A = "org-a";
 const ORG_B = "org-b";
@@ -108,25 +26,25 @@ function textMessage(id: string, body: string, timestamp = "1735000000", from = 
   return { id, from, type: "text", timestamp, text: { body } };
 }
 
-function webhook(phoneNumberId: string, value: Record<string, unknown>) {
+let eventSeq = 0;
+/** A Vobiz delivery for one Cloud API change value; a fixed eventId models a redelivery. */
+function webhook(phoneNumberId: string, value: Record<string, unknown>, eventId?: string) {
   return JSON.stringify({
-    object: "whatsapp_business_account",
-    entry: [
-      {
-        id: "WABA",
-        changes: [
-          { field: "messages", value: { metadata: { phone_number_id: phoneNumberId }, ...value } },
-        ],
-      },
-    ],
+    event_id: eventId ?? `evt-${++eventSeq}`,
+    event_type: "statuses" in value ? "message.status" : "message.inbound",
+    account_id: "MA_TEST",
+    occurred_at: "2026-10-27T10:00:00Z",
+    payload: {
+      messaging_product: "whatsapp",
+      metadata: { phone_number_id: phoneNumberId },
+      ...value,
+    },
   });
 }
 
-let eventSeq = 0;
-const run = (client: never, rawBody: string) =>
-  processInboundWhatsAppWebhook(client, { rawBody, eventId: `evt-${++eventSeq}` });
+const run = (client: never, rawBody: string) => processVobizWhatsAppWebhook(client, { rawBody });
 
-describe("processInboundWhatsAppWebhook — inbound messages", () => {
+describe("processVobizWhatsAppWebhook — inbound messages", () => {
   test("stores a new inbound text under the connection's own organization and reports it for an AI reply", async () => {
     const db = createFakeDb(seed());
     const result = await run(
@@ -153,17 +71,18 @@ describe("processInboundWhatsAppWebhook — inbound messages", () => {
 
   test("an exact redelivery is a duplicate: nothing stored twice, nothing reported for a reply", async () => {
     const db = createFakeDb(seed());
-    const body = webhook("PN_A", { messages: [textMessage("wamid.1", "Hello")] });
-    await processInboundWhatsAppWebhook(db.client, { rawBody: body, eventId: "same" });
-    const again = await processInboundWhatsAppWebhook(db.client, {
-      rawBody: body,
-      eventId: "same",
+    const body = webhook("PN_A", { messages: [textMessage("wamid.1", "Hello")] }, "same");
+    await run(db.client, body);
+    const again = await run(db.client, body);
+    assert.deepEqual(again, {
+      outcome: "duplicate",
+      newInboundTextMessageIds: [],
+      eventType: "message.inbound",
     });
-    assert.deepEqual(again, { outcome: "duplicate", newInboundTextMessageIds: [] });
     assert.equal(db.rows("whatsapp_messages").length, 1);
   });
 
-  test("the same message in a different payload (Meta batches differently on retry) is stored once and not re-reported", async () => {
+  test("the same message in a different event (a retried or re-batched delivery) is stored once and not re-reported", async () => {
     const db = createFakeDb(seed());
     const first = await run(
       db.client,
@@ -250,7 +169,7 @@ describe("processInboundWhatsAppWebhook — inbound messages", () => {
     assert.equal(db.rows("whatsapp_messages").length, 0);
   });
 
-  test("partial failure: the claim is released and the error propagates so Meta's retry is processed", async () => {
+  test("partial failure: the claim is released and the error propagates so Vobiz's retry is processed", async () => {
     let failMessages = true;
     const db = createFakeDb(seed(), {
       failWhen: (table, op) =>
@@ -258,20 +177,60 @@ describe("processInboundWhatsAppWebhook — inbound messages", () => {
           ? { code: "08006", message: "connection failure" }
           : null,
     });
-    const body = webhook("PN_A", { messages: [textMessage("wamid.1", "Hello")] });
-    await assert.rejects(
-      processInboundWhatsAppWebhook(db.client, { rawBody: body, eventId: "e1" }),
-    );
+    const body = webhook("PN_A", { messages: [textMessage("wamid.1", "Hello")] }, "e1");
+    await assert.rejects(run(db.client, body));
     assert.equal(db.rows("webhook_events").length, 0, "claim released");
     failMessages = false;
-    const retry = await processInboundWhatsAppWebhook(db.client, { rawBody: body, eventId: "e1" });
+    const retry = await run(db.client, body);
     assert.equal(retry.outcome, "processed");
     assert.equal(retry.newInboundTextMessageIds.length, 1);
     assert.ok(db.rows("webhook_events")[0]!["processed_at"]);
   });
 });
 
-describe("processInboundWhatsAppWebhook — delivery statuses", () => {
+describe("processVobizWhatsAppWebhook — envelope", () => {
+  test("call.* and unknown events are acknowledged and ignored, never stored", async () => {
+    const db = createFakeDb(seed());
+    for (const eventType of ["call.connect", "contact.updated"]) {
+      const raw = JSON.stringify({
+        event_id: `x-${eventType}`,
+        event_type: eventType,
+        payload: { metadata: { phone_number_id: "PN_A" }, messages: [textMessage("wamid.c", "x")] },
+      });
+      const result = await run(db.client, raw);
+      assert.equal(result.outcome, "ignored");
+      assert.equal(result.eventType, eventType);
+    }
+    assert.equal(db.rows("whatsapp_messages").length, 0);
+    assert.equal(db.rows("webhook_events").length, 0);
+  });
+
+  test("a body that isn't a Vobiz envelope is ignored, never guessed at", async () => {
+    const db = createFakeDb(seed());
+    for (const raw of [
+      "not json",
+      JSON.stringify({ entry: [] }),
+      JSON.stringify({ event_id: "e" }),
+    ]) {
+      assert.equal((await run(db.client, raw)).outcome, "ignored");
+    }
+    assert.equal(db.rows("whatsapp_messages").length, 0);
+  });
+
+  test("the event is claimed under Vobiz's event_id with its event_type", async () => {
+    const db = createFakeDb(seed());
+    await run(
+      db.client,
+      webhook("PN_A", { messages: [textMessage("wamid.9", "Hi")] }, "evt-claim"),
+    );
+    const [claim] = db.rows("webhook_events");
+    assert.equal(claim!["provider"], "vobiz_whatsapp");
+    assert.equal(claim!["event_id"], "evt-claim");
+    assert.equal(claim!["event_type"], "message.inbound");
+  });
+});
+
+describe("processVobizWhatsAppWebhook — delivery statuses", () => {
   function withOutbound(status: string, connection = "conn-a", org = ORG_A) {
     const s = seed() as Record<string, Record<string, unknown>[]>;
     s["whatsapp_messages"] = [

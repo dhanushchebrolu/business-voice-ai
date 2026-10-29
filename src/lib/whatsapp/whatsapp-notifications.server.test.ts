@@ -9,7 +9,6 @@ import {
   STALE_AFTER_MS,
 } from "./whatsapp-notifications.server.ts";
 import { sendWhatsAppPaymentMessage } from "./whatsapp-payments.server.ts";
-import { encryptCredential } from "./whatsapp-token-crypto.server.ts";
 import { createFakeDb } from "./whatsapp-test-db.ts";
 
 /**
@@ -18,17 +17,13 @@ import { createFakeDb } from "./whatsapp-test-db.ts";
  */
 
 const ENV = {
-  META_APP_ID: "test-app",
-  META_APP_SECRET: "test-secret",
-  META_WHATSAPP_CONFIG_ID: "test-config",
-  META_GRAPH_API_VERSION: "v23.0",
+  VOBIZ_AUTH_ID: "MA_TEST",
+  VOBIZ_AUTH_TOKEN: "vobiz-test-token",
 };
 const saved: Record<string, string | undefined> = {};
 beforeEach(() => {
-  for (const k of [...Object.keys(ENV), "WHATSAPP_CREDENTIAL_ENCRYPTION_KEY"])
-    saved[k] = process.env[k];
+  for (const k of Object.keys(ENV)) saved[k] = process.env[k];
   Object.assign(process.env, ENV);
-  process.env["WHATSAPP_CREDENTIAL_ENCRYPTION_KEY"] = randomBytes(32).toString("base64");
 });
 afterEach(() => {
   for (const [k, v] of Object.entries(saved)) {
@@ -53,7 +48,15 @@ function fakeMeta(statuses: (number | "timeout")[] = [200]) {
     }
     sent.push(JSON.parse(String(init.body)));
     return new Response(
-      JSON.stringify(status === 200 ? { messages: [{ id: `wamid.N${sent.length}` }] } : {}),
+      JSON.stringify(
+        status === 200
+          ? {
+              id: `vmsg.N${sent.length}`,
+              status: "pending",
+              meta_message_id: `wamid.N${sent.length}`,
+            }
+          : {},
+      ),
       { status },
     );
   }) as unknown as typeof fetch;
@@ -107,7 +110,8 @@ function seed(over: { notificationsEnabled?: boolean; booking?: Record<string, u
         status: "connected",
         notifications_enabled: over.notificationsEnabled ?? true,
         transactional_consent_basis: "Customers agree to WhatsApp updates when they book.",
-        access_token_ciphertext: encryptCredential("token-a"),
+        provider: "vobiz",
+        vobiz_channel_id: "ch-token-a",
       },
     ],
     whatsapp_templates: TEMPLATES,
@@ -169,7 +173,7 @@ describe("booking notifications", () => {
       type: string;
       template: { name: string; components: { parameters: { text: string }[] }[] };
     };
-    assert.equal(body.to, "919876543210");
+    assert.equal(body.to, "+919876543210");
     assert.equal(body.type, "template");
     assert.equal(body.template.name, "booking_confirmed_v1");
     const params = body.template.components[0]!.parameters.map((p) => p.text);

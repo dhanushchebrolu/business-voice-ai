@@ -40,7 +40,17 @@ const UNIQUE_KEYS: Record<
       where: (r) => LIVE_STATUSES.has(String(r["status"])),
     },
   ],
-  whatsapp_connections: [{ cols: ["phone_number_id"], partial: true }],
+  whatsapp_connections: [
+    { cols: ["phone_number_id"], partial: true, where: (r) => r["status"] !== "disconnected" },
+    { cols: ["vobiz_channel_id"], partial: true, where: (r) => r["status"] !== "disconnected" },
+  ],
+  whatsapp_number_orders: [
+    {
+      cols: ["organization_id", "phone_number"],
+      where: (r) => ["requested", "pending", "completed", "unknown"].includes(String(r["status"])),
+    },
+    { cols: ["vobiz_order_id"], partial: true },
+  ],
   whatsapp_notifications: [{ cols: ["dedupe_key"] }],
   whatsapp_campaign_recipients: [{ cols: ["campaign_id", "wa_id"] }],
   whatsapp_suppressions: [{ cols: ["business_id", "wa_id"] }],

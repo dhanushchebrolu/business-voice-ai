@@ -13,7 +13,6 @@ import {
   HISTORY_LIMIT,
   AI_REPLY_ATTEMPTS,
 } from "./whatsapp-ai-reply.server.ts";
-import { encryptCredential } from "./whatsapp-token-crypto.server.ts";
 import { latestConsent } from "./whatsapp-consent.server.ts";
 import { createFakeDb } from "./whatsapp-test-db.ts";
 
@@ -22,11 +21,8 @@ const NOW = new Date("2026-10-18T12:00:00.000Z");
 const minutesAgo = (m: number) => new Date(NOW.getTime() - m * 60_000).toISOString();
 
 beforeEach(() => {
-  process.env["META_APP_ID"] = "test-app";
-  process.env["META_APP_SECRET"] = "test-secret";
-  process.env["META_WHATSAPP_CONFIG_ID"] = "test-config";
-  process.env["META_GRAPH_API_VERSION"] = "v23.0";
-  process.env["WHATSAPP_CREDENTIAL_ENCRYPTION_KEY"] = randomBytes(32).toString("base64");
+  process.env["VOBIZ_AUTH_ID"] = "MA_TEST";
+  process.env["VOBIZ_AUTH_TOKEN"] = "vobiz-test-token";
 });
 afterEach(() => {
   for (const key of Object.keys(process.env)) if (!(key in ORIGINAL_ENV)) delete process.env[key];
@@ -41,7 +37,11 @@ function fakeMeta(status = 200) {
     return new Response(
       JSON.stringify(
         status === 200
-          ? { messages: [{ id: `wamid.R${sent.length}` }] }
+          ? {
+              id: `vmsg.R${sent.length}`,
+              status: "pending",
+              meta_message_id: `wamid.R${sent.length}`,
+            }
           : { error: { message: "nope" } },
       ),
       { status },
@@ -85,7 +85,8 @@ function seed(
         phone_number_id: "PN_A",
         status: over.connectionStatus ?? "connected",
         agent_config_id: over.agentConfigId === undefined ? "agent-a" : over.agentConfigId,
-        access_token_ciphertext: encryptCredential("token-a"),
+        provider: "vobiz",
+        vobiz_channel_id: "ch-token-a",
       },
     ],
     agent_configs: [
@@ -166,8 +167,8 @@ describe("replyToInboundWhatsAppMessage", () => {
     });
     assert.deepEqual(meta.sent, [
       {
-        url: "https://graph.facebook.com/v23.0/PN_A/messages",
-        to: "919876543210",
+        url: "https://api.vobiz.ai/api/v1/messaging/messages",
+        to: "+919876543210",
         body: "We open at 9am tomorrow.",
       },
     ]);

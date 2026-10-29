@@ -288,7 +288,7 @@ export async function replyToInboundWhatsAppMessage(
   const { data: connection, error: connError } = await supabaseAdmin
     .from("whatsapp_connections")
     .select(
-      "id, organization_id, business_id, phone_number_id, access_token_ciphertext, status, agent_config_id",
+      "id, organization_id, business_id, phone_number_id, waba_id, status, provider, vobiz_channel_id, agent_config_id",
     )
     .eq("id", inbound.whatsapp_connection_id)
     .eq("organization_id", org)
