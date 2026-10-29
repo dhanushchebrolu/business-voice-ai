@@ -17,6 +17,7 @@ import {
   callerBookingIntentAnyLanguage,
 } from "./voice-call-outcomes.ts";
 import { FALLBACK_MESSAGES } from "./voice-fallback-messages.ts";
+import { MISSING_DETAIL_QUESTION } from "./voice-intent-lexicon.ts";
 import type { AgentSnapshot } from "./agent-instructions.ts";
 import type { ServiceRow } from "./service-matching.ts";
 import type { CallerBooking } from "./calendar/caller-bookings.server.ts";
@@ -452,10 +453,11 @@ describe("booking authorization through the runtime, in any language", () => {
     // The caller never hears the generic question — only the runtime's
     // explicit booking question — so a "yes" to it is real consent.
     assert.doesNotMatch(joined(said), /कुछ और जानना है/, joined(said));
-    const readBack = callOutcomeLine("hi-IN", "notBookedYetConfirm", {
+    const readBack = callOutcomeLine("hi-IN", "confirmBooking", {
       service: "Root Canal Treatment",
       date: DATE,
       time: "19:00",
+      customerName: KNOWN.customer_name,
     })!;
     assert.ok(joined(said).includes(squash(readBack)), joined(said));
     assert.equal(calls("book_appointment").length, 0);
@@ -598,17 +600,18 @@ describe("'not booked yet' with every detail known asks a question a bare yes ca
     const said = await call.turn(language === "hi-IN" ? "ठीक है जी" : "సరే అండి", LYING, language);
     return { ...call, said };
   }
-  const readBack = (language: string) =>
-    callOutcomeLine(language, "notBookedYetConfirm", {
+  const readBack = (language: string, customerName: string) =>
+    callOutcomeLine(language, "confirmBooking", {
       service: "Root Canal Treatment",
       date: DATE,
       time: "19:00",
+      customerName,
     })!;
 
   test("the caller hears the details read back with the runtime's booking question, and nothing is booked", async () => {
     const { callId, calls, said } = await upToNotBookedYet("hi-IN", HINDI_NAME);
     assert.equal(calls("book_appointment").length, 0);
-    assert.ok(joined(said).includes(squash(readBack("hi-IN"))), joined(said));
+    assert.ok(joined(said).includes(squash(readBack("hi-IN", KNOWN.customer_name))), joined(said));
     assert.doesNotMatch(joined(said), /all booked|Shall I book/i);
     await terminateRuntimeSession(callId, "test cleanup");
   });
@@ -633,7 +636,7 @@ describe("'not booked yet' with every detail known asks a question a bare yes ca
     }
   });
 
-  test("with a detail still missing, the plain line is said and a bare yes books nothing", async () => {
+  test("with a detail still missing, only that detail is asked for and a bare yes books nothing", async () => {
     const { callId, turn, calls } = await openBookingCall();
     await turn(
       "Root canal treatment today at 7 PM",
@@ -645,10 +648,7 @@ describe("'not booked yet' with every detail known asks a question a bare yes ca
     );
     const noName = `Great news, you're all booked!\n${marker({ ...KNOWN, customer_name: null, ready_to_book: true })}`;
     const said = await turn("ठीक है जी बताइए", noName, "hi-IN");
-    assert.ok(
-      joined(said).includes(squash(callOutcomeLine("hi-IN", "notBookedYet")!)),
-      joined(said),
-    );
+    assert.ok(joined(said).includes(MISSING_DETAIL_QUESTION["hi-IN"].name), joined(said));
     const chunks = await turn("हाँ", noName, "hi-IN");
     assert.equal(calls("book_appointment").length, 0, joined(chunks));
     await terminateRuntimeSession(callId, "test cleanup");

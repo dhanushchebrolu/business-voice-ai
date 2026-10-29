@@ -234,11 +234,35 @@ describe("the 2026-10-29 call, end to end", () => {
     assert.equal(calls("book_appointment").length, 0, "nothing booked without a phone number");
     assert.doesNotMatch(text(yes), /कन्फर्म हो गया/, "no success before the backend says so");
 
-    // "Yes, this number" in Hindi settles the phone. The booking the caller
-    // already said yes to is now complete, so it is made — once — and only
+    assert.doesNotMatch(
+      text(yes),
+      /पुष्टि की जा रही/,
+      "no 'confirming…' for a yes that books nothing",
+    );
+
+    // "Yes, this number" settles the phone — consent to the number, not the
+    // final confirmation: the runtime reads the whole booking back once and
+    // asks, even though the model's state block says "ready to book".
+    const summary = await turn(
+      "हाँ जी, इसी नंबर पर",
+      "आपका अपॉइंटमेंट बुक हो गया है!" + marker({ customer_name: "Dhanush", ready_to_book: true }),
+      "hi-IN",
+    );
+    assert.equal(calls("book_appointment").length, 0, "consent is not the final confirmation");
+    assert.equal(
+      text(summary),
+      callOutcomeLine("hi-IN", "confirmBooking", {
+        service: "Cleaning",
+        date: TODAY,
+        time: "16:00",
+        customerName: "Dhanush",
+      }),
+    );
+
+    // The caller's yes to that summary books exactly it — once — and only
     // the stored outcome is announced, never the model's own claim.
     const book = await turn(
-      "हाँ जी, इसी नंबर पर",
+      "हाँ, बुक कर दो",
       "आपका अपॉइंटमेंट बुक हो गया है!" + marker({ customer_name: "Dhanush", ready_to_book: true }),
       "hi-IN",
     );
@@ -284,17 +308,52 @@ describe("the 2026-10-29 call, end to end", () => {
       "te-IN",
     );
     await turn("నా పేరు ధనుష్", "ధన్యవాదాలు." + marker({ customer_name: "Dhanush" }), "te-IN");
-    await turn("అవును", "సరే." + marker({ customer_name: "Dhanush" }), "te-IN");
-    // Consent to the number completes the booking the caller said yes to;
-    // the backend fails it, and the model's "booked!" is never said.
-    const chunks = await turn(
+    const asked = await turn("అవును", "సరే." + marker({ customer_name: "Dhanush" }), "te-IN");
+    assert.ok(text(asked).includes(CALLER_ID_QUESTION_BY_LANGUAGE["te-IN"]), text(asked));
+    const summary = await turn(
       "అవును అండి",
+      "సరే." + marker({ customer_name: "Dhanush", ready_to_book: true }),
+      "te-IN",
+    );
+    assert.match(text(summary), /బుక్ చేయమంటారా\?/, text(summary));
+    assert.equal(calls("book_appointment").length, 0);
+    // The backend fails the booking; the model's "booked!" is never said.
+    const chunks = await turn(
+      "బుక్ చేయండి",
       "మీ అపాయింట్మెంట్ బుక్ అయింది!" + marker({ customer_name: "Dhanush", ready_to_book: true }),
       "te-IN",
     );
     assert.equal(calls("book_appointment").length, 1, text(chunks));
     assert.doesNotMatch(text(chunks), /బుక్ అయింది!/, text(chunks));
     assert.ok(text(chunks).includes(callOutcomeLine("te-IN", "bookingFailed")!), text(chunks));
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("a yes never confirms details other than the ones read back", async () => {
+    const { callId, turn, calls } = await openCall();
+    await turn("आज शाम चार बजे क्लीनिंग चाहिए", "ज़रूर। आपका नाम?" + marker(), "hi-IN");
+    await turn("मेरा नाम धनुष है", "धन्यवाद।" + marker({ customer_name: "Dhanush" }), "hi-IN");
+    await turn("हाँ", "ठीक है।" + marker({ customer_name: "Dhanush" }), "hi-IN");
+    const summary = await turn(
+      "हाँ, इसी नंबर पर",
+      "ठीक है।" + marker({ customer_name: "Dhanush" }),
+      "hi-IN",
+    );
+    assert.match(text(summary), /Dhanush जी/, text(summary));
+
+    // "Yes — but it's for Ravi": the patient changed, so nothing is booked
+    // and the new details are read back instead.
+    const changed = await turn(
+      "हाँ, पर अपॉइंटमेंट रवि के नाम पर",
+      "ठीक है।" + marker({ customer_name: "Ravi", ready_to_book: true }),
+      "hi-IN",
+    );
+    assert.equal(calls("book_appointment").length, 0, text(changed));
+    assert.match(text(changed), /Ravi जी, Cleaning/, text(changed));
+
+    const booked = await turn("हाँ", "ठीक है।" + marker({ customer_name: "Ravi" }), "hi-IN");
+    assert.equal(calls("book_appointment").length, 1, text(booked));
+    assert.equal(calls("book_appointment")[0]!.input["customerName"], "Ravi");
     await terminateRuntimeSession(callId, "test cleanup");
   });
 

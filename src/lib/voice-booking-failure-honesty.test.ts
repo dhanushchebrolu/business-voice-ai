@@ -556,12 +556,13 @@ describe("languages the runtime can't check: model wording never reports an unsu
       );
       assert.equal(calls("book_appointment").length, 0);
       assert.ok(!spoken.includes(lang.falseClaim), `${lang.name} false claim spoken: ${spoken}`);
-      // Every detail is known, so the runtime's own sentence reads them back
+      // Every detail is known, so the runtime's own summary reads them back
       // and asks to book (a question a bare "yes" can answer).
-      const readBack = callOutcomeLine(lang.code, "notBookedYetConfirm", {
+      const readBack = callOutcomeLine(lang.code, "confirmBooking", {
         service: KNOWN.service,
         date: KNOWN.preferred_date,
         time: KNOWN.preferred_time,
+        customerName: KNOWN.customer_name,
       })!;
       assert.ok(
         spoken.includes(readBack),
@@ -631,7 +632,7 @@ describe("languages the runtime can't check: model wording never reports an unsu
     // Hindi, and the Latin-script claim is still caught on a Hindi call.
     const spoken = await turn("Parking hai kya?", `Aapki booking ho gayi hai!\n${marker(KNOWN)}`);
     assert.doesNotMatch(spoken, /booking ho gayi/i, spoken);
-    assert.match(spoken, /अभी तक कुछ भी बुक नहीं हुआ है/, spoken);
+    assert.match(spoken, /क्या यह अपॉइंटमेंट बुक कर दूँ\?/, spoken);
     await terminateRuntimeSession(callId, "test cleanup");
   });
 

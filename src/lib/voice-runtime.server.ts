@@ -107,6 +107,7 @@ import {
 } from "./voice-call-outcomes.ts";
 import {
   CALLER_ID_QUESTION_BY_LANGUAGE,
+  MISSING_DETAIL_QUESTION,
   asksAboutPhoneNumberAnyLanguage,
   availabilityRequestedAnyLanguage,
   callerIdAnswerAnyLanguage,
@@ -843,6 +844,8 @@ interface Session {
   bookingAuthorizedThisTurn: boolean;
   /** The last booking question the runtime itself asked in a language it can't pattern-check ("…उपलब्ध है। क्या इसे बुक कर दें?") — the only non-English question a bare "yes" can authorize a booking from (callerAuthorizesBooking). */
   runtimeBookingQuestion: string | null;
+  /** The details this turn's confirmation authorizes (see authorizedToBook); null when it authorizes nothing. */
+  authorizedDetails: AuthorizedDetails | null;
   /** A booking was actually confirmed by the booking layer on this call — until then, no reply may tell the caller they're booked. */
   confirmedBookingThisCall: boolean;
   /** The model called (or tried to call) a booking-creation tool on the turn being handled. */
@@ -2197,6 +2200,33 @@ function appointmentSlotKey(s: AppointmentState): string {
   return `${(s.service ?? "").toLowerCase()}|${s.preferredDate ?? ""}|${when}`;
 }
 
+function nameKey(name: string | null): string {
+  return (name ?? "").trim().toLowerCase();
+}
+
+/**
+ * The details a caller's confirmation covers (see handleUserUtterance): the
+ * slot they were asked about, and the name and phone number known then — or,
+ * for an explicit "book it" said together with them ("I'm Dhanush, book
+ * it", "use this number and book it"), the ones this same turn settles.
+ */
+export interface AuthorizedDetails {
+  slot: string;
+  /** Null: the name given in the same breath as an explicit "book it". */
+  name: string | null;
+  /** Null: the number given in the same breath as an explicit "book it". */
+  phone: string | null;
+}
+
+/** Whether this turn's confirmation authorizes booking exactly these details. */
+function authorizedToBook(session: Session, s: AppointmentState): boolean {
+  const a = session.authorizedDetails;
+  if (!session.bookingAuthorizedThisTurn || !a) return false;
+  if (appointmentSlotKey(s) !== a.slot || !s.customerName || !s.phone) return false;
+  if (a.name !== null && nameKey(s.customerName) !== a.name) return false;
+  return a.phone === null || a.phone === s.phone;
+}
+
 /**
  * Smile Dental incident (root canal today at 7 PM): the caller's name was
  * the last required detail. It was saved from the caller's words BEFORE the
@@ -2468,35 +2498,68 @@ function notBookedYetReply(s: AppointmentState, language = "en-IN"): string {
 }
 
 /**
- * notBookedYetReply for this call. When it ends with the runtime's localized
- * booking question (every detail known, another language), that question is
- * recorded so the caller's bare "yes" can answer it (callerAuthorizesBooking).
+ * The booking's short summary and the one question that books it, in the
+ * call's language — recorded as the runtime's own booking question, so the
+ * caller's bare "yes" to it authorizes exactly these details.
+ */
+function bookingSummaryQuestionFor(session: Session): string {
+  const s = session.appointmentState;
+  const language = responseLanguageFor(session);
+  const question =
+    callOutcomeLine(language, "confirmBooking", {
+      service: s.service,
+      date: s.preferredDate,
+      time: s.preferredTime,
+      customerName: s.customerName,
+    }) ?? bookingConfirmationQuestion(s);
+  session.runtimeBookingQuestion = question;
+  log("booking_summary_asked", session, { language });
+  return question;
+}
+
+/**
+ * The one question for the first detail still missing, in a language other
+ * than English — null on an English call (nextMissingDetailQuestion covers
+ * it) or when nothing is missing. The phone number is asked as the caller-ID
+ * question while caller ID is usable, and that is recorded as asked.
+ */
+function missingDetailQuestionFor(session: Session): string | null {
+  const s = session.appointmentState;
+  const language = normalizeVoiceLanguageCode(responseLanguageFor(session));
+  if (!language || language === "en-IN") return null;
+  const questions = MISSING_DETAIL_QUESTION[language];
+  if (!s.service) return questions.service;
+  if (!s.customerName) return questions.name;
+  if (!s.preferredDate) return questions.date;
+  if (!s.preferredTime && !s.wantsNextAvailable) return questions.time;
+  if (s.phone) return null;
+  if (
+    session.callerId &&
+    !s.phoneIssue &&
+    ["not_offered", "offered", "clarifying"].includes(s.callerIdChoice)
+  ) {
+    session.appointmentState = { ...s, callerIdChoice: "offered" };
+    return CALLER_ID_QUESTION_BY_LANGUAGE[language];
+  }
+  return questions.phone;
+}
+
+/**
+ * What the caller hears instead of a reply that was about a booking nothing
+ * made. In another language: the summary and booking question once every
+ * detail is known, otherwise the one missing detail — never a general
+ * "nothing is booked yet" with no way forward. In English: notBookedYetReply.
  */
 function notBookedYetReplyFor(session: Session): string {
   const language = responseLanguageFor(session);
-  // Another language, with only the phone number missing and caller ID
-  // usable: the one question that settles it, in the caller's language,
-  // instead of a general "tell me the remaining details".
-  const s = session.appointmentState;
-  const localizedCallerIdQuestion = (
-    CALLER_ID_QUESTION_BY_LANGUAGE as Record<string, string | undefined>
-  )[language];
-  if (
-    localizedCallerIdQuestion &&
-    session.callerId &&
-    !s.phone &&
-    !s.phoneIssue &&
-    ["not_offered", "offered", "clarifying"].includes(s.callerIdChoice) &&
-    appointmentStateIsComplete({ ...s, phone: session.callerId })
-  ) {
-    session.appointmentState = { ...s, callerIdChoice: "offered" };
-    return `${callOutcomeLine(language, "notBookedYet")?.split(/(?<=[.।])\s/)[0] ?? ""} ${localizedCallerIdQuestion}`.trim();
+  if (language !== "en-IN") {
+    if (appointmentStateIsComplete(session.appointmentState)) {
+      return bookingSummaryQuestionFor(session);
+    }
+    const missing = missingDetailQuestionFor(session);
+    if (missing) return missing;
   }
-  const reply = notBookedYetReply(session.appointmentState, language);
-  if (language !== "en-IN" && appointmentStateIsComplete(session.appointmentState)) {
-    session.runtimeBookingQuestion = reply;
-  }
-  return reply;
+  return notBookedYetReply(session.appointmentState, language);
 }
 
 /** The text of the agent's most recent reply, or "" at the start of a call. */
@@ -5136,12 +5199,13 @@ async function tryEarlyDeterministicDispatch(
       bookingStatus: "checking_availability",
     };
   }
-  // Authorization covers the slot the caller was asked about: a turn that
-  // also changes the service, date or time ("yes, but make it 8 PM") gets
-  // that new slot checked first, never booked.
+  // Authorization covers exactly the details the caller was asked about: a
+  // turn that also changes the service, date, time, name or number ("yes,
+  // but make it 8 PM") gets the new details checked or read back first,
+  // never booked.
   if (
     bookingAuthorized &&
-    appointmentSlotKey(preview) === appointmentSlotKey(previous) &&
+    authorizedToBook(session, preview) &&
     preview.bookingStatus !== "ready_to_book" &&
     preview.preferredDate &&
     (preview.preferredTime || preview.wantsNextAvailable)
@@ -5153,8 +5217,13 @@ async function tryEarlyDeterministicDispatch(
     preview = { ...preview, bookingStatus: "checking_availability" };
   }
 
+  // A "ready to book" carried over from an earlier turn is not this turn's
+  // authorization: only the caller's yes to these exact details books them
+  // (handleUserUtterance's main path then reads them back instead).
   const willAttemptBooking =
-    preview.bookingStatus === "ready_to_book" && appointmentStateIsComplete(preview);
+    preview.bookingStatus === "ready_to_book" &&
+    appointmentStateIsComplete(preview) &&
+    authorizedToBook(session, preview);
   const willCheckAvailability =
     !willAttemptBooking &&
     preview.bookingStatus === "checking_availability" &&
@@ -6035,11 +6104,17 @@ function enqueueUserUtterance(session: Session, text: string) {
       : immediateCallerAck(
           session.appointmentState,
           intent,
+          // The same rule handleUserUtterance applies: a bare "yes" with a
+          // detail still missing books nothing, so "one moment, confirming
+          // that" would be untrue.
           callerAuthorizesBooking(
             text,
             lastAgentReplyText(session),
             session.runtimeBookingQuestion,
-          ),
+          ) &&
+            (appointmentStateIsComplete(session.appointmentState) ||
+              EXPLICIT_BOOKING_INSTRUCTION_PATTERN.test(text) ||
+              callerBookingIntentAnyLanguage(text) === "instruct"),
         );
   if (immediateAck) {
     const spokenAck = localizedImmediateAck(session, immediateAck);
@@ -6057,8 +6132,10 @@ function enqueueUserUtterance(session: Session, text: string) {
 }
 
 async function handleUserUtterance(session: Session, text: string, immediateAck: string | null) {
-  // Read before this turn is recorded: the question the caller is answering.
+  // Read before this turn is recorded: the question the caller is answering,
+  // and the appointment details as they stood when it was asked.
   const agentTextBeforeTurn = lastAgentReplyText(session);
+  const stateWhenAsked = session.appointmentState;
   session.turns.push({ role: "user", text, at: new Date().toISOString() });
   // The name as it stood BEFORE this turn — previousAppointmentState below
   // already includes a name captured from this turn's own words.
@@ -6140,11 +6217,43 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
   const previousAppointmentState = session.appointmentState;
   // Booking authorization comes only from the caller's own words — see
   // callerAuthorizesBooking. Recorded for the native tool-calling path too.
-  const bookingAuthorized = callerAuthorizesBooking(
+  //
+  // A confirmation authorizes exactly the booking the caller had heard
+  // about (authorizedToBook):
+  //   - a bare "yes" — only when every required detail (service, date,
+  //     time, name and phone) was known when the question was asked, and
+  //     only for those details. A yes given while a detail was still
+  //     missing ("that time is free, shall I book?" before the phone
+  //     number) is not carried forward: once the last detail arrives the
+  //     runtime reads the summary back and asks once more, so consent to
+  //     use a phone number is never mistaken for the final confirmation.
+  //   - an explicit "book it" — for the slot and name already on the table,
+  //     with the phone number the caller settles in the same breath ("use
+  //     this number and book it").
+  const callerSaidBook = callerAuthorizesBooking(
     text,
     agentTextBeforeTurn,
     session.runtimeBookingQuestion,
   );
+  const explicitInstruction =
+    EXPLICIT_BOOKING_INSTRUCTION_PATTERN.test(text) ||
+    callerBookingIntentAnyLanguage(text) === "instruct";
+  // On the native tool-calling path the model, not AppointmentState, holds
+  // the details, and book_appointment's own validation checks them.
+  const toolCallingPath = Boolean(session.deps.generateReplyWithTools);
+  const askedWithEveryDetail = appointmentStateIsComplete(stateWhenAsked);
+  const bookingAuthorized =
+    callerSaidBook && (toolCallingPath || explicitInstruction || askedWithEveryDetail);
+  if (callerSaidBook && !bookingAuthorized) {
+    log("booking_yes_before_details_complete", session, { generation: session.generation });
+  }
+  session.authorizedDetails = bookingAuthorized
+    ? {
+        slot: appointmentSlotKey(stateWhenAsked),
+        name: stateWhenAsked.customerName ? nameKey(stateWhenAsked.customerName) : null,
+        phone: stateWhenAsked.phone,
+      }
+    : null;
   session.bookingAuthorizedThisTurn = bookingAuthorized;
   session.bookingToolCalledThisTurn = false;
   // Defensive: speech_end (onSttEvent) already arms a fresh silence timer
@@ -6477,9 +6586,11 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
           // into booking something.
           const slotUnchanged =
             appointmentSlotKey(appointmentState) === appointmentSlotKey(previousAppointmentState);
+          // The caller's yes covers exactly the details they were asked
+          // about — slot, name and number (see authorizedToBook).
+          const authorizedForTheseDetails = authorizedToBook(session, appointmentState);
           if (
-            bookingAuthorized &&
-            slotUnchanged &&
+            authorizedForTheseDetails &&
             appointmentState.bookingStatus !== "ready_to_book" &&
             appointmentState.preferredDate &&
             (appointmentState.preferredTime || appointmentState.wantsNextAvailable)
@@ -6495,7 +6606,7 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
           if (
             appointmentState.bookingStatus === "ready_to_book" &&
             appointmentStateIsComplete(appointmentState) &&
-            !(bookingAuthorized && slotUnchanged)
+            !authorizedForTheseDetails
           ) {
             log("booking_not_authorized", session, {
               source: "model_state",
@@ -6592,11 +6703,30 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
               return;
             }
             reply = dispatched;
-          } else if (confirmationNeeded) {
-            // The model said it was booking; nothing was booked. Ask the
-            // caller to confirm the details instead — their "yes" to this
-            // question is what authorizes the booking.
-            reply = bookingConfirmationQuestion(session.appointmentState);
+          } else if (
+            confirmationNeeded ||
+            (appointmentStateIsComplete(session.appointmentState) &&
+              !appointmentStateIsComplete(stateWhenAsked) &&
+              session.appointmentState.bookingStatus !== "booked" &&
+              session.appointmentState.availabilityStatus !== "unavailable")
+          ) {
+            // The model said it was booking (nothing was booked), or this
+            // turn supplied the last missing detail: read the booking back
+            // once, in the caller's language, and ask. Their "yes" to this
+            // question is what authorizes exactly these details.
+            reply = bookingSummaryQuestionFor(session);
+          } else if (
+            callerSaidBook &&
+            !bookingAuthorized &&
+            !appointmentStateIsComplete(session.appointmentState)
+          ) {
+            // "Yes, book it" with a detail still missing: the one question
+            // that gets it, in the caller's language — the summary and the
+            // real booking question follow once it is known.
+            reply =
+              missingDetailQuestionFor(session) ??
+              nextMissingDetailQuestion(session.appointmentState) ??
+              reply;
           }
         }
       }
@@ -7425,6 +7555,7 @@ export async function startRuntimeSession(
     lastDispatchedSlotKey: null,
     bookingAuthorizedThisTurn: false,
     runtimeBookingQuestion: null,
+    authorizedDetails: null,
     confirmedBookingThisCall: false,
     bookingToolCalledThisTurn: false,
     returningCallerName: { settled: false, name: null },

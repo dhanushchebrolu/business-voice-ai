@@ -51,6 +51,8 @@ export interface OutcomeFacts {
   /** The business's IANA timezone, for slotStarts / appointment instants. */
   timeZone?: string;
   service?: string | null;
+  /** The caller's name, for a booking summary. */
+  customerName?: string | null;
   /** One existing appointment (reschedule). */
   appointment?: { service: string | null; startIso: string } | null;
   /** Several existing appointments (reschedule: "which one?"). */
@@ -65,6 +67,8 @@ interface Formatted {
   /** slotStarts as a localized "A, B or C" list. */
   times: string;
   service: string;
+  /** The caller's name, or "" when not known. */
+  name: string;
   /** The single appointment: service, date, time. */
   booking: string;
   /** The appointments as a localized "A, B and C" list. */
@@ -162,6 +166,7 @@ function format(language: NonEnglish, facts: OutcomeFacts): Formatted {
       "or",
     ),
     service: facts.service?.trim() || APPOINTMENT_WORD[language],
+    name: facts.customerName?.trim() ?? "",
     booking: facts.appointment ? describe(facts.appointment) : APPOINTMENT_WORD[language],
     list: formatList(language, (facts.appointments ?? []).map(describe), "and"),
   };
@@ -188,6 +193,8 @@ export type OutcomeKey =
   | "appointmentConfirmed"
   | "appointmentSaved"
   | "notBookedYet"
+  /** Every detail known: the short summary (name, service, date, time) and the one question that books it — the runtime's own booking question. */
+  | "confirmBooking"
   /** Nothing booked yet, every detail known: reads them back and asks to book — the runtime's own booking question. */
   | "notBookedYetConfirm"
   | "noReminders"
@@ -245,6 +252,8 @@ const OUTCOMES: Record<NonEnglish, Templates> = {
       "आपका अपॉइंटमेंट अनुरोध सेव हो गया है, और हमारी टीम जल्द ही आपसे पुष्टि करेगी।",
     notBookedYet: () =>
       "अभी तक कुछ भी बुक नहीं हुआ है। बुकिंग के लिए बाकी जानकारी बताइए या पुष्टि कीजिए।",
+    confirmBooking: (d) =>
+      `${d.name ? `${d.name} जी, ` : ""}${d.service}, ${d.when}। क्या यह अपॉइंटमेंट बुक कर दूँ?`,
     notBookedYetConfirm: (d) =>
       `अभी तक कुछ भी बुक नहीं हुआ है। ${d.service}, ${d.when}। क्या इसे बुक कर दें?`,
     noReminders: () => "इस लाइन पर रिमाइंडर सेट नहीं किया जा सकता।",
@@ -308,6 +317,8 @@ const OUTCOMES: Record<NonEnglish, Templates> = {
       "आपली अपॉइंटमेंट विनंती सेव्ह झाली आहे, आणि आमची टीम लवकरच आपल्याशी खात्री करेल.",
     notBookedYet: () =>
       "अजून काहीही बुक झालेले नाही. बुकिंगसाठी उरलेली माहिती सांगा किंवा खात्री करा.",
+    confirmBooking: (d) =>
+      `${d.name ? `${d.name}, ` : ""}${d.service}, ${d.when}. हे अपॉइंटमेंट बुक करू का?`,
     notBookedYetConfirm: (d) =>
       `अजून काहीही बुक झालेले नाही. ${d.service}, ${d.when}. हे बुक करायचे का?`,
     noReminders: () => "या लाइनवर रिमाइंडर सेट करता येत नाही.",
@@ -369,6 +380,8 @@ const OUTCOMES: Record<NonEnglish, Templates> = {
     appointmentSaved: () =>
       "আপনার অ্যাপয়েন্টমেন্টের অনুরোধ সেভ হয়েছে, আর আমাদের টিম শীঘ্রই আপনার সঙ্গে নিশ্চিত করবে।",
     notBookedYet: () => "এখনও কিছু বুক হয়নি। বুকিংয়ের জন্য বাকি তথ্য বলুন বা নিশ্চিত করুন।",
+    confirmBooking: (d) =>
+      `${d.name ? `${d.name}, ` : ""}${d.service}, ${d.when}। অ্যাপয়েন্টমেন্টটা বুক করে দেব?`,
     notBookedYetConfirm: (d) => `এখনও কিছু বুক হয়নি। ${d.service}, ${d.when}। বুক করে দেব?`,
     noReminders: () => "এই লাইনে রিমাইন্ডার সেট করা যায় না।",
     rescheduleKept: () => "ঠিক আছে, আপনার অ্যাপয়েন্টমেন্ট যেমন ছিল তেমনই থাকছে।",
@@ -433,6 +446,8 @@ const OUTCOMES: Record<NonEnglish, Templates> = {
       "உங்கள் அப்பாயிண்ட்மெண்ட் கோரிக்கை சேமிக்கப்பட்டது, எங்கள் குழு விரைவில் உங்களுடன் உறுதிசெய்யும்.",
     notBookedYet: () =>
       "இதுவரை எதுவும் புக் செய்யப்படவில்லை. புக்கிங்கிற்கு மீதமுள்ள விவரங்களைச் சொல்லுங்கள் அல்லது உறுதிசெய்யுங்கள்.",
+    confirmBooking: (d) =>
+      `${d.name ? `${d.name}, ` : ""}${d.service}, ${d.when}. இதை புக் செய்யலாமா?`,
     notBookedYetConfirm: (d) =>
       `இதுவரை எதுவும் புக் செய்யப்படவில்லை. ${d.service}, ${d.when}. இதை புக் செய்யலாமா?`,
     noReminders: () => "இந்த லைனில் நினைவூட்டல் அமைக்க முடியாது.",
@@ -499,6 +514,8 @@ const OUTCOMES: Record<NonEnglish, Templates> = {
       "మీ అపాయింట్మెంట్ అభ్యర్థన సేవ్ అయింది, మా టీమ్ త్వరలో మీతో నిర్ధారిస్తుంది.",
     notBookedYet: () =>
       "ఇప్పటివరకు ఏదీ బుక్ కాలేదు. బుకింగ్ కోసం మిగిలిన వివరాలు చెప్పండి లేదా నిర్ధారించండి.",
+    confirmBooking: (d) =>
+      `${d.name ? `${d.name} గారు, ` : ""}${d.service}, ${d.when}. బుక్ చేయమంటారా?`,
     notBookedYetConfirm: (d) =>
       `ఇప్పటివరకు ఏదీ బుక్ కాలేదు. ${d.service}, ${d.when}. బుక్ చేయమంటారా?`,
     noReminders: () => "ఈ లైన్‌లో రిమైండర్ సెట్ చేయడం కుదరదు.",
@@ -561,6 +578,8 @@ const OUTCOMES: Record<NonEnglish, Templates> = {
     appointmentSaved: () =>
       "આપની એપોઇન્ટમેન્ટની વિનંતી સેવ થઈ ગઈ છે, અને અમારી ટીમ ટૂંક સમયમાં આપની સાથે પુષ્ટિ કરશે.",
     notBookedYet: () => "હજુ સુધી કંઈ બુક થયું નથી. બુકિંગ માટે બાકીની માહિતી કહો અથવા પુષ્ટિ કરો.",
+    confirmBooking: (d) =>
+      `${d.name ? `${d.name}, ` : ""}${d.service}, ${d.when}. શું તે બુક કરી દઈએ?`,
     notBookedYetConfirm: (d) =>
       `હજુ સુધી કંઈ બુક થયું નથી. ${d.service}, ${d.when}. શું તે બુક કરી દઈએ?`,
     noReminders: () => "આ લાઇન પર રિમાઇન્ડર સેટ કરી શકાતું નથી.",
@@ -624,6 +643,8 @@ const OUTCOMES: Record<NonEnglish, Templates> = {
     appointmentSaved: () =>
       "ನಿಮ್ಮ ಅಪಾಯಿಂಟ್ಮೆಂಟ್ ವಿನಂತಿ ಉಳಿಸಲಾಗಿದೆ, ನಮ್ಮ ತಂಡ ಶೀಘ್ರದಲ್ಲೇ ನಿಮ್ಮೊಂದಿಗೆ ಖಚಿತಪಡಿಸುತ್ತದೆ.",
     notBookedYet: () => "ಇನ್ನೂ ಏನೂ ಬುಕ್ ಆಗಿಲ್ಲ. ಬುಕಿಂಗ್‌ಗಾಗಿ ಉಳಿದ ವಿವರಗಳನ್ನು ಹೇಳಿ ಅಥವಾ ಖಚಿತಪಡಿಸಿ.",
+    confirmBooking: (d) =>
+      `${d.name ? `${d.name}, ` : ""}${d.service}, ${d.when}. ಇದನ್ನು ಬುಕ್ ಮಾಡಲೇ?`,
     notBookedYetConfirm: (d) =>
       `ಇನ್ನೂ ಏನೂ ಬುಕ್ ಆಗಿಲ್ಲ. ${d.service}, ${d.when}. ಇದನ್ನು ಬುಕ್ ಮಾಡಲೇ?`,
     noReminders: () => "ಈ ಲೈನ್‌ನಲ್ಲಿ ರಿಮೈಂಡರ್ ಹೊಂದಿಸಲು ಆಗುವುದಿಲ್ಲ.",
@@ -688,6 +709,8 @@ const OUTCOMES: Record<NonEnglish, Templates> = {
       "നിങ്ങളുടെ അപ്പോയിന്റ്മെന്റ് അഭ്യർത്ഥന സേവ് ചെയ്തു, ഞങ്ങളുടെ ടീം ഉടൻ നിങ്ങളുമായി ഉറപ്പാക്കും.",
     notBookedYet: () =>
       "ഇതുവരെ ഒന്നും ബുക്ക് ചെയ്തിട്ടില്ല. ബുക്കിംഗിനായി ബാക്കി വിവരങ്ങൾ പറയുക, അല്ലെങ്കിൽ ഉറപ്പാക്കുക.",
+    confirmBooking: (d) =>
+      `${d.name ? `${d.name}, ` : ""}${d.service}, ${d.when}. ഇത് ബുക്ക് ചെയ്യട്ടെ?`,
     notBookedYetConfirm: (d) =>
       `ഇതുവരെ ഒന്നും ബുക്ക് ചെയ്തിട്ടില്ല. ${d.service}, ${d.when}. ഇത് ബുക്ക് ചെയ്യട്ടെ?`,
     noReminders: () => "ഈ ലൈനിൽ റിമൈൻഡർ സെറ്റ് ചെയ്യാൻ കഴിയില്ല.",
@@ -754,6 +777,8 @@ const OUTCOMES: Record<NonEnglish, Templates> = {
       "ਤੁਹਾਡੀ ਅਪੌਇੰਟਮੈਂਟ ਦੀ ਬੇਨਤੀ ਸੇਵ ਹੋ ਗਈ ਹੈ, ਅਤੇ ਸਾਡੀ ਟੀਮ ਜਲਦੀ ਹੀ ਤੁਹਾਡੇ ਨਾਲ ਪੁਸ਼ਟੀ ਕਰੇਗੀ।",
     notBookedYet: () =>
       "ਅਜੇ ਤੱਕ ਕੁਝ ਵੀ ਬੁੱਕ ਨਹੀਂ ਹੋਇਆ। ਬੁਕਿੰਗ ਲਈ ਬਾਕੀ ਜਾਣਕਾਰੀ ਦੱਸੋ ਜਾਂ ਪੁਸ਼ਟੀ ਕਰੋ।",
+    confirmBooking: (d) =>
+      `${d.name ? `${d.name} ਜੀ, ` : ""}${d.service}, ${d.when}। ਕੀ ਇਹ ਬੁੱਕ ਕਰ ਦੇਈਏ?`,
     notBookedYetConfirm: (d) =>
       `ਅਜੇ ਤੱਕ ਕੁਝ ਵੀ ਬੁੱਕ ਨਹੀਂ ਹੋਇਆ। ${d.service}, ${d.when}। ਕੀ ਇਹ ਬੁੱਕ ਕਰ ਦੇਈਏ?`,
     noReminders: () => "ਇਸ ਲਾਈਨ 'ਤੇ ਰਿਮਾਈਂਡਰ ਸੈੱਟ ਨਹੀਂ ਕੀਤਾ ਜਾ ਸਕਦਾ।",
@@ -818,6 +843,8 @@ const OUTCOMES: Record<NonEnglish, Templates> = {
       "ଆପଣଙ୍କ ଆପଏଣ୍ଟମେଣ୍ଟ ଅନୁରୋଧ ସେଭ୍ ହୋଇଛି, ଆମ ଟିମ ଶୀଘ୍ର ଆପଣଙ୍କ ସହ ନିଶ୍ଚିତ କରିବ।",
     notBookedYet: () =>
       "ଏପର୍ଯ୍ୟନ୍ତ କିଛି ବୁକ୍ ହୋଇନାହିଁ। ବୁକିଂ ପାଇଁ ବାକି ତଥ୍ୟ କୁହନ୍ତୁ କିମ୍ବା ନିଶ୍ଚିତ କରନ୍ତୁ।",
+    confirmBooking: (d) =>
+      `${d.name ? `${d.name}, ` : ""}${d.service}, ${d.when}। ଏହାକୁ ବୁକ୍ କରିଦେବୁ କି?`,
     notBookedYetConfirm: (d) =>
       `ଏପର୍ଯ୍ୟନ୍ତ କିଛି ବୁକ୍ ହୋଇନାହିଁ। ${d.service}, ${d.when}। ଏହାକୁ ବୁକ୍ କରିଦେବୁ କି?`,
     noReminders: () => "ଏହି ଲାଇନରେ ରିମାଇଣ୍ଡର ସେଟ୍ କରାଯାଇପାରିବ ନାହିଁ।",
