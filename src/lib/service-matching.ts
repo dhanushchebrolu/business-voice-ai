@@ -211,6 +211,165 @@ function normalizeName(name: string): string {
 }
 
 /**
+ * Dental treatment names as callers say them in Indian scripts — the
+ * English loanword written in that script ("క్లీనింగ్", "क्लीनिंग"), or the
+ * language's own word for teeth — with the English word a configured
+ * service name uses. Services are configured in English, so without this a
+ * Telugu or Hindi caller saying "cleaning" was never matched and was asked
+ * for the service again.
+ */
+const NATIVE_SERVICE_WORDS: [string[], string][] = [
+  [
+    [
+      "క్లీనింగ్",
+      "क्लीनिंग",
+      "க்ளீனிங்",
+      "கிளீனிங்",
+      "ಕ್ಲೀನಿಂಗ್",
+      "ക്ലീനിംഗ്",
+      "ক্লিনিং",
+      "ક્લીનિંગ",
+      "ਕਲੀਨਿੰਗ",
+      "କ୍ଲିନିଂ",
+    ],
+    "cleaning",
+  ],
+  [
+    [
+      "స్కేలింగ్",
+      "स्केलिंग",
+      "ஸ்கேலிங்",
+      "ಸ್ಕೇಲಿಂಗ್",
+      "സ്കെയിലിംഗ്",
+      "স্কেলিং",
+      "સ્કેલિંગ",
+      "ਸਕੇਲਿੰਗ",
+    ],
+    "scaling",
+  ],
+  [
+    [
+      "రూట్ కెనాల్",
+      "రూట్ కేనాల్",
+      "रूट कैनाल",
+      "रूट केनाल",
+      "ரூட் கேனால்",
+      "ರೂಟ್ ಕೆನಾಲ್",
+      "റൂട്ട് കനാൽ",
+      "রুট ক্যানাল",
+      "રૂટ કેનાલ",
+      "ਰੂਟ ਕੈਨਾਲ",
+    ],
+    "root canal",
+  ],
+  [
+    [
+      "చెకప్",
+      "చెక్ అప్",
+      "चेकअप",
+      "चेक अप",
+      "செக்கப்",
+      "ಚೆಕಪ್",
+      "ചെക്കപ്പ്",
+      "চেকআপ",
+      "ચેકઅપ",
+      "ਚੈੱਕਅੱਪ",
+    ],
+    "checkup",
+  ],
+  [
+    [
+      "కన్సల్టేషన్",
+      "कंसल्टेशन",
+      "कन्सल्टेशन",
+      "கன்சல்டேஷன்",
+      "ಕನ್ಸಲ್ಟೇಶನ್",
+      "കൺസൾട്ടേഷൻ",
+      "কনসালটেশন",
+      "કન્સલ્ટેશન",
+      "ਕੰਸਲਟੇਸ਼ਨ",
+    ],
+    "consultation",
+  ],
+  [
+    ["ఫిల్లింగ్", "फिलिंग", "ஃபில்லிங்", "ಫಿಲ್ಲಿಂಗ್", "ഫില്ലിംഗ്", "ফিলিং", "ફિલિંગ", "ਫਿਲਿੰਗ"],
+    "filling",
+  ],
+  [
+    [
+      "వైటెనింగ్",
+      "వైట్నింగ్",
+      "व्हाइटनिंग",
+      "वाइटनिंग",
+      "வைட்டனிங்",
+      "ವೈಟ್ನಿಂಗ್",
+      "വൈറ്റനിംഗ്",
+      "হোয়াইটেনিং",
+      "વ્હાઇટનિંગ",
+      "ਵਾਈਟਨਿੰਗ",
+    ],
+    "whitening",
+  ],
+  [
+    [
+      "ఎక్స్‌ట్రాక్షన్",
+      "ఎక్స్ట్రాక్షన్",
+      "एक्सट्रैक्शन",
+      "எக்ஸ்ட்ராக்ஷன்",
+      "ಎಕ್ಸ್‌ಟ್ರಾಕ್ಷನ್",
+      "എക്സ്ട്രാക്ഷൻ",
+      "এক্সট্রাকশন",
+      "એક્સ્ટ્રેક્શન",
+      "ਐਕਸਟਰੈਕਸ਼ਨ",
+    ],
+    "extraction",
+  ],
+  [
+    [
+      "ఇంప్లాంట్",
+      "इम्प्लांट",
+      "इंप्लांट",
+      "இம்ப்ளான்ட்",
+      "ಇಂಪ್ಲಾಂಟ್",
+      "ഇംപ്ലാന്റ്",
+      "ইমপ্ল্যান্ট",
+      "ઇમ્પ્લાન્ટ",
+      "ਇੰਪਲਾਂਟ",
+    ],
+    "implant",
+  ],
+  [
+    ["బ్రేసెస్", "ब्रेसेस", "பிரேசஸ்", "ಬ್ರೇಸಸ್", "ബ്രേസസ്", "ব্রেসেস", "બ્રેસીસ", "ਬ੍ਰੇਸਿਜ਼"],
+    "braces",
+  ],
+  [
+    [
+      "పళ్ళు",
+      "పళ్ల",
+      "दांत",
+      "दाँत",
+      "பல்",
+      "ಹಲ್ಲು",
+      "പല്ല്",
+      "দাঁত",
+      "दात",
+      "દાંત",
+      "ਦੰਦ",
+      "ଦାନ୍ତ",
+    ],
+    "teeth",
+  ],
+];
+
+/** The caller's words plus the English service word for each native-script treatment name in them. */
+export function withEnglishServiceWords(text: string): string {
+  const english = NATIVE_SERVICE_WORDS.filter(([native]) =>
+    native.some((n) => text.includes(n)),
+  ).map(([, word]) => word);
+  return english.length ? `${text} ${english.join(" ")}` : text;
+}
+
+/**
  * Resolves caller wording to one configured service row.
  *
  * 1. A configured name said verbatim (longest wins) — the original
@@ -219,9 +378,10 @@ function normalizeName(name: string): string {
  *    score 2, body stems 1; at least one distinctive stem is required.
  *    A unique top score is a match; a tie is ambiguous.
  */
-export function resolveServiceFromText(rows: ServiceRow[], text: string): ServiceMatch {
+export function resolveServiceFromText(rows: ServiceRow[], rawText: string): ServiceMatch {
   const usable = rows.filter((r) => r.name.trim());
-  if (!usable.length || !text.trim()) return { kind: "none" };
+  if (!usable.length || !rawText.trim()) return { kind: "none" };
+  const text = withEnglishServiceWords(rawText);
 
   const lowerText = ` ${text.toLowerCase().replace(/\s+/g, " ")} `;
   let verbatim: ServiceRow | null = null;

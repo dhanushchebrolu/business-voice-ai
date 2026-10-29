@@ -89,6 +89,7 @@ import {
   nextCallLanguage,
   normalizeVoiceLanguageCode,
   resolvePrimaryLanguage,
+  speakablePart,
   voiceCanSpeakText,
   voiceLanguageName,
 } from "./voice-languages.ts";
@@ -104,6 +105,15 @@ import {
   type OutcomeFacts,
   type OutcomeKey,
 } from "./voice-call-outcomes.ts";
+import {
+  CALLER_ID_QUESTION_BY_LANGUAGE,
+  asksAboutPhoneNumberAnyLanguage,
+  availabilityRequestedAnyLanguage,
+  callerIdAnswerAnyLanguage,
+  explicitTimeAnyLanguage,
+  periodAnyLanguage,
+  relativeDateAnyLanguage,
+} from "./voice-intent-lexicon.ts";
 import type { ClaudeTool } from "./claude.server.ts";
 import { zonedWallTimeToUtc, dayOfWeekInTimezone } from "./calendar/timezone.ts";
 import { normalizeCallerId, normalizePhoneNumber, phoneLastFour } from "./phone-number.ts";
@@ -841,6 +851,8 @@ interface Session {
   reschedule: RescheduleFlow | null;
   /** Ids of bookings created on this call — a later time change refers to these, and is confirmed as a move, never booked again. */
   bookedThisCallIds: string[];
+  /** What was said when each slot (appointmentSlotKey) was booked on this call — repeated, never re-booked, if the caller asks to book it again. */
+  bookedSlotOutcomes: Map<string, string>;
   /** The returning caller's name lookup, started at session start in parallel with the TTS connection — see startRuntimeSession. */
   returningCallerName: { settled: boolean; name: string | null };
   /** The language_code the current TTS connection was opened with — see maybeSwitchTtsLanguage. Starts at the agent's primary_language (what startRuntimeSession connects with). */
@@ -2462,6 +2474,24 @@ function notBookedYetReply(s: AppointmentState, language = "en-IN"): string {
  */
 function notBookedYetReplyFor(session: Session): string {
   const language = responseLanguageFor(session);
+  // Another language, with only the phone number missing and caller ID
+  // usable: the one question that settles it, in the caller's language,
+  // instead of a general "tell me the remaining details".
+  const s = session.appointmentState;
+  const localizedCallerIdQuestion = (
+    CALLER_ID_QUESTION_BY_LANGUAGE as Record<string, string | undefined>
+  )[language];
+  if (
+    localizedCallerIdQuestion &&
+    session.callerId &&
+    !s.phone &&
+    !s.phoneIssue &&
+    ["not_offered", "offered", "clarifying"].includes(s.callerIdChoice) &&
+    appointmentStateIsComplete({ ...s, phone: session.callerId })
+  ) {
+    session.appointmentState = { ...s, callerIdChoice: "offered" };
+    return `${callOutcomeLine(language, "notBookedYet")?.split(/(?<=[.।])\s/)[0] ?? ""} ${localizedCallerIdQuestion}`.trim();
+  }
   const reply = notBookedYetReply(session.appointmentState, language);
   if (language !== "en-IN" && appointmentStateIsComplete(session.appointmentState)) {
     session.runtimeBookingQuestion = reply;
@@ -2602,15 +2632,22 @@ function extractEmail(text: string): string | null {
 }
 
 export function parseCallerIntentFromText(text: string): CallerIntentSignals {
+  // English patterns first; then the same intents in every other supported
+  // language (voice-intent-lexicon.ts) — a Telugu "ఈరోజు ఏ స్లాట్స్
+  // అందుబాటులో ఉన్నాయి?" must reach the calendar exactly as "What slots
+  // are available today?" does.
   const availabilityRequested =
-    AVAILABILITY_KEYWORDS.test(text) &&
-    (AVAILABILITY_QUESTION_SHAPE.test(text) ||
-      /\?/.test(text) ||
-      NEXT_AVAILABLE_PATTERN.test(text) ||
-      AVAILABILITY_IMPERATIVE_PATTERN.test(text));
+    (AVAILABILITY_KEYWORDS.test(text) &&
+      (AVAILABILITY_QUESTION_SHAPE.test(text) ||
+        /\?/.test(text) ||
+        NEXT_AVAILABLE_PATTERN.test(text) ||
+        AVAILABILITY_IMPERATIVE_PATTERN.test(text))) ||
+    availabilityRequestedAnyLanguage(text);
   const wantsNextAvailable = NEXT_AVAILABLE_PATTERN.test(text);
-  const preferredPeriod = PERIOD_PATTERNS.find(([re]) => re.test(text))?.[1] ?? null;
-  const relativeDate = RELATIVE_DATE_PATTERNS.find(([re]) => re.test(text))?.[1] ?? null;
+  const preferredPeriod =
+    PERIOD_PATTERNS.find(([re]) => re.test(text))?.[1] ?? periodAnyLanguage(text);
+  const relativeDate =
+    RELATIVE_DATE_PATTERNS.find(([re]) => re.test(text))?.[1] ?? relativeDateAnyLanguage(text);
   const weekdayMatch = WEEKDAY_PATTERN.exec(text);
   const weekday = weekdayMatch
     ? {
@@ -2620,7 +2657,7 @@ export function parseCallerIntentFromText(text: string): CallerIntentSignals {
         forceNextWeek: Boolean(weekdayMatch[1]),
       }
     : null;
-  const explicitTime = extractExplicitTime(text);
+  const explicitTime = extractExplicitTime(text) ?? explicitTimeAnyLanguage(text);
   const bookingConfirmed =
     BOOKING_CONFIRMATION_PATTERN.test(text) && !BOOKING_NEGATION_PATTERN.test(text);
   const reminderRequested = REMINDER_PATTERN.test(text);
@@ -2806,7 +2843,12 @@ export function resolveCallerIdAnswer(
   }
   const hedged = CALLER_ID_HEDGE_PATTERN.test(text);
   if (!hedged && CALLER_ID_DIFFERENT_PATTERN.test(text)) return { callerIdChoice: "declined" };
-  if (!hedged && CALLER_ID_ACCEPT_PATTERN.test(text)) {
+  // The same answer in the caller's own language ("అవును", "हाँ, इसी नंबर
+  // पर", "వేరే నంబర్") — without it a Telugu or Hindi "yes" read as
+  // unclear, then as a refusal, and the phone number was never settled.
+  const native = hedged ? null : callerIdAnswerAnyLanguage(text, confirmationAnswerAnyLanguage);
+  if (native === "different") return { callerIdChoice: "declined" };
+  if (native === "accept" || (!hedged && CALLER_ID_ACCEPT_PATTERN.test(text))) {
     return {
       callerIdChoice: "accepted",
       phone: callerId,
@@ -2822,6 +2864,36 @@ const PHONE_REQUEST_SENTENCE_PATTERN =
   /\b(phone|mobile|contact|cell)(\s+number)?\b|\byour number\b/i;
 const QUESTION_SHAPE_PATTERN =
   /\?|\b(may i|can i|could i|could you|can you|please (share|provide|tell|give))\b|\bwhat(?:'?s| is)\b/i;
+
+/**
+ * applyCallerIdOffer for a reply in another language: the sentence asking
+ * about a phone number becomes the runtime's own caller-ID question in that
+ * language (CALLER_ID_QUESTION_BY_LANGUAGE), so the caller's "అవును" /
+ * "हाँ" is read as consent to the number they're calling from. Before, the
+ * offer was recognised in English only, so a Telugu or Hindi caller's yes
+ * was never an answer to anything and the number was never settled.
+ */
+export function applyCallerIdOfferAnyLanguage(
+  reply: string,
+  language: string,
+  state: Pick<AppointmentState, "phone" | "callerIdChoice">,
+): { reply: string; offered: boolean } {
+  const question = (CALLER_ID_QUESTION_BY_LANGUAGE as Record<string, string | undefined>)[
+    normalizeVoiceLanguageCode(language) ?? ""
+  ];
+  if (!question || state.phone || state.callerIdChoice !== "not_offered") {
+    return { reply, offered: false };
+  }
+  const sentences = reply.match(/[^.!?।]+[.!?।]*\s*/g) ?? [reply];
+  let replaced = false;
+  const rewritten = sentences.map((sentence) => {
+    if (!asksAboutPhoneNumberAnyLanguage(sentence)) return sentence;
+    if (replaced) return "";
+    replaced = true;
+    return `${question} `;
+  });
+  return replaced ? { reply: rewritten.join("").trim(), offered: true } : { reply, offered: false };
+}
 
 /**
  * When caller ID is usable and the caller hasn't been asked about it yet,
@@ -3240,10 +3312,15 @@ async function speak(
     // is never sent to it. The retry line is in the voice's own language, so
     // the replacement itself always passes this check.
     if (!voiceCanSpeakText(text, session.ttsLanguage)) {
-      const replacement = localizedFallback("toolTurnRetry", session.ttsLanguage);
+      // A few stray words in another script are dropped and the real answer
+      // is still said; only a reply mostly in another script becomes the
+      // retry line.
+      const readable = speakablePart(text, session.ttsLanguage);
+      const replacement = readable ?? localizedFallback("toolTurnRetry", session.ttsLanguage);
       log("tts_text_not_speakable", session, {
         voice: session.ttsLanguage,
         replaced_text_length: text.length,
+        kept_readable_part: readable !== null,
       });
       const last = session.turns.at(-1);
       if (last?.role === "assistant" && last.text === text) last.text = replacement;
@@ -4843,6 +4920,19 @@ async function dispatchDeterministicTool(
   const stillCurrent = () => session.generation === generation;
   const firstCheckThisCall = session.lastDispatchedSlotKey === null;
   session.lastDispatchedSlotKey = appointmentSlotKey(session.appointmentState);
+  // A slot already booked on this call is never booked again: a second
+  // "yes, book it" (or the model's state block proposing it again) hears
+  // what the booking layer already reported for it. The database's
+  // idempotency key would also refuse a second row; this keeps the runtime
+  // from even asking.
+  const alreadyBooked = session.bookedSlotOutcomes.get(
+    appointmentSlotKey(session.appointmentState),
+  );
+  if (willAttemptBooking && alreadyBooked !== undefined) {
+    log("booking_already_made_this_call", session, { generation });
+    session.appointmentState = { ...session.appointmentState, bookingStatus: "booked" };
+    return stillCurrent() ? alreadyBooked : null;
+  }
   if (willAttemptBooking) {
     // Production incident: real calendar+LLM round trips left the caller
     // in dead air long enough to say "hello? are you there?". A short,
@@ -4854,10 +4944,15 @@ async function dispatchDeterministicTool(
     if (!immediateAckAlreadySpoken && stillCurrent()) {
       await speak(session, localizedFallback("confirmMoment", responseLanguageFor(session)));
     }
+    const requestedSlotKey = appointmentSlotKey(session.appointmentState);
     const outcome = await attemptBooking(session, generation);
     session.appointmentState = outcome.state;
     // The booked time can differ from the request ("next available").
     session.lastDispatchedSlotKey = appointmentSlotKey(outcome.state);
+    if (outcome.state.bookingStatus === "booked") {
+      session.bookedSlotOutcomes.set(requestedSlotKey, outcome.spoken);
+      session.bookedSlotOutcomes.set(appointmentSlotKey(outcome.state), outcome.spoken);
+    }
     return stillCurrent() ? outcome.spoken : null;
   }
 
@@ -5979,6 +6074,16 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
   // than threaded through — it's a pure, cheap regex pass, and threading
   // it would only save that.
   let callerIntent = parseCallerIntentFromText(text);
+  // Which booking signals this turn carried — flags only, never the words.
+  log("caller_intent", session, {
+    language: responseLanguageFor(session),
+    availability: callerIntent.availabilityRequested,
+    relative_date: callerIntent.relativeDate,
+    weekday: callerIntent.weekday !== null,
+    time: callerIntent.explicitTime !== null,
+    period: callerIntent.preferredPeriod,
+    phone_given: callerIntent.phone !== null,
+  });
   // The answer to CALLER_ID_QUESTION, when it's pending — applied before
   // anything else reads appointment state this turn, so the early
   // deterministic dispatch, the model's grounding message, and the booking
@@ -6609,6 +6714,17 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
         if (offer.offered) {
           reply = offer.reply;
           session.appointmentState = { ...session.appointmentState, callerIdChoice: "offered" };
+        }
+      } else {
+        const offer = applyCallerIdOfferAnyLanguage(
+          reply,
+          responseLanguageFor(session),
+          session.appointmentState,
+        );
+        if (offer.offered) {
+          reply = offer.reply;
+          session.appointmentState = { ...session.appointmentState, callerIdChoice: "offered" };
+          log("caller_id_offered", session, { language: responseLanguageFor(session) });
         }
       }
 
@@ -7305,6 +7421,7 @@ export async function startRuntimeSession(
     },
     reschedule: null,
     bookedThisCallIds: [],
+    bookedSlotOutcomes: new Map(),
     lastDispatchedSlotKey: null,
     bookingAuthorizedThisTurn: false,
     runtimeBookingQuestion: null,

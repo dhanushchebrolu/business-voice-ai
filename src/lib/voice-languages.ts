@@ -121,6 +121,29 @@ export function voiceCanSpeakText(text: string, language: string): boolean {
   return true;
 }
 
+/** The share of a reply's letters that must survive for speakablePart to keep it. */
+const MIN_SPEAKABLE_SHARE = 0.75;
+
+/**
+ * `text` without the words the voice for `language` can't read (a stray
+ * Hindi word in a Telugu reply), when nearly all of it is readable — or
+ * null when too much would be lost to still be the same reply. Lets the
+ * caller hear the model's real answer instead of a "please say that again"
+ * line that blames them for a problem on the agent's side.
+ */
+export function speakablePart(text: string, language: string): string | null {
+  const letters = (s: string) => [...s].filter((ch) => /\p{L}/u.test(ch)).length;
+  const kept = text
+    .split(/(\s+)/)
+    .filter((w) => /^\s+$/.test(w) || voiceCanSpeakText(w, language))
+    .join("")
+    .replace(/\s+([,.!?।])/g, "$1")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  const total = letters(text);
+  return total > 0 && letters(kept) / total >= MIN_SPEAKABLE_SHARE ? kept : null;
+}
+
 /** English name for prompts and logs; the raw code when it isn't supported. */
 export function voiceLanguageName(code: string): string {
   return voiceLanguage(code)?.name ?? code;
