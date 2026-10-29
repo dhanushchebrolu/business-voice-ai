@@ -6,6 +6,8 @@ import {
   terminateRuntimeSession,
   type StartRuntimeSessionInput,
 } from "./voice-runtime.server.ts";
+import { normalizeSttMessage } from "./sarvam-realtime.server.ts";
+import { withCurrentLanguageSection } from "./agent-instructions.ts";
 import { createHarness, type Harness } from "./telephony/voice-runtime-test-harness.ts";
 import {
   callOutcomeLine,
@@ -136,6 +138,8 @@ interface BookingScript {
   booking?: ToolResult[];
   /** The separate phrasing model (composeHonestBookingReply) — counted, and may throw. */
   wording?: (facts: string) => string;
+  /** The instructions the call starts with (routeToAgentRuntime's output). */
+  instructions?: string;
 }
 
 async function openBookingCall(script: BookingScript = {}) {
@@ -176,7 +180,7 @@ async function openBookingCall(script: BookingScript = {}) {
     businessId: "00000000-0000-0000-0000-000000000001",
     agentConfigId: "00000000-0000-0000-0000-000000000002",
     agentVersion: 3,
-    instructions: "You are Aria, a helpful receptionist for Smile Dental.",
+    instructions: script.instructions ?? "You are Aria, a helpful receptionist for Smile Dental.",
     snapshotAgent: agent,
     businessName: "Smile Dental",
     bridge: h.bridge,
@@ -186,6 +190,19 @@ async function openBookingCall(script: BookingScript = {}) {
   };
   await startRuntimeSession(input, h.deps);
   let emitted = 0;
+  /** One caller turn from a raw Sarvam realtime STT message, through the real normalizeSttMessage. */
+  const rawTurn = async (raw: Record<string, unknown>, reply: string) => {
+    while (emitted < h.tts.sentTexts.length) {
+      h.tts.emit({ type: "flushed" });
+      emitted++;
+    }
+    h.llm.setNextReply(reply);
+    const before = h.tts.sentTexts.length;
+    h.stt.emit({ type: "speech_start" });
+    h.stt.emit(normalizeSttMessage(raw));
+    await drain();
+    return spokenWithVoices(h, takeovers, before);
+  };
   /** One caller turn; returns what was spoken during it, chunk by chunk, with its voice. */
   const turn = async (said: string, reply: string, language = "en-IN") => {
     while (emitted < h.tts.sentTexts.length) {
@@ -201,7 +218,7 @@ async function openBookingCall(script: BookingScript = {}) {
   };
   const calls = (name: string) => h.tools.calls.filter((c) => c.name === name);
   const transcript = () => h.persistence.records.at(-1)?.turns.map((t) => t.text) ?? [];
-  return { h, callId, turn, calls, transcript, phrasingCalls: () => phrasingCalls };
+  return { h, callId, turn, rawTurn, calls, transcript, phrasingCalls: () => phrasingCalls };
 }
 
 /** English set-up: root canal tonight at 7 PM, caller-ID consent, name — the slot is offered. */
@@ -693,6 +710,176 @@ describe("callerBookingIntentAnyLanguage: 'confirm it' as an instruction", () =>
       assert.match(line, /\?$/, language);
       assert.notEqual(line, callOutcomeLine(language, "notBookedYet"), language);
     }
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* The production failure: an agent published before calls became      */
+/* multilingual, on raw Sarvam realtime STT messages                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The production agent (version 2, published 16 September) still carries the
+ * old generated "# LANGUAGE\nRespond in: en-IN." — and production read only
+ * `language_code`, which Sarvam's realtime endpoint never sends, so a Telugu
+ * caller was told "I can only assist in English". These calls start from
+ * that published text after routeToAgentRuntime's call-time override, and
+ * feed Sarvam's own realtime messages through normalizeSttMessage.
+ */
+const SEPTEMBER_PROMPT =
+  "# BUSINESS CONTEXT\nYou are the phone receptionist for Smile Dental.\n\n" +
+  "# RULES AND RESTRICTIONS\n1. Only answer with information given above.\n\n" +
+  "# LANGUAGE\nRespond in: en-IN.\n\n" +
+  "# SAFETY\n- Never claim a booking was completed unless a tool confirmed it.";
+const CALL_INSTRUCTIONS = withCurrentLanguageSection(SEPTEMBER_PROMPT, agent);
+const final = (text: string, extra: Record<string, unknown>) => ({
+  event: "transcript.final",
+  utterance_idx: 0,
+  text,
+  ...extra,
+});
+const systemText = (h: Harness) =>
+  (h.llm.calls.at(-1) ?? [])
+    .filter((m) => m.role === "system")
+    .map((m) => m.content)
+    .join("\n");
+const TELUGU_QUESTION = "మీ క్లినిక్ ఎక్కడ ఉంది చెప్పండి";
+const TELUGU_REPLY = "మేము ఎంజీ రోడ్‌లో ఉన్నాము.";
+const HINDI_REPLY = "जी हाँ, बताइए मैं आपकी क्या मदद करूँ?";
+
+describe("an old published prompt and Sarvam's realtime language fields, end to end", () => {
+  test("the call's instructions carry today's language rules, not the published English-only one", () => {
+    assert.doesNotMatch(CALL_INSTRUCTIONS, /Respond in: en-IN\./);
+    assert.match(CALL_INSTRUCTIONS, /Never refuse a call or claim you can only help in English/);
+    assert.ok(
+      CALL_INSTRUCTIONS.startsWith(
+        SEPTEMBER_PROMPT.slice(0, SEPTEMBER_PROMPT.indexOf("# LANGUAGE")),
+      ),
+    );
+  });
+
+  test("a Telugu caller (language + language_confidence) is answered in Telugu, by the Telugu voice", async () => {
+    const { h, callId, rawTurn } = await openBookingCall({ instructions: CALL_INSTRUCTIONS });
+    const chunks = await rawTurn(
+      final(TELUGU_QUESTION, { language: "te-IN", language_confidence: "0.92" }),
+      TELUGU_REPLY,
+    );
+    const system = systemText(h);
+    assert.doesNotMatch(system, /Respond in: en-IN\./, "no English-only rule reaches the model");
+    assert.match(system, /Reply to the caller's next message in Telugu \(te-IN\)/);
+    assert.ok(joined(chunks).includes(TELUGU_REPLY), joined(chunks));
+    for (const c of chunks) assert.equal(c.voice, "te-IN", `said by ${c.voice}: ${c.text}`);
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("'Hindi lo matladadava?' (romanized Telugu) switches to Hindi, then 'English lo matladandi' back to English", async () => {
+    const { h, callId, rawTurn } = await openBookingCall({ instructions: CALL_INSTRUCTIONS });
+    await rawTurn(
+      final(TELUGU_QUESTION, { language: "te-IN", language_confidence: "0.92" }),
+      TELUGU_REPLY,
+    );
+    const hindi = await rawTurn(
+      final("Hindi lo matladadava?", { language: "te-IN", language_confidence: "0.61" }),
+      HINDI_REPLY,
+    );
+    assert.match(systemText(h), /Reply to the caller's next message in Hindi \(hi-IN\)/);
+    assert.ok(joined(hindi).includes(HINDI_REPLY), joined(hindi));
+    for (const c of hindi) assert.equal(c.voice, "hi-IN", `said by ${c.voice}: ${c.text}`);
+
+    const english = await rawTurn(
+      final("English lo matladandi", { language: "te-IN", language_confidence: "0.58" }),
+      "Sure, how can I help you?",
+    );
+    assert.match(systemText(h), /Reply to the caller's next message in English \(en-IN\)/);
+    for (const c of english) assert.equal(c.voice, "en-IN", `said by ${c.voice}: ${c.text}`);
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("a Telugu-script request for Hindi ('హిందీలో మాట్లాడతావా?') switches to Hindi", async () => {
+    const { h, callId, rawTurn } = await openBookingCall({ instructions: CALL_INSTRUCTIONS });
+    await rawTurn(
+      final(TELUGU_QUESTION, { language: "te-IN", language_confidence: "0.92" }),
+      TELUGU_REPLY,
+    );
+    const chunks = await rawTurn(
+      final("హిందీలో మాట్లాడతావా?", { language: "te-IN", language_confidence: "0.95" }),
+      HINDI_REPLY,
+    );
+    assert.match(systemText(h), /Reply to the caller's next message in Hindi \(hi-IN\)/);
+    for (const c of chunks) assert.equal(c.voice, "hi-IN", `said by ${c.voice}: ${c.text}`);
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("a Hindi caller in Devanagari is answered in Hindi; an English caller stays in English", async () => {
+    const hindiCall = await openBookingCall({ instructions: CALL_INSTRUCTIONS });
+    const hindi = await hindiCall.rawTurn(
+      final("आपका क्लिनिक कहाँ है बताइए", { language: "hi-IN", language_confidence: "0.94" }),
+      "हमारा क्लिनिक एमजी रोड पर है।",
+    );
+    for (const c of hindi) assert.equal(c.voice, "hi-IN");
+    await terminateRuntimeSession(hindiCall.callId, "test cleanup");
+
+    const englishCall = await openBookingCall({ instructions: CALL_INSTRUCTIONS });
+    const english = await englishCall.rawTurn(
+      final("Is there parking near your clinic?", {
+        language: "en-IN",
+        language_confidence: "0.97",
+      }),
+      "Yes, there is parking right outside.",
+    );
+    assert.match(
+      systemText(englishCall.h),
+      /Reply to the caller's next message in English \(en-IN\)/,
+    );
+    assert.ok(joined(english).includes("Yes, there is parking right outside."));
+    for (const c of english) assert.equal(c.voice, "en-IN");
+    await terminateRuntimeSession(englishCall.callId, "test cleanup");
+  });
+
+  test("the legacy `language_code` field still drives the switch", async () => {
+    const { callId, rawTurn } = await openBookingCall({ instructions: CALL_INSTRUCTIONS });
+    const chunks = await rawTurn(final(TELUGU_QUESTION, { language_code: "te-IN" }), TELUGU_REPLY);
+    for (const c of chunks) assert.equal(c.voice, "te-IN", `said by ${c.voice}: ${c.text}`);
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("uncertain, missing, invalid or unsupported detection keeps the current language", async () => {
+    const { h, callId, rawTurn } = await openBookingCall({ instructions: CALL_INSTRUCTIONS });
+    await rawTurn(
+      final("Is there parking near your clinic?", {
+        language: "en-IN",
+        language_confidence: "0.97",
+      }),
+      "Yes, there is parking right outside.",
+    );
+    const cases: [string, Record<string, unknown>][] = [
+      ["నాకు సమయం చెప్పండి దయచేసి", { language: "te-IN", language_confidence: "0.40" }],
+      ["can you tell me the fee please", {}],
+      ["what is the fee for cleaning", { language: "te-IN", language_confidence: "abc" }],
+      ["is parking available near you", { language: "ur-IN", language_confidence: "0.99" }],
+    ];
+    for (const [text, extra] of cases) {
+      const chunks = await rawTurn(final(text, extra), "Our fee is five hundred rupees.");
+      assert.match(systemText(h), /in English \(en-IN\)/, JSON.stringify(extra));
+      for (const c of chunks)
+        assert.equal(c.voice, "en-IN", `${JSON.stringify(extra)}: ${c.voice}`);
+    }
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("a short acknowledgement never flips an established Telugu call to English", async () => {
+    const { h, callId, rawTurn } = await openBookingCall({ instructions: CALL_INSTRUCTIONS });
+    await rawTurn(
+      final(TELUGU_QUESTION, { language: "te-IN", language_confidence: "0.92" }),
+      TELUGU_REPLY,
+    );
+    const chunks = await rawTurn(
+      final("ok", { language: "en-IN", language_confidence: "0.99" }),
+      "సరే, ఇంకా ఏమైనా కావాలా?",
+    );
+    assert.match(systemText(h), /in Telugu \(te-IN\)/);
+    for (const c of chunks) assert.equal(c.voice, "te-IN", `said by ${c.voice}: ${c.text}`);
+    await terminateRuntimeSession(callId, "test cleanup");
   });
 });
 

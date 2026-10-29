@@ -359,6 +359,25 @@ describe("requestedLanguageFromText", () => {
     ["Mujhe Hindi nahi aati", null],
     ["Is the dentist Bengali?", null],
     ["what are your hours", null],
+    // A language named in the caller's own script: the production call's
+    // "Hindi lo matladadava?" ("will you speak Hindi?") and its Telugu-script
+    // form, Telugu asked for in Devanagari, and back to English.
+    ["Hindi lo matladadava?", "hi-IN"],
+    ["హిందీలో మాట్లాడతావా?", "hi-IN"],
+    ["तेलुगु में बात कीजिए", "te-IN"],
+    ["English lo matladandi", "en-IN"],
+    ["ఇంగ్లీష్‌లో మాట్లాడండి", "en-IN"], // with the zero-width joiner Telugu keyboards add
+    ["अंग्रेज़ी में बोलिए", "en-IN"],
+    ["इंग्लिश में बात करो", "en-IN"],
+    ["ಹಿಂದಿಯಲ್ಲಿ ಮಾತನಾಡಿ", "hi-IN"],
+    ["இந்தியில் பேசுங்க", "hi-IN"],
+    ["హిందీ వద్దు, తెలుగులో మాట్లాడండి", "te-IN"],
+    ["నాకు హిందీ రాదు", null],
+    ["నేను హిందీ సినిమా చూశాను", null],
+    // Words that merely begin like a language name: இந்தியா ("India"),
+    // ಹಿಂದಿನ ("previous").
+    ["இந்தியா பற்றி பேசுங்க", null],
+    ["ಹಿಂದಿನ ಬಗ್ಗೆ ಮಾತನಾಡಿ", null],
   ];
   for (const [text, expected] of cases) {
     test(`${JSON.stringify(text)} → ${expected}`, () => {

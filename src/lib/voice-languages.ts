@@ -247,23 +247,91 @@ function wordCount(text: string): number {
   return text.split(/\s+/).filter((w) => /\p{L}/u.test(w)).length;
 }
 
-/** How each language is named in a request — English, romanized, and its own script. */
+/**
+ * How each language is named in a request: English and romanized, and in
+ * the scripts callers write it in — its own, and (for English, Hindi and
+ * Telugu, and for every language in Telugu script and Devanagari) the
+ * caller's: a Telugu caller asks "హిందీలో మాట్లాడతావా?", a Hindi one
+ * "तेलुगु में बात करो". Native names are matched as substrings, so a
+ * spelling that begins an unrelated common word is left out or given in
+ * its "in <language>" form instead: Tamil இந்தி is the start of இந்தியா
+ * ("India"), so இந்தியில்; Kannada ಹಿಂದಿ starts ಹಿಂದಿನ ("previous"), so
+ * ಹಿಂದಿಯ (ಹಿಂದಿಯಲ್ಲಿ).
+ */
 const LANGUAGE_NAMES: Record<VoiceLanguageCode, { latin: string[]; native: string[] }> = {
   "en-IN": {
-    latin: ["english", "angrezi", "angreji"],
-    native: ["अंग्रेज़ी", "अंग्रेजी", "ఇంగ్లీష్", "ஆங்கில"],
+    latin: ["english", "inglish", "angrezi", "angreji"],
+    native: [
+      "अंग्रेज़ी",
+      "अंग्रेजी",
+      "इंग्लिश",
+      "ఇంగ్లీష్",
+      "ఇంగ్లిష్",
+      "ఆంగ్లం",
+      "ஆங்கில",
+      "இங்கிலீஷ்",
+      "ইংরেজি",
+      "ইংলিশ",
+      "અંગ્રેજી",
+      "ઇંગ્લિશ",
+      "ಇಂಗ್ಲಿಷ್",
+      "ಇಂಗ್ಲೀಷ್",
+      "ഇംഗ്ലീഷ്",
+      "ਅੰਗਰੇਜ਼ੀ",
+      "ਅੰਗਰੇਜੀ",
+      "ਇੰਗਲਿਸ਼",
+      "ଇଂରାଜୀ",
+      "ଇଂଲିଶ",
+    ],
   },
-  "hi-IN": { latin: ["hindi"], native: ["हिंदी", "हिन्दी"] },
-  "bn-IN": { latin: ["bengali", "bangla"], native: ["বাংলা"] },
-  "ta-IN": { latin: ["tamil"], native: ["தமிழ்"] },
-  "te-IN": { latin: ["telugu"], native: ["తెలుగు"] },
-  "gu-IN": { latin: ["gujarati"], native: ["ગુજરાતી"] },
-  "kn-IN": { latin: ["kannada"], native: ["ಕನ್ನಡ"] },
-  "ml-IN": { latin: ["malayalam"], native: ["മലയാളം", "മലയാള"] },
-  "mr-IN": { latin: ["marathi"], native: ["मराठी"] },
-  "pa-IN": { latin: ["punjabi"], native: ["ਪੰਜਾਬੀ"] },
-  "od-IN": { latin: ["odia", "oriya"], native: ["ଓଡ଼ିଆ", "ଓଡିଆ"] },
+  "hi-IN": {
+    latin: ["hindi"],
+    native: [
+      "हिंदी",
+      "हिन्दी",
+      "హిందీ",
+      "ஹிந்தி",
+      "இந்தியில்",
+      "হিন্দি",
+      "હિન્દી",
+      "હિંદી",
+      "ಹಿಂದಿಯ",
+      "ഹിന്ദി",
+      "ਹਿੰਦੀ",
+      "ହିନ୍ଦୀ",
+    ],
+  },
+  "bn-IN": { latin: ["bengali", "bangla"], native: ["বাংলা", "बंगाली", "बांग्ला", "బెంగాలీ"] },
+  "ta-IN": { latin: ["tamil"], native: ["தமிழ்", "तमिल", "తమిళం", "తమిళ్"] },
+  "te-IN": {
+    latin: ["telugu"],
+    native: [
+      "తెలుగు",
+      "तेलुगु",
+      "तेलगू",
+      "தெலுங்கு",
+      "তেলুগু",
+      "તેલુગુ",
+      "ತೆಲುಗು",
+      "തെലുങ്ക്",
+      "ਤੇਲਗੂ",
+      "ਤੇਲੁਗੂ",
+      "ତେଲୁଗୁ",
+    ],
+  },
+  "gu-IN": { latin: ["gujarati"], native: ["ગુજરાતી", "गुजराती", "గుజరాతీ"] },
+  "kn-IN": { latin: ["kannada"], native: ["ಕನ್ನಡ", "कन्नड़", "कन्नड", "కన్నడ"] },
+  "ml-IN": { latin: ["malayalam"], native: ["മലയാളം", "മലയാള", "मलयालम", "మలయాళం"] },
+  "mr-IN": { latin: ["marathi"], native: ["मराठी", "మరాఠీ"] },
+  "pa-IN": { latin: ["punjabi"], native: ["ਪੰਜਾਬੀ", "पंजाबी", "పంజాబీ"] },
+  "od-IN": {
+    latin: ["odia", "oriya"],
+    native: ["ଓଡ଼ିଆ", "ଓଡିଆ", "ओड़िया", "ओडिया", "उड़िया", "ఒడియా", "ఒరియా"],
+  },
 };
+
+/** Zero-width joiners Indic text often carries before a suffix ("ఇంగ్లీష్‌లో") — invisible, and never part of a name. */
+const ZERO_WIDTH_JOINERS = /[‌‍]/g;
 
 /**
  * A mention of a language is a request to use it when it comes with a verb
@@ -330,7 +398,8 @@ function isNegated(text: string, latin: string, native: string): boolean {
  * "No, speak English", "Speak English, not Hindi" and "I don't understand
  * Hindi, can you talk in English" all ask for English.
  */
-export function requestedLanguageFromText(text: string): VoiceLanguageCode | null {
+export function requestedLanguageFromText(said: string): VoiceLanguageCode | null {
+  const text = said.replace(ZERO_WIDTH_JOINERS, "");
   const hasVerb = REQUEST_VERB.test(text);
   const matches = VOICE_LANGUAGES.map((l) => l.code).flatMap((code) => {
     const names = LANGUAGE_NAMES[code];

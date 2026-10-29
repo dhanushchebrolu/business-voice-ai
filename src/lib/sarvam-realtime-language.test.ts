@@ -67,7 +67,9 @@ describe("normalizeSttMessage — detected language from the realtime protocol",
     assert.equal((event as { language?: string }).language, "en-IN");
   });
 
-  test("an invalid confidence is dropped rather than trusted", () => {
+  test("an invalid confidence is reported as 0 (unreliable), never dropped into 'trusted'", () => {
+    // A missing confidence means pinned or legacy STT and is trusted as
+    // strong (nextCallLanguage), so an unreadable one must not look missing.
     for (const bad of ["abc", "1.5", "-0.1", ""]) {
       const event = normalizeSttMessage({
         event: "transcript.final",
@@ -75,8 +77,18 @@ describe("normalizeSttMessage — detected language from the realtime protocol",
         language: "hi-IN",
         language_confidence: bad,
       });
-      assert.equal("languageConfidence" in event, false, `confidence ${JSON.stringify(bad)}`);
+      assert.equal(
+        (event as { languageConfidence?: number }).languageConfidence,
+        0,
+        `confidence ${JSON.stringify(bad)}`,
+      );
     }
+    const withoutConfidence = normalizeSttMessage({
+      event: "transcript.final",
+      text: "x",
+      language: "hi-IN",
+    });
+    assert.equal("languageConfidence" in withoutConfidence, false, "absent stays absent");
   });
 
   test("a numeric confidence is accepted too", () => {

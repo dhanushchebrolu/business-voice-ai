@@ -146,7 +146,11 @@ export async function routeToAgentRuntime(
     if (publishedVersion) {
       const snapshot =
         publishedVersion.snapshot as unknown as import("./agent-instructions").AgentSnapshot;
-      instructions = publishedVersion.instructions;
+      // The published text, with only its # LANGUAGE section brought up to
+      // date: one published before calls became multilingual still says
+      // "Respond in: en-IN." (see withCurrentLanguageSection).
+      const { withCurrentLanguageSection } = await import("./agent-instructions");
+      instructions = withCurrentLanguageSection(publishedVersion.instructions, snapshot.agent);
       agentSnapshotAgent = snapshot.agent;
       agentVersion = publishedVersion.version;
       businessName = snapshot.business.name;

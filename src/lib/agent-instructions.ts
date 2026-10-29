@@ -32,6 +32,43 @@ function languageSection(a: AgentSnapshot["agent"]): string {
   return `The caller may speak any of these languages, or a natural code-mixed combination of them (e.g. Hinglish, Tanglish): ${SUPPORTED_VOICE_LANGUAGES.map((l) => `${l.name} (${l.code})`).join(", ")}. Detect the caller's language (or code-mixed style) from what they actually say, and respond naturally in that same language or style. If the caller explicitly asks you to switch language ("Can you speak Telugu?", "Hindi mein baat karo"), switch immediately and keep responding in that language for the rest of the call unless they ask to switch again. A change of language never resets the conversation: keep everything the caller already told you (their name, number, the service, date and time) and carry on from where you were. Never refuse a call or claim you can only help in English — that is never true for this line. Your default language is ${primary} — use it for your own opening greeting and whenever the caller's language is unclear or you have no other signal yet. When a system note names the language for your next reply, follow it — that is the language your reply will be spoken in.`;
 }
 
+/**
+ * Published instructions with today's # LANGUAGE section in place of the one
+ * saved at publish time — for calls, which replay agent_versions.instructions
+ * verbatim. An agent published before every call became multilingual still
+ * carries "Respond in: en-IN." there, which made it refuse Telugu and Hindi
+ * callers no matter what the runtime detected.
+ *
+ * Only that section changes: everything before its heading and from the next
+ * "# " heading on is kept byte for byte, so booking, payment, business and
+ * rules text stay exactly as published. The last "# LANGUAGE" heading is the
+ * one replaced — it is always the generated section, while an earlier one
+ * could only come from uploaded knowledge text. Instructions without the
+ * section get it appended.
+ */
+export function withCurrentLanguageSection(
+  instructions: string,
+  agent: AgentSnapshot["agent"],
+): string {
+  const section = languageSection(agent);
+  const headings = [...instructions.matchAll(/^# LANGUAGE[ \t]*\r?$/gm)];
+  const heading = headings.at(-1);
+  if (heading?.index === undefined) {
+    const separator = instructions.endsWith("\n") ? "\n" : "\n\n";
+    return `${instructions}${separator}# LANGUAGE\n${section}\n`;
+  }
+  const headingEnd = heading.index + heading[0].length;
+  const bodyStart = instructions.startsWith("\n", headingEnd) ? headingEnd + 1 : headingEnd;
+  const next = /^# /m.exec(instructions.slice(bodyStart));
+  const bodyEnd = next ? bodyStart + next.index : instructions.length;
+  const body = instructions.slice(bodyStart, bodyEnd);
+  // Keep the blank line(s) that separated the section from the next heading
+  // (at least one line break, so the next heading still starts a line).
+  const trailing = /\s*$/.exec(body)?.[0] ?? "";
+  const separator = next && !trailing.includes("\n") ? "\n\n" : trailing;
+  return `${instructions.slice(0, bodyStart)}${section}${separator}${instructions.slice(bodyEnd)}`;
+}
+
 export interface AgentSnapshot {
   business: {
     name: string;

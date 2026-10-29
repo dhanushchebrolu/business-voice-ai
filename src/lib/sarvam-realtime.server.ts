@@ -606,9 +606,13 @@ export function normalizeSttMessage(raw: unknown): SttEvent {
     // runtime, so every reply stayed in the agent's primary language.
     // `language_code` is still read as a fallback for that legacy shape.
     const language = detectedLanguageCode(data["language"] ?? data["language_code"]);
-    const languageConfidence = parseLanguageConfidence(
-      data["language_confidence"] ?? data["language_probability"],
-    );
+    const rawConfidence = data["language_confidence"] ?? data["language_probability"];
+    const parsedConfidence = parseLanguageConfidence(rawConfidence);
+    // A confidence that is sent but unreadable is reported as 0, unreliable:
+    // only a detection with no confidence at all (pinned or legacy STT) is
+    // trusted outright (nextCallLanguage), and garbage must not earn that.
+    const languageConfidence =
+      parsedConfidence ?? (rawConfidence === undefined || rawConfidence === null ? undefined : 0);
     const extra = languageConfidence === undefined ? {} : { languageConfidence };
     return isFinal
       ? { type: "final_transcript", text: transcript, language, ...extra }
