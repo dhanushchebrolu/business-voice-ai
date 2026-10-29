@@ -2,6 +2,8 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
   callerAuthorizesBooking,
+  chunkIntoSentences,
+  textForSpeech,
   startRuntimeSession,
   terminateRuntimeSession,
   type StartRuntimeSessionInput,
@@ -853,7 +855,7 @@ describe("an old published prompt and Sarvam's realtime language fields, end to 
       "Yes, there is parking right outside.",
     );
     const cases: [string, Record<string, unknown>][] = [
-      ["నాకు సమయం చెప్పండి దయచేసి", { language: "te-IN", language_confidence: "0.40" }],
+      ["can I come in the evening", { language: "te-IN", language_confidence: "0.40" }],
       ["can you tell me the fee please", {}],
       ["what is the fee for cleaning", { language: "te-IN", language_confidence: "abc" }],
       ["is parking available near you", { language: "ur-IN", language_confidence: "0.99" }],
@@ -880,6 +882,158 @@ describe("an old published prompt and Sarvam's realtime language fields, end to 
     assert.match(systemText(h), /in Telugu \(te-IN\)/);
     for (const c of chunks) assert.equal(c.voice, "te-IN", `said by ${c.voice}: ${c.text}`);
     await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+/**
+ * The production call of 2026-10-29 that the earlier fix did not cover:
+ * "Hello", then romanized Telugu, then Devanagari Hindi — all answered in
+ * English. Sarvam's realtime STT labelled the first two "en-IN" (the
+ * romanized Telugu at 0.6), and "Hello" at confidence 1 had locked the call
+ * to English, so the Hindi sentence needed a second confirming sentence.
+ */
+describe("the caller's language from their own words, without being asked", () => {
+  test("Hello → romanized Telugu → Devanagari Hindi: Telugu, then Hindi, by the matching voice", async () => {
+    const { h, callId, rawTurn } = await openBookingCall({ instructions: CALL_INSTRUCTIONS });
+    const hello = await rawTurn(
+      final("Hello", { language: "en-IN", language_confidence: "1" }),
+      "Hello! How can I help you today?",
+    );
+    for (const c of hello) assert.equal(c.voice, "en-IN");
+
+    const telugu = await rawTurn(
+      final("Appointment book cheyali anukuntunnaru", {
+        language: "en-IN",
+        language_confidence: "0.6",
+      }),
+      "తప్పకుండా, ఏ రోజు, ఏ సమయానికి కావాలి?",
+    );
+    assert.match(systemText(h), /Reply to the caller's next message in Telugu \(te-IN\)/);
+    assert.ok(telugu.length > 0);
+    for (const c of telugu) assert.equal(c.voice, "te-IN", `said by ${c.voice}: ${c.text}`);
+
+    const hindi = await rawTurn(
+      final("आज तीन बजे अपार्टमेंट बुक कर दो।", { language: "hi-IN", language_confidence: "0.55" }),
+      "ज़रूर, आज तीन बजे के लिए आपका नाम बताइए?",
+    );
+    assert.match(systemText(h), /Reply to the caller's next message in Hindi \(hi-IN\)/);
+    assert.ok(hindi.length > 0);
+    for (const c of hindi) assert.equal(c.voice, "hi-IN", `said by ${c.voice}: ${c.text}`);
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  // "I want an appointment" in each language, as saaras:v3-realtime writes
+  // it, with the low-confidence label Sarvam gives code-mixed speech — the
+  // script alone must decide.
+  const FIRST_UTTERANCES: [string, string, Record<string, unknown>][] = [
+    ["te-IN", "నాకు అపాయింట్మెంట్ బుక్ చేయాలి", { language: "en-IN", language_confidence: "0.55" }],
+    ["hi-IN", "मुझे अपॉइंटमेंट बुक करनी है", { language: "en-IN", language_confidence: "0.55" }],
+    [
+      "ta-IN",
+      "எனக்கு ஒரு அப்பாயின்ட்மென்ட் வேண்டும்",
+      { language: "en-IN", language_confidence: "0.5" },
+    ],
+    ["kn-IN", "ನನಗೆ ಒಂದು ಅಪಾಯಿಂಟ್ಮೆಂಟ್ ಬೇಕು", { language: "en-IN", language_confidence: "0.5" }],
+    [
+      "ml-IN",
+      "എനിക്ക് ഒരു അപ്പോയിന്റ്മെന്റ് വേണം",
+      { language: "en-IN", language_confidence: "0.5" },
+    ],
+    ["bn-IN", "আমার একটা অ্যাপয়েন্টমেন্ট চাই", { language: "en-IN", language_confidence: "0.5" }],
+    ["mr-IN", "मला अपॉइंटमेंट बुक करायची आहे", { language: "mr-IN", language_confidence: "0.5" }],
+    ["gu-IN", "મારે એપોઇન્ટમેન્ટ બુક કરવી છે", { language: "en-IN", language_confidence: "0.5" }],
+    ["pa-IN", "ਮੈਨੂੰ ਅਪੌਇੰਟਮੈਂਟ ਬੁੱਕ ਕਰਨੀ ਹੈ", { language: "en-IN", language_confidence: "0.5" }],
+    ["od-IN", "ମୋତେ ଗୋଟିଏ ଆପଏଣ୍ଟମେଣ୍ଟ ଦରକାର", { language: "or-IN", language_confidence: "0.5" }],
+  ];
+  for (const [code, said, extra] of FIRST_UTTERANCES) {
+    test(`a ${code} caller's first sentence is answered in ${code}, by the ${code} voice`, async () => {
+      const { h, callId, rawTurn } = await openBookingCall({ instructions: CALL_INSTRUCTIONS });
+      // The reply repeats the caller's words: any text in the right script.
+      const chunks = await rawTurn(final(said, extra), said);
+      assert.ok(systemText(h).includes(`next message in`) && systemText(h).includes(`(${code})`));
+      assert.ok(chunks.length > 0);
+      for (const c of chunks) assert.equal(c.voice, code, `said by ${c.voice}: ${c.text}`);
+      await terminateRuntimeSession(callId, "test cleanup");
+    });
+  }
+
+  test("romanized Hindi is answered in Hindi; plain English stays English", async () => {
+    const hindiCall = await openBookingCall({ instructions: CALL_INSTRUCTIONS });
+    const hindi = await hindiCall.rawTurn(
+      final("Mujhe kal appointment chahiye", { language: "en-IN", language_confidence: "0.62" }),
+      "ज़रूर, कल किस समय आना चाहेंगे?",
+    );
+    assert.match(systemText(hindiCall.h), /in Hindi \(hi-IN\)/);
+    for (const c of hindi) assert.equal(c.voice, "hi-IN");
+    await terminateRuntimeSession(hindiCall.callId, "test cleanup");
+
+    const englishCall = await openBookingCall({ instructions: CALL_INSTRUCTIONS });
+    const english = await englishCall.rawTurn(
+      final("I want to book an appointment for tomorrow at 3 PM", {
+        language: "en-IN",
+        language_confidence: "0.6",
+      }),
+      "Sure, may I have your name?",
+    );
+    assert.match(systemText(englishCall.h), /in English \(en-IN\)/);
+    for (const c of english) assert.equal(c.voice, "en-IN");
+    await terminateRuntimeSession(englishCall.callId, "test cleanup");
+  });
+
+  test("Telugu → Hindi → English across a call, and a short native-script 'ok' moves nothing", async () => {
+    const { h, callId, rawTurn } = await openBookingCall({ instructions: CALL_INSTRUCTIONS });
+    await rawTurn(
+      final(TELUGU_QUESTION, { language: "te-IN", language_confidence: "0.7" }),
+      TELUGU_REPLY,
+    );
+    const hindi = await rawTurn(
+      final("मुझे कल सुबह दस बजे आना है", { language: "hi-IN", language_confidence: "0.7" }),
+      HINDI_REPLY,
+    );
+    for (const c of hindi) assert.equal(c.voice, "hi-IN");
+    const ack = await rawTurn(
+      final("ఓకే", { language: "te-IN", language_confidence: "0.99" }),
+      "जी, और कुछ?",
+    );
+    assert.match(systemText(h), /in Hindi \(hi-IN\)/);
+    for (const c of ack) assert.equal(c.voice, "hi-IN");
+    const english = await rawTurn(
+      final("Actually can we continue this conversation", {
+        language: "en-IN",
+        language_confidence: "0.9",
+      }),
+      "Of course, go ahead.",
+    );
+    for (const c of english) assert.equal(c.voice, "en-IN");
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
+describe("text for the voice", () => {
+  test("markdown, bullets and emoji are removed; dates, times, amounts and names are untouched", () => {
+    assert.equal(
+      textForSpeech("**Sure!** Your slot is on 14-10-2030 at 7:30 PM 😊"),
+      "Sure! Your slot is on 14-10-2030 at 7:30 PM",
+    );
+    assert.equal(
+      textForSpeech("## Options\n- Root canal: ₹4,500\n- Cleaning: ₹800"),
+      "Options\nRoot canal: ₹4,500\nCleaning: ₹800",
+    );
+    for (const plain of [
+      "ఆదివారం, 3:30 PMకి డాక్టర్ రావు గారు ఉంటారు.",
+      "जी, कल सुबह 10 बजे का समय मिल जाएगा।",
+      "Your email is dhanush_c@example.com, right?",
+      "It's 2.5 hours, Dr. K. Rao.",
+    ]) {
+      assert.equal(textForSpeech(plain), plain);
+    }
+  });
+
+  test("Indian-language sentences ending in a danda are split like English ones", () => {
+    assert.deepEqual(
+      chunkIntoSentences("ज़रूर, आपका अपॉइंटमेंट देख लेती हूँ। कल सुबह दस बजे ठीक रहेगा?"),
+      ["ज़रूर, आपका अपॉइंटमेंट देख लेती हूँ।", "कल सुबह दस बजे ठीक रहेगा?"],
+    );
   });
 });
 

@@ -186,7 +186,7 @@ function updateCallLanguage(
   confidence: number | undefined,
 ): void {
   const before = responseLanguageFor(session);
-  const { state, decision } = nextCallLanguage(
+  const { state, decision, source } = nextCallLanguage(
     {
       current: normalizeVoiceLanguageCode(session.detectedLanguage),
       pending: normalizeVoiceLanguageCode(session.pendingLanguage),
@@ -198,6 +198,7 @@ function updateCallLanguage(
   if (decision === "no_detection" || decision === "unchanged") return;
   log("call_language", session, {
     decision,
+    source,
     detected: language ?? null,
     confidence: confidence ?? null,
     from: before,
@@ -217,8 +218,16 @@ export function responseLanguageInstruction(language: string): string {
   const name = voiceLanguageName(language);
   return `Reply to the caller's next message in ${name} (${language}), written in ${name}'s own script${
     language === "en-IN" ? "" : " — a few English words the caller used themselves are fine"
-  }. Do not reply in any other language this turn.`;
+  }. Do not reply in any other language this turn. ${SPOKEN_STYLE_NOTE}`;
 }
+
+/**
+ * How a reply should read when bulbul:v3 speaks it. v3 takes plain text
+ * only — no SSML, and no pitch or loudness control — so phrasing and
+ * punctuation are the only prosody the voice gets.
+ */
+const SPOKEN_STYLE_NOTE =
+  "Write it the way a warm, experienced receptionist would say it out loud in that language — everyday spoken phrasing, not a word-for-word translation from English. Use short sentences with commas where a speaker would pause, and end questions with a question mark. Keep dates, times, numbers and names exactly as they are. No lists, markdown, emoji or stage directions.";
 
 /**
  * Explicit runtime states. `created` -> `connecting` -> `greeting` ->
@@ -1850,11 +1859,33 @@ function withTurnDeadline<T>(
   });
 }
 
-/** Splits accumulated assistant text into TTS-safe chunks at sentence boundaries. */
+/**
+ * Text as the voice should receive it. bulbul:v3 reads its input literally
+ * (no SSML or markup support), so formatting a model sometimes adds —
+ * markdown emphasis and headings, list bullets, emoji — would be spoken or
+ * mangled. Only those characters are removed; every word, digit and
+ * punctuation mark that carries meaning (dates, times, ₹ amounts, names)
+ * is kept exactly.
+ */
+export function textForSpeech(text: string): string {
+  return text
+    .replace(/[*`]+/g, " ")
+    .replace(/^[ \t]*(?:#+|[-•]|\d+[.)])[ \t]+/gm, "")
+    .replace(/\p{Extended_Pictographic}️?/gu, "")
+    .replace(/[ \t]+/g, " ")
+    .replace(/ +([,.!?।])/g, "$1")
+    .trim();
+}
+
+/**
+ * Splits accumulated assistant text into TTS-safe chunks at sentence
+ * boundaries — including the danda (।) Hindi, Marathi, Bengali, Punjabi and
+ * Odia sentences end with.
+ */
 export function chunkIntoSentences(text: string): string[] {
   const trimmed = text.trim();
   if (!trimmed) return [];
-  const parts = trimmed.match(/[^.!?\n]+[.!?\n]*/g) ?? [trimmed];
+  const parts = trimmed.match(/[^.!?।\n]+[.!?।\n]*/g) ?? [trimmed];
   const chunks: string[] = [];
   let buffer = "";
   for (const part of parts) {
@@ -1862,7 +1893,7 @@ export function chunkIntoSentences(text: string): string[] {
     // Flush once a chunk is a complete-looking sentence and long enough to
     // be worth an independent TTS round trip, so we don't fire one request
     // per short fragment.
-    if (buffer.trim().length >= 20 && /[.!?]\s*$/.test(buffer)) {
+    if (buffer.trim().length >= 20 && /[.!?।]\s*$/.test(buffer)) {
       chunks.push(buffer.trim());
       buffer = "";
     }
@@ -3179,6 +3210,13 @@ async function speak(
   text: string,
   asState: "greeting" | "speaking" = "speaking",
 ): Promise<void> {
+  // What the caller hears is what the transcript records.
+  const spoken = textForSpeech(text);
+  if (spoken !== text) {
+    const last = session.turns.at(-1);
+    if (last?.role === "assistant" && last.text === text) last.text = spoken;
+    text = spoken;
+  }
   if (asState !== "greeting") {
     const unreachable = await maybeSwitchTtsLanguage(session);
     if (unreachable) {
@@ -6495,7 +6533,10 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
       // the model wrote. The caller hears where things really stand.
       if (!session.confirmedBookingThisCall && !replyIsToolOutcome) {
         const checkable = isEnglish && isClaimCheckableText(reply);
-        if (checkable && claimsBookingSuccess(reply)) {
+        // Latin-script text is checked on every call, not only English
+        // ones: a Hindi call's model can still write Hinglish ("Aapki
+        // booking ho gayi hai!"), which the phrase list does cover.
+        if (isClaimCheckableText(reply) && claimsBookingSuccess(reply)) {
           log("reply_overclaimed_booking", session, { tool_calling: usedToolCallingThisTurn });
           reply = notBookedYetReplyFor(session);
         } else if (

@@ -171,11 +171,19 @@ export function parseLanguageConfidence(raw: unknown): number | undefined {
  *   1. The caller explicitly asks for a language ("Can you speak Telugu?",
  *      "Hindi mein baat karo") → switch at once. Sarvam would detect such a
  *      request in the language it is SAID in, not the one asked for.
+ *   1b. The transcript's own words show the language — written in an Indian
+ *      script, or romanized Telugu/Hindi (textLanguageEvidence) → that
+ *      language: it sets the call's language from the first utterance and
+ *      switches an established one on any real sentence, whatever
+ *      confidence Sarvam gave its label. Sarvam labels code-mixed Indian
+ *      speech "en-IN" at 0.5–0.6 on real calls, so its label alone left
+ *      Telugu and Hindi callers answered in English.
  *   2. No detection, or one outside the 11 (Sarvam's STT recognises 23) →
  *      keep the current language.
  *   3. language_confidence below RELIABLE_LANGUAGE_CONFIDENCE → ignored.
- *   4. The first reliable detection of the call → adopted at once, so a
- *      caller who opens in Telugu is answered in Telugu from their first turn.
+ *   4. The first reliable detection of a real sentence → adopted at once,
+ *      so a caller who opens in Telugu is answered in Telugu from their
+ *      first turn. A short Latin-script opener ("Hello") never sets it.
  *   5. After that, only a real sentence (MIN_SWITCH_WORDS or more words) can
  *      change the language: immediately when the detection is STRONG,
  *      otherwise when the same language is detected reliably on two such
@@ -209,42 +217,298 @@ export type CallLanguageDecision =
   | "ignored_unreliable"
   | "ignored_short";
 
+/**
+ * Where a call-language decision's evidence came from: the caller's words
+ * naming a language (`request`), the script the transcript is written in
+ * (`script`), romanized Indian-language words (`romanized`), or Sarvam's
+ * own detected-language label (`stt`).
+ */
+export type CallLanguageSource = "request" | "script" | "romanized" | "stt";
+
 export function nextCallLanguage(
   state: CallLanguageState,
   turn: { text: string; language?: string | undefined; confidence?: number | undefined },
-): { state: CallLanguageState; decision: CallLanguageDecision } {
+): { state: CallLanguageState; decision: CallLanguageDecision; source: CallLanguageSource | null } {
   const requested = requestedLanguageFromText(turn.text);
-  if (requested) return { state: { current: requested, pending: null }, decision: "requested" };
+  if (requested) {
+    return {
+      state: { current: requested, pending: null },
+      decision: "requested",
+      source: "request",
+    };
+  }
+  const short = wordCount(turn.text) < MIN_SWITCH_WORDS;
 
-  if (!turn.language) return { state, decision: "no_detection" };
+  // The transcript's own words, before Sarvam's label (rule 1b; see
+  // textLanguageEvidence): Sarvam labels code-mixed and romanized Indian
+  // speech "en-IN" at 0.5–0.6 confidence on real calls, which would leave a
+  // Telugu caller answered in English for the whole call.
+  const fromText = textLanguageEvidence(turn.text, turn.language, turn.confidence);
+  if (fromText) {
+    const { code, source } = fromText;
+    if (code === state.current) {
+      return { state: { ...state, pending: null }, decision: "unchanged", source };
+    }
+    // Words in the caller's own language are as strong as evidence gets: a
+    // first utterance of any length sets the call's language, and a real
+    // sentence switches an established one at once. A short reply ("సరే",
+    // "ठीक है") still never moves an established language (rule 5).
+    if (state.current !== null && short) return { state, decision: "ignored_short", source };
+    return { state: { current: code, pending: null }, decision: "adopted", source };
+  }
+
+  if (!turn.language) return { state, decision: "no_detection", source: null };
   const code = normalizeVoiceLanguageCode(turn.language);
-  if (!code) return { state, decision: "ignored_unsupported" };
-  if (code === state.current) return { state: { ...state, pending: null }, decision: "unchanged" };
+  if (!code) return { state, decision: "ignored_unsupported", source: "stt" };
+  if (code === state.current) {
+    return { state: { ...state, pending: null }, decision: "unchanged", source: "stt" };
+  }
 
   const confidence = turn.confidence ?? 1;
   if (confidence < RELIABLE_LANGUAGE_CONFIDENCE) {
-    return { state: { ...state, pending: null }, decision: "ignored_unreliable" };
+    return { state: { ...state, pending: null }, decision: "ignored_unreliable", source: "stt" };
   }
-  const short = wordCount(turn.text) < MIN_SWITCH_WORDS;
   const strong = confidence >= STRONG_LANGUAGE_CONFIDENCE;
-  const adopt = { state: { current: code, pending: null }, decision: "adopted" as const };
+  const adopt = {
+    state: { current: code, pending: null },
+    decision: "adopted" as const,
+    source: "stt" as const,
+  };
+  const ignoredShort = { state, decision: "ignored_short" as const, source: "stt" as const };
 
-  // The call's first language: any reliable sentence, or a short reply only
-  // when strongly detected (rule 4).
-  if (state.current === null)
-    return short && !strong ? { state, decision: "ignored_short" } : adopt;
+  // The call's first language from Sarvam's label alone: any reliable
+  // sentence. A short Latin-script reply ("Hello", "Hi", "ok") never sets
+  // it, however confidently labelled — Indian callers open in English
+  // whatever language they go on to speak, and a "Hello" that locked the
+  // call to English is exactly how a Telugu caller was answered in English
+  // throughout. Only a label with no words attached (a separate
+  // language-detection event) can still set it when strong.
+  if (state.current === null) {
+    if (!short) return adopt;
+    return turn.text.trim() === "" && strong ? adopt : ignoredShort;
+  }
 
   // An established language: a short reply never moves it (rule 5) —
   // pending is left exactly as it was, so "ok" between two English
   // sentences neither completes nor cancels that confirmation.
-  if (short) return { state, decision: "ignored_short" };
+  if (short) return ignoredShort;
   if (strong) return adopt;
   if (state.pending === code) return adopt;
-  return { state: { ...state, pending: code }, decision: "pending" };
+  return { state: { ...state, pending: code }, decision: "pending", source: "stt" };
 }
 
 function wordCount(text: string): number {
   return text.split(/\s+/).filter((w) => /\p{L}/u.test(w)).length;
+}
+
+/** Each Indian script, and the supported language written in it (Devanagari: see textLanguageEvidence). */
+const SCRIPT_LANGUAGES: { script: RegExp; code: VoiceLanguageCode }[] = [
+  { script: /\p{Script=Devanagari}/u, code: "hi-IN" },
+  { script: /\p{Script=Telugu}/u, code: "te-IN" },
+  { script: /\p{Script=Tamil}/u, code: "ta-IN" },
+  { script: /\p{Script=Kannada}/u, code: "kn-IN" },
+  { script: /\p{Script=Malayalam}/u, code: "ml-IN" },
+  { script: /\p{Script=Bengali}/u, code: "bn-IN" },
+  { script: /\p{Script=Gujarati}/u, code: "gu-IN" },
+  { script: /\p{Script=Gurmukhi}/u, code: "pa-IN" },
+  { script: /\p{Script=Oriya}/u, code: "od-IN" },
+];
+
+/**
+ * Romanized words that are distinctively Telugu or Hindi — verb forms,
+ * pronouns and postpositions a caller uses in any sentence, none of them an
+ * English word. Loanwords both languages share with English ("appointment",
+ * "book", "time") are deliberately absent: they are the code-mixed part.
+ */
+const ROMANIZED_MARKERS: Partial<Record<VoiceLanguageCode, ReadonlySet<string>>> = {
+  "te-IN": new Set([
+    "cheyali",
+    "cheyyali",
+    "cheyandi",
+    "cheyyandi",
+    "cheyadaniki",
+    "chesta",
+    "chestanu",
+    "chestara",
+    "chesaru",
+    "chesanu",
+    "kavali",
+    "kaavali",
+    "kavalandi",
+    "kavalante",
+    "undi",
+    "unnadi",
+    "unnaya",
+    "unnara",
+    "unnaru",
+    "unnanu",
+    "ledu",
+    "ledhu",
+    "levu",
+    "naaku",
+    "naku",
+    "meeku",
+    "meeru",
+    "miru",
+    "nenu",
+    "memu",
+    "manam",
+    "enti",
+    "emiti",
+    "ekkada",
+    "eppudu",
+    "enduku",
+    "entha",
+    "repu",
+    "ivvala",
+    "eeroju",
+    "ninna",
+    "gantalaki",
+    "gantala",
+    "ganta",
+    "matladandi",
+    "matladu",
+    "cheppandi",
+    "cheppu",
+    "anukuntunna",
+    "anukuntunnanu",
+    "anukuntunnaru",
+    "anukuntunnam",
+    "kosam",
+    "kooda",
+    "kuda",
+    "avunu",
+    "kadu",
+    "kaadu",
+    "sare",
+    "bagunnara",
+    "vastanu",
+    "vachi",
+    "ippudu",
+    "inka",
+    "chala",
+    "andi",
+    "garu",
+  ]),
+  "hi-IN": new Set([
+    "mujhe",
+    "mujhko",
+    "humein",
+    "hume",
+    "chahiye",
+    "chahta",
+    "chahti",
+    "chahte",
+    "karna",
+    "karni",
+    "karwana",
+    "karvana",
+    "karo",
+    "kariye",
+    "kijiye",
+    "dijiye",
+    "karenge",
+    "karunga",
+    "karungi",
+    "hai",
+    "hain",
+    "hoon",
+    "nahi",
+    "nahin",
+    "kya",
+    "kyun",
+    "kaise",
+    "kitne",
+    "kitna",
+    "baje",
+    "aaj",
+    "kal",
+    "parso",
+    "abhi",
+    "mera",
+    "meri",
+    "mere",
+    "aapka",
+    "aapki",
+    "aapko",
+    "aap",
+    "liye",
+    "theek",
+    "thik",
+    "accha",
+    "achha",
+    "batao",
+    "bataiye",
+    "sakta",
+    "sakti",
+    "sakte",
+    "chaliye",
+    "hoga",
+    "hogi",
+  ]),
+};
+/** At least this many marker words, making up at least this share of the utterance's words. */
+const MIN_ROMANIZED_MARKERS = 2;
+const MIN_ROMANIZED_SHARE = 0.3;
+/** The share of an utterance's words that must be in one Indian script for the script to decide. */
+const MIN_SCRIPT_SHARE = 0.3;
+
+/**
+ * The language the transcript's own words show, or null when they don't
+ * settle it (then Sarvam's label decides, in nextCallLanguage):
+ *
+ *   1. Script. saaras:v3-realtime's default `transcribe` mode writes each
+ *       language in its own script, so words in Telugu script are Telugu
+ *       speech, whatever confidence Sarvam attached to its label. The
+ *       script decides when at least MIN_SCRIPT_SHARE of the words are in
+ *       it (English loanwords stay Latin in code-mixed speech:
+ *       "appointment book చేయాలి"). Devanagari is Hindi or Marathi: Sarvam's
+ *       label picks Marathi; anything else in Devanagari is answered in
+ *       Hindi.
+ *   2. Romanized Telugu or Hindi. Sarvam sometimes transcribes code-mixed
+ *       speech in Latin script and labels it English ("Appointment book
+ *       cheyali anukuntunnaru" came back en-IN at 0.6). Distinctive marker
+ *       words decide it — MIN_ROMANIZED_MARKERS of them, at least
+ *       MIN_ROMANIZED_SHARE of the words — unless Sarvam reliably labelled
+ *       the utterance as another of the 11 languages, which it heard and these
+ *       markers only guess at.
+ */
+export function textLanguageEvidence(
+  text: string,
+  sttLanguage?: string | undefined,
+  sttConfidence?: number | undefined,
+): { code: VoiceLanguageCode; source: "script" | "romanized" } | null {
+  const words = text.split(/\s+/).filter((w) => /\p{L}/u.test(w));
+  if (words.length === 0) return null;
+  const labelled = normalizeVoiceLanguageCode(sttLanguage);
+
+  let best: { code: VoiceLanguageCode; count: number } | null = null;
+  for (const { script, code } of SCRIPT_LANGUAGES) {
+    const count = words.filter((w) => script.test(w)).length;
+    if (count > 0 && (!best || count > best.count)) best = { code, count };
+  }
+  if (best && best.count / words.length >= MIN_SCRIPT_SHARE) {
+    const code = best.code === "hi-IN" && labelled === "mr-IN" ? "mr-IN" : best.code;
+    return { code, source: "script" };
+  }
+
+  const reliableIndianLabel =
+    labelled !== null &&
+    labelled !== "en-IN" &&
+    (sttConfidence ?? 1) >= RELIABLE_LANGUAGE_CONFIDENCE;
+  if (reliableIndianLabel) return null;
+  const latin = words.map((w) => w.toLowerCase().replace(/[^a-z]/g, "")).filter(Boolean);
+  let romanized: { code: VoiceLanguageCode; count: number } | null = null;
+  for (const [code, markers] of Object.entries(ROMANIZED_MARKERS)) {
+    const count = latin.filter((w) => markers.has(w)).length;
+    if (!romanized || count > romanized.count)
+      romanized = { code: code as VoiceLanguageCode, count };
+  }
+  return romanized &&
+    romanized.count >= MIN_ROMANIZED_MARKERS &&
+    romanized.count / words.length >= MIN_ROMANIZED_SHARE
+    ? { code: romanized.code, source: "romanized" }
+    : null;
 }
 
 /**

@@ -12,6 +12,7 @@ import {
   parseLanguageConfidence,
   resolvePrimaryLanguage,
   sttRealtimeLanguageCode,
+  textLanguageEvidence,
   voiceCanSpeakText,
   voiceLanguageName,
 } from "./voice-languages.ts";
@@ -168,6 +169,45 @@ describe("localized fallback lines", () => {
   });
 });
 
+describe("textLanguageEvidence — the language the caller's own words show", () => {
+  const cases: [string, string | undefined, number | undefined, unknown][] = [
+    // Script decides, whatever Sarvam's label or confidence.
+    ["నాకు అపాయింట్మెంట్ కావాలి", "en-IN", 0.5, { code: "te-IN", source: "script" }],
+    ["आज तीन बजे अपार्टमेंट बुक कर दो।", "hi-IN", 0.55, { code: "hi-IN", source: "script" }],
+    ["appointment book చేయాలి", "en-IN", 0.6, { code: "te-IN", source: "script" }],
+    ["मला उद्या यायचे आहे", "mr-IN", 0.4, { code: "mr-IN", source: "script" }],
+    ["मुझे कल आना है", "ne-IN", 0.7, { code: "hi-IN", source: "script" }],
+    ["எனக்கு நாளை வேண்டும்", undefined, undefined, { code: "ta-IN", source: "script" }],
+    // Romanized Telugu and Hindi, as Sarvam labels them: English.
+    [
+      "Appointment book cheyali anukuntunnaru",
+      "en-IN",
+      0.6,
+      { code: "te-IN", source: "romanized" },
+    ],
+    ["repu 3 gantalaki ravacha andi", "en-IN", 0.55, { code: "te-IN", source: "romanized" }],
+    ["Mujhe kal appointment chahiye", "en-IN", 0.62, { code: "hi-IN", source: "romanized" }],
+    ["aaj teen baje book kar dijiye", undefined, undefined, { code: "hi-IN", source: "romanized" }],
+    // Sarvam reliably heard another Indian language: its label decides, not the markers.
+    ["mujhe kal chahiye", "pa-IN", 0.9, null],
+    // …but one the agent can't speak (Urdu): Hindi is the closest it can answer in.
+    ["mujhe kal chahiye", "ur-IN", 0.9, { code: "hi-IN", source: "romanized" }],
+    // English, including English with one Indian word or a name in it.
+    ["I want to book an appointment for tomorrow at 3 PM", "en-IN", 0.6, null],
+    ["Hello", "en-IN", 1, null],
+    ["Is Dr. Kal available today", "en-IN", 0.9, null],
+    ["Can I come at 3 baje tomorrow", "en-IN", 0.6, null],
+    ["My name is Lena and I need a cleaning", "en-IN", 0.8, null],
+    ["My name is राम", "en-IN", 0.8, null],
+    ["", "te-IN", 0.9, null],
+  ];
+  for (const [text, label, confidence, expected] of cases) {
+    test(`${JSON.stringify(text)} (${label ?? "no label"} @ ${confidence ?? "–"})`, () => {
+      assert.deepEqual(textLanguageEvidence(text, label, confidence), expected);
+    });
+  }
+});
+
 describe("nextCallLanguage — automatic, stable call language", () => {
   const none = { current: null, pending: null } as const;
   const telugu = { current: "te-IN", pending: null } as const;
@@ -178,7 +218,11 @@ describe("nextCallLanguage — automatic, stable call language", () => {
       language: "te-IN",
       confidence: 0.7,
     });
-    assert.deepEqual(r, { state: { current: "te-IN", pending: null }, decision: "adopted" });
+    assert.deepEqual(r, {
+      state: { current: "te-IN", pending: null },
+      decision: "adopted",
+      source: "script",
+    });
   });
 
   test("Odia's realtime code is normalized before anything else", () => {
@@ -198,6 +242,7 @@ describe("nextCallLanguage — automatic, stable call language", () => {
     assert.deepEqual(r, {
       state: { current: "te-IN", pending: null },
       decision: "ignored_unreliable",
+      source: "stt",
     });
   });
 
@@ -216,7 +261,11 @@ describe("nextCallLanguage — automatic, stable call language", () => {
       language: "en-IN",
       confidence: 0.7,
     });
-    assert.deepEqual(first, { state: { current: "te-IN", pending: "en-IN" }, decision: "pending" });
+    assert.deepEqual(first, {
+      state: { current: "te-IN", pending: "en-IN" },
+      decision: "pending",
+      source: "stt",
+    });
     const second = nextCallLanguage(first.state, {
       text: "and the timing",
       language: "en-IN",
@@ -230,7 +279,11 @@ describe("nextCallLanguage — automatic, stable call language", () => {
       { current: "te-IN", pending: "en-IN" },
       { text: "సరే చెప్పండి", language: "te-IN", confidence: 0.9 },
     );
-    assert.deepEqual(r, { state: { current: "te-IN", pending: null }, decision: "unchanged" });
+    assert.deepEqual(r, {
+      state: { current: "te-IN", pending: null },
+      decision: "unchanged",
+      source: "script",
+    });
   });
 
   test("acknowledgements never switch an established call, however confidently detected", () => {
@@ -239,7 +292,7 @@ describe("nextCallLanguage — automatic, stable call language", () => {
         const r = nextCallLanguage(telugu, { text, language: "en-IN", confidence });
         assert.deepEqual(
           r,
-          { state: telugu, decision: "ignored_short" },
+          { state: telugu, decision: "ignored_short", source: "stt" },
           `${JSON.stringify(text)} @ ${confidence}`,
         );
       }
@@ -283,10 +336,45 @@ describe("nextCallLanguage — automatic, stable call language", () => {
     );
   });
 
+  test("a short Latin-script opener ('Hello') never sets the call's language; the next real sentence does", () => {
+    const hello = nextCallLanguage(none, { text: "Hello", language: "en-IN", confidence: 1 });
+    assert.deepEqual(hello, { state: none, decision: "ignored_short", source: "stt" });
+    const next = nextCallLanguage(hello.state, {
+      text: "Appointment book cheyali anukuntunnaru",
+      language: "en-IN",
+      confidence: 0.6,
+    });
+    assert.deepEqual(next, {
+      state: { current: "te-IN", pending: null },
+      decision: "adopted",
+      source: "romanized",
+    });
+  });
+
+  test("a sentence in another script switches an established call at once, whatever Sarvam's confidence", () => {
+    const r = nextCallLanguage(
+      { current: "en-IN", pending: null },
+      { text: "आज तीन बजे अपार्टमेंट बुक कर दो।", language: "hi-IN", confidence: 0.55 },
+    );
+    assert.deepEqual(r, {
+      state: { current: "hi-IN", pending: null },
+      decision: "adopted",
+      source: "script",
+    });
+  });
+
+  test("a language-detection event with no words can still set the first language when strong", () => {
+    assert.equal(nextCallLanguage(none, { text: "", language: "te-IN" }).state.current, "te-IN");
+    assert.equal(
+      nextCallLanguage(none, { text: "", language: "te-IN", confidence: 0.7 }).state.current,
+      null,
+    );
+  });
+
   test("no detection, or a language outside the 11, keeps the current language", () => {
     assert.equal(nextCallLanguage(telugu, { text: "hello there" }).decision, "no_detection");
     const urdu = nextCallLanguage(telugu, {
-      text: "mujhe chahiye",
+      text: "please hold on a moment",
       language: "ur-IN",
       confidence: 0.95,
     });
@@ -308,7 +396,11 @@ describe("nextCallLanguage — automatic, stable call language", () => {
       language: "te-IN",
       confidence: 0.9,
     });
-    assert.deepEqual(r, { state: { current: "en-IN", pending: null }, decision: "requested" });
+    assert.deepEqual(r, {
+      state: { current: "en-IN", pending: null },
+      decision: "requested",
+      source: "request",
+    });
   });
 });
 

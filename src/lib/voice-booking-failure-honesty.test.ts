@@ -627,9 +627,11 @@ describe("languages the runtime can't check: model wording never reports an unsu
   test("Hinglish in Latin script is checked: 'aapki booking ho gayi' after a failure is rejected", async () => {
     const { callId, turn } = await openCall();
     await upToBookingQuestion(turn);
+    // "Parking hai kya?" is romanized Hindi: the call is now answered in
+    // Hindi, and the Latin-script claim is still caught on a Hindi call.
     const spoken = await turn("Parking hai kya?", `Aapki booking ho gayi hai!\n${marker(KNOWN)}`);
     assert.doesNotMatch(spoken, /booking ho gayi/i, spoken);
-    assert.match(spoken, /I haven't booked anything yet/i, spoken);
+    assert.match(spoken, /अभी तक कुछ भी बुक नहीं हुआ है/, spoken);
     await terminateRuntimeSession(callId, "test cleanup");
   });
 
