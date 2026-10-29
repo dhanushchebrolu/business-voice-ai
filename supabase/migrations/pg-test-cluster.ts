@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, chmodSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, chmodSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -44,19 +44,41 @@ export interface Cluster {
 
 export type BootstrapResult = { ok: true; cluster: Cluster } | { ok: false; reason: string };
 
-const PG_BIN_CANDIDATES = [
-  "",
-  "/usr/lib/postgresql/17/bin/",
-  "/usr/lib/postgresql/16/bin/",
-  "/usr/lib/postgresql/15/bin/",
-  "/usr/lib/postgresql/14/bin/",
+/** Debian/Ubuntu install each server major version under <root>/<major>/bin, off PATH. */
+const DEBIAN_PG_ROOT = "/usr/lib/postgresql";
+const HOMEBREW_PG_BIN_DIRS = [
   "/opt/homebrew/opt/postgresql@16/bin/",
   "/usr/local/opt/postgresql@16/bin/",
 ];
 
+/** The major versions installed under /usr/lib/postgresql, or none when it doesn't exist. */
+function installedDebianPgVersions(): string[] {
+  try {
+    return readdirSync(DEBIAN_PG_ROOT);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Where to look for psql/initdb/pg_ctl, in order: PATH, then every server
+ * version actually installed under /usr/lib/postgresql (newest first), then
+ * Homebrew. Discovered rather than listed: a fixed 14–17 list found nothing
+ * on GitHub's Ubuntu 26.04 runners, which install PostgreSQL 18, so every
+ * PostgreSQL test skipped.
+ */
+export function pgBinCandidates(
+  installedVersions: () => string[] = installedDebianPgVersions,
+): string[] {
+  const versions = installedVersions()
+    .filter((v) => /^\d+$/.test(v))
+    .sort((a, b) => Number(b) - Number(a));
+  return ["", ...versions.map((v) => `${DEBIAN_PG_ROOT}/${v}/bin/`), ...HOMEBREW_PG_BIN_DIRS];
+}
+
 /** Looks for psql, initdb, AND pg_ctl together — a partial install (e.g. client tools only) is not usable. */
-export function findPgBinDir(): string | null {
-  for (const dir of PG_BIN_CANDIDATES) {
+export function findPgBinDir(candidates: string[] = pgBinCandidates()): string | null {
+  for (const dir of candidates) {
     try {
       execFileSync(`${dir}psql`, ["--version"], { stdio: "ignore" });
       execFileSync(`${dir}initdb`, ["--version"], { stdio: "ignore" });

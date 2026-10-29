@@ -1,7 +1,39 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { pgCtlStartArgs, shellQuote } from "./pg-test-cluster.ts";
+import { findPgBinDir, pgBinCandidates, pgCtlStartArgs, shellQuote } from "./pg-test-cluster.ts";
+
+/**
+ * Where the bootstrap finds the server binaries. Ubuntu installs them under
+ * /usr/lib/postgresql/<major>/bin, off PATH, and runner images move to new
+ * major versions (PostgreSQL 18 on Ubuntu 26.04): a missed version makes
+ * every PostgreSQL test skip, which CI then fails on.
+ */
+describe("finding the PostgreSQL server binaries", () => {
+  test("PATH first, then every installed /usr/lib/postgresql version newest first (18 included), then Homebrew", () => {
+    const candidates = pgBinCandidates(() => ["16", "18", "9", "notes", "17.6"]);
+    assert.deepEqual(candidates.slice(0, 4), [
+      "",
+      "/usr/lib/postgresql/18/bin/",
+      "/usr/lib/postgresql/16/bin/",
+      "/usr/lib/postgresql/9/bin/",
+    ]);
+    assert.ok(
+      candidates
+        .slice(4)
+        .every((dir) => dir.includes("homebrew") || dir.includes("/usr/local/opt/")),
+    );
+  });
+
+  test("with nothing under /usr/lib/postgresql, only PATH and Homebrew are tried", () => {
+    assert.deepEqual(pgBinCandidates(() => [])[0], "");
+    assert.ok(pgBinCandidates(() => []).every((dir) => !dir.startsWith("/usr/lib/postgresql/")));
+  });
+
+  test("a directory without all three of psql, initdb and pg_ctl is not a PostgreSQL install", () => {
+    assert.equal(findPgBinDir(["/nonexistent-postgresql-dir/bin/"]), null);
+  });
+});
 
 /**
  * The disposable-cluster bootstrap runs pg_ctl two ways: directly (CI runs
