@@ -231,6 +231,15 @@ const NATIVE_SERVICE_WORDS: [string[], string][] = [
       "ક્લીનિંગ",
       "ਕਲੀਨਿੰਗ",
       "କ୍ଲିନିଂ",
+      // "clean" as a verb ("పళ్ళు క్లీన్ చేయించాలి").
+      "క్లీన్",
+      "क्लीन",
+      "க்ளீன்",
+      "ಕ್ಲೀನ್",
+      "ക്ലീൻ",
+      "ক্লিন",
+      "ક્લીન",
+      "ਕਲੀਨ",
     ],
     "cleaning",
   ],
@@ -366,8 +375,34 @@ export function withEnglishServiceWords(text: string): string {
   const english = NATIVE_SERVICE_WORDS.filter(([native]) =>
     native.some((n) => text.includes(n)),
   ).map(([, word]) => word);
+  // Each language's own verb for cleaning means "cleaning" only about teeth:
+  // "दांत साफ करवाने हैं" is a cleaning, "साफ़ साफ़ बताइए" ("tell me
+  // clearly") is not.
+  if (
+    !english.includes("cleaning") &&
+    NATIVE_CLEAN_VERBS.some((v) => text.includes(v)) &&
+    NATIVE_TEETH_WORDS.some((t) => text.includes(t))
+  ) {
+    english.push("cleaning");
+  }
   return english.length ? `${text} ${english.join(" ")}` : text;
 }
+
+/** Each language's own word for cleaning — counted only together with a word for teeth. */
+const NATIVE_CLEAN_VERBS = [
+  "శుభ్రం",
+  "साफ",
+  "सफाई",
+  "சுத்தம்",
+  "ಸ್ವಚ್ಛ",
+  "വൃത്തിയാക്ക",
+  "পরিষ্কার",
+  "સાફ",
+  "ਸਾਫ਼",
+  "ସଫା",
+];
+/** The words for teeth in NATIVE_SERVICE_WORDS' "teeth" entry. */
+const NATIVE_TEETH_WORDS = NATIVE_SERVICE_WORDS.find(([, word]) => word === "teeth")?.[0] ?? [];
 
 /**
  * Resolves caller wording to one configured service row.

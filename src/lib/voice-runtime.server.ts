@@ -114,6 +114,9 @@ import {
   explicitTimeAnyLanguage,
   periodAnyLanguage,
   relativeDateAnyLanguage,
+  spokenDigitsToNumerals,
+  spokenPhoneDigits,
+  IS_THAT_RIGHT,
 } from "./voice-intent-lexicon.ts";
 import type { ClaudeTool } from "./claude.server.ts";
 import { zonedWallTimeToUtc, dayOfWeekInTimezone } from "./calendar/timezone.ts";
@@ -140,6 +143,7 @@ import {
   findConfiguredService,
   resolveServiceFromText,
   spokenServiceList,
+  withEnglishServiceWords,
   type ServiceRow,
 } from "./service-matching.ts";
 
@@ -745,6 +749,20 @@ interface Session {
   startedAt: number;
   stt: SttSession | null;
   tts: TtsSession | null;
+  /** How STT was opened (format), so a dropped connection is reopened identically; null until it first connects. */
+  sttFormat: { sampleRateHz: number; encoding: "mulaw" | "linear16" } | null;
+  /** STT reconnects so far on this call (bounded by MAX_PROVIDER_RECONNECTS). */
+  sttReconnects: number;
+  /** Which STT connection is current: a "closed" from any other (an already-replaced socket) is ignored. */
+  activeSttConnectionId: number;
+  /** A recoverStt run is in progress: a second close while it runs starts nothing. */
+  sttRecovering: boolean;
+  /** The active TTS connection closed while the call was live: reopen it before the next reply. */
+  ttsNeedsReconnect: boolean;
+  /** TTS reconnects so far on this call (bounded by MAX_PROVIDER_RECONNECTS). */
+  ttsReconnects: number;
+  /** The reconnect in progress, shared by every reply that needs the voice meanwhile. */
+  ttsReconnecting: Promise<boolean> | null;
   accumulatingUserText: string;
   silenceTimer: ReturnType<typeof setTimeout> | null;
   silencePromptSent: boolean;
@@ -856,6 +874,10 @@ interface Session {
   bookedThisCallIds: string[];
   /** What was said when each slot (appointmentSlotKey) was booked on this call — repeated, never re-booked, if the caller asks to book it again. */
   bookedSlotOutcomes: Map<string, string>;
+  /** A phone number being read out in pieces (collectPhoneFragment): the digits so far, and the last fragment. */
+  phoneDigits: { collected: string; last: string | null };
+  /** A number assembled from pieces was just read back; the caller's next turn may reject it. */
+  phoneReadBack: string | null;
   /** The returning caller's name lookup, started at session start in parallel with the TTS connection — see startRuntimeSession. */
   returningCallerName: { settled: boolean; name: string | null };
   /** The language_code the current TTS connection was opened with — see maybeSwitchTtsLanguage. Starts at the agent's primary_language (what startRuntimeSession connects with). */
@@ -2372,8 +2394,10 @@ export interface CallerIntentSignals {
 
 const AVAILABILITY_KEYWORDS =
   /\b(available|availability|availabl[ey]|slots?|openings?|free|anything open|any time|what time)\b/i;
+// "When are you free tomorrow", "tell me when you're free" and "show me the
+// slots" ask for the calendar exactly as "any slots?" does.
 const AVAILABILITY_QUESTION_SHAPE =
-  /\b(any|anything|do you have|what('s| is)|is there|are there|what times?)\b/i;
+  /\b(any|anything|do you have|what('s| is)|is there|are there|what times?|when|tell me|show me|let me know)\b/i;
 const NEXT_AVAILABLE_PATTERN =
   /\b(next available|earliest|soonest|first available|as soon as possible|asap)\b/i;
 // Production incident: "General checkup, and let me know if that slot is
@@ -2634,8 +2658,29 @@ function extractExplicitTime(text: string): string | null {
     if (hour >= 1 && hour <= 6) hour += 12; // ambiguous -> assume afternoon
     return `${String(hour).padStart(2, "0")}:${minute}`;
   }
+  // "at 4", "around 5", "4 o'clock" (a real call: "tomorrow at 4" left the
+  // time unknown). A bare number without "at"/"o'clock" is still never a
+  // time. The same afternoon assumption as "4:30", unless the caller said
+  // the time of day ("at 9 in the morning", "at 7 in the evening").
+  const hourOnly = HOUR_ONLY_TIME_PATTERN.exec(text);
+  if (hourOnly) {
+    let hour = parseInt(hourOnly[1] ?? hourOnly[2]!, 10);
+    const period = PERIOD_PATTERNS.find(([re]) => re.test(text))?.[1] ?? null;
+    if (period === "morning") {
+      if (hour === 12) hour = 0;
+    } else if (period === "afternoon" || period === "evening") {
+      if (hour < 12) hour += 12;
+    } else if (hour >= 1 && hour <= 6) {
+      hour += 12;
+    }
+    return `${String(hour).padStart(2, "0")}:00`;
+  }
   return null;
 }
+
+/** An hour said with "at"/"around"/"by" or "o'clock" and no minutes or am/pm. */
+const HOUR_ONLY_TIME_PATTERN =
+  /\b(?:at|around|by)\s+(1[0-2]|0?[1-9])\b(?!\s*(?::|\.\d|%|people|persons?|kids?|children|members?|days?|weeks?|months?|years?|minutes?|mins?|hours?|teeth|tooth|rupees?|rs))|\b(1[0-2]|0?[1-9])\s*o'?\s?clock\b/i;
 
 // Matches a long run of digit groups, optionally separated by whitespace
 // or hyphens (STT often transcribes a spoken phone number digit-by-digit,
@@ -2653,8 +2698,90 @@ const PHONE_DIGIT_RUN_PATTERN = /\b(?:\d[\s-]*){6,}\d\b/;
  * in the call; reading the digits straight off the turn they were
  * actually spoken in avoids ever depending on that recall at all).
  */
+/** Words that can surround a number read out in pieces without making it anything else. */
+const PHONE_FRAGMENT_FILLER =
+  /^(?:and|then|uh|um|it'?s|is|my|the|number|no|sorry|next|rest|remaining|ok|okay|నంబర్|నెంబర్|తర్వాత|ఇంకా|లేదు|और|फिर|नंबर|बाकी|नहीं|aur|phir|inka|taruvata)$/i;
+/** A full number is this many digits; fragments are collected until it is reached. */
+const FULL_PHONE_DIGITS = 10;
+
+/**
+ * The digits of a turn that is only part of a phone number being read out
+ * ("98480", "nine eight four", "తొమ్మిది ఎనిమిది నాలుగు") — or null when
+ * the turn is anything else. `restart` is true when it begins with a "no"
+ * ("no, 98480…"): the caller is starting the number again.
+ */
+export function phoneNumberFragment(text: string): { digits: string; restart: boolean } | null {
+  const numerals = spokenDigitsToNumerals(text);
+  const digits = numerals.replace(/\D/g, "");
+  if (digits.length < 3 || digits.length >= 7) return null;
+  const words = numerals
+    .replace(/\d/g, " ")
+    .split(/[\s,.;:!?।-]+/)
+    .filter(Boolean);
+  if (words.length > 3 || !words.every((w) => PHONE_FRAGMENT_FILLER.test(w))) return null;
+  return { digits, restart: /^\s*(?:no|nahi|nahin|नहीं|లేదు)\b/iu.test(text) };
+}
+
+/**
+ * A phone number given in pieces across turns, while the agent is waiting
+ * for one: each fragment is appended (an identical fragment said twice in a
+ * row is a repetition, not more digits), "no, …" starts over, and once
+ * FULL_PHONE_DIGITS are collected the whole number is returned for the
+ * usual validation. Only the digit count is logged.
+ */
+function collectPhoneFragment(
+  session: Session,
+  text: string,
+  awaitingPhone: boolean,
+): string | null {
+  const fragment = awaitingPhone ? phoneNumberFragment(text) : null;
+  if (!fragment) {
+    if (!awaitingPhone) session.phoneDigits = { collected: "", last: null };
+    return null;
+  }
+  const buffer = session.phoneDigits;
+  if (fragment.restart) {
+    session.phoneDigits = { collected: fragment.digits, last: fragment.digits };
+  } else if (fragment.digits === buffer.last) {
+    log("phone_fragment_repeated", session, { digits_so_far: buffer.collected.length });
+    return null;
+  } else {
+    session.phoneDigits = { collected: buffer.collected + fragment.digits, last: fragment.digits };
+  }
+  const collected = session.phoneDigits.collected;
+  log("phone_fragment", session, { digits_so_far: collected.length });
+  if (collected.length < FULL_PHONE_DIGITS) return null;
+  session.phoneDigits = { collected: "", last: null };
+  return collected;
+}
+
+/**
+ * The caller's answer to a read-back of their number: a yes or no in any
+ * supported language, or null for anything else (which keeps the number).
+ */
+export function phoneReadBackAnswer(text: string): "yes" | "no" | null {
+  const native = confirmationAnswerAnyLanguage(text);
+  if (native) return native;
+  const firstWord = text.trim().split(/[\s,.!?।]+/)[0] ?? "";
+  const nativeFirst = firstWord ? confirmationAnswerAnyLanguage(firstWord) : null;
+  if (nativeFirst) return nativeFirst;
+  if (/\b(?:no|nope|wrong|incorrect|not (?:right|correct))\b/i.test(text)) return "no";
+  if (AFFIRMATIVE_PATTERN.test(text)) return "yes";
+  return null;
+}
+
+/** Asks for the phone number again — the targeted re-ask for an invalid one, in the call's language. */
+function askPhoneAgainFor(session: Session): string {
+  const issue = session.appointmentState.phoneIssue;
+  const language = normalizeVoiceLanguageCode(responseLanguageFor(session));
+  if (language && language !== "en-IN") return MISSING_DETAIL_QUESTION[language].phone;
+  return issue ? phoneIssueQuestion(issue) : "What's the best phone number to reach you?";
+}
+
 function extractPhoneNumber(text: string): string | null {
-  const match = PHONE_DIGIT_RUN_PATTERN.exec(text);
+  // "nine eight four…", "double nine", Telugu/Hindi digit words and native
+  // digits all read as the numerals they are (spokenDigitsToNumerals).
+  const match = PHONE_DIGIT_RUN_PATTERN.exec(spokenDigitsToNumerals(text));
   if (!match) return null;
   const digits = match[0].replace(/\D/g, "");
   return digits.length >= 7 ? digits : null;
@@ -2811,7 +2938,58 @@ export function isPresenceCheck(text: string): boolean {
 
 /** The agent's reply asked for the caller's name. */
 const NAME_QUESTION_PATTERN =
-  /\b(?:your|the)\s+(?:full\s+)?name\b|\bwho\s+(?:am i|is)\s+speaking\b/i;
+  /\b(?:your|the)\s+(?:full\s+)?name\b|\bwho\s+(?:am i|is)\s+speaking\b|పేరు|नाम|பெயர்|ಹೆಸರ|പേര്|নাম|नाव|નામ|ਨਾਮ|ନାମ/i;
+
+/**
+ * "My name is X" in the languages callers use: romanized Hindi/Telugu and
+ * each script's own words. The name follows (Telugu "నా పేరు X") or comes
+ * before a closing verb (Hindi "मेरा नाम X है").
+ */
+const NATIVE_NAME_INTRO =
+  /^\s*(?:naa\s+peru|na\s+peru|mera\s+naam|mera\s+nam|నా\s*పేరు|मेरा\s+नाम|मेरे\s+नाम|என்\s+பெயர்|ನನ್ನ\s+ಹೆಸರು|എന്റെ\s+പേര്|আমার\s+নাম|माझे\s+नाव|माझं\s+नाव|મારું\s+નામ|ਮੇਰਾ\s+ਨਾਮ|ମୋ\s+ନାମ)\s+(.+?)\s*$/iu;
+/** Words that close a native "my name is X" sentence: "है", "అండి", "ఉంది"… */
+const NATIVE_NAME_TAIL =
+  /\s+(?:hai|he|andi|undi|है|हूँ|हूं|అండి|ఉంది|అని|ஆகும்|தான்|ಆಗಿದೆ|ആണ്|আছে|आहे|છે|ਹੈ|ଅଟେ)[\s.!।]*$/iu;
+/** A name word in any script: letters and combining marks only. */
+const NAME_WORD = /^[\p{L}\p{M}][\p{L}\p{M}'.-]*$/u;
+/**
+ * Greetings, thanks, apologies and question words callers say in their own
+ * script — what a bare reply to "what's your name?" often is instead.
+ */
+const NATIVE_NOT_A_NAME = new Set([
+  "హలో",
+  "హాలో",
+  "నమస్తే",
+  "నమస్కారం",
+  "ధన్యవాదాలు",
+  "థాంక్యూ",
+  "థాంక్స్",
+  "క్షమించండి",
+  "సారీ",
+  "ఏంటి",
+  "ఏమిటి",
+  "ఎవరు",
+  "ఏం",
+  "ఆగండి",
+  "ఓకే",
+  "హలో?",
+  "हेलो",
+  "हैलो",
+  "हलो",
+  "नमस्ते",
+  "नमस्कार",
+  "धन्यवाद",
+  "थैंक्यू",
+  "थैंक्स",
+  "शुक्रिया",
+  "सॉरी",
+  "माफ़ी",
+  "क्या",
+  "कौन",
+  "रुको",
+  "रुकिए",
+  "ओके",
+]);
 
 /**
  * The caller's name from their own words (call dfcf72ca: the name was
@@ -2826,6 +3004,8 @@ const NAME_QUESTION_PATTERN =
  * NOT_A_NAME, digits, or more than three words.
  */
 export function extractCallerName(text: string, agentAskedForName: boolean): string | null {
+  const native = nativeCallerName(text, agentAskedForName);
+  if (native !== undefined) return native;
   const explicit = /\b(?:my\s+name\s+is|my\s+name'?s|call\s+me)\s+(.+)/i.exec(text);
   const contextual = agentAskedForName
     ? /^\s*(?:(?:it'?s|this\s+is|i'?m|i\s+am|name'?s|name\s+is)\s+)?(.+)$/i.exec(text)
@@ -2852,6 +3032,50 @@ export function extractCallerName(text: string, agentAskedForName: boolean): str
     if (rest) return null;
   }
   return words.map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
+}
+
+/**
+ * extractCallerName for a name said the way Telugu, Hindi and other
+ * callers say it: "naa peru Dhanush", "నా పేరు ధనుష్", "मेरा नाम धनुष है",
+ * or — only when the agent just asked for the name — a bare name in an
+ * Indian script ("ధనుష్"). The name is kept in the script it was said in.
+ * Returns undefined when the turn is not shaped like this (the English
+ * rules then decide), null when it is but holds no usable name.
+ */
+function nativeCallerName(text: string, agentAskedForName: boolean): string | null | undefined {
+  const intro = NATIVE_NAME_INTRO.exec(text);
+  const bareNative = !intro && agentAskedForName && /[ऀ-෿]/u.test(text) ? text.trim() : null;
+  const candidate = intro?.[1] ?? bareNative;
+  if (candidate === null || candidate === undefined) return undefined;
+  // An answer that is about something else — yes/no, a day or time, a
+  // request for slots, a booking or a treatment — is never a name.
+  if (
+    confirmationAnswerAnyLanguage(candidate) !== null ||
+    relativeDateAnyLanguage(candidate) !== null ||
+    periodAnyLanguage(candidate) !== null ||
+    explicitTimeAnyLanguage(candidate) !== null ||
+    availabilityRequestedAnyLanguage(candidate) ||
+    mentionsBookingInAnyScript(candidate) ||
+    withEnglishServiceWords(candidate) !== candidate
+  ) {
+    return null;
+  }
+  const words = candidate
+    .replace(NATIVE_NAME_TAIL, "")
+    .replace(/[,.!?।]+$/u, "")
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!words.length || words.length > 3) return null;
+  if (
+    !words.every(
+      (w) => NAME_WORD.test(w) && !NOT_A_NAME.has(w.toLowerCase()) && !NATIVE_NOT_A_NAME.has(w),
+    )
+  ) {
+    return null;
+  }
+  return words
+    .map((w) => (/^[a-z]/i.test(w) ? w.charAt(0).toUpperCase() + w.slice(1).toLowerCase() : w))
+    .join(" ");
 }
 
 /**
@@ -3264,6 +3488,185 @@ async function persistTranscript(session: Session) {
   }
 }
 
+/** Reconnects per call, per provider connection, before the call is ended honestly instead. */
+const MAX_PROVIDER_RECONNECTS = 2;
+/** Close kinds a reconnect cannot fix — the same request would be refused again. */
+const PERMANENT_STT_CLOSE_KINDS: ReadonlySet<string> = new Set([
+  "auth_or_quota",
+  "auth_failed",
+  "rejected_request",
+]);
+
+/**
+ * The speech recognizer closed while the call is live. The caller's audio is
+ * buffered (session.stt = null routes it to pendingInboundFrames, as during
+ * startup) while a new connection with the same format opens, then flushed
+ * into it. Bounded: after MAX_PROVIDER_RECONNECTS, or for a close the
+ * provider will repeat (auth, quota, a rejected request), the caller hears
+ * an honest "having trouble understanding" in their language and the call
+ * ends — never minutes of silence and "are you still there?".
+ */
+async function recoverStt(session: Session, closeKind: string): Promise<void> {
+  const format = session.sttFormat;
+  // Synchronously, before any await: frames arriving from now on are
+  // buffered (pendingInboundFrames), not sent to the closed socket.
+  session.stt = null;
+  if (!format || session.terminationStarted || session.sttRecovering) return;
+  session.sttRecovering = true;
+  try {
+    let kind = closeKind;
+    while (!session.terminationStarted) {
+      if (PERMANENT_STT_CLOSE_KINDS.has(kind) || session.sttReconnects >= MAX_PROVIDER_RECONNECTS) {
+        log("stt_unrecoverable", session, { kind, attempts: session.sttReconnects });
+        await endConversationGracefully(
+          session,
+          session.generation,
+          "stt_unavailable",
+          localizedFallback("providerTrouble", responseLanguageFor(session)),
+        );
+        return;
+      }
+      session.sttReconnects += 1;
+      const connectionId = session.activeSttConnectionId + 1;
+      log("stt_reconnect_started", session, { attempt: session.sttReconnects, kind });
+      try {
+        const stt = await withConnectTimeout(
+          session.deps.connectStt({
+            language: "auto",
+            sampleRateHz: format.sampleRateHz,
+            encoding: format.encoding,
+            onEvent: (e) => onSttEvent(session, e, connectionId),
+          }),
+          (late) => late.close(),
+        );
+        if (session.terminationStarted) {
+          stt.close();
+          return;
+        }
+        // Becomes current only once connected; any close the old socket
+        // still reports is ignored from here on (onSttEvent).
+        session.activeSttConnectionId = connectionId;
+        session.stt = stt;
+        log("stt_reconnect_succeeded", session, {
+          attempt: session.sttReconnects,
+          flushed_frames: session.pendingInboundFrames.length,
+        });
+        // Buffered audio first, in arrival order; live frames follow it
+        // because session.stt is set in this same synchronous step.
+        for (const frame of session.pendingInboundFrames) stt.sendAudioFrame(frame.data);
+        session.pendingInboundFrames = [];
+        return;
+      } catch (err) {
+        log("stt_reconnect_failed", session, {
+          attempt: session.sttReconnects,
+          message: (err as Error).message,
+        });
+        kind = "abnormal";
+      }
+    }
+  } finally {
+    session.sttRecovering = false;
+  }
+}
+
+/** How long a mid-call reconnect may take before it counts as failed (the caller is waiting). */
+const PROVIDER_RECONNECT_TIMEOUT_MS = 8_000;
+
+/**
+ * `connect` bounded by PROVIDER_RECONNECT_TIMEOUT_MS. A connection that
+ * arrives after the deadline is closed (`discard`) rather than leaked.
+ */
+function withConnectTimeout<T>(connect: Promise<T>, discard: (late: T) => void): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      settled = true;
+      reject(new Error(`connect timed out after ${PROVIDER_RECONNECT_TIMEOUT_MS} ms`));
+    }, PROVIDER_RECONNECT_TIMEOUT_MS);
+    connect.then(
+      (value) => {
+        clearTimeout(timer);
+        if (settled) {
+          try {
+            discard(value);
+          } catch {
+            /* best-effort */
+          }
+          return;
+        }
+        settled = true;
+        resolve(value);
+      },
+      (err: unknown) => {
+        clearTimeout(timer);
+        if (!settled) {
+          settled = true;
+          reject(err);
+        }
+      },
+    );
+  });
+}
+
+/**
+ * Reopens the voice when its connection closed mid-call (onTtsEvent
+ * "closed"), before a reply is sent into a dead socket. Same voice,
+ * language and audio format. Returns false when no voice could be opened
+ * (bounded by MAX_PROVIDER_RECONNECTS): nothing can be said, so the call is
+ * ended rather than left silent.
+ */
+function ensureTtsOpen(session: Session): Promise<boolean> {
+  if (!session.ttsNeedsReconnect) return Promise.resolve(Boolean(session.tts));
+  // One reconnect at a time: a reply arriving while it runs waits for it.
+  session.ttsReconnecting ??= reopenTts(session).finally(() => {
+    session.ttsReconnecting = null;
+  });
+  return session.ttsReconnecting;
+}
+
+async function reopenTts(session: Session): Promise<boolean> {
+  while (session.ttsReconnects < MAX_PROVIDER_RECONNECTS && !session.terminationStarted) {
+    session.ttsReconnects += 1;
+    log("tts_reconnect_started", session, {
+      attempt: session.ttsReconnects,
+      language: session.ttsLanguage,
+    });
+    const connectionId = ++session.ttsConnectionIdSeq;
+    try {
+      const tts = await withConnectTimeout(
+        session.deps.connectTts({
+          voiceId: session.input.snapshotAgent.voice_id,
+          language: session.ttsLanguage,
+          pace: session.input.snapshotAgent.speaking_pace,
+          outputCodec: session.declaredTtsOutputCodec ?? "mulaw",
+          outputSampleRateHz: session.declaredTtsOutputSampleRateHz ?? 8000,
+          onEvent: (e) => onTtsEvent(session, e, connectionId),
+        }),
+        (late) => late.close(),
+      );
+      if (session.terminationStarted) {
+        tts.close();
+        return false;
+      }
+      session.tts = tts;
+      session.activeTtsConnectionId = connectionId;
+      session.ttsConnectedAt = Date.now();
+      session.ttsNeedsReconnect = false;
+      log("tts_reconnect_succeeded", session, { attempt: session.ttsReconnects });
+      return true;
+    } catch (err) {
+      log("tts_reconnect_failed", session, {
+        attempt: session.ttsReconnects,
+        message: (err as Error).message,
+      });
+    }
+  }
+  log("tts_unrecoverable", session, { attempts: session.ttsReconnects });
+  session.tts = null;
+  if (!session.terminationStarted) await requestProviderHangup(session, "tts_unavailable");
+  return false;
+}
+
 /**
  * Reconnects TTS with a different language_code when the turn about to be
  * spoken needs one the current connection wasn't opened with — see
@@ -3306,6 +3709,8 @@ async function maybeSwitchTtsLanguage(session: Session): Promise<string | null> 
     session.ttsLanguage = targetLanguage;
     session.ttsConnectedAt = Date.now();
     session.activeTtsConnectionId = newConnectionId;
+    // A fresh connection: a close the old one reported needs no reconnect.
+    session.ttsNeedsReconnect = false;
     console.info("tts:connection_replaced", {
       call_id: session.input.callId,
       old_connection_id: oldConnectionId,
@@ -3393,6 +3798,7 @@ async function speak(
     // The customer's own greeting: spoken as configured, but flagged.
     log("greeting_script_mismatch", session, { voice: session.ttsLanguage });
   }
+  if (session.ttsNeedsReconnect && !(await ensureTtsOpen(session))) return;
   if (!session.tts) return;
   setState(session, asState);
   // Task 2/7: a fresh id for THIS specific utterance, so diagnostics can
@@ -6168,14 +6574,79 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
   // again once it's settled). See resolveCallerIdAnswer.
   // "Hello?" answers nothing — not the caller-ID question either.
   const presenceCheck = isPresenceCheck(text);
-  const callerIdAnswer = presenceCheck
+  // The runtime's own reply this turn about a phone number, if it has one —
+  // spoken (without a model round trip) once this turn's generation exists.
+  let phoneReply: string | null = null;
+  // A number assembled from pieces was read back last turn: a "no" clears it
+  // so it is given again; anything else keeps it. (A yes here confirms the
+  // digits only — never a booking: callerAuthorizesBooking needs a booking
+  // question.)
+  if (session.phoneReadBack) {
+    session.phoneReadBack = null;
+    if (phoneReadBackAnswer(text) === "no") {
+      session.appointmentState = {
+        ...session.appointmentState,
+        phone: null,
+        phoneSource: null,
+        phoneIssue: null,
+        callerIdChoice: session.callerId ? "declined" : session.appointmentState.callerIdChoice,
+      };
+      session.phoneDigits = { collected: "", last: null };
+      log("phone_readback_rejected", session, { generation: session.generation });
+      if (!callerIntent.phone && !phoneNumberFragment(text)) phoneReply = askPhoneAgainFor(session);
+    }
+  }
+  // A phone number read out in pieces ("98480" … "12345"): collected across
+  // turns while the agent is waiting for a number, and used once complete.
+  // A piece on its own is not an answer to the caller-ID question.
+  const stateNow = session.appointmentState;
+  const awaitingPhone =
+    !stateNow.phone &&
+    // A number already part-way read out: keep collecting, whatever the
+    // agent's last line was (its "got it" is not a phone question).
+    (session.phoneDigits.collected !== "" ||
+      // "offered"/"clarifying": asked whether to use the calling number — a
+      // caller reading out digits instead is giving a different one.
+      ["declined", "offered", "clarifying"].includes(stateNow.callerIdChoice) ||
+      stateNow.phoneIssue !== null ||
+      (PHONE_REQUEST_SENTENCE_PATTERN.test(agentTextBeforeTurn) &&
+        QUESTION_SHAPE_PATTERN.test(agentTextBeforeTurn)) ||
+      asksAboutPhoneNumberAnyLanguage(agentTextBeforeTurn));
+  const completedPhone = callerIntent.phone
     ? null
-    : resolveCallerIdAnswer(
-        text,
-        session.appointmentState,
-        session.callerId,
-        session.input.businessCountry ?? null,
-      );
+    : collectPhoneFragment(session, text, awaitingPhone);
+  if (callerIntent.phone) session.phoneDigits = { collected: "", last: null };
+  if (completedPhone) {
+    // Assembled from pieces, so one mis-heard piece would make it the wrong
+    // number: validated, then read back digit by digit before anything else.
+    const normalized = normalizePhoneNumber(completedPhone, session.input.businessCountry ?? null);
+    if (normalized.ok) {
+      session.appointmentState = {
+        ...stateNow,
+        phone: normalized.e164,
+        phoneSource: "caller_provided",
+        phoneIssue: null,
+        callerIdChoice: session.callerId ? "declined" : stateNow.callerIdChoice,
+      };
+      session.phoneReadBack = normalized.e164;
+      const language = normalizeVoiceLanguageCode(responseLanguageFor(session)) ?? "en-IN";
+      phoneReply = `${spokenPhoneDigits(normalized.e164)}. ${IS_THAT_RIGHT[language]}`;
+    } else {
+      session.appointmentState = { ...stateNow, phoneIssue: normalized.reason };
+      phoneReply = askPhoneAgainFor(session);
+    }
+    log("phone_assembled", session, { valid: normalized.ok });
+  }
+  const phoneFragmentTurn = !completedPhone && awaitingPhone && phoneNumberFragment(text) !== null;
+  const callerIdAnswer =
+    presenceCheck || phoneFragmentTurn || completedPhone
+      ? null
+      : resolveCallerIdAnswer(
+          text,
+          session.appointmentState,
+          session.callerId,
+          session.input.businessCountry ?? null,
+        );
   if (callerIdAnswer) {
     // Smile Dental incident: the caller's "Yes" to "may I use the number
     // you're calling from?" was also read as "yes, book it" — with the date
@@ -6275,6 +6746,18 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
   // round's changes — see enqueueUserUtterance's own doc comment for why
   // this must NOT move any earlier.
   const generation = ++session.generation;
+  // Part of a phone number, more to come: a short "got it" in the caller's
+  // language lets them carry on — no model round trip, so nothing reads a
+  // half number back or changes the subject mid-dictation.
+  if (phoneFragmentTurn || phoneReply) {
+    await speakRuntimeTurnReply(
+      session,
+      generation,
+      phoneReply ?? localizedFallback("gotIt", responseLanguageFor(session)),
+      { awaitAnythingElse: false },
+    );
+    return;
+  }
   const requestStarted = Date.now();
   const llmRequestAt = requestStarted;
 
@@ -7067,7 +7550,13 @@ async function speakFallback(session: Session, error: unknown, trigger: string) 
   }
 }
 
-function onSttEvent(session: Session, event: SttEvent) {
+function onSttEvent(session: Session, event: SttEvent, connectionId = 1) {
+  // A close from a socket recoverStt has already replaced is not news about
+  // the current one — acting on it would drop a healthy recognizer.
+  if (event.type === "closed" && connectionId !== session.activeSttConnectionId) {
+    log("stt_stale_close_ignored", session, { connection_id: connectionId });
+    return;
+  }
   switch (event.type) {
     case "speech_start": {
       // The caller is audibly speaking — whatever silence has accumulated
@@ -7252,6 +7741,13 @@ function onSttEvent(session: Session, event: SttEvent) {
         kind: closeInfo.kind,
         retryable: closeInfo.retryable,
       });
+      // Mid-call, a dropped recognizer means the caller is talking to no
+      // one: reopen it (their audio buffers meanwhile) instead of waiting
+      // for the silence timer to ask "are you still there?" for a fault
+      // that is ours, not theirs.
+      if (!session.terminationStarted && session.sttFormat && !session.sttRecovering) {
+        void recoverStt(session, closeInfo.kind);
+      }
       break;
     }
     case "unknown":
@@ -7378,6 +7874,11 @@ function onTtsEvent(session: Session, event: TtsEvent, connectionId: number) {
       break;
     case "closed":
       log("tts_disconnected", session, { code: event.code, reason: event.reason });
+      // The voice in use closed mid-call (a replaced one closing is
+      // expected): the next reply reopens it first (ensureTtsOpen).
+      if (connectionId === session.activeTtsConnectionId && !session.terminationStarted) {
+        session.ttsNeedsReconnect = true;
+      }
       break;
     case "flushed":
       // One TTS output summary per flushed chunk — bytes only, never the
@@ -7520,6 +8021,13 @@ export async function startRuntimeSession(
     startedAt: Date.now(),
     stt: null,
     tts: null,
+    sttFormat: null,
+    sttReconnects: 0,
+    activeSttConnectionId: 1,
+    sttRecovering: false,
+    ttsNeedsReconnect: false,
+    ttsReconnects: 0,
+    ttsReconnecting: null,
     accumulatingUserText: "",
     silenceTimer: null,
     silencePromptSent: false,
@@ -7552,6 +8060,8 @@ export async function startRuntimeSession(
     reschedule: null,
     bookedThisCallIds: [],
     bookedSlotOutcomes: new Map(),
+    phoneDigits: { collected: "", last: null },
+    phoneReadBack: null,
     lastDispatchedSlotKey: null,
     bookingAuthorizedThisTurn: false,
     runtimeBookingQuestion: null,
@@ -7759,6 +8269,7 @@ export async function startRuntimeSession(
     }
     if (sttOutcome.status === "fulfilled") {
       session.stt = sttOutcome.value;
+      session.sttFormat = { sampleRateHz: sttSampleRateHz, encoding: sttEncoding };
       /**
        * Diagnostic (audio format tracing): the exact format this session
        * told the AI voice provider inbound audio would arrive in, derived

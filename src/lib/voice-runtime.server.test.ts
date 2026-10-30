@@ -378,11 +378,12 @@ describe("parseCallerIntentFromText — deterministic backstop over the caller's
     });
 
     test("a phone number spoken as a single run of words is captured in full", () => {
+      // Digit words are read as numerals (spokenDigitsToNumerals): callers
+      // read numbers out, and STT transcribes them as words.
       assert.equal(
         parseCallerIntentFromText("My number is nine nine nine nine nine nine nine nine nine nine")
           .phone,
-        null,
-        "word-form digits (not numerals) are intentionally out of scope — only numeral digit runs are extracted",
+        "9999999999",
       );
     });
 

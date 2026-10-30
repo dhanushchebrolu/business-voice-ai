@@ -44,6 +44,89 @@ export function asciiDigits(text: string): string {
   });
 }
 
+/** Single digits said as words — English, Telugu and Hindi, in script and romanized. */
+const DIGIT_WORDS = new Map<string, string>(
+  (
+    [
+      ["0", ["zero", "oh", "o", "సున్నా", "sunna", "शून्य", "ज़ीरो", "जीरो", "shunya"]],
+      ["1", ["one", "ఒకటి", "okati", "एक", "ek"]],
+      ["2", ["two", "రెండు", "rendu", "दो", "do"]],
+      ["3", ["three", "మూడు", "moodu", "mudu", "तीन", "teen", "tin"]],
+      ["4", ["four", "నాలుగు", "naalugu", "nalugu", "चार", "char", "chaar"]],
+      ["5", ["five", "ఐదు", "aidu", "पांच", "पाँच", "paanch", "panch"]],
+      ["6", ["six", "ఆరు", "aaru", "छह", "छः", "छे", "chhe", "che"]],
+      ["7", ["seven", "ఏడు", "edu", "सात", "saat"]],
+      ["8", ["eight", "ఎనిమిది", "enimidi", "आठ", "aath"]],
+      ["9", ["nine", "తొమ్మిది", "tommidi", "नौ", "nau"]],
+    ] as const
+  ).flatMap(([digit, words]) => words.map((w) => [w.toLowerCase(), digit] as const)),
+);
+/** "double nine" / "triple seven", as Indian English speakers read numbers out. */
+const REPEAT_WORDS = new Map<string, number>([
+  ["double", 2],
+  ["triple", 3],
+]);
+/** Fewer consecutive digit tokens than this is ordinary speech ("one moment", "two people"), never a number read out. */
+const MIN_SPOKEN_DIGIT_RUN = 3;
+
+/**
+ * A number read out digit by digit, turned into numerals: "nine eight four
+ * eight zero" → "9 8 4 8 0", "double nine" → "9 9", "తొమ్మిది ఎనిమిది
+ * నాలుగు" → "9 8 4", and numerals already in the text kept as they are.
+ * Only a run of MIN_SPOKEN_DIGIT_RUN or more digit tokens is converted, so
+ * "one moment" or "for two people" is left untouched.
+ */
+export function spokenDigitsToNumerals(text: string): string {
+  const tokens = asciiDigits(text).split(/(\s+|[,.;:!?।-]+)/);
+  const out: string[] = [];
+  let run: string[] = [];
+  let runTokens: string[] = [];
+  let digitTokens = 0;
+  const flush = () => {
+    if (digitTokens >= MIN_SPOKEN_DIGIT_RUN) {
+      // Keep the separator that followed the number ("… 5 and").
+      const trailing = runTokens.length && /^\s+$/.test(runTokens.at(-1)!) ? " " : "";
+      out.push(run.join(" ") + trailing);
+    } else {
+      out.push(runTokens.join(""));
+    }
+    run = [];
+    runTokens = [];
+    digitTokens = 0;
+  };
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]!;
+    const word = token.toLowerCase();
+    if (/^\s+$|^[,.;:!?।-]+$/.test(token) || token === "") {
+      if (runTokens.length) runTokens.push(token);
+      else out.push(token);
+      continue;
+    }
+    const repeat = REPEAT_WORDS.get(word);
+    const next = tokens.slice(i + 1).find((t) => t.trim() && !/^[,.;:!?।-]+$/.test(t));
+    const nextDigit = next
+      ? (DIGIT_WORDS.get(next.toLowerCase()) ?? (/^\d$/.test(next) ? next : null))
+      : null;
+    if (repeat && nextDigit) {
+      run.push(...Array(repeat - 1).fill(nextDigit));
+      runTokens.push(token);
+      digitTokens += repeat - 1;
+      continue;
+    }
+    const digit = DIGIT_WORDS.get(word) ?? (/^\d+$/.test(token) ? token : null);
+    if (digit !== null) {
+      run.push(digit);
+      runTokens.push(token);
+      digitTokens += digit.length;
+      continue;
+    }
+    if (runTokens.length) flush();
+    out.push(token);
+  }
+  if (runTokens.length) flush();
+  return out.join("");
+}
+
 /* ------------------------------------------------------------------ */
 /* Availability                                                         */
 /* ------------------------------------------------------------------ */
@@ -452,6 +535,36 @@ export const CALLER_ID_QUESTION_BY_LANGUAGE: Record<NonEnglish, string> = {
   "pa-IN": "ਕੀ ਮੈਂ ਉਹੀ ਨੰਬਰ ਵਰਤਾਂ ਜਿਸ ਤੋਂ ਤੁਸੀਂ ਕਾਲ ਕਰ ਰਹੇ ਹੋ?",
   "od-IN": "ଆପଣ ଯେଉଁ ନମ୍ବରରୁ କଲ୍ କରୁଛନ୍ତି, ସେହି ନମ୍ବର ବ୍ୟବହାର କରିବି କି?",
 };
+
+/** "Is that right?" after a number is read back, in every supported language. */
+export const IS_THAT_RIGHT: Record<VoiceLanguageCode, string> = {
+  "en-IN": "Is that right?",
+  "hi-IN": "सही है?",
+  "te-IN": "సరేనా?",
+  "ta-IN": "சரியா?",
+  "kn-IN": "ಸರಿಯೇ?",
+  "ml-IN": "ശരിയാണോ?",
+  "bn-IN": "ঠিক আছে?",
+  "mr-IN": "बरोबर आहे का?",
+  "gu-IN": "બરાબર છે?",
+  "pa-IN": "ਠੀਕ ਹੈ?",
+  "od-IN": "ଠିକ୍ ଅଛି କି?",
+};
+
+/**
+ * A phone number as it is read back on a call: the ten national digits one
+ * by one, in two groups of five ("9 8 4 8 0, 1 2 3 4 5"), so the voice
+ * says each digit instead of a large number. Other lengths are read digit
+ * by digit without grouping.
+ */
+export function spokenPhoneDigits(e164: string): string {
+  const digits = e164.replace(/\D/g, "");
+  const national = digits.length === 12 && digits.startsWith("91") ? digits.slice(2) : digits;
+  const spaced = (s: string) => s.split("").join(" ");
+  return national.length === 10
+    ? `${spaced(national.slice(0, 5))}, ${spaced(national.slice(5))}`
+    : spaced(national);
+}
 
 /** The one detail still missing before a booking can be summarized. */
 export type MissingDetail = "service" | "name" | "date" | "time" | "phone";
