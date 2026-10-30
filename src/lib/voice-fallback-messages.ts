@@ -211,6 +211,7 @@ type CallFlowMessageKey =
   | "paymentWait"
   | "maxDuration"
   | "humanUnavailable"
+  | "priceUnconfirmed"
   | "repeatedQuestion"
   | "rescheduleFailed";
 
@@ -228,6 +229,8 @@ const CALL_FLOW_MESSAGES: Record<VoiceLanguageCode, CallFlowTable> = {
       "I haven't received confirmation of your payment yet. I'll text you as soon as it comes through — is there anything else I can help with in the meantime?",
     maxDuration: (b) => CLOSING_MESSAGES.maxDuration(b),
     humanUnavailable: () => CLOSING_MESSAGES.humanUnavailable,
+    priceUnconfirmed: () =>
+      "I'm sorry, I can't confirm the current price right now. Is there anything else I can help you with?",
     repeatedQuestion: () => CLOSING_MESSAGES.repeatedQuestion,
     rescheduleFailed: () =>
       `I'm sorry, I couldn't change your appointment just now. Our team can help you with it. ${ANYTHING_ELSE_EN}`,
@@ -243,6 +246,8 @@ const CALL_FLOW_MESSAGES: Record<VoiceLanguageCode, CallFlowTable> = {
       `इस कॉल की समय सीमा पूरी हो गई है। ${b} में कॉल करने के लिए धन्यवाद। नमस्ते!`,
     humanUnavailable: () =>
       "माफ़ कीजिए, इस कॉल पर किसी व्यक्ति से बात नहीं कराई जा सकती। आप कामकाज के समय में दोबारा कॉल करके टीम से बात कर सकते हैं। क्या किसी और चीज़ में मदद कर सकते हैं?",
+    priceUnconfirmed: () =>
+      "माफ़ कीजिए, अभी मौजूदा कीमत की पुष्टि नहीं कर सकते। क्या किसी और चीज़ में मदद कर सकते हैं?",
     repeatedQuestion: () =>
       "माफ़ कीजिए, इस कॉल पर यह हल नहीं हो पा रहा है। आप दोबारा कॉल कर सकते हैं या सीधे टीम से संपर्क कर सकते हैं। क्या किसी और चीज़ में मदद कर सकते हैं?",
     rescheduleFailed: () =>
@@ -258,6 +263,8 @@ const CALL_FLOW_MESSAGES: Record<VoiceLanguageCode, CallFlowTable> = {
     maxDuration: (b) => `এই কলের সময়সীমা শেষ হয়েছে। ${b}-এ ফোন করার জন্য ধন্যবাদ। নমস্কার!`,
     humanUnavailable: () =>
       "দুঃখিত, এই কলে কোনো ব্যক্তির সঙ্গে যোগাযোগ করিয়ে দেওয়া সম্ভব নয়। কাজের সময়ে আবার ফোন করে টিমের সঙ্গে কথা বলতে পারেন। আর কিছুতে সাহায্য করতে পারি?",
+    priceUnconfirmed: () =>
+      "দুঃখিত, এখন বর্তমান দাম নিশ্চিত করা যাচ্ছে না। আর কিছুতে সাহায্য করতে পারি?",
     repeatedQuestion: () =>
       "দুঃখিত, এই কলে বিষয়টি সমাধান করা যাচ্ছে না। আপনি আবার ফোন করতে পারেন বা সরাসরি টিমের সঙ্গে যোগাযোগ করতে পারেন। আর কিছুতে সাহায্য করতে পারি?",
     rescheduleFailed: () =>
@@ -274,6 +281,8 @@ const CALL_FLOW_MESSAGES: Record<VoiceLanguageCode, CallFlowTable> = {
       `இந்த அழைப்பின் நேர வரம்பு முடிந்துவிட்டது. ${b}-க்கு அழைத்ததற்கு நன்றி. வணக்கம்!`,
     humanUnavailable: () =>
       "மன்னிக்கவும், இந்த அழைப்பில் ஒருவரிடம் இணைக்க முடியாது. வேலை நேரத்தில் மீண்டும் அழைத்து குழுவுடன் பேசலாம். வேறு ஏதாவது உதவி வேண்டுமா?",
+    priceUnconfirmed: () =>
+      "மன்னிக்கவும், இப்போதைய விலையை இப்போது உறுதிசெய்ய முடியவில்லை. வேறு ஏதாவது உதவி வேண்டுமா?",
     repeatedQuestion: () =>
       "மன்னிக்கவும், இந்த அழைப்பில் இதைத் தீர்க்க முடியவில்லை. நீங்கள் மீண்டும் அழைக்கலாம் அல்லது நேரடியாக குழுவைத் தொடர்புகொள்ளலாம். வேறு ஏதாவது உதவி வேண்டுமா?",
     rescheduleFailed: () =>
@@ -290,6 +299,8 @@ const CALL_FLOW_MESSAGES: Record<VoiceLanguageCode, CallFlowTable> = {
       `ఈ కాల్ సమయ పరిమితి పూర్తయింది. ${b} కి కాల్ చేసినందుకు ధన్యవాదాలు. నమస్కారం!`,
     humanUnavailable: () =>
       "క్షమించండి, ఈ కాల్‌లో ఎవరితోనూ కలపడం సాధ్యం కాదు. పని వేళల్లో మళ్ళీ కాల్ చేసి టీమ్‌తో మాట్లాడవచ్చు. ఇంకేమైనా సహాయం కావాలా?",
+    priceUnconfirmed: () =>
+      "క్షమించండి, ప్రస్తుత ధరను ఇప్పుడు నిర్ధారించలేకపోతున్నాం. ఇంకేమైనా సహాయం కావాలా?",
     repeatedQuestion: () =>
       "క్షమించండి, ఈ కాల్‌లో దీన్ని పరిష్కరించలేకపోతున్నాం. మీరు మళ్ళీ కాల్ చేయవచ్చు లేదా నేరుగా టీమ్‌ని సంప్రదించవచ్చు. ఇంకేమైనా సహాయం కావాలా?",
     rescheduleFailed: () =>
@@ -305,6 +316,8 @@ const CALL_FLOW_MESSAGES: Record<VoiceLanguageCode, CallFlowTable> = {
     maxDuration: (b) => `આ કૉલની સમય મર્યાદા પૂરી થઈ ગઈ છે. ${b} ને કૉલ કરવા બદલ આભાર. આવજો!`,
     humanUnavailable: () =>
       "માફ કરશો, આ કૉલ પર કોઈ વ્યક્તિ સાથે વાત કરાવી શકાય તેમ નથી. કામકાજના સમયે ફરી કૉલ કરીને ટીમ સાથે વાત કરી શકો છો. બીજી કોઈ મદદ જોઈએ છે?",
+    priceUnconfirmed: () =>
+      "માફ કરશો, અત્યારે હાલની કિંમતની પુષ્ટિ કરી શકાતી નથી. બીજી કોઈ મદદ જોઈએ?",
     repeatedQuestion: () =>
       "માફ કરશો, આ કૉલ પર આનો ઉકેલ આવી શકતો નથી. આપ ફરી કૉલ કરી શકો છો અથવા સીધો ટીમનો સંપર્ક કરી શકો છો. બીજી કોઈ મદદ જોઈએ છે?",
     rescheduleFailed: () =>
@@ -320,6 +333,8 @@ const CALL_FLOW_MESSAGES: Record<VoiceLanguageCode, CallFlowTable> = {
     maxDuration: (b) => `ಈ ಕರೆಯ ಸಮಯ ಮಿತಿ ಮುಗಿದಿದೆ. ${b} ಗೆ ಕರೆ ಮಾಡಿದ್ದಕ್ಕೆ ಧನ್ಯವಾದಗಳು. ನಮಸ್ಕಾರ!`,
     humanUnavailable: () =>
       "ಕ್ಷಮಿಸಿ, ಈ ಕರೆಯಲ್ಲಿ ಯಾರಿಗಾದರೂ ಸಂಪರ್ಕಿಸಲು ಸಾಧ್ಯವಿಲ್ಲ. ಕೆಲಸದ ಸಮಯದಲ್ಲಿ ಮತ್ತೆ ಕರೆ ಮಾಡಿ ತಂಡದೊಂದಿಗೆ ಮಾತನಾಡಬಹುದು. ಬೇರೆ ಏನಾದರೂ ಸಹಾಯ ಬೇಕೇ?",
+    priceUnconfirmed: () =>
+      "ಕ್ಷಮಿಸಿ, ಈಗಿನ ಬೆಲೆಯನ್ನು ಈಗ ಖಚಿತಪಡಿಸಲು ಆಗುತ್ತಿಲ್ಲ. ಬೇರೆ ಏನಾದರೂ ಸಹಾಯ ಬೇಕೆ?",
     repeatedQuestion: () =>
       "ಕ್ಷಮಿಸಿ, ಈ ಕರೆಯಲ್ಲಿ ಇದನ್ನು ಬಗೆಹರಿಸಲು ಆಗುತ್ತಿಲ್ಲ. ನೀವು ಮತ್ತೆ ಕರೆ ಮಾಡಬಹುದು ಅಥವಾ ನೇರವಾಗಿ ತಂಡವನ್ನು ಸಂಪರ್ಕಿಸಬಹುದು. ಬೇರೆ ಏನಾದರೂ ಸಹಾಯ ಬೇಕೇ?",
     rescheduleFailed: () =>
@@ -335,6 +350,8 @@ const CALL_FLOW_MESSAGES: Record<VoiceLanguageCode, CallFlowTable> = {
     maxDuration: (b) => `ഈ കോളിന്റെ സമയപരിധി കഴിഞ്ഞു. ${b}-ലേക്ക് വിളിച്ചതിന് നന്ദി. നമസ്കാരം!`,
     humanUnavailable: () =>
       "ക്ഷമിക്കണം, ഈ കോളിൽ ഒരാളുമായി ബന്ധിപ്പിക്കാൻ കഴിയില്ല. പ്രവൃത്തി സമയത്ത് വീണ്ടും വിളിച്ച് ടീമുമായി സംസാരിക്കാം. മറ്റെന്തെങ്കിലും സഹായം വേണോ?",
+    priceUnconfirmed: () =>
+      "ക്ഷമിക്കണം, ഇപ്പോഴത്തെ വില ഇപ്പോൾ ഉറപ്പിക്കാൻ കഴിയുന്നില്ല. മറ്റെന്തെങ്കിലും സഹായം വേണോ?",
     repeatedQuestion: () =>
       "ക്ഷമിക്കണം, ഈ കോളിൽ ഇത് പരിഹരിക്കാൻ കഴിയുന്നില്ല. നിങ്ങൾക്ക് വീണ്ടും വിളിക്കാം, അല്ലെങ്കിൽ നേരിട്ട് ടീമിനെ ബന്ധപ്പെടാം. മറ്റെന്തെങ്കിലും സഹായം വേണോ?",
     rescheduleFailed: () =>
@@ -351,6 +368,8 @@ const CALL_FLOW_MESSAGES: Record<VoiceLanguageCode, CallFlowTable> = {
       `या कॉलची वेळमर्यादा पूर्ण झाली आहे. ${b} ला कॉल केल्याबद्दल धन्यवाद. नमस्कार!`,
     humanUnavailable: () =>
       "माफ करा, या कॉलवर कोणाशी बोलणे करून देता येणार नाही. कामकाजाच्या वेळेत पुन्हा कॉल करून टीमशी बोलू शकता. आणखी काही मदत हवी आहे का?",
+    priceUnconfirmed: () =>
+      "माफ करा, सध्याची किंमत आत्ता निश्चित करता येत नाही. आणखी काही मदत हवी आहे का?",
     repeatedQuestion: () =>
       "माफ करा, या कॉलवर हे सोडवता येत नाहीये. आपण पुन्हा कॉल करू शकता किंवा थेट टीमशी संपर्क करू शकता. आणखी काही मदत हवी आहे का?",
     rescheduleFailed: () =>
@@ -367,6 +386,8 @@ const CALL_FLOW_MESSAGES: Record<VoiceLanguageCode, CallFlowTable> = {
       `ਇਸ ਕਾਲ ਦੀ ਸਮਾਂ ਸੀਮਾ ਪੂਰੀ ਹੋ ਗਈ ਹੈ। ${b} ਨੂੰ ਕਾਲ ਕਰਨ ਲਈ ਧੰਨਵਾਦ। ਸਤ ਸ੍ਰੀ ਅਕਾਲ!`,
     humanUnavailable: () =>
       "ਮਾਫ਼ ਕਰਨਾ, ਇਸ ਕਾਲ 'ਤੇ ਕਿਸੇ ਵਿਅਕਤੀ ਨਾਲ ਗੱਲ ਨਹੀਂ ਕਰਵਾਈ ਜਾ ਸਕਦੀ। ਕੰਮ ਦੇ ਸਮੇਂ ਦੌਰਾਨ ਦੁਬਾਰਾ ਕਾਲ ਕਰਕੇ ਟੀਮ ਨਾਲ ਗੱਲ ਕਰ ਸਕਦੇ ਹੋ। ਕੋਈ ਹੋਰ ਮਦਦ ਚਾਹੀਦੀ ਹੈ?",
+    priceUnconfirmed: () =>
+      "ਮਾਫ਼ ਕਰਨਾ, ਹੁਣ ਮੌਜੂਦਾ ਕੀਮਤ ਦੀ ਪੁਸ਼ਟੀ ਨਹੀਂ ਹੋ ਸਕਦੀ। ਕੀ ਹੋਰ ਕੋਈ ਮਦਦ ਚਾਹੀਦੀ ਹੈ?",
     repeatedQuestion: () =>
       "ਮਾਫ਼ ਕਰਨਾ, ਇਸ ਕਾਲ 'ਤੇ ਇਹ ਹੱਲ ਨਹੀਂ ਹੋ ਰਿਹਾ। ਤੁਸੀਂ ਦੁਬਾਰਾ ਕਾਲ ਕਰ ਸਕਦੇ ਹੋ ਜਾਂ ਸਿੱਧਾ ਟੀਮ ਨਾਲ ਸੰਪਰਕ ਕਰ ਸਕਦੇ ਹੋ। ਕੋਈ ਹੋਰ ਮਦਦ ਚਾਹੀਦੀ ਹੈ?",
     rescheduleFailed: () =>
@@ -382,6 +403,8 @@ const CALL_FLOW_MESSAGES: Record<VoiceLanguageCode, CallFlowTable> = {
     maxDuration: (b) => `ଏହି କଲର ସମୟ ସୀମା ଶେଷ ହୋଇଛି। ${b} କୁ କଲ୍ କରିଥିବାରୁ ଧନ୍ୟବାଦ। ନମସ୍କାର!`,
     humanUnavailable: () =>
       "କ୍ଷମା କରିବେ, ଏହି କଲରେ କାହା ସହିତ ଯୋଡ଼ିବା ସମ୍ଭବ ନୁହେଁ। କାମ ସମୟରେ ପୁଣି କଲ୍ କରି ଟିମ ସହିତ କଥା ହୋଇପାରିବେ। ଆଉ କିଛି ସାହାଯ୍ୟ ଦରକାର କି?",
+    priceUnconfirmed: () =>
+      "କ୍ଷମା କରିବେ, ବର୍ତ୍ତମାନର ଦାମ ଏବେ ନିଶ୍ଚିତ କରିହେଉନାହିଁ। ଆଉ କିଛି ସାହାଯ୍ୟ ଦରକାର କି?",
     repeatedQuestion: () =>
       "କ୍ଷମା କରିବେ, ଏହି କଲରେ ଏହାର ସମାଧାନ ହୋଇପାରୁନାହିଁ। ଆପଣ ପୁଣି କଲ୍ କରିପାରିବେ କିମ୍ବା ସିଧାସଳଖ ଟିମ ସହିତ ଯୋଗାଯୋଗ କରିପାରିବେ। ଆଉ କିଛି ସାହାଯ୍ୟ ଦରକାର କି?",
     rescheduleFailed: () =>

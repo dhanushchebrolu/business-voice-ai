@@ -284,9 +284,41 @@ const TOMORROW_TERMS = terms([
 
 /** "today"/"tomorrow" said in any supported language, or null. */
 export function relativeDateAnyLanguage(text: string): "today" | "tomorrow" | null {
-  if (TOMORROW_TERMS.test(text)) return "tomorrow";
-  if (TODAY_TERMS.test(text)) return "today";
+  const negated = negatedRelativeDates(text);
+  if (TOMORROW_TERMS.test(text) && !negated.has("tomorrow")) return "tomorrow";
+  if (TODAY_TERMS.test(text) && !negated.has("today")) return "today";
   return null;
+}
+
+/**
+ * "today"/"tomorrow" the caller rules out in the same breath: "not
+ * tomorrow, today", "कल नहीं, आज", "రేపు కాదు, ఈరోజు", "kal nahi aaj".
+ * Without this, "tomorrow" — checked first — won even when negated.
+ */
+export function negatedRelativeDates(text: string): Set<"today" | "tomorrow"> {
+  const out = new Set<"today" | "tomorrow">();
+  // A bare "no" is not a negator here: "no, tomorrow is fine" (often
+  // transcribed without the comma) is a correction TO tomorrow. Nor is
+  // "not until tomorrow", which means tomorrow.
+  const english =
+    /\b(?:not(?!\s+until\b)|don'?t\s+want|instead\s+of)\s+(?:\w+\s+){0,2}?(tomorrow|today)\b|\b(tomorrow|today)\s+(?:is\s+)?not\b/gi;
+  for (const m of text.matchAll(english))
+    out.add((m[1] ?? m[2])!.toLowerCase() as "today" | "tomorrow");
+  if (
+    /(?:कल)\s*(?:नहीं|नही|मत)|\bkal\s+(?:nahi|nahin|mat)\b|(?:రేపు|రేపటి)\s*(?:కాదు|వద్దు)|\brepu\s+(?:kaadu|vaddu)\b/iu.test(
+      text,
+    )
+  ) {
+    out.add("tomorrow");
+  }
+  if (
+    /(?:आज)\s*(?:नहीं|नही|मत)|\baaj\s+(?:nahi|nahin|mat)\b|(?:ఈరోజు|ఈ\s+రోజు|ఇవాళ)\s*(?:కాదు|వద్దు)|\b(?:ivvala|eeroju)\s+(?:kaadu|vaddu)\b/iu.test(
+      text,
+    )
+  ) {
+    out.add("today");
+  }
+  return out;
 }
 
 /* ------------------------------------------------------------------ */
@@ -550,6 +582,166 @@ export const IS_THAT_RIGHT: Record<VoiceLanguageCode, string> = {
   "pa-IN": "ਠੀਕ ਹੈ?",
   "od-IN": "ଠିକ୍ ଅଛି କି?",
 };
+
+/**
+ * Asked when the caller points at "the second one" but the agent's last
+ * reply named no list it could mean, so nothing is guessed.
+ */
+export const WHICH_ONE_QUESTION: Record<VoiceLanguageCode, string> = {
+  "en-IN": "Sorry, which one did you mean?",
+  "hi-IN": "माफ़ कीजिए, आप कौन सा कह रहे हैं?",
+  "te-IN": "క్షమించండి, మీరు ఏది అంటున్నారు?",
+  "ta-IN": "மன்னிக்கவும், நீங்கள் எதைச் சொல்கிறீர்கள்?",
+  "kn-IN": "ಕ್ಷಮಿಸಿ, ನೀವು ಯಾವುದನ್ನು ಹೇಳುತ್ತಿದ್ದೀರಿ?",
+  "ml-IN": "ക്ഷമിക്കണം, നിങ്ങൾ ഏതാണ് ഉദ്ദേശിച്ചത്?",
+  "bn-IN": "দুঃখিত, আপনি কোনটার কথা বলছেন?",
+  "mr-IN": "माफ करा, तुम्ही कोणतं म्हणताय?",
+  "gu-IN": "માફ કરશો, તમે કયું કહો છો?",
+  "pa-IN": "ਮਾਫ਼ ਕਰਨਾ, ਤੁਸੀਂ ਕਿਹੜਾ ਕਹਿ ਰਹੇ ਹੋ?",
+  "od-IN": "କ୍ଷମା କରିବେ, ଆପଣ କେଉଁଟି କହୁଛନ୍ତି?",
+};
+
+/**
+ * Ordinals as a choice among options — never the bare word, which usually
+ * means something else ("first tell me the price", "पहले फीस बताइए",
+ * "ముందు చెప్పండి"): English "the/<ordinal> one/option/time/slot/service",
+ * Telugu "-ది" forms ("రెండోది") or the ordinal before an option word, Hindi
+ * and romanized with "वाला"/"wala" or an option word.
+ */
+const OPTION_NOUN_EN = String.raw`(?:one|option|time|slot|service)`;
+const OPTION_NOUN_TE = "(?:సర్వీస్|టైమ్|టైం|ఆప్షన్|స్లాట్)";
+const OPTION_NOUN_HI = "(?:वाला|वाली|वाले|सर्विस|टाइम|स्लॉट|ऑप्शन)";
+const OPTION_NOUN_ROMAN = String.raw`(?:wala|wali|wale|one|option|time|slot)`;
+function ordinal(
+  en: string,
+  teOne: string,
+  teAdj: string,
+  hi: string,
+  roman: string,
+  teRomanOne?: string,
+): RegExp {
+  return new RegExp(
+    [
+      // Romanized Telugu "rendodi" ("the second one") stands alone, like రెండోది.
+      ...(teRomanOne ? [String.raw`\b${teRomanOne}\b`] : []),
+      String.raw`\bthe\s+${en}\b`,
+      String.raw`\b${en}\s+${OPTION_NOUN_EN}\b`,
+      `(?<![\\p{L}\\p{M}])${teOne}`,
+      `(?<![\\p{L}\\p{M}])${teAdj}\\s*${OPTION_NOUN_TE}`,
+      `(?<![\\p{L}\\p{M}])${hi}\\s+${OPTION_NOUN_HI}`,
+      String.raw`\b${roman}\s+${OPTION_NOUN_ROMAN}\b`,
+    ].join("|"),
+    "iu",
+  );
+}
+const ORDINALS: [number, RegExp][] = [
+  [
+    1,
+    ordinal(
+      "(?:first|1st)",
+      "మొదటిది",
+      "మొదటి",
+      "(?:पहला|पहली)",
+      "(?:pehla|pehli|modati)",
+      "(?:modatidi|modatidhi)",
+    ),
+  ],
+  [
+    2,
+    ordinal(
+      "(?:second|2nd)",
+      "రెండోది",
+      "(?:రెండో|రెండవ)",
+      "(?:दूसरा|दूसरी)",
+      "(?:dusra|doosra|dusri|rendo)",
+      "(?:rendodi|rendodhi|rendavadi)",
+    ),
+  ],
+  [
+    3,
+    ordinal(
+      "(?:third|3rd)",
+      "మూడోది",
+      "(?:మూడో|మూడవ)",
+      "(?:तीसरा|तीसरी)",
+      "(?:teesra|tisra|teesri|moodo)",
+      "(?:moododi|mooddodi|mudodi)",
+    ),
+  ],
+  [
+    4,
+    ordinal(
+      "(?:fourth|4th)",
+      "నాలుగోది",
+      "(?:నాలుగో|నాలుగవ)",
+      "(?:चौथा|चौथी)",
+      "(?:chautha|chauthi)",
+    ),
+  ],
+  [
+    5,
+    ordinal(
+      "(?:fifth|5th)",
+      "ఐదోది",
+      "(?:ఐదో|ఐదవ)",
+      "(?:पांचवा|पाँचवाँ|पांचवी)",
+      "(?:paanchva|paanchvi)",
+    ),
+  ],
+];
+const LAST = new RegExp(
+  String.raw`\bthe\s+last\b|\blast\s+${OPTION_NOUN_EN}\b|(?<![\p{L}\p{M}])చివరిది|(?<![\p{L}\p{M}])(?:आखिरी|आख़िरी)\s+${OPTION_NOUN_HI}|\b(?:aakhri|akhri)\s+${OPTION_NOUN_ROMAN}\b`,
+  "iu",
+);
+const EARLIER = new RegExp(
+  String.raw`\b(?:the\s+)?(?:earlier|earliest|sooner)(?:\s+${OPTION_NOUN_EN})?\b|(?<![\p{L}\p{M}])ముందుది|(?<![\p{L}\p{M}])(?:पहले|जल्दी)\s+(?:वाला|वाली)|\b(?:pehle|jaldi)\s+(?:wala|wali)\b`,
+  "iu",
+);
+const LATER = new RegExp(
+  String.raw`\b(?:the\s+)?(?:later|latest)(?:\s+${OPTION_NOUN_EN})?\b|(?<![\p{L}\p{M}])తర్వాతది|(?<![\p{L}\p{M}])(?:बाद|लेट)\s+(?:वाला|वाली)|\b(?:baad|late)\s+(?:wala|wali)\b`,
+  "iu",
+);
+
+/**
+ * The caller is changing something already said — "change it to
+ * tomorrow", "actually, cleaning instead", "not that one, the second one",
+ * "రేపటికి మార్చండి", "అది కాదు", "badulu", "कल कर दीजिए, आज नहीं", "badal
+ * do". On such a turn the caller's own words are the new value, over any
+ * older value the model's state block still repeats.
+ */
+const CORRECTION = new RegExp(
+  [
+    String.raw`\b(?:actually|instead|rather|change\s+(?:it|that|the\s+\w+)|make\s+it|switch\s+(?:it|to)|not\s+that(?:\s+one)?|i\s+(?:meant|said)|correction|wrong\s+(?:one|time|day|date))\b`,
+    "మార్చ|బదులు|కాదు",
+    String.raw`\b(?:kaadu|kadu|ma+rch(?:andi|u|i|esi|eyandi|eyi)|badulu|vaddu)\b`,
+    "बदल|की\\s+जगह|बल्कि|असल\\s+में|वो\\s+नहीं|नहीं",
+    String.raw`\b(?:badal\w*|ki\s+jagah|balki|asal\s+mein|nahi|nahin)\b`,
+  ].join("|"),
+  "iu",
+);
+
+export function isCorrection(text: string): boolean {
+  return CORRECTION.test(text);
+}
+
+/**
+ * Which of the options the agent just read out the caller is pointing at:
+ * a position ("the second one", "రెండోది", "दूसरा वाला"), the last one, or —
+ * for times — the earlier or later one. Null when the turn is not a short
+ * reference (more than six words is a sentence about something else, where
+ * "first" or "later" mean what they usually mean).
+ */
+export function optionReference(
+  text: string,
+): { position: number } | "last" | "earlier" | "later" | null {
+  if (text.trim().split(/\s+/).length > 6) return null;
+  const ordinal = ORDINALS.find(([, re]) => re.test(text));
+  if (ordinal) return { position: ordinal[0] };
+  if (LAST.test(text)) return "last";
+  if (EARLIER.test(text)) return "earlier";
+  if (LATER.test(text)) return "later";
+  return null;
+}
 
 /**
  * A phone number as it is read back on a call: the ten national digits one

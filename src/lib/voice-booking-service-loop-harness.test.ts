@@ -325,7 +325,7 @@ describe("a service that can't be identified never loops", () => {
     { id: "svc-whitening", name: "Teeth Whitening", duration_minutes: 60 },
   ];
 
-  test("unsupported wording: ask once, then list the real services, then offer a callback — and stop asking", async () => {
+  test("unsupported wording: ask once, then list the real services, then an honest next step (no callback promise) — and stop asking", async () => {
     const { h, callId, catchUp } = await openCall(NO_CLEANING);
     const replies: string[] = [];
     for (const said of [
@@ -347,7 +347,8 @@ describe("a service that can't be identified never loops", () => {
     assert.ok(count(all, SERVICE_QUESTION) <= 1, `the same question at most once: ${all}`);
     assert.match(replies[1]!, /We offer Root Canal Treatment and Teeth Whitening/);
     assert.match(replies[2]!, /couldn't match that to one of our services/i);
-    assert.match(replies[2]!, /call you back/i);
+    assert.match(replies[2]!, /call back during opening hours/i);
+    assert.doesNotMatch(replies[2]!, /call you back/i, "no callback exists to promise");
     assert.doesNotMatch(replies[3]!, /which service|we offer/i, "no further service questions");
     assert.equal(h.tools.calls.filter((c) => c.name === "book_appointment").length, 0);
     await terminateRuntimeSession(callId, "test cleanup");
@@ -574,7 +575,7 @@ describe('Smile Dental production: "Root canal" is understood and booked', () =>
     });
   }
 
-  test('"Root canal" at a clinic that doesn\'t offer it never loops: list, then callback, then stop', async () => {
+  test('"Root canal" at a clinic that doesn\'t offer it never loops: list, then an honest next step, then stop', async () => {
     const NO_RCT: ServiceRow[] = [
       { id: "svc-teeth-cleaning", name: "Teeth Cleaning", duration_minutes: 30 },
       { id: "svc-whitening", name: "Teeth Whitening", duration_minutes: 60 },
@@ -602,7 +603,11 @@ describe('Smile Dental production: "Root canal" is understood and booked', () =>
     }
     const all = replies.join(" | ");
     assert.ok(count(all, SERVICE_QUESTION) <= 1, `asked at most once more: ${all}`);
-    assert.ok(/call you back/i.test(all), `a callback is offered: ${all}`);
+    assert.ok(
+      /call back during opening hours/i.test(all),
+      `an honest next step is offered: ${all}`,
+    );
+    assert.ok(!/call you back/i.test(all), `no callback is promised: ${all}`);
     assert.doesNotMatch(replies[4]!, /which service|we offer/i, "no further service questions");
     assert.equal(h.tools.calls.filter((c) => c.name === "book_appointment").length, 0);
     await terminateRuntimeSession(callId, "test cleanup");

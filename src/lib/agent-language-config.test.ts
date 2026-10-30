@@ -259,11 +259,11 @@ describe("withCurrentLanguageSection — calls never replay an outdated language
 });
 
 describe("calls use the current language section, not the one saved at publish time", () => {
-  test("routeToAgentRuntime passes published instructions through withCurrentLanguageSection with the snapshot's agent", () => {
+  test("routeToAgentRuntime passes published instructions through withCurrentCallSections (which includes the language section) with the snapshot's agent", () => {
     const src = repoFile("src", "lib", "telephony-runtime.ts");
     assert.match(
       src,
-      /instructions = withCurrentLanguageSection\(publishedVersion\.instructions, snapshot\.agent\);/,
+      /instructions = withCurrentCallSections\(\s*publishedVersion\.instructions,\s*snapshot\.agent,\s*liveServices,?\s*\);/,
     );
     assert.doesNotMatch(src, /instructions = publishedVersion\.instructions;/);
   });

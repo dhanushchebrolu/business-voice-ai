@@ -1339,7 +1339,9 @@ describe("silence/timeout handling — wiring", () => {
       fnBody,
       /message: localizedFallback\("silenceHangup", responseLanguageFor\(session\)\)/,
     );
-    const finishStart = src.indexOf("async function finishCall(");
+    // finishCall records the close in progress (session.closing) and runs
+    // runFinishCall, which holds the steps.
+    const finishStart = src.indexOf("async function runFinishCall(");
     const finishBody = src.slice(finishStart, src.indexOf("\n}\n", finishStart));
     assert.match(
       finishBody,

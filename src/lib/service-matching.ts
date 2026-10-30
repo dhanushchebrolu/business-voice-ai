@@ -128,7 +128,24 @@ const STOPWORDS = new Set([
 
 // Concepts that say what part of the body is involved but not what is done
 // to it — never enough on their own to choose a service.
-const WEAK_STEMS = new Set(["tooth", "mouth", "gum", "smile", "oral"]);
+const WEAK_STEMS = new Set([
+  "tooth",
+  "mouth",
+  "gum",
+  "smile",
+  "oral",
+  // Words for "a service" itself: "What treatments do you do?" asks about
+  // services in general and must not select "Root Canal Treatment".
+  "treatment",
+  "service",
+  "servic",
+  "procedure",
+  "therapy",
+  "session",
+  "appointment",
+  "visit",
+  "package",
+]);
 
 // Equivalent words folded to one stem before comparison.
 const SYNONYMS: Record<string, string> = {

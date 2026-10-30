@@ -121,7 +121,7 @@ export async function routeToAgentRuntime(
     // Greeting latency: these two reads are independent (both keyed by the
     // already-authorized businessId), so they run concurrently — one round
     // trip before the caller hears the greeting, not two.
-    const [{ data: publishedVersion }, { data: businessRow }] = await Promise.all([
+    const [{ data: publishedVersion }, { data: businessRow }, servicesRes] = await Promise.all([
       supabaseAdmin
         .from("agent_versions")
         .select("version, snapshot, instructions")
@@ -135,8 +135,34 @@ export async function routeToAgentRuntime(
       // published agent snapshot. Null (international numbers only) if
       // unset or unreadable; never a guessed default.
       supabaseAdmin.from("businesses").select("country").eq("id", businessId).maybeSingle(),
+      // The business's services and prices as they are now — the published
+      // instructions carry the list as it was at publish time. Never
+      // rejects: a failed read flags the published prices as unconfirmed
+      // rather than failing the call.
+      Promise.resolve(
+        supabaseAdmin
+          .from("services")
+          .select(
+            "name, description, category, price, currency, duration_minutes, attributes, is_active",
+          )
+          .eq("business_id", businessId)
+          .eq("is_active", true)
+          .order("sort_order"),
+      ).catch((error: unknown) => ({ data: null, error })),
     ]);
     const businessCountry = businessRow?.country ?? null;
+    // Null when the read failed: the published prices are then flagged as
+    // unconfirmed rather than quoted as current.
+    const liveServices = servicesRes.error
+      ? null
+      : ((servicesRes.data ??
+          []) as unknown as import("./agent-instructions").AgentSnapshot["services"]);
+    console.info("telephony:runtime_stage", {
+      callId: input.callId,
+      stage: "live_services",
+      resolved: liveServices !== null,
+      count: liveServices?.length ?? 0,
+    });
 
     let instructions: string;
     let agentSnapshotAgent: import("./agent-instructions").AgentSnapshot["agent"];
@@ -146,11 +172,17 @@ export async function routeToAgentRuntime(
     if (publishedVersion) {
       const snapshot =
         publishedVersion.snapshot as unknown as import("./agent-instructions").AgentSnapshot;
-      // The published text, with only its # LANGUAGE section brought up to
-      // date: one published before calls became multilingual still says
-      // "Respond in: en-IN." (see withCurrentLanguageSection).
-      const { withCurrentLanguageSection } = await import("./agent-instructions");
-      instructions = withCurrentLanguageSection(publishedVersion.instructions, snapshot.agent);
+      // The published text, with only its # LANGUAGE, # ESCALATION, # SAFETY
+      // and # SERVICES AND PRICING sections brought up to date: older
+      // versions say "Respond in: en-IN.", promise transfers and callbacks
+      // this line cannot do, and list prices as they were at publish time
+      // (see withCurrentCallSections).
+      const { withCurrentCallSections } = await import("./agent-instructions");
+      instructions = withCurrentCallSections(
+        publishedVersion.instructions,
+        snapshot.agent,
+        liveServices,
+      );
       agentSnapshotAgent = snapshot.agent;
       agentVersion = publishedVersion.version;
       businessName = snapshot.business.name;
@@ -200,6 +232,7 @@ export async function routeToAgentRuntime(
       // — the voice runtime offers it as the appointment contact number.
       callerNumber: input.callerE164,
       businessCountry,
+      pricesUnverified: liveServices === null,
       routingStartedAt,
     };
 
@@ -285,6 +318,7 @@ export async function routeToAgentRuntime(
       bridge,
       callerNumber: input.callerE164,
       businessCountry,
+      pricesUnverified: liveServices === null,
       routingStartedAt,
       ...(adapter.hangupCall && input.providerCallId
         ? {

@@ -209,6 +209,10 @@ describe("5/6/7/8. STT -> LLM -> TTS: the full turn-taking cycle", () => {
     const h = createHarness();
     const callId = newCallId();
     const handle = await startRuntimeSession(baseInput(callId, h.bridge), h.deps);
+    // The greeting has finished playing: "..." during it would be a
+    // wordless interruption, and the greeting would be said again
+    // (recoverFromFalseBargeIn) — not what this test is about.
+    makeTtsFlushCatchUp(h.tts)();
     const spokenBefore = h.tts.sentTexts.length;
 
     h.llm.setNextReply("");

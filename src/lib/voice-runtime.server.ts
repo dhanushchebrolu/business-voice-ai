@@ -114,9 +114,14 @@ import {
   explicitTimeAnyLanguage,
   periodAnyLanguage,
   relativeDateAnyLanguage,
+  negatedRelativeDates,
   spokenDigitsToNumerals,
   spokenPhoneDigits,
   IS_THAT_RIGHT,
+  asciiDigits,
+  optionReference,
+  isCorrection,
+  WHICH_ONE_QUESTION,
 } from "./voice-intent-lexicon.ts";
 import type { ClaudeTool } from "./claude.server.ts";
 import { zonedWallTimeToUtc, dayOfWeekInTimezone } from "./calendar/timezone.ts";
@@ -478,6 +483,12 @@ export interface StartRuntimeSessionInput {
    */
   businessCountry?: string | null;
   /**
+   * The business's current price list could not be read at call start (see
+   * withCurrentCallSections): a reply quoting an amount is replaced with an
+   * honest "can't confirm the current price" in the caller's language.
+   */
+  pricesUnverified?: boolean;
+  /**
    * The business's active configured services, when the caller already has
    * them. Optional: when absent, the runtime loads them on first need (see
    * Session.cachedServices). Used to map how the caller describes a service
@@ -763,6 +774,23 @@ interface Session {
   ttsReconnects: number;
   /** The reconnect in progress, shared by every reply that needs the voice meanwhile. */
   ttsReconnecting: Promise<boolean> | null;
+  /**
+   * What a barge-in cut off, kept until the interruption proves to be real
+   * words — see recoverFromFalseBargeIn: the reply being spoken ("repeat")
+   * or the caller's question still being answered ("rerun"); "close" when it
+   * was the goodbye, which is never said twice.
+   */
+  bargeInRecovery: { kind: "repeat" | "rerun" | "close"; text: string } | null;
+  /** Fires recoverFromFalseBargeIn when no words follow an interruption. */
+  bargeInRecoveryTimer: ReturnType<typeof setTimeout> | null;
+  /** The generation of an interrupted reply being said again; null when none is. */
+  bargeInReplayGeneration: number | null;
+  /** A rerun of an interrupted question is being handled right now. */
+  bargeInRerunActive: boolean;
+  /** Final transcripts with words so far — tells a queued rerun the caller has moved on. */
+  callerTurnsHeard: number;
+  /** The finishCall in progress, if any. */
+  closing: Promise<void> | null;
   accumulatingUserText: string;
   silenceTimer: ReturnType<typeof setTimeout> | null;
   silencePromptSent: boolean;
@@ -1369,6 +1397,19 @@ async function finishCall(
   opts: { reason: string; message: string | null; generation?: number },
 ): Promise<void> {
   if (session.callCompletion === "ending" || session.callCompletion === "terminating") return;
+  const run = runFinishCall(session, opts);
+  session.closing = run;
+  try {
+    await run;
+  } finally {
+    if (session.closing === run) session.closing = null;
+  }
+}
+
+async function runFinishCall(
+  session: Session,
+  opts: { reason: string; message: string | null; generation?: number },
+): Promise<void> {
   const state = stateOf(session);
   if (state === "ending" || state === "ended" || state === "failed") return;
   session.callCompletion = "ending";
@@ -1473,6 +1514,31 @@ function sentenceClaims(reply: string, claim: RegExp): boolean {
  * sentence by sentence, so "Sorry, I couldn't check — but you're booked!"
  * still counts, while "it isn't confirmed yet" does not.
  */
+/**
+ * A reply saying the call is being transferred, someone will call back, or a
+ * message was taken — none of which this line can do (see agent-
+ * instructions.ts escalationSection). English, Telugu, Hindi and romanized;
+ * a negated sentence ("I can't transfer you") is not a claim.
+ */
+const TRANSFER_OR_CALLBACK_CLAIM =
+  /\b(?:transferring|transfer(?:red)?\s+(?:you|your\s+call)|put(?:ting)?\s+you\s+through|connect(?:ing|ed)?\s+you\s+(?:to|with|now)|will\s+call\s+you\s+back|call\s+you\s+back|(?:arranged?|scheduled?|booked)\s+a\s+call\s?back|someone\s+will\s+(?:call|contact|get\s+back\s+to)\s+you|(?:noted|taken|left|recorded|passed\s+on)\s+(?:a|your|the)\s+message)\b|ట్రాన్స్‌?ఫర్\s*చేస్తున్నా|కనెక్ట్\s*చేస్తున్నా|కాల్\s*బ్యాక్\s*చేస్తా|మళ్ళీ\s*కాల్\s*చేస్తా|ट्रांसफर\s*कर\s*(?:रहा|रही|रहे|दिया|दी|दूँगा|दूंगा|दूँगी|दूंगी)|कनेक्ट\s*कर\s*(?:रहा|रही|रहे|दिया)|(?:आपको\s*)?(?:वापस\s*)?कॉल\s*(?:बैक\s*)?(?:करेंगे|करेगा|करेगी|कर\s*देंगे)|\b(?:transfer|connect)\s+kar\s+(?:raha|rahi|rahe|diya)\b|\bcall\s+back\s+kar(?:enge|ega|egi)\b/iu;
+
+/**
+ * A reply naming an amount of money: ₹, Rs or INR with a number, or a
+ * currency word in any supported language (rupees, रुपये, రూపాయలు, ...),
+ * which also catches amounts said in words.
+ */
+const PRICE_AMOUNT =
+  /(?:₹|\brs\.?|\binr\b)\s*\d|\d[\d,.]*\s*(?:\/-|\brs\b|\binr\b)|\b(?:rupees?|rupaye)\b|रुपये|रुपए|रुपया|రూపాయ|ரூபாய்|ರೂಪಾಯಿ|രൂപ|টাকা|রুপি|રૂપિયા|ਰੁਪਏ|ଟଙ୍କା/iu;
+
+export function quotesPrice(reply: string): boolean {
+  return PRICE_AMOUNT.test(reply);
+}
+
+export function claimsTransferOrCallback(reply: string): boolean {
+  return sentenceClaims(reply, TRANSFER_OR_CALLBACK_CLAIM);
+}
+
 export function claimsBookingSuccess(reply: string): boolean {
   return sentenceClaims(reply, BOOKING_SUCCESS_PATTERN);
 }
@@ -1706,7 +1772,8 @@ export function apptStateMarkerDiagnostic(
  *    isn't offered and list what is.
  * 3. First plain ask: "Which service would you like to book?"
  * 4. Second ask: list the configured services to choose from.
- * 5. After that: stop asking, offer a callback from the team, and let the
+ * 5. After that: stop asking, suggest calling back during opening hours (no
+ *    callback exists to promise), and let the
  *    conversation continue (question null from then on).
  */
 function serviceClarification(session: Session): { question: string | null; reason: string } {
@@ -1722,7 +1789,7 @@ function serviceClarification(session: Session): { question: string | null; reas
   if (attempt === 3) {
     return {
       question:
-        "I'm sorry, I couldn't match that to one of our services. I'll ask the team to call you back to arrange it. Is there anything else I can help with?",
+        "I'm sorry, I couldn't match that to one of our services. You're welcome to call back during opening hours to arrange it with the team. Is there anything else I can help with?",
       reason: "service_unresolved_callback",
     };
   }
@@ -2023,6 +2090,19 @@ export function parseApptStateMarker(reply: string): {
 }
 
 /**
+ * The service, day, time or number differs — any of these makes an earlier
+ * "yes" stale (authorizedToBook) and needs a fresh read-back.
+ */
+function bookingDetailsChanged(before: AppointmentState, after: AppointmentState): boolean {
+  return (
+    before.service !== after.service ||
+    before.preferredDate !== after.preferredDate ||
+    before.preferredTime !== after.preferredTime ||
+    before.phone !== after.phone
+  );
+}
+
+/**
  * Merges a turn's proposed appointment-state fields into the session's
  * persistent state — only fields the model actually provided this turn are
  * overwritten; everything else (including a field the current turn didn't
@@ -2079,6 +2159,14 @@ export function mergeAppointmentState(
     phoneCountry?: string | null;
     email?: string | null;
     service?: string | null;
+    /**
+     * The caller explicitly corrected something this turn ("change it to
+     * tomorrow", "actually, cleaning instead", "రేపటికి మార్చండి"): the date,
+     * time and service from their own words then win over the model's state
+     * block, which can still repeat the value being corrected. Otherwise the
+     * model's values win and the caller's words only fill gaps.
+     */
+    correction?: boolean;
   },
 ): AppointmentState {
   const hasExtracted = Boolean(
@@ -2090,26 +2178,35 @@ export function mergeAppointmentState(
   );
   if (!proposed && !hasExtracted) return current;
   const proposedSafe = proposed ?? {};
-  const preferredDate =
-    proposedSafe.preferredDate ?? extracted?.preferredDate ?? current.preferredDate;
+  const correction = extracted?.correction === true;
+  const preferredDate = correction
+    ? (extracted?.preferredDate ?? proposedSafe.preferredDate ?? current.preferredDate)
+    : (proposedSafe.preferredDate ?? extracted?.preferredDate ?? current.preferredDate);
   // preferredTime and preferredPeriod are each independently sticky (a
   // given value persists until the caller gives a new one) — see
   // attemptAvailabilityCheck/attemptBooking for why an exact preferredTime
   // always takes priority over preferredPeriod when, unusually, both end
   // up set at once, rather than this merge trying to clear one in favor of
   // the other.
-  const preferredTime =
-    proposedSafe.preferredTime ?? extracted?.preferredTime ?? current.preferredTime;
+  const preferredTime = correction
+    ? (extracted?.preferredTime ?? proposedSafe.preferredTime ?? current.preferredTime)
+    : (proposedSafe.preferredTime ?? extracted?.preferredTime ?? current.preferredTime);
   const preferredPeriod = proposedSafe.preferredPeriod ?? current.preferredPeriod;
   // The requested slot itself changed this turn (a new date/time/period, or
   // a correction to one already given) — any availabilityStatus/selectedSlot
   // carried over from a PREVIOUS check now describes a slot the caller is
   // no longer asking about, so it must not keep being treated as current
   // (e.g. silently booking the OLD time as "already confirmed available").
+  const service = correction
+    ? (extracted?.service ?? proposedSafe.service ?? current.service)
+    : (proposedSafe.service ?? extracted?.service ?? current.service);
+  // A different service is a different booking too (its duration decides
+  // which slots are free), so a check made for the old one is stale as well.
   const slotChanged =
     preferredDate !== current.preferredDate ||
     preferredTime !== current.preferredTime ||
-    preferredPeriod !== current.preferredPeriod;
+    preferredPeriod !== current.preferredPeriod ||
+    (current.service !== null && service !== current.service);
   // Phone: only ever stored as E.164 (contacts.phone's own CHECK constraint
   // — see phone-number.ts; a raw "9876543210" here is exactly what made
   // every voice booking fail at the contact upsert). Same priority as
@@ -2145,7 +2242,7 @@ export function mergeAppointmentState(
     phoneIssue = null;
   }
   return {
-    service: proposedSafe.service ?? extracted?.service ?? current.service,
+    service,
     customerName: proposedSafe.customerName ?? current.customerName,
     // Sticky-current outranks the marker here (the OPPOSITE of
     // service/customerName/date/time just above, which let a fresh marker
@@ -2755,6 +2852,64 @@ function collectPhoneFragment(
   return collected;
 }
 
+/** Two times joined as a span ("9:00 AM to 6:00 PM", "9:00 am – 6:00 pm", "9:00 AM se 6:00 PM tak"). */
+const TIME_RANGE_PATTERN =
+  /\d:\d\d\s*[ap]\.?\s?m\.?\s*(?:to|till|until|through|-|–|—|से|నుండి|నుంచి|se)\s*\d/i;
+
+/**
+ * The clock times the agent read out in `reply`, in the order said, as
+ * 24-hour "HH:mm" — the options "the earlier one" or "the second time"
+ * refers to. Times are spoken with am/pm in every language's formatting
+ * ("7:00 PM", "7:00 pm", native digits included).
+ */
+export function timesNamedIn(reply: string): string[] {
+  const out: string[] = [];
+  // "Open 9:00 AM to 6:00 PM" states a range, not times to choose from.
+  if (TIME_RANGE_PATTERN.test(asciiDigits(reply))) return out;
+  for (const m of asciiDigits(reply).matchAll(
+    /\b(1[0-2]|0?[1-9]):([0-5]\d)\s*([ap])\.?\s?m\.?/gi,
+  )) {
+    let hour = parseInt(m[1]!, 10);
+    const pm = m[3]!.toLowerCase() === "p";
+    if (pm && hour !== 12) hour += 12;
+    if (!pm && hour === 12) hour = 0;
+    const time = `${String(hour).padStart(2, "0")}:${m[2]}`;
+    if (!out.includes(time)) out.push(time);
+  }
+  return out;
+}
+
+/**
+ * The configured services named in `reply`, in the order said — the options
+ * "the second one" refers to. Only the business's own catalogue rows can
+ * be returned (tenant-scoped by the caller of this function).
+ */
+export function servicesNamedIn(reply: string, rows: ServiceRow[]): ServiceRow[] {
+  const lower = reply.toLowerCase();
+  return rows
+    .map((row) => ({
+      row,
+      at: row.name.trim() ? lower.indexOf(row.name.trim().toLowerCase()) : -1,
+    }))
+    .filter((x) => x.at >= 0)
+    .sort((a, b) => a.at - b.at)
+    .map((x) => x.row);
+}
+
+/** The option a reference points at, or null when it doesn't apply (no such position; earlier/later for non-times). */
+export function pickOption<T>(
+  options: T[],
+  reference: NonNullable<ReturnType<typeof optionReference>>,
+): T | null {
+  if (reference === "last") return options.at(-1) ?? null;
+  if (reference === "earlier" || reference === "later") {
+    if (!options.every((o) => typeof o === "string")) return null;
+    const sorted = [...(options as string[])].sort();
+    return (reference === "earlier" ? sorted[0] : sorted.at(-1)) as T;
+  }
+  return options[reference.position - 1] ?? null;
+}
+
 /**
  * The caller's answer to a read-back of their number: a yes or no in any
  * supported language, or null for anything else (which keeps the number).
@@ -2836,8 +2991,11 @@ export function parseCallerIntentFromText(text: string): CallerIntentSignals {
   const wantsNextAvailable = NEXT_AVAILABLE_PATTERN.test(text);
   const preferredPeriod =
     PERIOD_PATTERNS.find(([re]) => re.test(text))?.[1] ?? periodAnyLanguage(text);
+  // A day the caller rules out ("not tomorrow, today") is never the one used.
+  const negatedDates = negatedRelativeDates(text);
   const relativeDate =
-    RELATIVE_DATE_PATTERNS.find(([re]) => re.test(text))?.[1] ?? relativeDateAnyLanguage(text);
+    RELATIVE_DATE_PATTERNS.find(([re, day]) => re.test(text) && !negatedDates.has(day))?.[1] ??
+    relativeDateAnyLanguage(text);
   const weekdayMatch = WEEKDAY_PATTERN.exec(text);
   const weekday = weekdayMatch
     ? {
@@ -4570,7 +4728,7 @@ function calendarErrorFacts(errorCode: string): string {
     case "CALENDAR_TIMEOUT":
       return "The calendar did not respond in time. Apologize briefly and say you're having trouble reaching the calendar right now, so you couldn't confirm that slot.";
     default:
-      return "The calendar could not be reached right now, so availability cannot be confirmed. Apologize briefly and offer a callback.";
+      return "The calendar could not be reached right now, so availability cannot be confirmed. Apologize briefly and suggest trying again in a little while. Do not promise a callback.";
   }
 }
 
@@ -4580,11 +4738,11 @@ function calendarErrorFallback(errorCode: string): string {
     case "GOOGLE_AUTH_REQUIRED":
     case "NEEDS_REAUTH":
     case "NOT_CONFIGURED":
-      return "I'm sorry, I'm unable to access the calendar for this business right now, so I can't confirm that yet. I'll have someone call you back to confirm.";
+      return "I'm sorry, I'm unable to access the calendar for this business right now, so I can't confirm that yet. Please try again in a little while.";
     case "CALENDAR_TIMEOUT":
       return "I'm sorry, the calendar is taking longer than expected to respond, so I couldn't confirm that just now. Someone will follow up shortly.";
     default:
-      return "I'm sorry, I couldn't reach the calendar just now, so I can't confirm that. I'll have someone call you back to confirm.";
+      return "I'm sorry, I couldn't reach the calendar just now, so I can't confirm that. Please try again in a little while.";
   }
 }
 
@@ -4758,7 +4916,7 @@ async function attemptAvailabilityCheck(
       spoken: await composeHonestBookingReply(
         session,
         "Availability could not be checked because this line isn't configured for live calendar access. Tell the caller you'll have someone confirm and call them back.",
-        "I'm sorry, I'm unable to access the calendar on this line right now. I'll have someone call you back to confirm.",
+        "I'm sorry, I'm unable to access the calendar on this line right now. Please try again in a little while.",
         {},
         outcomeText(session, "calendarCheckFailed"),
       ),
@@ -4974,7 +5132,7 @@ async function attemptBooking(
       spoken: await composeHonestBookingReply(
         session,
         "The booking could not be attempted because this line isn't configured for live booking. Tell the caller you'll have someone confirm the appointment and call them back.",
-        "I'm sorry, I'm unable to complete the booking on this line right now. I'll have someone call you back to confirm.",
+        "I'm sorry, I'm unable to complete the booking on this line right now. Please try again in a little while.",
         { englishVerbatim: true },
         outcomeText(session, "lineCannotBook"),
       ),
@@ -5516,7 +5674,13 @@ async function tryEarlyDeterministicDispatch(
   bookingAuthorized: boolean,
 ): Promise<
   | { dispatched: true; spoken: string | null }
-  | { dispatched: false; extractedDate: string | null; matchedServiceName: string | null }
+  | {
+      dispatched: false;
+      extractedDate: string | null;
+      matchedServiceName: string | null;
+      /** matchedServiceName came from "the second one" (or a correction), so it replaces the model's. */
+      serviceFromCallerChoice: boolean;
+    }
 > {
   // Production incident (found via this round's own regression test for
   // the exact reported sequence): "Yeah, please confirm. Also, can you
@@ -5536,7 +5700,12 @@ async function tryEarlyDeterministicDispatch(
   const dateTimeIsAmbiguous = callerIntent.reminderRequested;
   const needsTimezone =
     !dateTimeIsAmbiguous && Boolean(callerIntent.relativeDate || callerIntent.weekday);
-  const needsServices = previous.service === null;
+  // A service already chosen is looked up again only when the caller
+  // changes it ("actually, cleaning instead") or points at one the agent
+  // listed ("the second one").
+  const reference = optionReference(text);
+  const correction = isCorrection(text);
+  const needsServices = previous.service === null || correction || reference !== null;
   // Only actually fetched when not already cached on the session (see
   // session.cachedServices's own doc comment) — the configured list is
   // the same for every turn of this call, so a turn that repeats
@@ -5546,6 +5715,7 @@ async function tryEarlyDeterministicDispatch(
   const needsServicesFetch = needsServices && session.cachedServices === null;
   let extractedDate: string | null = null;
   let matchedServiceName: string | null = null;
+  let serviceFromCallerChoice = false;
   if (needsTimezone || needsServicesFetch) {
     const ctx = await resolveDeterministicExtractionContext(
       session.input.businessId,
@@ -5569,13 +5739,28 @@ async function tryEarlyDeterministicDispatch(
     }
   }
   if (needsServices) {
+    // "The second one" / "రెండోది" / "दूसरा वाला": one of the services the
+    // agent just named, in the order it named them.
+    const listed = reference
+      ? servicesNamedIn(lastAgentReplyText(session), session.cachedServices ?? [])
+      : [];
+    const referenced = reference && listed.length >= 2 ? pickOption(listed, reference) : null;
     // The caller's own words, mapped onto the configured services
     // (service-matching.ts) — "clean my teeth" now finds "Teeth Cleaning".
     // A tie between services is remembered so the clarification can ask
     // "A or B?" instead of the generic question.
-    const resolution = resolveServiceFromText(session.cachedServices ?? [], text);
-    if (resolution.kind === "match") matchedServiceName = resolution.row.name.trim();
-    else if (resolution.kind === "ambiguous") session.serviceCandidates = resolution.candidates;
+    const resolution = referenced
+      ? ({ kind: "match", row: referenced } as const)
+      : resolveServiceFromText(session.cachedServices ?? [], text);
+    if (referenced) log("reference_resolved", session, { kind: "service", options: listed.length });
+    if (resolution.kind === "match") {
+      matchedServiceName = resolution.row.name.trim();
+      serviceFromCallerChoice = previous.service !== null || referenced !== null;
+    } else if (resolution.kind === "ambiguous" && previous.service === null) {
+      // A chosen service is only replaced by a confident match; a tie while
+      // changing it leaves the current one for the model to ask about.
+      session.serviceCandidates = resolution.candidates;
+    }
   }
   // `proposed: null` is deliberate — this preview reflects ONLY what's
   // deterministically extractable this turn, never anything a marker
@@ -5588,6 +5773,7 @@ async function tryEarlyDeterministicDispatch(
     phoneCountry: session.input.businessCountry ?? null,
     email: callerIntent.email,
     service: matchedServiceName,
+    correction: correction || serviceFromCallerChoice,
   });
 
   // Mirrors handleUserUtterance's own marker-driven backstops exactly,
@@ -5635,7 +5821,7 @@ async function tryEarlyDeterministicDispatch(
     preview.bookingStatus === "checking_availability" &&
     appointmentSlotIsKnown(preview);
   if (!willAttemptBooking && !willCheckAvailability) {
-    return { dispatched: false, extractedDate, matchedServiceName };
+    return { dispatched: false, extractedDate, matchedServiceName, serviceFromCallerChoice };
   }
 
   session.appointmentState = preview;
@@ -5782,19 +5968,27 @@ const BARE_ORDINAL_DAY_PATTERN = /\bthe\s+(\d{1,2})(?:st|nd|rd|th)\b/i;
  *    call ("actually, 1 PM instead") — confirmed with the caller before
  *    anything is moved, and never booked as a second appointment.
  * Null otherwise, and always null when the caller asks for an additional
- * booking ("book another appointment").
+ * booking ("book another appointment"). While a new booking is still being
+ * put together on this call (`collectingBooking`), "change it to tomorrow"
+ * or "move it to 4 PM" corrects that request, not an existing booking.
  */
 export function detectRescheduleRequest(
   text: string,
   intent: CallerIntentSignals,
   bookedThisCall: boolean,
+  collectingBooking = false,
 ): "explicit" | "implicit" | null {
   if (NEW_BOOKING_PATTERN.test(text)) return null;
   const givesSlot = Boolean(intent.explicitTime || intent.relativeDate || intent.weekday);
   if (RESCHEDULE_KEYWORD_PATTERN.test(text) || RESCHEDULE_MOVE_PATTERN.test(text)) {
     return "explicit";
   }
-  if (RESCHEDULE_MOVE_IT_PATTERN.test(text) && (givesSlot || bookedThisCall)) return "explicit";
+  if (
+    RESCHEDULE_MOVE_IT_PATTERN.test(text) &&
+    (bookedThisCall || (givesSlot && !collectingBooking))
+  ) {
+    return "explicit";
+  }
   if (bookedThisCall && givesSlot && !intent.availabilityRequested) return "implicit";
   return null;
 }
@@ -5968,6 +6162,18 @@ const RESCHEDULE_UNAVAILABLE =
 const RESCHEDULE_LOOKUP_FAILED =
   "I'm sorry, I couldn't look up your appointment just now. Please try again in a moment, or our team can help you.";
 
+/** detectRescheduleRequest for this call: what was booked, and whether a new booking is being collected. */
+function rescheduleRequestFor(
+  session: Session,
+  text: string,
+  intent: CallerIntentSignals,
+): ReturnType<typeof detectRescheduleRequest> {
+  const s = session.appointmentState;
+  const collecting =
+    s.bookingStatus !== "booked" && Boolean(s.service || s.preferredDate || s.preferredTime);
+  return detectRescheduleRequest(text, intent, session.bookedThisCallIds.length > 0, collecting);
+}
+
 /**
  * Handles this turn when it belongs to a reschedule — starting one, or
  * continuing one already in progress. Returns false (the turn is not a
@@ -5981,7 +6187,7 @@ async function handleRescheduleTurn(
 ): Promise<boolean> {
   const flow = session.reschedule;
   if (!flow) {
-    const trigger = detectRescheduleRequest(text, intent, session.bookedThisCallIds.length > 0);
+    const trigger = rescheduleRequestFor(session, text, intent);
     if (!trigger) return false;
     log("reschedule_requested", session, { trigger });
     await startReschedule(session, text, intent, generation, trigger);
@@ -6497,13 +6703,38 @@ function localizedImmediateAck(session: Session, ack: string): string {
   return localizedFallback(key, language);
 }
 
-function enqueueUserUtterance(session: Session, text: string) {
+function enqueueUserUtterance(
+  session: Session,
+  text: string,
+  /**
+   * A rerun of a question an interruption cut off (recoverFromFalseBargeIn):
+   * callerTurnsHeard when it was queued. It is dropped if the caller has
+   * said something new before it starts.
+   */
+  opts?: { replayAfterTurns: number },
+) {
+  if (opts) {
+    session.utteranceQueue = session.utteranceQueue.then(async () => {
+      if (session.callerTurnsHeard !== opts.replayAfterTurns) {
+        log("barge_in_replay_superseded", session, { kind: "rerun_queued" });
+        return;
+      }
+      session.bargeInRerunActive = true;
+      try {
+        await handleUserUtterance(session, text, null);
+      } catch (err) {
+        log("utterance_queue_error", session, { message: (err as Error).message });
+      } finally {
+        session.bargeInRerunActive = false;
+      }
+    });
+    return;
+  }
   const intent = parseCallerIntentFromText(text);
   // A reschedule speaks its own replies — a booking-flow ack ("Got it —
   // 1 PM") would misdescribe what is happening.
   const rescheduleTurn =
-    session.reschedule !== null ||
-    detectRescheduleRequest(text, intent, session.bookedThisCallIds.length > 0) !== null;
+    session.reschedule !== null || rescheduleRequestFor(session, text, intent) !== null;
   const immediateAck =
     session.deps.generateReplyWithTools || rescheduleTurn
       ? null
@@ -6557,6 +6788,19 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
   // than threaded through — it's a pure, cheap regex pass, and threading
   // it would only save that.
   let callerIntent = parseCallerIntentFromText(text);
+  // "The earlier one" / "the second time" / "రెండోది": one of the times the
+  // agent just read out (an offered alternative, a list of open slots).
+  const timeReference = callerIntent.explicitTime ? null : optionReference(text);
+  let timeFromReference = false;
+  if (timeReference) {
+    const offered = timesNamedIn(agentTextBeforeTurn);
+    const chosen = offered.length >= 2 ? pickOption(offered, timeReference) : null;
+    if (chosen) {
+      callerIntent = { ...callerIntent, explicitTime: chosen };
+      timeFromReference = true;
+      log("reference_resolved", session, { kind: "time", options: offered.length });
+    }
+  }
   // Which booking signals this turn carried — flags only, never the words.
   log("caller_intent", session, {
     language: responseLanguageFor(session),
@@ -6820,8 +7064,7 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
   // LLM paths: the model has no tool that can find the caller's bookings.
   // Checked synchronously first, so an ordinary turn takes no extra await.
   const rescheduleTurn =
-    session.reschedule !== null ||
-    detectRescheduleRequest(text, callerIntent, session.bookedThisCallIds.length > 0) !== null;
+    session.reschedule !== null || rescheduleRequestFor(session, text, callerIntent) !== null;
   try {
     if (rescheduleTurn && (await handleRescheduleTurn(session, text, callerIntent, generation))) {
       return;
@@ -6921,7 +7164,12 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
       // this deterministic fast path must never preempt that decision by
       // guessing it can act first from AppointmentState heuristics alone.
       const early = session.deps.generateReplyWithTools
-        ? ({ dispatched: false, extractedDate: null, matchedServiceName: null } as const)
+        ? ({
+            dispatched: false,
+            extractedDate: null,
+            matchedServiceName: null,
+            serviceFromCallerChoice: false,
+          } as const)
         : await tryEarlyDeterministicDispatch(
             session,
             previousAppointmentState,
@@ -7039,8 +7287,44 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
               phoneCountry: session.input.businessCountry ?? null,
               email: callerIntent.email,
               service: matchedServiceName,
+              // The caller's own correction or choice from a list wins over
+              // the model's state block, which may still repeat the old value.
+              correction: isCorrection(text) || timeFromReference || early.serviceFromCallerChoice,
             },
           );
+          // "The second one" with no list in the agent's last reply to point
+          // at: whatever service or time the model picked for it is a guess,
+          // so the earlier values stay and the caller is asked which one.
+          const unresolvedReference =
+            timeReference !== null && !timeFromReference && !early.serviceFromCallerChoice;
+          let askWhichOne = false;
+          if (
+            unresolvedReference &&
+            (appointmentState.service !== previousAppointmentState.service ||
+              appointmentState.preferredTime !== previousAppointmentState.preferredTime)
+          ) {
+            const sameSlot =
+              appointmentState.preferredDate === previousAppointmentState.preferredDate &&
+              appointmentState.preferredPeriod === previousAppointmentState.preferredPeriod;
+            appointmentState = {
+              ...appointmentState,
+              service: previousAppointmentState.service,
+              preferredTime: previousAppointmentState.preferredTime,
+              // Only an availability check for the slot still asked about stays valid.
+              availabilityStatus: sameSlot
+                ? previousAppointmentState.availabilityStatus
+                : appointmentState.availabilityStatus,
+              selectedSlot: sameSlot
+                ? previousAppointmentState.selectedSlot
+                : appointmentState.selectedSlot,
+              bookingStatus:
+                appointmentState.bookingStatus === "ready_to_book"
+                  ? "collecting"
+                  : appointmentState.bookingStatus,
+            };
+            askWhichOne = true;
+            log("reference_unresolved", session, {});
+          }
 
           // Deterministic backstop (production incident: the model's marker
           // did not reliably propose checking_availability/ready_to_book every
@@ -7186,8 +7470,21 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
               return;
             }
             reply = dispatched;
+          } else if (askWhichOne) {
+            reply =
+              WHICH_ONE_QUESTION[
+                normalizeVoiceLanguageCode(responseLanguageFor(session)) ?? "en-IN"
+              ];
           } else if (
             confirmationNeeded ||
+            // A booking detail changed after everything was known ("change
+            // it to tomorrow", a new number): the new details are read back
+            // and confirmed again before anything is booked.
+            (bookingDetailsChanged(previousAppointmentState, session.appointmentState) &&
+              appointmentStateIsComplete(previousAppointmentState) &&
+              appointmentStateIsComplete(session.appointmentState) &&
+              session.appointmentState.bookingStatus !== "booked" &&
+              session.appointmentState.availabilityStatus !== "unavailable") ||
             (appointmentStateIsComplete(session.appointmentState) &&
               !appointmentStateIsComplete(stateWhenAsked) &&
               session.appointmentState.bookingStatus !== "booked" &&
@@ -7380,6 +7677,27 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
         return;
       }
 
+      // No transfer, callback or message-taking exists on this line: a
+      // reply promising one is replaced by the honest line in the caller's
+      // language (what to do instead), never spoken.
+      if (claimsTransferOrCallback(reply)) {
+        log("reply_claimed_transfer_or_callback", session, { generation });
+        reply = localizedFallback("humanUnavailable", responseLanguageFor(session));
+      }
+      // The price list couldn't be checked for this call: an amount the
+      // model quotes may be out of date, so none is said as current.
+      // Booking and payment outcomes are the runtime's own text and stay.
+      if (
+        session.input.pricesUnverified &&
+        !toolDispatched &&
+        !usedToolCallingThisTurn &&
+        !enteredPaymentWait &&
+        quotesPrice(reply)
+      ) {
+        log("reply_quoted_unverified_price", session, { generation });
+        reply = localizedFallback("priceUnconfirmed", responseLanguageFor(session));
+      }
+
       reply = guardRepeatedReply(session, reply);
       session.turns.push({ role: "assistant", text: reply, at: new Date().toISOString() });
       await speak(session, reply);
@@ -7550,6 +7868,140 @@ async function speakFallback(session: Session, error: unknown, trigger: string) 
   }
 }
 
+/** How long after the caller goes quiet an interruption may still turn into words. */
+const BARGE_IN_RECOVERY_MS = 2_000;
+
+/**
+ * Sounds that carry no answer — hesitation and listening noises. "Yes",
+ * "ok", "haan", "సరే" are deliberately NOT here: said over the end of the
+ * agent's question ("Shall I book it?" — "yes"), they are the answer, and
+ * must be processed as a turn, never discarded as noise.
+ */
+const FILLER_WORDS = new Set([
+  "hmm",
+  "hmmm",
+  "hm",
+  "mm",
+  "mmm",
+  "mhm",
+  "uh",
+  "uhh",
+  "um",
+  "umm",
+  "ah",
+  "oh",
+  "హ్మ్",
+  "హ్మ్మ్",
+  "ఆ",
+  "हम्म",
+  "हूँ",
+  "उम्म",
+]);
+
+/** Nothing said, or only filler sounds ("hmm", "uh", "హ్మ్") — an interruption with no words. */
+export function isFillerOnly(text: string): boolean {
+  const words = text
+    .toLowerCase()
+    .split(/[\s,.!?।]+/)
+    .filter(Boolean);
+  return words.length <= 3 && words.every((w) => FILLER_WORDS.has(w));
+}
+
+/**
+ * Records what a barge-in is about to cut off: the reply being spoken, or —
+ * while the agent was still preparing one — the caller's question it was
+ * answering. A second interruption keeps the first record (that is still
+ * what the caller has not heard).
+ */
+function noteBargeInCutOff(session: Session, state: RuntimeState): void {
+  if (session.bargeInRecovery) return;
+  // A goodbye cut off by a sound is not said twice: the call is closed
+  // without it instead.
+  if (session.callCompletion === "ending" || session.callCompletion === "terminating") {
+    session.bargeInRecovery = { kind: "close", text: "" };
+    return;
+  }
+  const last = session.turns.at(-1);
+  if (state === "thinking" && last?.role === "user" && last.text.trim()) {
+    session.bargeInRecovery = { kind: "rerun", text: last.text };
+  } else if (last?.role === "assistant" && last.text.trim()) {
+    session.bargeInRecovery = { kind: "repeat", text: last.text };
+  }
+}
+
+function clearBargeInRecovery(session: Session): void {
+  session.bargeInRecovery = null;
+  if (session.bargeInRecoveryTimer) clearTimeout(session.bargeInRecoveryTimer);
+  session.bargeInRecoveryTimer = null;
+}
+
+/**
+ * Every VAD speech start interrupts at once — responsiveness to a real
+ * interruption is never delayed — so a cough, a "hmm" or line noise also
+ * stops the agent. Without this, what it cut off was simply lost: the reply
+ * mid-sentence, or (while the agent was preparing an answer) the whole
+ * answer, leaving the caller in silence until "are you still there?". When
+ * the interruption turns out to hold no words, the caller gets it back: the
+ * interrupted reply is said again, or the question is answered after all.
+ */
+async function recoverFromFalseBargeIn(session: Session, reason: string): Promise<void> {
+  const cutOff = session.bargeInRecovery;
+  clearBargeInRecovery(session);
+  if (!cutOff || session.terminationStarted) return;
+  log("barge_in_recovered", session, { kind: cutOff.kind, reason });
+  if (cutOff.kind === "close") {
+    // The interrupted goodbye has already stood the close down
+    // (finishCall); the call ends now, without saying goodbye again.
+    if (session.closing) await session.closing;
+    if (session.callCompletion === "awaiting_anything_else" && !session.terminationStarted) {
+      await finishCall(session, { reason: "farewell_interrupted_by_noise", message: null });
+    }
+    return;
+  }
+  if (cutOff.kind === "rerun") {
+    // The question the cancelled turn was answering: the turn is run again
+    // (its record is replaced, never doubled) — unless the caller has said
+    // something new by the time it would start.
+    const last = session.turns.at(-1);
+    if (last?.role === "user" && last.text === cutOff.text) session.turns.pop();
+    enqueueUserUtterance(session, cutOff.text, { replayAfterTurns: session.callerTurnsHeard });
+    return;
+  }
+  const generation = ++session.generation;
+  session.bargeInReplayGeneration = generation;
+  try {
+    await speak(session, cutOff.text);
+  } catch (err) {
+    log("runtime_reply_failed", session, { message: (err as Error).message });
+  }
+  // bargeInReplayGeneration stays set: its audio can still be playing after
+  // the text is sent, and any later turn moves the generation on anyway.
+  if (generation !== session.generation) return;
+  setState(session, "listening");
+  armSilenceTimer(session);
+}
+
+/**
+ * A transcript with real words arrived (possibly late, after the replay of
+ * an interrupted reply had already started): the replay, or the rerun of
+ * the earlier question, answers something the caller has moved on from, so
+ * it is stopped instead of finishing over the new turn.
+ */
+function supersedeBargeInReplay(session: Session): void {
+  const replaying =
+    session.bargeInReplayGeneration !== null &&
+    session.bargeInReplayGeneration === session.generation &&
+    (stateOf(session) === "speaking" || ttsAudioInFlight(session));
+  if (!replaying && !session.bargeInRerunActive) return;
+  log("barge_in_replay_superseded", session, { kind: replaying ? "repeat" : "rerun" });
+  session.bargeInReplayGeneration = null;
+  session.generation++;
+  session.input.bridge.clearOutboundBuffer();
+  session.outboundPlayoutEndsAt = 0;
+  session.tts?.flush();
+  session.ttsChunksFlushed = session.ttsChunksSent;
+}
+
 function onSttEvent(session: Session, event: SttEvent, connectionId = 1) {
   // A close from a socket recoverStt has already replaced is not news about
   // the current one — acting on it would drop a healthy recognizer.
@@ -7587,6 +8039,10 @@ function onSttEvent(session: Session, event: SttEvent, connectionId = 1) {
       ) {
         // Barge-in: stop talking immediately, discard the audio already
         // queued for the caller, and soft-cancel any in-flight LLM turn.
+        // What is cut off is kept until the interruption proves to be words
+        // (recoverFromFalseBargeIn): a cough must not cost the caller the
+        // answer.
+        noteBargeInCutOff(session, state);
         const oldGeneration = session.generation;
         session.generation++;
         session.input.bridge.clearOutboundBuffer();
@@ -7618,6 +8074,17 @@ function onSttEvent(session: Session, event: SttEvent, connectionId = 1) {
       // one of the "waiting on the caller" states (e.g. does nothing while
       // the agent is thinking/speaking, which isn't caller silence).
       armSilenceTimer(session);
+      // An interruption that produced no words within BARGE_IN_RECOVERY_MS
+      // of the caller going quiet was a sound, not a turn.
+      if (session.bargeInRecovery) {
+        if (session.bargeInRecoveryTimer) clearTimeout(session.bargeInRecoveryTimer);
+        session.bargeInRecoveryTimer = setTimeout(() => {
+          session.bargeInRecoveryTimer = null;
+          // Words already heard (a partial): the final transcript decides.
+          if (!isFillerOnly(session.accumulatingUserText)) return;
+          void recoverFromFalseBargeIn(session, "no_words");
+        }, BARGE_IN_RECOVERY_MS);
+      }
       break;
     case "partial_transcript":
       // A partial means the caller is still actively mid-utterance — just
@@ -7655,6 +8122,18 @@ function onSttEvent(session: Session, event: SttEvent, connectionId = 1) {
         break;
       }
       session.lastFinalTranscript = { text: event.text, at: Date.now() };
+
+      // The words (or lack of them) behind a barge-in: an empty transcript
+      // or only a filler sound ("hmm", "uh") gives the caller back what the
+      // interruption cut off; any real word — "yes" and "ok" included — makes
+      // it a genuine turn, processed as usual.
+      if (session.bargeInRecovery) {
+        if (isFillerOnly(event.text)) {
+          void recoverFromFalseBargeIn(session, event.text.trim() ? "filler" : "empty");
+          break;
+        }
+        clearBargeInRecovery(session);
+      }
 
       // Follow the caller's language — after the duplicate guard above, so
       // a redelivered transcript can never count as a second, confirming
@@ -7712,6 +8191,10 @@ function onSttEvent(session: Session, event: SttEvent, connectionId = 1) {
         reason: "ok",
         transcript_final_at: transcriptFinalAt,
       });
+      // The caller has moved on: a replay of what an earlier interruption
+      // cut off (recoverFromFalseBargeIn) is now out of date.
+      session.callerTurnsHeard++;
+      supersedeBargeInReplay(session);
       enqueueUserUtterance(session, event.text);
       break;
     }
@@ -8028,6 +8511,12 @@ export async function startRuntimeSession(
     ttsNeedsReconnect: false,
     ttsReconnects: 0,
     ttsReconnecting: null,
+    bargeInRecovery: null,
+    bargeInRecoveryTimer: null,
+    bargeInReplayGeneration: null,
+    bargeInRerunActive: false,
+    callerTurnsHeard: 0,
+    closing: null,
     accumulatingUserText: "",
     silenceTimer: null,
     silencePromptSent: false,
@@ -8440,6 +8929,7 @@ export async function terminateRuntimeSession(callId: string, reason: string): P
   session.generation++; // discard any in-flight LLM work
   clearSilenceTimer(session);
   clearPaymentWaitTimer(session);
+  clearBargeInRecovery(session);
   clearMaxDurationTimer(session);
   try {
     session.stt?.close();

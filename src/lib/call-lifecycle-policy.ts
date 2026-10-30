@@ -134,6 +134,14 @@ const NOTHING_ELSE_PATTERN =
   /^\W*(?:no|nope|nah|no[\s,]+thanks?|no[\s,]+thank\s+you|thanks?|thank\s+you(?:\s+(?:so|very)\s+much)?|ok(?:ay)?[\s,]+thanks?|all\s+good|not\s+right\s+now|i'?m\s+(?:good|fine|all\s+set|ok(?:ay)?)(?:[\s,]+(?:thanks?|thank\s+you))?)\W*$/i;
 const HUMAN_REQUEST_PATTERN =
   /\b(?:speak|talk|connect|transfer)\b[^.?!]*\b(?:human|person|someone|somebody|representative|receptionist|staff|agent|operator|manager|doctor)\b|\b(?:real|actual|live)\s+(?:person|human)\b/i;
+/**
+ * The same request in Telugu, Hindi and romanized speech — a person to talk
+ * to, and a verb of speaking: "మనిషితో మాట్లాడాలి", "डॉक्टर से बात कराइए",
+ * "kisi se baat karni hai". Both are required, so "किसी बात की चिंता नहीं"
+ * ("no worries about anything") is never one.
+ */
+const NATIVE_HUMAN_REQUEST_PATTERN =
+  /(?:మనిషి|వ్యక్తి|ఎవరితో|డాక్టర్|స్టాఫ్|రిసెప్షనిస్ట్|మేనేజర్|సిబ్బంది)[^.?!।]*మాట్లాడ|(?:इंसान|व्यक्ति|आदमी|डॉक्टर|डाक्टर|स्टाफ|मैनेजर|रिसेप्शनिस्ट|किसी\s+से)[^.?!।]*(?:बात|बोल)|\b(?:insaan|insan|vyakti|aadmi|doctor|staff|manager|manishi|evaritho|kisi\s+se)\b[^.?!]*\b(?:baat|bolna|matlad\w*)\b/iu;
 // "Thanks — can I also ask about prices?" is a new request, not a goodbye.
 const CONTINUATION_PATTERN =
   /\?|\b(?:also|another|one\s+more|but|what|how|when|where|why|which|can\s+(?:i|you)|could\s+(?:i|you)|i\s+(?:want|need|would\s+like)|book|reschedule|cancel|change|price|cost|open|available)\b/i;
@@ -155,7 +163,9 @@ export function classifyCallerClosingIntent(
 ): CallerClosingIntent | null {
   const trimmed = text.trim();
   if (!trimmed) return null;
-  if (HUMAN_REQUEST_PATTERN.test(trimmed)) return "human_requested";
+  if (HUMAN_REQUEST_PATTERN.test(trimmed) || NATIVE_HUMAN_REQUEST_PATTERN.test(trimmed)) {
+    return "human_requested";
+  }
   if (ctx.hasNewRequest) return null;
   const continues = CONTINUATION_PATTERN.test(trimmed);
   if (HANGUP_REQUEST_PATTERN.test(trimmed) && !continues && !NEGATED_HANGUP_PATTERN.test(trimmed)) {

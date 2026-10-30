@@ -299,15 +299,35 @@ describe("Caller ID reaches the voice runtime (trusted webhook `From`, never spe
 });
 
 describe("greeting latency: routing reads after the gate", () => {
-  test("the published version and business country are read concurrently, still after the tenant/entitlement gate", () => {
+  test("the published version, business country and live services are read concurrently, still after the tenant/entitlement gate", () => {
     const gateIdx = runtimeSrc.indexOf("const gate = await checkTelephonyAccess(");
     const allIdx = runtimeSrc.indexOf(
-      "const [{ data: publishedVersion }, { data: businessRow }] = await Promise.all([",
+      "const [{ data: publishedVersion }, { data: businessRow }, servicesRes] = await Promise.all([",
     );
     assert.ok(gateIdx > -1 && allIdx > -1);
     assert.ok(gateIdx < allIdx, "no agent data is read before the gate");
     const block = runtimeSrc.slice(allIdx, runtimeSrc.indexOf("]);", allIdx));
     assert.match(block, /\.from\("agent_versions"\)/);
     assert.match(block, /\.from\("businesses"\)\.select\("country"\)/);
+    assert.match(block, /\.from\("services"\)[\s\S]*\.eq\("business_id", businessId\)/);
+  });
+
+  test("a failed price read never falls back silently: the runtime is told prices are unverified", () => {
+    // A read error (or a rejected query) leaves liveServices null — never an
+    // empty or published list presented as current.
+    assert.match(runtimeSrc, /const liveServices = servicesRes\.error\s*\? null/);
+    assert.match(runtimeSrc, /\.catch\(\(error: unknown\) => \(\{ data: null, error \}\)\)/);
+    // Both start paths (Durable Object RPC and in-process) carry the flag.
+    assert.equal(runtimeSrc.match(/pricesUnverified: liveServices === null,/g)?.length, 2);
+    for (const file of [
+      "call-session-durable-object.server.ts",
+      "vobiz-call-session-durable-object.server.ts",
+    ]) {
+      const doSrc = readFileSync(
+        join(dirname(fileURLToPath(import.meta.url)), "telephony", file),
+        "utf8",
+      );
+      assert.match(doSrc, /pricesUnverified: body\.pricesUnverified === true,/, file);
+    }
   });
 });

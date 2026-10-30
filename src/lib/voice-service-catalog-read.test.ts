@@ -238,7 +238,7 @@ describe("a failed services read is retried, never treated as an empty catalog",
     await terminateRuntimeSession(callId, "test cleanup");
   });
 
-  test("a catalog that never loads still can't trap the caller: bounded asks, then a callback", async () => {
+  test("a catalog that never loads still can't trap the caller: bounded asks, then an honest next step", async () => {
     const client = new FakeAdminClient([
       { data: null, error: { code: "PGRST303", message: "JWT issued at future" } },
     ]);
@@ -262,7 +262,8 @@ describe("a failed services read is retried, never treated as an empty catalog",
     });
     const all = replies.join(" | ");
     assert.ok(all.split(SERVICE_QUESTION).length - 1 <= 2, `bounded: ${all}`);
-    assert.match(all, /call you back/i);
+    assert.match(all, /call back during opening hours/i);
+    assert.doesNotMatch(all, /call you back/i, "no callback exists to promise");
     assert.doesNotMatch(replies[3]!, /which service/i, "stops asking");
     assert.equal(h.tools.calls.filter((c) => c.name === "book_appointment").length, 0);
 
