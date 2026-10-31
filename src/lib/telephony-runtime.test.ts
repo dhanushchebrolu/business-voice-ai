@@ -294,7 +294,12 @@ describe("Caller ID reaches the voice runtime (trusted webhook `From`, never spe
     const vobizStart = vobizDoSrc.indexOf("const handle = await startRuntimeSession({");
     const vobizBlock = vobizDoSrc.slice(vobizStart, vobizDoSrc.indexOf("});\n", vobizStart));
     assert.match(vobizBlock, /requestProviderHangup: async \(\) =>/);
-    assert.match(vobizBlock, /adapter\.hangupCall\(body\.providerCallId\)/);
+    // Through the transient-failure retry (hangupWithRetry), still Vobiz's
+    // own hang-up API for this exact call.
+    assert.match(
+      vobizBlock,
+      /hangupWithRetry\(\s*\{ hangupCall: adapter\.hangupCall\.bind\(adapter\) \},\s*body\.providerCallId,?\s*\)/,
+    );
     const exotelStart = exotelDoSrc.indexOf("const handle = await startRuntimeSession({");
     assert.doesNotMatch(
       exotelDoSrc.slice(exotelStart, exotelDoSrc.indexOf("});\n", exotelStart)),
@@ -394,5 +399,84 @@ describe("a call the runtime can never serve is ended, not left connected in sil
       /endUnservableCall\([\s\S]*"agent_config_incomplete"/,
     );
     assert.doesNotMatch(runtimeSrc.slice(gateDenied, gateDenied + 200), /endUnservableCall/);
+  });
+});
+
+describe("provider hang-up retries transient failures only", () => {
+  const noSleep = async () => {};
+  const err = (status?: number) => Object.assign(new Error("hang-up failed"), { status });
+
+  test("an unreachable or 5xx provider is retried until it hangs up", async () => {
+    const { hangupWithRetry } = await import("./telephony/unservable-call.ts");
+    let attempts = 0;
+    const adapter = {
+      hangupCall: async () => {
+        attempts++;
+        if (attempts < 3) throw err(attempts === 1 ? 503 : 502);
+        return "hung_up" as const;
+      },
+    };
+    assert.equal(await hangupWithRetry(adapter, "CA-r1", noSleep), "hung_up");
+    assert.equal(attempts, 3);
+  });
+
+  test("a 4xx (bad credentials, wrong request) is not retried", async () => {
+    const { hangupWithRetry } = await import("./telephony/unservable-call.ts");
+    let attempts = 0;
+    const adapter = {
+      hangupCall: async () => {
+        attempts++;
+        throw err(401);
+      },
+    };
+    await assert.rejects(hangupWithRetry(adapter, "CA-r2", noSleep));
+    assert.equal(attempts, 1);
+  });
+
+  test("attempts are bounded: a provider that stays down fails after the last try", async () => {
+    const { hangupWithRetry } = await import("./telephony/unservable-call.ts");
+    let attempts = 0;
+    const adapter = {
+      hangupCall: async () => {
+        attempts++;
+        throw err(503);
+      },
+    };
+    await assert.rejects(hangupWithRetry(adapter, "CA-r3", noSleep));
+    assert.equal(attempts, 3);
+  });
+
+  test("'call not found' is an answer, not a failure — no retry", async () => {
+    const { hangupWithRetry } = await import("./telephony/unservable-call.ts");
+    let attempts = 0;
+    const adapter = {
+      hangupCall: async () => {
+        attempts++;
+        return "call_not_found" as const;
+      },
+    };
+    assert.equal(await hangupWithRetry(adapter, "CA-r4", noSleep), "call_not_found");
+    assert.equal(attempts, 1);
+  });
+
+  test("every Vobiz hang-up path goes through the retry", () => {
+    const doSrc = readFileSync(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        "telephony/vobiz-call-session-durable-object.server.ts",
+      ),
+      "utf8",
+    );
+    const helperSrc = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "telephony/unservable-call.ts"),
+      "utf8",
+    );
+    assert.doesNotMatch(
+      doSrc,
+      /adapter\.hangupCall\(/,
+      "the DO never calls hangupCall without the retry",
+    );
+    assert.equal((doSrc.match(/hangupWithRetry\(/g) ?? []).length >= 2, true);
+    assert.match(helperSrc, /export async function endUnservableCall[\s\S]*hangupWithRetry\(/);
   });
 });

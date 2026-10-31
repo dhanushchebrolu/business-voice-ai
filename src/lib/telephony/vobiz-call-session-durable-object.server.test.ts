@@ -929,3 +929,105 @@ describe("VobizCallSessionDurableObject: a call is never left connected in silen
     }
   });
 });
+
+describe("VobizCallSessionDurableObject: a media stream nothing claims is never left connected", () => {
+  type Instrumented = {
+    fetch: (request: Request) => Promise<Response>;
+    registerBridge: (id: string, bridge: AudioMediaBridge) => void;
+    release: (id: string) => void;
+    hangUpUnstartedCall: (providerCallId: string) => Promise<void>;
+    unclaimedStreamMs: number;
+  };
+  function instrumented(name: string, unclaimedStreamMs: number) {
+    const instance = new VobizCallSessionDurableObject(
+      fakeState(name),
+      {},
+    ) as unknown as Instrumented;
+    const hungUp: string[] = [];
+    instance.hangUpUnstartedCall = async (providerCallId: string) => {
+      hungUp.push(providerCallId);
+    };
+    instance.unclaimedStreamMs = unclaimedStreamMs;
+    return { instance, hungUp };
+  }
+  const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  test("REGRESSION: a stream no runtime start ever claims (handoff failed, crashed or never ran) ends the call and closes the stream", async () => {
+    const { instance, hungUp } = instrumented("v-unclaimed", 40);
+    const logs = captureLogs();
+    try {
+      const bridge = fakeBridge();
+      instance.registerBridge("vobiz-unclaimed-1", bridge);
+      await wait(90);
+      assert.deepEqual(hungUp, ["vobiz-unclaimed-1"]);
+      assert.equal(bridge.closed, true, "the stream is closed too");
+    } finally {
+      logs.restore();
+    }
+  });
+
+  test("a stream a start claims in time is never hung up by the watchdog", async () => {
+    const { instance, hungUp } = instrumented("v-claimed", 60);
+    const logs = captureLogs();
+    try {
+      instance.registerBridge("vobiz-claimed-1", fakeBridge());
+      await instance.fetch(
+        new Request("https://vobiz-call-session/internal/start-runtime", {
+          method: "POST",
+          body: JSON.stringify({
+            ...BASE_RPC_FIELDS,
+            callId: "call-claimed-1",
+            providerCallId: "vobiz-claimed-1",
+            timeoutMs: 1000,
+          }),
+        }),
+      );
+      await wait(120);
+      assert.deepEqual(hungUp, [], "a claimed stream is the runtime's to end, not the watchdog's");
+    } finally {
+      logs.restore();
+    }
+  });
+
+  test("REGRESSION: a runtime start that throws after taking the stream ends the call and closes the stream (was: 500, caller left in silence)", async () => {
+    const { instance, hungUp } = instrumented("v-throws", 30_000);
+    const logs = captureLogs();
+    try {
+      const bridge = fakeBridge();
+      instance.registerBridge("vobiz-throws-1", bridge);
+      // A snapshot missing its agent block makes startRuntimeSession throw
+      // (the shape of an old or corrupted published version).
+      const res = await instance.fetch(
+        new Request("https://vobiz-call-session/internal/start-runtime", {
+          method: "POST",
+          body: JSON.stringify({
+            ...BASE_RPC_FIELDS,
+            snapshotAgent: null,
+            callId: "call-throws-1",
+            providerCallId: "vobiz-throws-1",
+            timeoutMs: 1000,
+          }),
+        }),
+      );
+      assert.equal(res.status, 200);
+      assert.equal(((await res.json()) as { handled: boolean }).handled, false);
+      assert.deepEqual(hungUp, ["vobiz-throws-1"]);
+      assert.equal(bridge.closed, true);
+    } finally {
+      logs.restore();
+    }
+  });
+
+  test("a stream the caller already hung up on (released) is not hung up again", async () => {
+    const { instance, hungUp } = instrumented("v-released", 40);
+    const logs = captureLogs();
+    try {
+      instance.registerBridge("vobiz-released-1", fakeBridge());
+      instance.release("vobiz-released-1");
+      await wait(90);
+      assert.deepEqual(hungUp, []);
+    } finally {
+      logs.restore();
+    }
+  });
+});

@@ -2,6 +2,7 @@ import type { AudioMediaBridge } from "./audio-bridge.ts";
 import { VobizMediaBridge, type VobizSocketLike } from "./vobiz-media-bridge.server.ts";
 import { authorizeMediaSession, maskCallSid } from "./media-session-authorization.server.ts";
 import { VOBIZ_MEDIA_STREAM_PATH as MEDIA_STREAM_PATH } from "./vobiz-media-stream-path.ts";
+import { hangupWithRetry } from "./unservable-call.ts";
 import {
   startRuntimeSession,
   terminateRuntimeSession,
@@ -140,6 +141,15 @@ export class VobizCallSessionDurableObject {
    * caller heard silence.
    */
   private inflight = new Map<string, Promise<VobizAgentRuntimeRpcResult>>();
+  /**
+   * How long a media stream may wait for a runtime start to claim it before
+   * the call is ended. A stream that nothing claims means the handoff
+   * failed before reaching this object (a coordinator error, an exception,
+   * a crashed or missing background handoff): without this, the stream was
+   * dropped silently and the caller stayed connected — and billed — in
+   * silence. Overridable in tests.
+   */
+  protected unclaimedStreamMs = ARRIVAL_TTL_MS;
   private arrived = new Map<string, AudioMediaBridge>();
   private active = new Set<string>();
   private readonly state: DurableObjectState;
@@ -383,7 +393,18 @@ export class VobizCallSessionDurableObject {
     // The WS connection beat the webhook's start-runtime call — hold it
     // briefly rather than dropping it, exactly like Exotel's DO.
     this.arrived.set(providerCallId, bridge);
-    setTimeout(() => this.arrived.delete(providerCallId), ARRIVAL_TTL_MS);
+    setTimeout(() => {
+      // Claimed by a start (removed from `arrived`) or released by a hang-up:
+      // nothing to do. Otherwise no runtime will ever serve this call.
+      if (this.arrived.get(providerCallId) !== bridge) return;
+      this.arrived.delete(providerCallId);
+      console.error("vobiz_call_session_do:unclaimed_stream", {
+        doId: this.state.id.toString(),
+        providerCallId: maskCallSid(providerCallId),
+        waitedMs: this.unclaimedStreamMs,
+      });
+      void this.hangUpUnstartedCall(providerCallId).finally(() => bridge.close());
+    }, this.unclaimedStreamMs);
   }
 
   private release(providerCallId: string): void {
@@ -475,7 +496,10 @@ export class VobizCallSessionDurableObject {
         });
         return;
       }
-      const outcome = await adapter.hangupCall(providerCallId);
+      const outcome = await hangupWithRetry(
+        { hangupCall: adapter.hangupCall.bind(adapter) },
+        providerCallId,
+      );
       console.info("vobiz_call_session_do:unstarted_call_hung_up", {
         providerCallId: masked,
         outcome,
@@ -610,9 +634,27 @@ export class VobizCallSessionDurableObject {
         const { getTelephonyAdapter } = await import("../telephony.server.ts");
         const adapter = getTelephonyAdapter("vobiz");
         if (!adapter?.hangupCall) throw new Error("Vobiz adapter is not configured.");
-        return adapter.hangupCall(body.providerCallId);
+        return hangupWithRetry(
+          { hangupCall: adapter.hangupCall.bind(adapter) },
+          body.providerCallId,
+        );
       },
-    });
+    }).catch((err: unknown) => ({ startError: err as Error }));
+    if ("startError" in handle) {
+      // The stream is already taken, so the unclaimed-stream watchdog will
+      // not end this call: end it here, or the caller is left in silence.
+      console.error("vobiz_call_session_do:start_runtime_threw", {
+        callId: body.callId,
+        providerCallId: maskCallSid(body.providerCallId),
+        message: handle.startError.message,
+      });
+      await this.hangUpUnstartedCall(body.providerCallId);
+      bridge.close();
+      return {
+        handled: false,
+        note: "The voice runtime could not start (unexpected error). The call was ended so the caller is not left in silence.",
+      };
+    }
 
     console.info("vobiz_call_session_do:start_runtime_completed", {
       callId: body.callId,
