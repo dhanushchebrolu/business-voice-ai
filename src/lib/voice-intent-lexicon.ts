@@ -839,3 +839,296 @@ export const MISSING_DETAIL_QUESTION: Record<NonEnglish, Record<MissingDetail, s
     phone: "ଆପଣଙ୍କ ଫୋନ୍ ନମ୍ବର କେତେ?",
   },
 };
+
+/* ------------------------------------------------------------------ */
+/* Pre-deployment audit: rejections, names, protected tokens, claims   */
+/* ------------------------------------------------------------------ */
+
+/** Case-insensitive Unicode alternation of strings and regexes. */
+function anyOf(...parts: (string | RegExp)[]): RegExp {
+  return new RegExp(parts.map((p) => (typeof p === "string" ? p : p.source)).join("|"), "iu");
+}
+
+/** A Telugu/Devanagari word bounded by non-letters of those scripts. */
+function bounded(word: string): string {
+  return `(?<![\\u0C00-\\u0C7F\\u0900-\\u097F])(?:${word})(?![\\u0C00-\\u0C7F\\u0900-\\u097F])`;
+}
+
+/**
+ * Splits text into sentences without touching what is inside them: a
+ * sentence ends at . ! ? । only when followed by whitespace or the end, so
+ * an email ("clinic@example.com"), a URL, a decimal price ("₹1,499.50") or a
+ * time ("6.30") is never cut, and "Dr. Rao" stays whole. Each piece keeps
+ * its trailing whitespace, so pieces.join("") === text.
+ */
+export function splitSentences(text: string): string[] {
+  const pieces: string[] = [];
+  const end = /[.!?।]+(?=\s|$)/gu;
+  let start = 0;
+  let m: RegExpExecArray | null;
+  while ((m = end.exec(text))) {
+    if (m[0] === ".") {
+      const before = text.slice(start, m.index);
+      // Titles and single initials: "Dr. Rao", "A. Kumar".
+      if (/(?:^|[\s(])(?:Dr|Mr|Mrs|Ms|Mx|St|Prof|Sr|Jr|[A-Z])$/.test(before)) continue;
+    }
+    let next = m.index + m[0].length;
+    while (next < text.length && /\s/u.test(text[next]!)) next++;
+    pieces.push(text.slice(start, next));
+    start = next;
+  }
+  if (start < text.length) pieces.push(text.slice(start));
+  return pieces;
+}
+
+/** "This number" / "the number I'm calling from", in Telugu, Hindi, romanized and English. */
+const THIS_NUMBER =
+  "(?:(?:ఇదే|ఈ|అదే|ఆ)\\s*(?:ఫోన్\\s*)?(?:నెంబర్|నంబర్|నెంబరు|నంబరు)|(?:కాల్|ఫోన్)\\s*(?:చేసిన|చేస్తున్న|చేసే)[^.?!,]{0,12}(?:నెంబర్|నంబర్|నెంబరు|నంబరు)|(?:यही|इसी|वही|उसी|यह|ये|इस|उस)\\s*(?:फ़ोन\\s*|फोन\\s*)?(?:नंबर|नम्बर)|\\b(?:ide|ee|ade|aa|idhe|adhe|same|this|that|yahi|isi|wahi|usi|ye|yeh|is)\\s+(?:phone\\s+)?(?:number|nambar|nembar)\\b|\\bcall\\s+(?:chesina|chestunna|chesthunna)\\s+(?:phone\\s+)?(?:number|nambar)\\b)";
+
+/**
+ * The caller rejects the calling number itself, the negation bound to the
+ * number phrase: after it in Telugu/Hindi word order ("ఈ నెంబర్ కాదు",
+ * "same number kaadu", "यह नंबर नहीं", "इस नंबर पर नहीं"), before it in
+ * English ("not this number", "don't use that number"). A leading "కాదు,
+ * ఇదే నెంబర్ వాడండి" ("no — use this one") is a correction toward it.
+ */
+export const CALLER_ID_REJECTED = anyOf(
+  `${THIS_NUMBER}[\\s,]*(?:కి|కు|ను|నే|తో|पर|पे|से)?[\\s,]*(?:${bounded("కాదు")}|${bounded("కాదండి")}|వద్దు|వాడకండి|వాడొద్దు|యూస్\\s*చేయకండి|${bounded("नहीं")}|${bounded("मत")})`,
+  `${THIS_NUMBER}[\\s,]*(?:ki|ku|nu|ne|to|pe|par|se)?[\\s,]*\\b(?:kaadu|kadu|kaadandi|vaddu|vadhu|vaadakandi|vadakandi|use\\s+cheyyakandi|use\\s+cheyakandi|nahi|nahin|mat)\\b`,
+  // "number" is required: "not that one" picks among slots or services.
+  /\b(?:not|never)\s+(?:the\s+)?(?:this|that|same|my|the)\s+(?:same\s+)?(?:phone\s+)?number\b/,
+  /\b(?:don'?t|do\s+not|never)\s+use\s+(?:this|that|the\s+same|my|the)\s+(?:same\s+)?(?:phone\s+)?number\b/,
+);
+
+/** A negator inside a name answer ("రవి కాదు", "Ravi kaadu", "Ravi nahi", "not Ravi"). */
+const NAME_NEGATOR =
+  /^(?:కాదు|కాదండి|కాదండీ|కాను|नहीं|नही|ना|kaadu|kadu|kaadandi|kadandi|kaanu|nahi|nahin|nai|not|no|isn't|isnt)$/iu;
+/** Politeness/copula that ends a name ("andi", "అండి", "hai", "है"). */
+const NAME_TERMINATOR = /^(?:andi|andee|ani|hai|hu|hoon|ji|అండి|అండీ|అని|है|हूँ|हूं|जी)$/iu;
+/** Words that are never (part of) a name: refusals, verbs, fillers, question words. */
+const NAME_FILLER =
+  /^(?:చెప్ప[\p{L}\p{M}]*|చెబు[\p{L}\p{M}]*|కదా|కదండి|ఎందుకు|ఏంటి|ఏమిటి|తెలుసు|తెలీదు|తెలియదు|ముందే|ఇందాక|ఇంతకుముందే|ఇప్పుడే|ఏమో|అవసరం|వద్దు|ఉంది|అదే|నేను|మీకు|cheppa\w*|chepp\w*|cheptha\w*|kada|kadha|enduku|endhuku|enti|emiti|telusu|teliyadu|teledu|mundhe|munde|indaka|emo|avasaram|vaddu|undi|ade|nenu|meeku|बता[\p{L}\p{M}]*|बोला|बोल[\p{L}\p{M}]*|क्यों|क्या|पहले|अभी|ज़रूरत|जरूरत|मत|वही|मैं|आपको|bata\w*|bola|bol\w*|kyu|kyun|kyon|kya|pehle|pahle|abhi|zaroorat|jarurat|mat|wahi|main|aapko|why|what|already|told|tell|said|wait|sorry|hello|ok|okay|yes|it|it's|its|is|haan|ha|avunu|అవును|హా|हाँ|हां)$/iu;
+
+function titleCaseName(words: string[]): string {
+  return words
+    .map((w) => (/^[a-z]/i.test(w) ? w.charAt(0).toUpperCase() + w.slice(1).toLowerCase() : w))
+    .join(" ");
+}
+
+const stripWord = (raw: string) => raw.replace(/^[^\p{L}]+|[^\p{L}\p{M}]+$/gu, "");
+
+/** Up to three name words from the start of `raws`; null when the first word is not a name. */
+function nameWords(raws: string[]): { words: string[]; rest: string[] } | null {
+  const words: string[] = [];
+  let i = 0;
+  for (; i < raws.length; i++) {
+    const raw = raws[i]!;
+    const word = stripWord(raw);
+    if (!word || /\d/.test(raw)) break;
+    if (NAME_TERMINATOR.test(word) || NAME_NEGATOR.test(word)) break;
+    if (NAME_FILLER.test(word)) {
+      if (!words.length) return null;
+      break;
+    }
+    words.push(word);
+    if (/[,.;!?।]$/u.test(raw) || words.length === 3) {
+      i++;
+      break;
+    }
+  }
+  return words.length ? { words, rest: raws.slice(i) } : null;
+}
+
+export interface NameIntroduction {
+  /** The name the caller gave (after any correction), or null when not confident. */
+  name: string | null;
+  /** A name the caller said is NOT theirs ("నా పేరు రవి కాదు" → "రవి"). */
+  rejected: string | null;
+}
+
+/**
+ * "My name is X" in Telugu, Hindi (script or romanized) and English, with a
+ * negated correction: "నా పేరు రవి కాదు, రాజు", "mera naam Ravi nahi, Raju",
+ * "my name is not Ravi, it is Raju" → "Raju" (rejected "Ravi"). A refusal or
+ * filler ("నా పేరు చెప్పాను కదా", "mera naam nahi bataunga") gives no name.
+ * Null when the turn has no introduction at all. The caller's script is kept.
+ */
+export function parseNameIntroduction(text: string): NameIntroduction | null {
+  const intros: RegExp[] = [
+    /నా\s*పేరు\s+(.+)/u,
+    /\b(?:naa|na|naku)\s+peru\s+(.+)/iu,
+    /मेरा\s*नाम\s+(.+)/u,
+    /\bmera\s+naam\s+(.+)/iu,
+    /\bmy\s+name(?:\s+is|'s|\s+isn'?t)\s+(.+)/iu,
+  ];
+  for (const re of intros) {
+    const m = re.exec(text);
+    if (!m?.[1]) continue;
+    // "my name isn't X" — the negation is in the intro itself.
+    const negatedIntro = /isn'?t\s+$/i.test(text.slice(0, m.index + m[0].length - m[1].length));
+    let raws = m[1].split(/\s+/).filter(Boolean);
+    let leadingNegation = negatedIntro;
+    if (!leadingNegation && raws.length && NAME_NEGATOR.test(stripWord(raws[0]!))) {
+      // "my name is not Ravi" (English negator first) vs "mera naam nahi
+      // bataunga" (a refusal): a name must follow for the former.
+      if (!/^(?:not|isn't|isnt)$/i.test(stripWord(raws[0]!))) return { name: null, rejected: null };
+      leadingNegation = true;
+      raws = raws.slice(1);
+    }
+    const first = nameWords(raws);
+    if (!first) return { name: null, rejected: null };
+    if (leadingNegation) {
+      // "not Ravi, it is Raju" / "isn't Ravi, it's Raju" / "not Ravi but Raju".
+      const after = first.rest.filter(
+        (w) => !/^(?:it|it's|its|is|but|but,|rather)$/i.test(stripWord(w) || w),
+      );
+      const corrected = nameWords(after);
+      return {
+        name: corrected ? titleCaseName(corrected.words) : null,
+        rejected: titleCaseName(first.words),
+      };
+    }
+    const next = first.rest.length ? stripWord(first.rest[0]!) : "";
+    if (NAME_NEGATOR.test(next)) {
+      const corrected = nameWords(first.rest.slice(1));
+      return {
+        name: corrected ? titleCaseName(corrected.words) : null,
+        rejected: titleCaseName(first.words),
+      };
+    }
+    return { name: titleCaseName(first.words), rejected: null };
+  }
+  return null;
+}
+
+/** Clauses of one sentence, split at commas/semicolons (not inside "₹1,499") and "but". */
+function splitClauses(sentence: string): string[] {
+  return sentence.split(/(?<!\d),|,(?!\d)|;|\s[—–-]\s|\s+(?:but|కానీ|लेकिन|lekin|kaani)\s+/u);
+}
+
+const MESSAGE_CHANNEL = anyOf(
+  /\b(?:sms|texts?|message|whats\s?app|e-?mail|confirmation)\b/,
+  /\bto\s+your\s+(?:phone|mobile|number|inbox)\b/,
+  "మెసేజ్",
+  "మెసేజి",
+  "ఎస్ఎంఎస్",
+  "ఎస్.ఎం.ఎస్",
+  "వాట్సాప్",
+  "ఈమెయిల్",
+  "ఇమెయిల్",
+  "కన్ఫర్మేషన్",
+  "నిర్ధారణ",
+  "సందేశ",
+  "संदेश",
+  "मैसेज",
+  "एसएमएस",
+  "व्हाट्सएप",
+  "ईमेल",
+  "कन्फर्मेशन",
+  "पुष्टि",
+  /\b(?:sandesam|sandesh)\b/,
+);
+
+/** Delivery TO THE CALLER, done or promised ("sent", "we'll text you", "పంపిస్తాము", "मिल जाएगा"). */
+const MESSAGE_DELIVERY = anyOf(
+  /\b(?:sent|texted|emailed|messaged|whats\s?app(?:ed)?\s+you|on\s+(?:its|the)\s+way)\b/,
+  /\b(?:i|we|i'?ll|we'?ll|i\s+will|we\s+will|i\s+am|we\s+are|i'm|we're|i'?ve|we'?ve|let\s+me|shall)\s+(?:\w+\s+){0,2}?(?:send|sending|text|texting|message|messaging|email|emailing|whats\s?app|forward|share|sharing)\b/,
+  /\b(?:send|text|message|email|whats\s?app|forward)\s+(?:it\s+|them\s+|this\s+|that\s+)?(?:to\s+)?you\b/,
+  /\byou(?:'ll|\s+will|\s+should|\s+shall|\s+would)?\s+(?:also\s+|soon\s+|shortly\s+)?(?:get|receive|be\s+getting|be\s+receiving)\b/,
+  /\byou(?:'ll|\s+will)\s+(?:be\s+)?(?:sent|texted|notified)\b/,
+  "పంపి(?:ంచ)?(?:స్తా|స్తాము|స్తాను|స్తాం|ంచాము|ంచాను|ంచాం|నాము|నాను|ాము|ాను|ాం)",
+  "పంపాము",
+  "పంపాను",
+  "పంపాం",
+  "పంపుతా",
+  "పంపిస్తున్నా",
+  "వస్తుంది",
+  "వచ్చింది",
+  "వస్తాయి",
+  "అందుతుంది",
+  "అందుతాయి",
+  "తెలియజేస్తా",
+  "తెలియజేశా",
+  "తెలియజేసా",
+  /\b(?:pampistam\w*|pampistanu|pampisthanu|pampisthamu|pampinchamu|pampinchanu|pampamu|pampanu|vastundi|vasthundi|vachindi|andutundi|teliyajestam\w*)\b/,
+  "भेज\\s*(?:दिया|दी|दिए|देंगे|देंगी|दूँगा|दूंगा|दूँगी|रहे|रही|रहा|चुके|गया|गई|जाएगा|जाएगी|ा|ी|े\\s*(?:हैं|है))",
+  "भेजेंगे",
+  "भेजूँगा",
+  "भेजूंगा",
+  "मिल\\s*जाए(?:गा|गी|ंगे)",
+  "मिलेगा",
+  "मिलेगी",
+  "मिलेंगे",
+  "आ\\s*जाए(?:गा|गी)",
+  "आएगा",
+  "आएगी",
+  /\b(?:bhej\s+(?:diya|di|denge|dunga|rahe|chuke)|bhejenge|bhejunga|mil\s+jayega|mil\s+jaayega|milega|milegi|aa\s+jayega|aayega|aayegi)\b/,
+);
+
+/** The caller is told how to reach the business ("send us…", "మాకు…", "हमें…") — not a delivery claim. */
+const DELIVERY_INSTRUCTION = anyOf(
+  /\b(?:send|text|message|email|whats\s?app|write|contact|reach|call)\s+(?:us|the\s+(?:clinic|office|business|salon|team))\b/,
+  /\b(?:you\s+can|feel\s+free\s+to|please)\s+(?:also\s+)?(?:send|text|message|email|whats\s?app)\b/,
+  bounded("మాకు"),
+  /\bmaaku\b/,
+  bounded("हमें"),
+  bounded("हमको"),
+  /\b(?:hume|humein|hamein|humko)\b/,
+);
+
+/** A negation bound to the delivery ("can't send", "SMS రాదు", "పంపలేను", "नहीं भेज"). */
+const DELIVERY_NEGATED = anyOf(
+  /\b(?:not|never|can'?t|cannot|won'?t|isn'?t|wasn'?t|haven'?t|hasn'?t|unable|don'?t|didn'?t|no\s+(?:sms|text|message|email|whatsapp))\b/,
+  "పంపలే",
+  "పంపడం\\s*లేదు",
+  "పంపను",
+  "పంపము",
+  "రాదు",
+  "రావు",
+  "అందదు",
+  "(?:వస్తుంది|వచ్చింది|పంపించ\\S*|పంప\\S*)\\s*లేదు",
+  "తెలియజేయలే",
+  /\b(?:pampalen\w*|pampadam\s+ledu|radu|raadu|andadu)\b/,
+  "नहीं\\s*(?:भेज|मिल|आ)",
+  "(?:भेज|मिल|आ)\\S*\\s*नहीं",
+  `${bounded("न")}\\s*(?:भेज|मिल)`,
+  /\b(?:nahi|nahin)\s+(?:bhej|mil|aa)\w*/,
+);
+
+function claimsDelivery(clause: string): boolean {
+  return (
+    MESSAGE_CHANNEL.test(clause) &&
+    MESSAGE_DELIVERY.test(clause) &&
+    !DELIVERY_NEGATED.test(clause) &&
+    !DELIVERY_INSTRUCTION.test(clause)
+  );
+}
+
+/**
+ * Removes every sentence telling the caller a message (SMS, WhatsApp, text,
+ * email, "a confirmation") was or will be sent to them: the voice runtime
+ * holds no verified delivery state, so such a sentence is unsupported.
+ * Judged clause by clause, so an unrelated "లేదు" elsewhere never hides a
+ * claim, while a negated delivery ("I can't send a text") and contact
+ * instructions ("send us a WhatsApp at …", an email address) are kept.
+ * Kept text is returned byte-for-byte.
+ */
+export function removeMessageSentClaims(reply: string): { reply: string; removed: number } {
+  const sentences = splitSentences(reply);
+  let removed = 0;
+  const kept = sentences.filter((sentence) => {
+    const claim = splitClauses(sentence).some(claimsDelivery);
+    if (claim) removed++;
+    return !claim;
+  });
+  return { reply: removed ? kept.join("").trim() : reply, removed };
+}
+
+/**
+ * An English "yes" that pauses or hedges ("yes, one second", "yes, hold
+ * on", "sure, let me think", "yes but actually") — never consent to book.
+ * (Telugu and Hindi hesitation is already read by
+ * callerBookingIntentAnyLanguage.)
+ */
+export const BOOKING_HESITATION =
+  /\b(?:but|however|wait|hold\s+on|hang\s+on|one\s+(?:sec|second|minute|moment)|just\s+a\s+(?:sec|second|minute|moment)|give\s+me\s+a\s+(?:sec|second|minute|moment)|let\s+me\s+(?:think|check|see)|not\s+sure|maybe|actually)\b/i;
