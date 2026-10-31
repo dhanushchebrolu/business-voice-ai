@@ -841,3 +841,91 @@ describe("Vobiz callId correlation is delegated to the shared module (same produ
     assert.match(src, /authorizeMediaSession\("vobiz", callId, undefined\)/);
   });
 });
+
+describe("VobizCallSessionDurableObject: a call is never left connected in silence", () => {
+  type Instrumented = {
+    fetch: (request: Request) => Promise<Response>;
+    registerBridge: (id: string, bridge: AudioMediaBridge) => void;
+    hangUpUnstartedCall: (providerCallId: string) => Promise<void>;
+  };
+  function instrumented(name: string) {
+    const instance = new VobizCallSessionDurableObject(
+      fakeState(name),
+      {},
+    ) as unknown as Instrumented;
+    const hungUp: string[] = [];
+    // The provider boundary: record the hang-up instead of calling Vobiz.
+    instance.hangUpUnstartedCall = async (providerCallId: string) => {
+      hungUp.push(providerCallId);
+    };
+    return { instance, hungUp };
+  }
+  const start = (instance: Instrumented, id: string, timeoutMs: number) =>
+    instance.fetch(
+      new Request("https://vobiz-call-session/internal/start-runtime", {
+        method: "POST",
+        body: JSON.stringify({
+          ...BASE_RPC_FIELDS,
+          callId: `call-${id}`,
+          providerCallId: id,
+          timeoutMs,
+        }),
+      }),
+    );
+
+  test("REGRESSION: a second start for the same call joins the first — the media stream is found once even when it arrives after the first start's own wait", async () => {
+    const { instance, hungUp } = instrumented("v-race");
+    const logs = captureLogs();
+    try {
+      // "ringing" starts a short wait; "in_progress" asks again with a
+      // longer one; the stream then arrives between the two deadlines.
+      const first = start(instance, "vobiz-race-1", 60);
+      await new Promise((r) => setTimeout(r, 10));
+      const second = start(instance, "vobiz-race-1", 600);
+      await new Promise((r) => setTimeout(r, 140));
+      instance.registerBridge("vobiz-race-1", fakeBridge());
+      const [a, b] = await Promise.all([first, second]);
+      assert.equal(a.status, 200);
+      assert.equal(b.status, 200);
+      const found = logs.calls.filter(
+        (c) => c.event === "vobiz_call_session_do:start_runtime_bridge_found",
+      );
+      const starting = logs.calls.filter(
+        (c) => c.event === "vobiz_call_session_do:starting_voice_runtime",
+      );
+      assert.equal(found.length, 1, "the stream is used exactly once");
+      assert.equal(starting.length, 1, "exactly one runtime is started for the call");
+      assert.deepEqual(hungUp, [], "a call whose stream arrived is never hung up as unstarted");
+    } finally {
+      logs.restore();
+    }
+  });
+
+  test("REGRESSION: when no media stream ever arrives, the connected call is hung up instead of left silent (and billed)", async () => {
+    const { instance, hungUp } = instrumented("v-silent");
+    const logs = captureLogs();
+    try {
+      const res = await start(instance, "vobiz-silent-1", 50);
+      const body = (await res.json()) as { handled: boolean; note: string };
+      assert.equal(body.handled, false);
+      assert.deepEqual(hungUp, ["vobiz-silent-1"]);
+    } finally {
+      logs.restore();
+    }
+  });
+
+  test("two joined starts that both find no stream hang the call up once, not twice", async () => {
+    const { instance, hungUp } = instrumented("v-silent-joined");
+    const logs = captureLogs();
+    try {
+      const first = start(instance, "vobiz-silent-2", 40);
+      const second = start(instance, "vobiz-silent-2", 80);
+      const results = await Promise.all([first, second]);
+      for (const r of results)
+        assert.equal(((await r.json()) as { handled: boolean }).handled, false);
+      assert.deepEqual(hungUp, ["vobiz-silent-2"]);
+    } finally {
+      logs.restore();
+    }
+  });
+});

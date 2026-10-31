@@ -30,6 +30,7 @@ import { checkTelephonyAccess, maskPhoneNumber } from "./telephony-guard.server"
 import { getTelephonyAdapter } from "./telephony.server";
 import { getCallSessionStub, getVobizCallSessionStub } from "./telephony/cloudflare-env.server";
 import { maskCallSid } from "./telephony/media-session-authorization.server";
+import { endUnservableCall } from "./telephony/unservable-call.ts";
 import type {
   StartRuntimeRpcInput,
   AgentRuntimeRpcResult,
@@ -114,6 +115,7 @@ export async function routeToAgentRuntime(
       resolved: Boolean(businessId),
     });
     if (!businessId) {
+      await endUnservableCall(adapter, input.providerCallId, input.callId, "no_business");
       return { handled: false, note: "No business is configured for this workspace yet." };
     }
 
@@ -204,6 +206,12 @@ export async function routeToAgentRuntime(
       const snapshot = await loadSnapshot(supabaseAdmin, businessId);
       const issues = validateAgentConfig(snapshot);
       if (issues.length) {
+        await endUnservableCall(
+          adapter,
+          input.providerCallId,
+          input.callId,
+          "agent_config_incomplete",
+        );
         return {
           handled: false,
           note: `Agent configuration incomplete: ${issues.map((i) => i.field).join(", ")}.`,

@@ -197,14 +197,19 @@ describe("#14 Invalid agent configuration — handoff refuses to start rather th
     const liveFallbackStart = runtimeSrc.indexOf("const issues = validateAgentConfig(snapshot);");
     assert.ok(liveFallbackStart > -1);
     const nearby = runtimeSrc.slice(liveFallbackStart, liveFallbackStart + 400);
-    assert.match(nearby, /if \(issues\.length\) \{\s*\n\s*return \{\s*\n\s*handled: false,/);
+    // The only statement allowed before the refusal is ending the call
+    // (endUnservableCall) — the handoff still returns handled:false at once.
+    assert.match(
+      nearby,
+      /if \(issues\.length\) \{\s*\n(?:\s*await endUnservableCall\([^;]*\);\s*\n)?\s*return \{\s*\n\s*handled: false,/,
+    );
     assert.match(nearby, /Agent configuration incomplete/);
   });
 
   test("no business configured for the workspace also refuses to start, rather than running the agent with empty context", () => {
     assert.match(
       runtimeSrc,
-      /if \(!businessId\) \{\s*\n\s*return \{ handled: false, note: "No business is configured for this workspace yet\." \};/,
+      /if \(!businessId\) \{\s*\n(?:\s*await endUnservableCall\([^;]*\);\s*\n)?\s*return \{ handled: false, note: "No business is configured for this workspace yet\." \};/,
     );
   });
 });
@@ -329,5 +334,65 @@ describe("greeting latency: routing reads after the gate", () => {
       );
       assert.match(doSrc, /pricesUnverified: body\.pricesUnverified === true,/, file);
     }
+  });
+});
+
+describe("a call the runtime can never serve is ended, not left connected in silence", () => {
+  test("endUnservableCall hangs up through the provider's own hang-up API and reports it", async () => {
+    const { endUnservableCall } = await import("./telephony/unservable-call.ts");
+    const hungUp: string[] = [];
+    const adapter = {
+      hangupCall: async (id: string) => {
+        hungUp.push(id);
+        return "hung_up" as const;
+      },
+    };
+    assert.equal(await endUnservableCall(adapter, "CA-1", "call-1", "no_business"), true);
+    assert.deepEqual(hungUp, ["CA-1"]);
+  });
+
+  test("a provider without a hang-up API (Exotel) is left exactly as before", async () => {
+    const { endUnservableCall } = await import("./telephony/unservable-call.ts");
+    assert.equal(await endUnservableCall({}, "CA-2", "call-2", "no_business"), false);
+    assert.equal(await endUnservableCall(null, "CA-2", "call-2", "no_business"), false);
+  });
+
+  test("a failed hang-up is logged and never thrown into the webhook", async () => {
+    const { endUnservableCall } = await import("./telephony/unservable-call.ts");
+    const adapter = {
+      hangupCall: async () => {
+        throw new Error("Vobiz unreachable");
+      },
+    };
+    const originalError = console.error;
+    const logged: unknown[] = [];
+    console.error = (...args: unknown[]) => {
+      logged.push(args);
+    };
+    try {
+      assert.equal(
+        await endUnservableCall(adapter, "CA-3", "call-3", "agent_config_incomplete"),
+        false,
+      );
+    } finally {
+      console.error = originalError;
+    }
+    assert.equal(logged.length, 1);
+  });
+
+  test("both deterministic refusals end the call before returning handled:false — and the gate denial does not (the caller is hearing the denial message)", () => {
+    const noBusiness = runtimeSrc.indexOf('"No business is configured for this workspace yet."');
+    const incomplete = runtimeSrc.indexOf("Agent configuration incomplete:");
+    const gateDenied = runtimeSrc.indexOf("if (!gate.allowed) {");
+    assert.ok(noBusiness > 0 && incomplete > 0 && gateDenied > 0);
+    assert.match(
+      runtimeSrc.slice(noBusiness - 200, noBusiness),
+      /endUnservableCall\(adapter, input\.providerCallId, input\.callId, "no_business"\)/,
+    );
+    assert.match(
+      runtimeSrc.slice(incomplete - 300, incomplete),
+      /endUnservableCall\([\s\S]*"agent_config_incomplete"/,
+    );
+    assert.doesNotMatch(runtimeSrc.slice(gateDenied, gateDenied + 200), /endUnservableCall/);
   });
 });

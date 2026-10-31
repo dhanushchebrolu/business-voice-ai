@@ -11,7 +11,8 @@ import {
   type StartRuntimeSessionInput,
 } from "./voice-runtime.server.ts";
 import { createHarness, type Harness } from "./telephony/voice-runtime-test-harness.ts";
-import { callOutcomeLine } from "./voice-call-outcomes.ts";
+import { callOutcomeLine, formatLocalTime } from "./voice-call-outcomes.ts";
+import { VOICE_LANGUAGES } from "./voice-languages.ts";
 import {
   CALLER_ID_QUESTION_BY_LANGUAGE,
   CALLER_ID_REJECTED,
@@ -222,6 +223,28 @@ describe("TTS chunks never split an email, URL, price or title", () => {
       );
     }
     assert.doesNotMatch(joined, /example\. com|1,499\. 50|smile\. example/);
+  });
+
+  test("every language's booking read-back keeps its time in one chunk (Punjabi 'ਬਾ.ਦੁ.')", () => {
+    // The time is formatted by this runtime's own Intl data, so the check
+    // holds whatever the abbreviation looks like on a given Node build.
+    // main split "7:00 ਬਾ." from "ਦੁ." — a pause inside "PM" on every call.
+    for (const language of VOICE_LANGUAGES.map((l) => l.code)) {
+      for (const time of ["07:00", "11:30", "19:00", "23:45"]) {
+        const line = callOutcomeLine(language, "confirmBooking", {
+          service: "Root Canal Treatment",
+          date: "2030-10-14",
+          time,
+          customerName: "Dhanush",
+        });
+        if (!line) continue;
+        const spokenTime = formatLocalTime(language, time);
+        assert.ok(
+          chunkIntoSentences(line).some((chunk) => chunk.includes(spokenTime)),
+          `${language} ${time}: "${spokenTime}" split across ${JSON.stringify(chunkIntoSentences(line))}`,
+        );
+      }
+    }
   });
 
   test("danda-ended sentences and short fragments still chunk as before", () => {
