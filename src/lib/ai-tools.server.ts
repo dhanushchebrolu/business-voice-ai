@@ -35,7 +35,7 @@ import {
   request_payment,
   check_payment_status,
 } from "./payments/payment-tools.server.ts";
-import { classifyBookingStatus } from "./calendar/booking-outcome.ts";
+import { classifyBookingStatus, voiceBookingIdempotencyKey } from "./calendar/booking-outcome.ts";
 
 type Client = SupabaseClient<Database>;
 
@@ -152,7 +152,7 @@ const TOOL_REGISTRY: Record<string, ToolDefinition> = {
       if (!startIso || !endIso) return invalidInput("startIso and endIso are required.");
 
       const idempotencyKey = ctx.callId
-        ? `voice:${ctx.callId}:${startIso}:${endIso}`
+        ? voiceBookingIdempotencyKey(ctx.callId, startIso, endIso)
         : `${ctx.source}:${crypto.randomUUID()}`;
 
       const result = await create_calendar_event(supabaseAdmin, {
@@ -255,7 +255,7 @@ const TOOL_REGISTRY: Record<string, ToolDefinition> = {
       if (!startIso || !endIso) return invalidInput("startIso and endIso are required.");
 
       const idempotencyKey = ctx.callId
-        ? `voice:${ctx.callId}:${startIso}:${endIso}`
+        ? voiceBookingIdempotencyKey(ctx.callId, startIso, endIso)
         : `${ctx.source}:${crypto.randomUUID()}`;
 
       const result = await create_payment_required_booking(supabaseAdmin, {

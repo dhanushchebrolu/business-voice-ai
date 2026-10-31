@@ -238,7 +238,7 @@ describe("a failed booking is never announced as booked, whatever the model says
     await terminateRuntimeSession(callId, "test cleanup");
   });
 
-  test("a booking timeout (the calendar never answers): never claimed, retry offered", async (t) => {
+  test("a booking timeout (the calendar never answers): never claimed, never called a failure", async (t) => {
     t.mock.timers.enable({ apis: ["setTimeout"] });
     const { callId, turn, calls, h } = await openCall();
     await upToBookingQuestion(turn);
@@ -257,17 +257,17 @@ describe("a failed booking is never announced as booked, whatever the model says
     const spoken = h.tts.sentTexts.slice(before).join(" ");
     assert.equal(calls("book_appointment").length, 1);
     assertNoFalseSuccess(spoken);
-    assert.match(spoken, /taking too long to respond, so I couldn't confirm the booking/i, spoken);
-    assert.match(spoken, /try again, or choose another time\?/i, spoken);
+    assert.match(spoken, /can't tell yet whether your booking went through/i, spoken);
+    assert.doesNotMatch(spoken, /couldn't (?:book|confirm)|failed/i, "not called a failure");
     await terminateRuntimeSession(callId, "test cleanup");
   });
 
-  test("a reported CALENDAR_TIMEOUT error: same truthful reply", async () => {
+  test("a reported CALENDAR_TIMEOUT error: the outcome is unknown, so it's said to be unknown", async () => {
     const { callId, turn } = await openCall({ booking: [err("CALENDAR_TIMEOUT")] });
     await upToBookingQuestion(turn);
     const spoken = await turn("Yes, book it", LYING());
     assertNoFalseSuccess(spoken);
-    assert.match(spoken, /couldn't confirm the booking/i, spoken);
+    assert.match(spoken, /can't tell yet whether your booking went through/i, spoken);
     await terminateRuntimeSession(callId, "test cleanup");
   });
 
@@ -644,5 +644,491 @@ describe("languages the runtime can't check: model wording never reports an unsu
       assert.equal(mentionsBookingInAnyScript(lang.falseClaim), true, lang.name);
       assert.equal(mentionsBookingInAnyScript(lang.neutral), false, lang.name);
     }
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* A booking request that timed out: reconciled, never guessed         */
+/* ------------------------------------------------------------------ */
+
+type Call = Awaited<ReturnType<typeof openCall>>;
+
+/** book_appointment that answers only when the test says so (recorded as called). */
+function heldBookingRequest(h: Harness) {
+  let settle: (result: ToolResult) => void = () => {};
+  const execute = h.deps.executeTool!;
+  h.deps.executeTool = async (name, toolInput, ctx) => {
+    const answer = await execute(name, toolInput, ctx);
+    if (name !== "book_appointment") return answer;
+    return new Promise<ToolResult>((resolve) => {
+      settle = resolve;
+    });
+  };
+  return { settle: (result: ToolResult) => settle(result) };
+}
+
+/** Every TTS chunk reported delivered, so the caller is only listening. */
+function audioFinished(h: Harness) {
+  for (let i = 0; i < h.tts.sentTexts.length; i++) h.tts.emit({ type: "flushed" });
+}
+
+/** Up to the booking question, then "Yes, book it" while book_appointment hangs past its deadline. */
+async function bookingThatTimesOut(
+  t: { mock: { timers: { tick: (ms: number) => void } } },
+  call: Call,
+) {
+  await upToBookingQuestion(call.turn);
+  audioFinished(call.h);
+  const before = call.h.tts.sentTexts.length;
+  call.h.llm.setNextReply(LYING());
+  call.h.stt.emit({ type: "speech_start" });
+  call.h.stt.emit({ type: "final_transcript", text: "Yes, book it", language: "en-IN" });
+  await drain();
+  t.mock.timers.tick(10_000); // CALENDAR_TOOL_TIMEOUT_MS
+  await drain();
+  const spoken = call.h.tts.sentTexts.slice(before).join(" ");
+  assert.match(spoken, /can't tell yet whether your booking went through/i, spoken);
+  audioFinished(call.h);
+  return spoken;
+}
+
+describe("a booking request that timed out is reconciled before anything else is said or booked", () => {
+  test("it succeeds after the deadline: the caller is told it is confirmed, and it is this call's booking", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const call = await openCall();
+    const request = heldBookingRequest(call.h);
+    await bookingThatTimesOut(t, call);
+    const before = call.h.tts.sentTexts.length;
+    request.settle(BOOKED);
+    await drain();
+    const late = call.h.tts.sentTexts.slice(before).join(" ");
+    assert.match(late, /now heard back: your Root Canal Treatment for .* is confirmed/i, late);
+    assert.equal(call.calls("book_appointment").length, 1, "one booking request, never two");
+    // Asking to book that slot again (different words: the same words within
+    // two seconds are dropped as one transcript, and would prove nothing)
+    // reaches the booking path — and hears the outcome already known for the
+    // slot: no second request, and no fresh availability check that would
+    // now find the slot taken by this very booking.
+    const checksBefore = call.calls("check_calendar_availability").length;
+    audioFinished(call.h);
+    const again = await call.turn("Please book it for me", LYING());
+    assert.match(again, /is confirmed/i, again);
+    assert.doesNotMatch(again, /isn't available/i, again);
+    assert.equal(call.calls("book_appointment").length, 1);
+    assert.equal(call.calls("check_calendar_availability").length, checksBefore);
+    await terminateRuntimeSession(call.callId, "test cleanup");
+    assert.equal(call.h.persistence.records[0]?.outcome, "booked");
+  });
+
+  test("it fails after the deadline: the caller is told nothing was booked", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const call = await openCall();
+    const request = heldBookingRequest(call.h);
+    await bookingThatTimesOut(t, call);
+    const before = call.h.tts.sentTexts.length;
+    request.settle(err("SLOT_NO_LONGER_AVAILABLE"));
+    await drain();
+    const late = call.h.tts.sentTexts.slice(before).join(" ");
+    assert.match(late, /the booking didn't go through, so nothing is booked/i, late);
+    await terminateRuntimeSession(call.callId, "test cleanup");
+  });
+
+  test("while it is unresolved, no second booking request is made — even for the same slot", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const call = await openCall();
+    heldBookingRequest(call.h);
+    await bookingThatTimesOut(t, call);
+    // Different words: the same words within two seconds are one transcript.
+    const reply = await call.turn("Yes please, go ahead and book it", LYING());
+    assert.match(reply, /still checking whether your earlier booking went through/i, reply);
+    assertNoFalseSuccess(reply);
+    assert.equal(call.calls("book_appointment").length, 1);
+    await terminateRuntimeSession(call.callId, "test cleanup");
+  });
+
+  test("the request never answers: the stored row is found by its idempotency key, for this tenant only", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const lookups: { organizationId: string; businessId: string; idempotencyKey: string }[] = [];
+    const call = await openCall({
+      extraDeps: {
+        findBookingByIdempotencyKey: async (query) => {
+          lookups.push(query);
+          return { id: "booking-1", status: "CONFIRMED", startAt: SLOT_7PM.start };
+        },
+      },
+    });
+    heldBookingRequest(call.h);
+    await bookingThatTimesOut(t, call);
+    assert.equal(lookups.length, 0, "not looked up before the reconciliation delay");
+    const before = call.h.tts.sentTexts.length;
+    t.mock.timers.tick(15_000); // BOOKING_RECONCILE_MS (the silence check-in came at 12 s)
+    await drain();
+    // Held while the check-in is still playing; said once it has finished.
+    audioFinished(call.h);
+    t.mock.timers.tick(500);
+    await drain();
+    assert.deepEqual(lookups, [
+      {
+        organizationId: "00000000-0000-0000-0000-000000000000",
+        businessId: "00000000-0000-0000-0000-000000000001",
+        idempotencyKey: `voice:${call.callId}:${SLOT_7PM.start}:${SLOT_7PM.end}`,
+      },
+    ]);
+    const late = call.h.tts.sentTexts.slice(before).join(" ");
+    assert.match(late, /is confirmed/i, late);
+    await terminateRuntimeSession(call.callId, "test cleanup");
+  });
+
+  test("still nothing after every lookup: said to be unknown, and nothing else is booked on this call", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    let lookups = 0;
+    const call = await openCall({
+      extraDeps: {
+        findBookingByIdempotencyKey: async () => {
+          lookups++;
+          return null;
+        },
+      },
+    });
+    heldBookingRequest(call.h);
+    await bookingThatTimesOut(t, call);
+    const before = call.h.tts.sentTexts.length;
+    t.mock.timers.tick(15_000);
+    await drain();
+    assert.equal(lookups, 1);
+    assert.doesNotMatch(
+      call.h.tts.sentTexts.slice(before).join(" "),
+      /booking|confirm/i,
+      "'not found yet' is not an answer",
+    );
+    audioFinished(call.h);
+    t.mock.timers.tick(15_000);
+    await drain();
+    assert.equal(lookups, 2);
+    audioFinished(call.h);
+    t.mock.timers.tick(500);
+    await drain();
+    const late = call.h.tts.sentTexts.slice(before).join(" ");
+    assert.match(late, /still can't confirm whether the booking went through/i, late);
+    assertNoFalseSuccess(late);
+    audioFinished(call.h);
+    const again = await call.turn("Book it for me please", LYING());
+    assert.match(again, /still can't confirm/i, again);
+    assert.equal(call.calls("book_appointment").length, 1);
+    await terminateRuntimeSession(call.callId, "test cleanup");
+  });
+
+  test("the call ends first: a late answer says nothing into an ended call", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const call = await openCall();
+    const request = heldBookingRequest(call.h);
+    await bookingThatTimesOut(t, call);
+    await terminateRuntimeSession(call.callId, "test cleanup");
+    const before = call.h.tts.sentTexts.length;
+    request.settle(BOOKED);
+    await drain();
+    t.mock.timers.tick(60_000);
+    await drain();
+    assert.equal(call.h.tts.sentTexts.length, before, "nothing spoken after the call ended");
+  });
+
+  test("Telugu: the unresolved booking is described in Telugu, not as a failure", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const call = await openCall({ language: "te-IN" });
+    heldBookingRequest(call.h);
+    await upToBookingQuestion(call.turn);
+    audioFinished(call.h);
+    const before = call.h.tts.sentTexts.length;
+    call.h.llm.setNextReply(LYING());
+    call.h.stt.emit({ type: "speech_start" });
+    call.h.stt.emit({ type: "final_transcript", text: "అవును, బుక్ చేయండి", language: "te-IN" });
+    await drain();
+    t.mock.timers.tick(10_000);
+    await drain();
+    const spoken = call.h.tts.sentTexts.slice(before).join(" ");
+    assert.ok(
+      spoken.includes(callOutcomeLine("te-IN", "bookingUnresolved")!),
+      `Telugu unresolved line: ${spoken}`,
+    );
+    await terminateRuntimeSession(call.callId, "test cleanup");
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Turn deadline, changed slots, outcomes, quiet-line announcements     */
+/* ------------------------------------------------------------------ */
+
+/** Captures structured log lines (event name and fields) while `fn` runs. */
+async function captureLogs(
+  fn: () => Promise<void>,
+): Promise<{ event: string; fields: Record<string, unknown> }[]> {
+  const lines: { event: string; fields: Record<string, unknown> }[] = [];
+  const original = console.info;
+  console.info = (event: unknown, fields?: unknown) => {
+    if (typeof event === "string") {
+      lines.push({ event, fields: (fields ?? {}) as Record<string, unknown> });
+    }
+  };
+  try {
+    await fn();
+  } finally {
+    console.info = original;
+  }
+  return lines;
+}
+
+describe("the turn runs out of time while a booking request is still running", () => {
+  const tools: ClaudeTool[] = [
+    { name: "book_appointment", description: "d", input_schema: { type: "object" } },
+  ];
+
+  test("no generic error: the outcome is reconciled, nothing else is booked, and the late success is announced", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    let attempt = 0;
+    const toolResults: string[] = [];
+    const call = await openCall({
+      extraDeps: {
+        resolveAvailableTools: async () => tools,
+        generateReplyWithTools: async (_messages, _tools, execute) => {
+          attempt++;
+          if (attempt === 1) {
+            return { reply: "Root canal at 7 PM for Dhanush. Shall I book it?", toolCalls: [] };
+          }
+          // The model is slow (20 s), then the booking request outlives the
+          // rest of the 25-second turn deadline.
+          await new Promise((resolve) => setTimeout(resolve, 20_000));
+          const result = await execute("book_appointment", {
+            startIso: SLOT_7PM.start,
+            endIso: SLOT_7PM.end,
+          });
+          toolResults.push(result.content);
+          return {
+            reply: "Booked.",
+            toolCalls: [{ name: "book_appointment", input: {}, isError: false }],
+          };
+        },
+      },
+    });
+    const request = heldBookingRequest(call.h);
+    await call.turn("Root canal at 7 PM please", "unused");
+    audioFinished(call.h);
+    const before = call.h.tts.sentTexts.length;
+    call.h.stt.emit({ type: "speech_start" });
+    call.h.stt.emit({ type: "final_transcript", text: "Yes", language: "en-IN" });
+    await drain();
+    t.mock.timers.tick(20_000); // the model answers and calls book_appointment
+    await drain();
+    assert.equal(call.calls("book_appointment").length, 1, "the request is running");
+    t.mock.timers.tick(5_000); // TURN_DEADLINE_MS (25 s) passes first
+    await drain();
+    const spoken = call.h.tts.sentTexts.slice(before).join(" ");
+    assert.match(spoken, /can't tell yet whether your booking went through/i, spoken);
+    assert.doesNotMatch(spoken, /something went wrong/i, "never the generic error");
+    assertNoFalseSuccess(spoken);
+
+    // While unresolved, another booking is refused before it reaches the booking layer.
+    audioFinished(call.h);
+    await call.turn("Yes please, book it now", "unused");
+    t.mock.timers.tick(20_000);
+    await drain();
+    assert.equal(call.calls("book_appointment").length, 1, "no second booking request");
+    assert.match(toolResults.at(-1) ?? "", /BOOKING_OUTCOME_PENDING/);
+
+    // The original request now succeeds: told, recorded, once.
+    audioFinished(call.h);
+    const lateFrom = call.h.tts.sentTexts.length;
+    request.settle(BOOKED);
+    await drain();
+    audioFinished(call.h);
+    t.mock.timers.tick(500);
+    await drain();
+    assert.match(call.h.tts.sentTexts.slice(lateFrom).join(" "), /is confirmed/i);
+    await terminateRuntimeSession(call.callId, "test cleanup");
+    assert.equal(call.h.persistence.records[0]?.outcome, "booked");
+  });
+});
+
+describe("a late result never overwrites what the caller asked for since", () => {
+  test("the caller moved to 8 PM while 7 PM was unresolved: told 7 PM is booked, 8 PM stays their request", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const call = await openCall();
+    const request = heldBookingRequest(call.h);
+    await bookingThatTimesOut(t, call);
+    await call.turn(
+      "Actually, make it 8 PM instead",
+      `Okay.\n${marker({ ...KNOWN, preferred_time: "20:00" })}`,
+    );
+    audioFinished(call.h);
+    const before = call.h.tts.sentTexts.length;
+    const logs = await captureLogs(async () => {
+      request.settle(BOOKED);
+      await drain();
+      audioFinished(call.h);
+      t.mock.timers.tick(500);
+      await drain();
+    });
+    const late = call.h.tts.sentTexts.slice(before).join(" ");
+    assert.match(late, /7:00 PM is confirmed|7 PM is confirmed|at 7:00 PM/i, late);
+    assert.ok(logs.some((l) => l.event === "voice_runtime:late_booking_slot_differs"));
+    await call.turn(
+      "Do you have parking?",
+      `Yes.\n${marker({ ...KNOWN, preferred_time: "20:00" })}`,
+    );
+    const known = (call.h.llm.calls.at(-1) ?? [])
+      .filter((m) => m.role === "system")
+      .map((m) => m.content)
+      .join("\n");
+    assert.match(known, /preferred time: 20:00/, "the newer request is kept");
+    await terminateRuntimeSession(call.callId, "test cleanup");
+    assert.equal(call.h.persistence.records[0]?.outcome, "booked", "7 PM really is held");
+  });
+});
+
+describe("the call outcome counts only bookings that are really held", () => {
+  const PENDING: ToolResult = {
+    content: JSON.stringify({
+      success: true,
+      data: { id: "booking-p", status: "PENDING_CONFIRMATION", startAt: SLOT_7PM.start },
+      bookingOutcome: "pending",
+    }),
+  };
+  for (const [name, booking, expected] of [
+    ["confirmed", [BOOKED], "booked"],
+    ["pending confirmation", [PENDING], "completed"],
+    ["failed", [err("UNKNOWN")], "completed"],
+    ["timed out, unresolved", [err("CALENDAR_TIMEOUT")], "booking_unresolved"],
+  ] as const) {
+    test(`${name} → ${expected}`, async () => {
+      const call = await openCall({ booking: [...booking] });
+      await upToBookingQuestion(call.turn);
+      await call.turn("Yes, book it", LYING());
+      await terminateRuntimeSession(call.callId, "call ended: completed");
+      assert.equal(call.h.persistence.records[0]?.outcome, expected);
+    });
+  }
+});
+
+describe("a late booking result never talks over the caller", () => {
+  test("the caller starts speaking just before the result arrives: it waits, then comes first in the reply", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const call = await openCall();
+    const request = heldBookingRequest(call.h);
+    await bookingThatTimesOut(t, call);
+    call.h.stt.emit({ type: "speech_start" }); // the caller is talking
+    const before = call.h.tts.sentTexts.length;
+    request.settle(BOOKED);
+    await drain();
+    t.mock.timers.tick(2_000);
+    await drain();
+    assert.equal(call.h.tts.sentTexts.length, before, "nothing said over the caller");
+    call.h.llm.setNextReply(`Yes, there's parking.\n${marker(KNOWN)}`);
+    call.h.stt.emit({
+      type: "final_transcript",
+      text: "Is there parking nearby?",
+      language: "en-IN",
+    });
+    await drain();
+    const reply = call.h.tts.sentTexts.slice(before).join(" ");
+    assert.match(
+      reply,
+      /is confirmed[\s\S]*parking/i,
+      `the result first, then the answer: ${reply}`,
+    );
+    await terminateRuntimeSession(call.callId, "test cleanup");
+  });
+});
+
+describe("nothing is booked, moved or asked after the call ends", () => {
+  test("a booking confirmation delivered after termination: no model call, no tool call", async () => {
+    const call = await openCall();
+    await upToBookingQuestion(call.turn);
+    await terminateRuntimeSession(call.callId, "call ended: completed");
+    const llm = call.h.llm.calls.length;
+    const tools = call.h.tools.calls.length;
+    call.h.stt.emit({ type: "speech_start" });
+    call.h.stt.emit({ type: "final_transcript", text: "Yes, book it", language: "en-IN" });
+    await drain();
+    assert.equal(call.h.llm.calls.length, llm, "no model call");
+    assert.equal(call.h.tools.calls.length, tools, "no calendar or booking call");
+  });
+
+  test("a turn already running when the call ends: its booking call is refused", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const tools: ClaudeTool[] = [
+      { name: "book_appointment", description: "d", input_schema: { type: "object" } },
+    ];
+    let attempt = 0;
+    const results: string[] = [];
+    const call = await openCall({
+      extraDeps: {
+        resolveAvailableTools: async () => tools,
+        generateReplyWithTools: async (_m, _t, execute) => {
+          attempt++;
+          if (attempt === 1) return { reply: "7 PM for Dhanush. Shall I book it?", toolCalls: [] };
+          await new Promise((resolve) => setTimeout(resolve, 5_000));
+          const result = await execute("book_appointment", {
+            startIso: SLOT_7PM.start,
+            endIso: SLOT_7PM.end,
+          });
+          results.push(result.content);
+          return { reply: "Booked.", toolCalls: [] };
+        },
+      },
+    });
+    await call.turn("Root canal at 7 PM please", "unused");
+    call.h.stt.emit({ type: "speech_start" });
+    call.h.stt.emit({ type: "final_transcript", text: "Yes", language: "en-IN" });
+    await drain();
+    await terminateRuntimeSession(call.callId, "call ended: completed");
+    t.mock.timers.tick(5_000);
+    await drain();
+    assert.equal(call.calls("book_appointment").length, 0, "never reached the booking layer");
+    assert.match(results[0] ?? "", /CALL_ENDED/);
+  });
+
+  test("a reschedule asked for while a booking is unresolved: nothing is looked up or moved", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    let lookups = 0;
+    const call = await openCall({
+      extraDeps: {
+        findCallerBookings: async () => {
+          lookups++;
+          return [];
+        },
+      },
+    });
+    heldBookingRequest(call.h);
+    await bookingThatTimesOut(t, call);
+    const reply = await call.turn("Can I reschedule my appointment?", LYING());
+    assert.match(reply, /still checking whether your earlier booking went through/i, reply);
+    assert.equal(lookups, 0, "no booking looked up to move");
+    assert.equal(call.calls("reschedule_appointment").length, 0);
+    await terminateRuntimeSession(call.callId, "test cleanup");
+  });
+});
+
+describe("booking failures are logged by code, never by message", () => {
+  test("a booking request that throws after the deadline: the log carries the error class, not its text", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const call = await openCall();
+    let fail: (e: Error) => void = () => {};
+    const execute = call.h.deps.executeTool!;
+    call.h.deps.executeTool = async (name, toolInput, ctx) => {
+      const answer = await execute(name, toolInput, ctx);
+      if (name !== "book_appointment") return answer;
+      return new Promise<ToolResult>((_resolve, reject) => {
+        fail = reject;
+      });
+    };
+    await bookingThatTimesOut(t, call);
+    const logs = await captureLogs(async () => {
+      fail(new TypeError("customer 9876543210 Dhanush could not be saved"));
+      await drain();
+    });
+    const line = logs.find((l) => l.event === "voice_runtime:booking_late_request_failed");
+    assert.ok(line, "the failure is logged");
+    assert.equal(line!.fields["error"], "TypeError");
+    assert.doesNotMatch(JSON.stringify(line!.fields), /9876543210|Dhanush/);
+    await terminateRuntimeSession(call.callId, "test cleanup");
   });
 });

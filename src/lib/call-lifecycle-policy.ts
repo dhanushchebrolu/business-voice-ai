@@ -25,10 +25,23 @@ export type CallLifecyclePhase =
   | "FAILED";
 
 export interface CallLifecyclePolicy {
-  /** Caller silence before the one "are you still there?" prompt. */
+  /** Caller silence before the one "are you still there?" check-in. */
   silencePromptMs: number;
-  /** Further silence after that prompt before a goodbye and hang-up. */
+  /**
+   * Further silence after the check-in before one final notice ("I'll end
+   * the call shortly if I don't hear from you"). 0 skips the final notice:
+   * the goodbye then follows the check-in directly.
+   */
+  silenceFinalNoticeMs: number;
+  /** Further silence after the last prompt (final notice, or check-in) before a goodbye and hang-up. */
   silenceHangupMs: number;
+  /**
+   * How long a caller's turn may go without anything said back (the model
+   * or a calendar call being slow) before one short "One moment, please."
+   * Never said when the turn already got an immediate acknowledgement. 0
+   * turns it off.
+   */
+  holdingResponseMs: number;
   /** The same agent reply this many times in a row ends the loop (offer an alternative). */
   repeatedReplyLimit: number;
   /** Consecutive failed turns (LLM/TTS/tool errors) before the call is ended safely. */
@@ -55,13 +68,15 @@ export interface CallLifecyclePolicy {
 }
 
 /**
- * Conservative defaults: the silence timings match the runtime's existing
- * behaviour (12 s prompt, then 10 s), nothing hangs up mid-operation, and a
- * long call is only closed after 30 minutes.
+ * Conservative defaults: a check-in after 12 s of silence, a final notice
+ * 8 s later, the goodbye 10 s after that (30 s in all); nothing hangs up
+ * mid-operation, and a long call is only closed after 30 minutes.
  */
 export const DEFAULT_CALL_LIFECYCLE_POLICY: CallLifecyclePolicy = {
   silencePromptMs: 12_000,
+  silenceFinalNoticeMs: 8_000,
   silenceHangupMs: 10_000,
+  holdingResponseMs: 3_000,
   repeatedReplyLimit: 3,
   consecutiveErrorLimit: 2,
   closingAudioMaxWaitMs: 15_000,
@@ -97,6 +112,16 @@ export function resolveCallLifecyclePolicy(
       continue;
     }
     if (typeof value !== "number" || !Number.isFinite(value)) continue;
+    if (key === "silenceFinalNoticeMs") {
+      // 0 skips the final notice; otherwise never below three seconds.
+      policy.silenceFinalNoticeMs = value <= 0 ? 0 : Math.max(Math.round(value), 3_000);
+      continue;
+    }
+    if (key === "holdingResponseMs") {
+      // 0 turns it off; otherwise never so soon it talks over a normal reply.
+      policy.holdingResponseMs = value <= 0 ? 0 : Math.max(Math.round(value), 1_500);
+      continue;
+    }
     if (key === "maxCallDurationMs") {
       // 0 disables the limit; otherwise never below five minutes.
       policy.maxCallDurationMs = value <= 0 ? 0 : Math.max(value, 5 * 60_000);

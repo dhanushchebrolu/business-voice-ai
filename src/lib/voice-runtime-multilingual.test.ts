@@ -532,7 +532,7 @@ const hindiTurn = (h: Harness, reply = "ठीक है।") =>
   say(h, "मुझे कल सुबह का अपॉइंटमेंट चाहिए", "hi-IN", 0.95, reply);
 
 describe("fixed lines are spoken in the active voice's language", () => {
-  test("silence prompt, then the silence hang-up, in Hindi on the Hindi voice", async (t) => {
+  test("silence check-in, final notice, then the silence hang-up, in Hindi on the Hindi voice", async (t) => {
     t.mock.timers.enable();
     const h = createHarness();
     const spoken = trackVoices(h);
@@ -546,6 +546,13 @@ describe("fixed lines are spoken in the active voice's language", () => {
     await drain(40);
     const prompt = FALLBACK_MESSAGES["hi-IN"].silencePrompt("");
     assert.ok(saidBy(spoken, "hi-IN").includes(prompt), JSON.stringify(spoken));
+    finishPlayback(h);
+    await drain(40);
+
+    t.mock.timers.tick(8_000); // silenceFinalNoticeMs
+    await drain(40);
+    const notice = FALLBACK_MESSAGES["hi-IN"].silenceFinalNotice("");
+    assert.ok(saidBy(spoken, "hi-IN").includes(notice), JSON.stringify(spoken));
     finishPlayback(h);
     await drain(40);
 

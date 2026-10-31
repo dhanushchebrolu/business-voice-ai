@@ -263,7 +263,7 @@ describe("calls use the current language section, not the one saved at publish t
     const src = repoFile("src", "lib", "telephony-runtime.ts");
     assert.match(
       src,
-      /instructions = withCurrentCallSections\(\s*publishedVersion\.instructions,\s*snapshot\.agent,\s*liveServices,?\s*\);/,
+      /instructions = withCurrentCallSections\(\s*publishedVersion\.instructions,\s*snapshot\.agent,\s*liveServices,\s*businessTimezone \? \{ now: new Date\(\), timezone: businessTimezone \} : undefined,?\s*\);/,
     );
     assert.doesNotMatch(src, /instructions = publishedVersion\.instructions;/);
   });

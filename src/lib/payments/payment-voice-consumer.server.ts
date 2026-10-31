@@ -51,8 +51,9 @@ function composeVoiceMessage(
     case "PAYMENT_CAPTURED_AFTER_EXPIRY":
       // Money moved, but the hold is gone — same honesty rule the
       // WhatsApp consumer follows: never claim the booking is confirmed
-      // here.
-      return `I see your payment of ${amountText} went through, but the hold on that time slot had already expired. We'll follow up shortly to confirm a new time or arrange a refund — sorry about that.`;
+      // here. No follow-up is promised either: nothing alerts staff to
+      // this case yet, so the caller is asked to get in touch instead.
+      return `I see your payment of ${amountText} went through, but the hold on that time slot had already expired, so this booking isn't confirmed. Please contact us to arrange a new time or a refund — sorry about that.`;
     case "PAYMENT_FAILED":
       return paymentLinkUrl
         ? `It looks like that payment attempt didn't go through. You can try again using the link I sent, or I can send a new one.`

@@ -538,6 +538,12 @@ describe("10. Silence timeout", () => {
     assert.equal(handle.state, "listening", "still waiting on the caller after the prompt");
 
     flushCatchUp(); // the prompt's own audio has now fully played out too
+    t.mock.timers.tick(8_000); // silenceFinalNoticeMs
+    await drain();
+    assert.match(h.tts.sentTexts.join(" "), /end the call shortly/i, "the final notice first");
+    assert.equal(h.bridge.closed, false, "a notice never ends the call");
+
+    flushCatchUp();
     t.mock.timers.tick(10_000); // SILENCE_HANGUP_MS
     await drain();
 
@@ -1005,12 +1011,15 @@ describe("13. Silence timer defense in depth", () => {
 
     t.mock.timers.tick(12_000); // SILENCE_PROMPT_MS — must NOT fire while thinking
     await drain();
-    assert.equal(
-      h.tts.sentTexts.length,
-      spokenBeforeSilence,
+    const meanwhile = h.tts.sentTexts.slice(spokenBeforeSilence).join(" ");
+    assert.doesNotMatch(
+      meanwhile,
+      /still there/i,
       "no silence prompt may interrupt an in-flight LLM request",
     );
-    assert.equal(handle.state, "thinking");
+    // The slow turn gets one short holding line (holdingResponseMs), not dead air.
+    assert.equal(meanwhile, "One moment, please.", meanwhile);
+    assert.notEqual(handle.state, "listening", "still answering the caller's question");
 
     t.mock.timers.tick(8_000); // let the slow LLM call resolve (20s total)
     await drain();
@@ -2026,6 +2035,9 @@ describe("29. New diagnostic events (calendar_tool:*, voice:tool_result, voice:f
       h.llm.setDelay(0);
 
       h.stt.speakUtterance("Can you check if that slot is available?");
+      // The calendar call must happen while the call is live: once it has
+      // ended, tool calls are refused (CALL_ENDED) — see callToolUnlessOver.
+      for (let i = 0; i < 50 && !h.tools.calls.length; i++) await drain(16);
       await drain(16);
       await terminateRuntimeSession(callId, "test cleanup");
     });

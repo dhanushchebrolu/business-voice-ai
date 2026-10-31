@@ -264,24 +264,24 @@ describe("Caller ID reaches the voice runtime (trusted webhook `From`, never spe
     for (const expr of occurrences) assert.match(expr!, /^event\.fromE164/);
   });
 
-  test("the business country is read live from the business row and reaches the runtime on every path", () => {
-    assert.match(runtimeSrc, /\.from\("businesses"\)\s*\.select\("country"\)/);
+  test("the business country and timezone are read live from the business row and reach the runtime on every path", () => {
+    assert.match(runtimeSrc, /\.from\("businesses"\)\s*\.select\("country, timezone"\)/);
     const rpcStart = runtimeSrc.indexOf("const rpcInput: StartRuntimeRpcInput = {");
-    assert.match(
-      runtimeSrc.slice(rpcStart, runtimeSrc.indexOf("};", rpcStart)),
-      /businessCountry,/,
-    );
+    const rpcBlock = runtimeSrc.slice(rpcStart, runtimeSrc.indexOf("};", rpcStart));
+    assert.match(rpcBlock, /businessCountry,/);
+    assert.match(rpcBlock, /businessTimezone,/);
     const fallbackStart = runtimeSrc.indexOf("const handle = await startRuntimeSession({");
-    assert.match(
-      runtimeSrc.slice(fallbackStart, runtimeSrc.indexOf("});\n", fallbackStart)),
-      /businessCountry,/,
+    const fallbackBlock = runtimeSrc.slice(
+      fallbackStart,
+      runtimeSrc.indexOf("});\n", fallbackStart),
     );
+    assert.match(fallbackBlock, /businessCountry,/);
+    assert.match(fallbackBlock, /businessTimezone,/);
     for (const src of [exotelDoSrc, vobizDoSrc]) {
       const start = src.indexOf("const handle = await startRuntimeSession({");
-      assert.match(
-        src.slice(start, src.indexOf("});\n", start)),
-        /businessCountry: body\.businessCountry \?\? null/,
-      );
+      const block = src.slice(start, src.indexOf("});\n", start));
+      assert.match(block, /businessCountry: body\.businessCountry \?\? null/);
+      assert.match(block, /businessTimezone: body\.businessTimezone \?\? null/);
     }
   });
 
@@ -308,7 +308,7 @@ describe("greeting latency: routing reads after the gate", () => {
     assert.ok(gateIdx < allIdx, "no agent data is read before the gate");
     const block = runtimeSrc.slice(allIdx, runtimeSrc.indexOf("]);", allIdx));
     assert.match(block, /\.from\("agent_versions"\)/);
-    assert.match(block, /\.from\("businesses"\)\.select\("country"\)/);
+    assert.match(block, /\.from\("businesses"\)\s*\.select\("country, timezone"\)/);
     assert.match(block, /\.from\("services"\)[\s\S]*\.eq\("business_id", businessId\)/);
   });
 

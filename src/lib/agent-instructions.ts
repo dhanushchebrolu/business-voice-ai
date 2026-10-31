@@ -96,6 +96,11 @@ export function withCurrentCallSections(
    * current. Undefined leaves the published section as it is.
    */
   liveServices?: AgentSnapshot["services"] | null,
+  /**
+   * When the call is happening, in the business's timezone: the published
+   * # CURRENT DATE is replaced with this call's day. Undefined leaves it.
+   */
+  callDate?: { now: Date; timezone: string },
 ): string {
   let out = replaceSection(
     replaceSection(
@@ -109,6 +114,9 @@ export function withCurrentCallSections(
   // Versions published before this told the agent to take a message and
   // promise a callback (or offer a transfer) after hours.
   out = out.replace(OLD_AFTER_HOURS_LINE, AFTER_HOURS_LINE);
+  if (callDate) {
+    out = replaceSection(out, "CURRENT DATE", currentDateSection(callDate.now, callDate.timezone));
+  }
   if (liveServices) {
     out = replaceSection(
       out,
@@ -295,6 +303,16 @@ function todayInTimezone(now: Date, timezone: string): string {
 }
 
 /**
+ * The # CURRENT DATE body: today in the business's timezone. Published
+ * instructions carry the day they were published, so every call replaces it
+ * (withCurrentCallSections) — otherwise "tomorrow" is resolved against a day
+ * that may be weeks old.
+ */
+export function currentDateSection(now: Date, timezone: string): string {
+  return `Today is ${todayInTimezone(now, timezone)}, in ${timezone}. Resolve any relative date the caller gives ("tomorrow", "next Friday", "this weekend") against this exact date — never guess or ask the caller to also state the absolute date themselves.`;
+}
+
+/**
  * Deterministic, server-generated instruction document. This is what grounds the
  * voice agent — it is never authored by the customer directly. `now`
  * defaults to the real current time — tests pass a fixed Date so the
@@ -320,7 +338,7 @@ You are an employee of this business. Never mention that you are an AI model, an
 The caller has already heard your opening greeting — it is the first message in this conversation, before anything the caller has said. Do not greet the caller again, welcome them again, or repeat any version of your opening line in your first reply. Respond directly and naturally to whatever the caller actually says.
 
 # CURRENT DATE
-Today is ${todayInTimezone(now, b.timezone)}, in ${b.timezone}. Resolve any relative date the caller gives ("tomorrow", "next Friday", "this weekend") against this exact date — never guess or ask the caller to also state the absolute date themselves.
+${currentDateSection(now, b.timezone)}
 
 # RESPONSE STYLE
 This is a live phone call, not a chat window. Keep every reply to 1–2 short sentences. Ask only one question at a time. Never read out a long list unless the caller specifically asks for all of it — summarize the 3–4 most relevant options instead and offer to say more. Never repeat information you already gave earlier in this same call.

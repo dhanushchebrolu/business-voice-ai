@@ -133,8 +133,13 @@ export async function routeToAgentRuntime(
       // How a phone number given without a country code is read (see
       // phone-number.ts) — the live business row, not a possibly-older
       // published agent snapshot. Null (international numbers only) if
-      // unset or unreadable; never a guessed default.
-      supabaseAdmin.from("businesses").select("country").eq("id", businessId).maybeSingle(),
+      // unset or unreadable; never a guessed default. The timezone decides
+      // which day "today" is for this call (see withCurrentCallSections).
+      supabaseAdmin
+        .from("businesses")
+        .select("country, timezone")
+        .eq("id", businessId)
+        .maybeSingle(),
       // The business's services and prices as they are now — the published
       // instructions carry the list as it was at publish time. Never
       // rejects: a failed read flags the published prices as unconfirmed
@@ -151,6 +156,7 @@ export async function routeToAgentRuntime(
       ).catch((error: unknown) => ({ data: null, error })),
     ]);
     const businessCountry = businessRow?.country ?? null;
+    let businessTimezone: string | null = businessRow?.timezone ?? null;
     // Null when the read failed: the published prices are then flagged as
     // unconfirmed rather than quoted as current.
     const liveServices = servicesRes.error
@@ -172,16 +178,19 @@ export async function routeToAgentRuntime(
     if (publishedVersion) {
       const snapshot =
         publishedVersion.snapshot as unknown as import("./agent-instructions").AgentSnapshot;
-      // The published text, with only its # LANGUAGE, # ESCALATION, # SAFETY
-      // and # SERVICES AND PRICING sections brought up to date: older
-      // versions say "Respond in: en-IN.", promise transfers and callbacks
-      // this line cannot do, and list prices as they were at publish time
-      // (see withCurrentCallSections).
+      // The published text, with only its # LANGUAGE, # ESCALATION, # SAFETY,
+      // # CURRENT DATE and # SERVICES AND PRICING sections brought up to
+      // date: older versions say "Respond in: en-IN.", promise transfers and
+      // callbacks this line cannot do, carry the day they were published as
+      // "today", and list prices as they were at publish time (see
+      // withCurrentCallSections).
       const { withCurrentCallSections } = await import("./agent-instructions");
+      businessTimezone ??= snapshot.business.timezone ?? null;
       instructions = withCurrentCallSections(
         publishedVersion.instructions,
         snapshot.agent,
         liveServices,
+        businessTimezone ? { now: new Date(), timezone: businessTimezone } : undefined,
       );
       agentSnapshotAgent = snapshot.agent;
       agentVersion = publishedVersion.version;
@@ -201,6 +210,7 @@ export async function routeToAgentRuntime(
         };
       }
       instructions = buildAgentInstructions(snapshot);
+      businessTimezone ??= snapshot.business.timezone ?? null;
       agentSnapshotAgent = snapshot.agent;
       agentVersion = null;
       businessName = snapshot.business.name;
@@ -233,6 +243,7 @@ export async function routeToAgentRuntime(
       callerNumber: input.callerE164,
       businessCountry,
       pricesUnverified: liveServices === null,
+      businessTimezone,
       routingStartedAt,
     };
 
@@ -319,6 +330,7 @@ export async function routeToAgentRuntime(
       callerNumber: input.callerE164,
       businessCountry,
       pricesUnverified: liveServices === null,
+      businessTimezone,
       routingStartedAt,
       ...(adapter.hangupCall && input.providerCallId
         ? {

@@ -14,10 +14,12 @@ name: Test
 # PostgreSQL-backed regression tests, not just a source-text scan of them,
 # and treats an unexpected skip of those tests as a hard CI failure rather
 # than a silent pass.
+#
+# Every push runs it, main included: Lovable pushes straight to main, so a
+# main-only change (one that never went through a pull request) is still
+# tested. Running it never deploys anything (see above).
 on:
   push:
-    branches-ignore:
-      - main
   pull_request:
 
 permissions:

@@ -114,6 +114,8 @@ export interface VobizStartRuntimeRpcInput {
   businessCountry?: string | null;
   /** The live price list could not be read at call start, so no amount may be quoted as current — see StartRuntimeSessionInput.pricesUnverified. */
   pricesUnverified?: boolean;
+  /** businesses.timezone, read live at call start — see StartRuntimeSessionInput.businessTimezone. */
+  businessTimezone?: string | null;
   timeoutMs?: number;
   /** When telephony routing for this call began (ms since epoch) — greeting-latency instrumentation only. Optional so an older in-flight RPC body still parses. */
   routingStartedAt?: number;
@@ -507,6 +509,7 @@ export class VobizCallSessionDurableObject {
         : {}),
       businessCountry: body.businessCountry ?? null,
       pricesUnverified: body.pricesUnverified === true,
+      businessTimezone: body.businessTimezone ?? null,
       // Vobiz documents a live-call hang-up API, so a completed
       // conversation ends the PSTN call explicitly rather than relying on
       // the stream closing.

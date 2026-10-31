@@ -300,9 +300,11 @@ describe("normal completion ends the call after the final audio, with one hang-u
 /* C. Silence                                                           */
 /* ------------------------------------------------------------------ */
 
-describe("silence: one prompt, then a goodbye and one hang-up", () => {
-  test("prompts once, then ends within the configured limits — never a second prompt", async (t) => {
-    const call = await openCall(t, { policy: { silencePromptMs: 20_000, silenceHangupMs: 8_000 } });
+describe("silence: a check-in, a final notice, then a goodbye and one hang-up", () => {
+  test("each stage after its own configured silence — never a second check-in", async (t) => {
+    const call = await openCall(t, {
+      policy: { silencePromptMs: 20_000, silenceFinalNoticeMs: 6_000, silenceHangupMs: 8_000 },
+    });
     const before = call.h.tts.sentTexts.length;
     t.mock.timers.tick(19_000);
     await drain();
@@ -311,10 +313,18 @@ describe("silence: one prompt, then a goodbye and one hang-up", () => {
     await drain();
     assert.match(call.spokenSince(before), /still there/i);
     call.flush();
+    t.mock.timers.tick(5_000);
+    await drain();
+    assert.doesNotMatch(call.spokenSince(before), /end the call/i, "no notice before its interval");
+    t.mock.timers.tick(1_000);
+    await drain();
+    assert.match(call.spokenSince(before), /end the call shortly/i, "the final notice");
+    assert.deepEqual(call.hangups, [], "a notice is not a hang-up");
+    call.flush();
     t.mock.timers.tick(8_000);
     await drain(200);
     const spoken = call.spokenSince(before);
-    assert.equal(spoken.match(/still there/gi)?.length, 1, "exactly one prompt");
+    assert.equal(spoken.match(/still there/gi)?.length, 1, "exactly one check-in");
     assert.match(spoken, /end the call here/i);
     await finishAudio(call, t);
     assert.deepEqual(call.hangups, ["before_close"]);

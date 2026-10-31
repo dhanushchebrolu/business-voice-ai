@@ -1235,13 +1235,18 @@ describe("silence/timeout handling — wiring", () => {
     assert.match(isAwaitingCallerBody, /state === "interrupted"/);
   });
 
-  test("the timer fires the one-time prompt before it ever hangs up, gated by silencePromptSent", () => {
+  test("the timer fires the check-in, then the final notice, before it ever hangs up", () => {
     const fnStart = src.indexOf("function armSilenceTimer(session: Session) {");
     const fnBody = src.slice(fnStart, src.indexOf("\n}\n", fnStart));
     assert.match(
       fnBody,
-      /if \(session\.silencePromptSent\) void endDueToSilence\(session\);\s*\n\s*else void speakSilencePrompt\(session\);/,
+      /else if \(stage === "check_in"\) void speakSilencePrompt\(session\);\s*\n\s*else if \(stage === "final_notice"\) void speakSilenceFinalNotice\(session\);\s*\n\s*else void endDueToSilence\(session\);/,
     );
+    // The stages are gated by what has already been said.
+    const stageStart = src.indexOf("function silenceStage(session: Session)");
+    const stageBody = src.slice(stageStart, src.indexOf("\n}\n", stageStart));
+    assert.match(stageBody, /if \(!session\.silencePromptSent\) return "check_in";/);
+    assert.match(stageBody, /!session\.silenceFinalNoticeSent/);
   });
 
   test("speech_start unconditionally cancels the pending timer and resets the prompt flag, before the barge-in branch", () => {
@@ -1280,11 +1285,11 @@ describe("silence/timeout handling — wiring", () => {
   // An empty raw reply now flows into the same empty-reply exit as an
   // empty-after-marker/booking reply (which asks for the next missing
   // booking detail instead of going silent), so there are three exits.
-  test("all three handleUserUtterance exit paths (empty reply — raw or after marker/booking, reply spoken, LLM error) re-arm before returning to LISTENING", () => {
+  test("all four handleUserUtterance exit paths (empty reply — raw or after marker/booking, reply spoken, LLM error, turn deadline during a booking) re-arm before returning to LISTENING", () => {
     const fnStart = src.indexOf("async function handleUserUtterance(");
     const fnBody = src.slice(fnStart, src.indexOf("\n}\n", fnStart));
     const armOccurrences = [...fnBody.matchAll(/armSilenceTimer\(session\);/g)];
-    assert.equal(armOccurrences.length, 3);
+    assert.equal(armOccurrences.length, 4);
   });
 
   /**
