@@ -146,7 +146,15 @@ describe("key handling", () => {
     } catch (err) {
       const message = (err as Error).message;
       assert.doesNotMatch(message, /super-secret-value-should-never-appear-in-errors/);
-      assert.doesNotMatch(message, new RegExp(key));
+      // `key` is random base64, which can contain regex metacharacters
+      // (`+`, `/`). Passing it to `new RegExp()` threw a SyntaxError
+      // ("Nothing to repeat") on a few percent of runs. The intent is a
+      // literal substring check, so do that directly.
+      assert.equal(
+        message.includes(key),
+        false,
+        "error message must never contain the raw key material",
+      );
     }
   });
 });
