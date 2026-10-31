@@ -197,14 +197,19 @@ describe("#14 Invalid agent configuration — handoff refuses to start rather th
     const liveFallbackStart = runtimeSrc.indexOf("const issues = validateAgentConfig(snapshot);");
     assert.ok(liveFallbackStart > -1);
     const nearby = runtimeSrc.slice(liveFallbackStart, liveFallbackStart + 400);
-    assert.match(nearby, /if \(issues\.length\) \{\s*\n\s*return \{\s*\n\s*handled: false,/);
+    // The only statement allowed before the refusal is ending the call
+    // (endUnservableCall) — the handoff still returns handled:false at once.
+    assert.match(
+      nearby,
+      /if \(issues\.length\) \{\s*\n(?:\s*await endUnservableCall\([^;]*\);\s*\n)?\s*return \{\s*\n\s*handled: false,/,
+    );
     assert.match(nearby, /Agent configuration incomplete/);
   });
 
   test("no business configured for the workspace also refuses to start, rather than running the agent with empty context", () => {
     assert.match(
       runtimeSrc,
-      /if \(!businessId\) \{\s*\n\s*return \{ handled: false, note: "No business is configured for this workspace yet\." \};/,
+      /if \(!businessId\) \{\s*\n(?:\s*await endUnservableCall\([^;]*\);\s*\n)?\s*return \{ handled: false, note: "No business is configured for this workspace yet\." \};/,
     );
   });
 });
@@ -289,7 +294,12 @@ describe("Caller ID reaches the voice runtime (trusted webhook `From`, never spe
     const vobizStart = vobizDoSrc.indexOf("const handle = await startRuntimeSession({");
     const vobizBlock = vobizDoSrc.slice(vobizStart, vobizDoSrc.indexOf("});\n", vobizStart));
     assert.match(vobizBlock, /requestProviderHangup: async \(\) =>/);
-    assert.match(vobizBlock, /adapter\.hangupCall\(body\.providerCallId\)/);
+    // Through the transient-failure retry (hangupWithRetry), still Vobiz's
+    // own hang-up API for this exact call.
+    assert.match(
+      vobizBlock,
+      /hangupWithRetry\(\s*\{ hangupCall: adapter\.hangupCall\.bind\(adapter\) \},\s*body\.providerCallId,?\s*\)/,
+    );
     const exotelStart = exotelDoSrc.indexOf("const handle = await startRuntimeSession({");
     assert.doesNotMatch(
       exotelDoSrc.slice(exotelStart, exotelDoSrc.indexOf("});\n", exotelStart)),
@@ -329,5 +339,144 @@ describe("greeting latency: routing reads after the gate", () => {
       );
       assert.match(doSrc, /pricesUnverified: body\.pricesUnverified === true,/, file);
     }
+  });
+});
+
+describe("a call the runtime can never serve is ended, not left connected in silence", () => {
+  test("endUnservableCall hangs up through the provider's own hang-up API and reports it", async () => {
+    const { endUnservableCall } = await import("./telephony/unservable-call.ts");
+    const hungUp: string[] = [];
+    const adapter = {
+      hangupCall: async (id: string) => {
+        hungUp.push(id);
+        return "hung_up" as const;
+      },
+    };
+    assert.equal(await endUnservableCall(adapter, "CA-1", "call-1", "no_business"), true);
+    assert.deepEqual(hungUp, ["CA-1"]);
+  });
+
+  test("a provider without a hang-up API (Exotel) is left exactly as before", async () => {
+    const { endUnservableCall } = await import("./telephony/unservable-call.ts");
+    assert.equal(await endUnservableCall({}, "CA-2", "call-2", "no_business"), false);
+    assert.equal(await endUnservableCall(null, "CA-2", "call-2", "no_business"), false);
+  });
+
+  test("a failed hang-up is logged and never thrown into the webhook", async () => {
+    const { endUnservableCall } = await import("./telephony/unservable-call.ts");
+    const adapter = {
+      hangupCall: async () => {
+        throw new Error("Vobiz unreachable");
+      },
+    };
+    const originalError = console.error;
+    const logged: unknown[] = [];
+    console.error = (...args: unknown[]) => {
+      logged.push(args);
+    };
+    try {
+      assert.equal(
+        await endUnservableCall(adapter, "CA-3", "call-3", "agent_config_incomplete"),
+        false,
+      );
+    } finally {
+      console.error = originalError;
+    }
+    assert.equal(logged.length, 1);
+  });
+
+  test("both deterministic refusals end the call before returning handled:false — and the gate denial does not (the caller is hearing the denial message)", () => {
+    const noBusiness = runtimeSrc.indexOf('"No business is configured for this workspace yet."');
+    const incomplete = runtimeSrc.indexOf("Agent configuration incomplete:");
+    const gateDenied = runtimeSrc.indexOf("if (!gate.allowed) {");
+    assert.ok(noBusiness > 0 && incomplete > 0 && gateDenied > 0);
+    assert.match(
+      runtimeSrc.slice(noBusiness - 200, noBusiness),
+      /endUnservableCall\(adapter, input\.providerCallId, input\.callId, "no_business"\)/,
+    );
+    assert.match(
+      runtimeSrc.slice(incomplete - 300, incomplete),
+      /endUnservableCall\([\s\S]*"agent_config_incomplete"/,
+    );
+    assert.doesNotMatch(runtimeSrc.slice(gateDenied, gateDenied + 200), /endUnservableCall/);
+  });
+});
+
+describe("provider hang-up retries transient failures only", () => {
+  const noSleep = async () => {};
+  const err = (status?: number) => Object.assign(new Error("hang-up failed"), { status });
+
+  test("an unreachable or 5xx provider is retried until it hangs up", async () => {
+    const { hangupWithRetry } = await import("./telephony/unservable-call.ts");
+    let attempts = 0;
+    const adapter = {
+      hangupCall: async () => {
+        attempts++;
+        if (attempts < 3) throw err(attempts === 1 ? 503 : 502);
+        return "hung_up" as const;
+      },
+    };
+    assert.equal(await hangupWithRetry(adapter, "CA-r1", noSleep), "hung_up");
+    assert.equal(attempts, 3);
+  });
+
+  test("a 4xx (bad credentials, wrong request) is not retried", async () => {
+    const { hangupWithRetry } = await import("./telephony/unservable-call.ts");
+    let attempts = 0;
+    const adapter = {
+      hangupCall: async () => {
+        attempts++;
+        throw err(401);
+      },
+    };
+    await assert.rejects(hangupWithRetry(adapter, "CA-r2", noSleep));
+    assert.equal(attempts, 1);
+  });
+
+  test("attempts are bounded: a provider that stays down fails after the last try", async () => {
+    const { hangupWithRetry } = await import("./telephony/unservable-call.ts");
+    let attempts = 0;
+    const adapter = {
+      hangupCall: async () => {
+        attempts++;
+        throw err(503);
+      },
+    };
+    await assert.rejects(hangupWithRetry(adapter, "CA-r3", noSleep));
+    assert.equal(attempts, 3);
+  });
+
+  test("'call not found' is an answer, not a failure — no retry", async () => {
+    const { hangupWithRetry } = await import("./telephony/unservable-call.ts");
+    let attempts = 0;
+    const adapter = {
+      hangupCall: async () => {
+        attempts++;
+        return "call_not_found" as const;
+      },
+    };
+    assert.equal(await hangupWithRetry(adapter, "CA-r4", noSleep), "call_not_found");
+    assert.equal(attempts, 1);
+  });
+
+  test("every Vobiz hang-up path goes through the retry", () => {
+    const doSrc = readFileSync(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        "telephony/vobiz-call-session-durable-object.server.ts",
+      ),
+      "utf8",
+    );
+    const helperSrc = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "telephony/unservable-call.ts"),
+      "utf8",
+    );
+    assert.doesNotMatch(
+      doSrc,
+      /adapter\.hangupCall\(/,
+      "the DO never calls hangupCall without the retry",
+    );
+    assert.equal((doSrc.match(/hangupWithRetry\(/g) ?? []).length >= 2, true);
+    assert.match(helperSrc, /export async function endUnservableCall[\s\S]*hangupWithRetry\(/);
   });
 });

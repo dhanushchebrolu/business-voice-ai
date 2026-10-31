@@ -2,6 +2,7 @@ import type { AudioMediaBridge } from "./audio-bridge.ts";
 import { VobizMediaBridge, type VobizSocketLike } from "./vobiz-media-bridge.server.ts";
 import { authorizeMediaSession, maskCallSid } from "./media-session-authorization.server.ts";
 import { VOBIZ_MEDIA_STREAM_PATH as MEDIA_STREAM_PATH } from "./vobiz-media-stream-path.ts";
+import { hangupWithRetry } from "./unservable-call.ts";
 import {
   startRuntimeSession,
   terminateRuntimeSession,
@@ -58,6 +59,9 @@ const DEFAULT_BRIDGE_TIMEOUT_MS = 15_000;
 interface PendingWaiter {
   resolve: (bridge: AudioMediaBridge | null) => void;
   timeout: ReturnType<typeof setTimeout>;
+  /** When the wait ends (epoch ms) — a joined start may extend it, never shorten it. */
+  deadline: number;
+  onTimeout: () => void;
 }
 
 /** Minimal Durable Object state shape this class actually uses — see cloudflare-env.server.ts for why this project doesn't depend on @cloudflare/workers-types. */
@@ -128,6 +132,24 @@ export interface VobizAgentRuntimeRpcResult {
 
 export class VobizCallSessionDurableObject {
   private waiters = new Map<string, PendingWaiter>();
+  /**
+   * The one in-flight start per provider call. A second start for the same
+   * call (the "ringing" and "in_progress" webhooks both hand off) joins it
+   * rather than registering a competing waiter: before, the second waiter
+   * replaced the first, and the first's timeout then deleted the second's,
+   * so a stream arriving between the two deadlines was never used and the
+   * caller heard silence.
+   */
+  private inflight = new Map<string, Promise<VobizAgentRuntimeRpcResult>>();
+  /**
+   * How long a media stream may wait for a runtime start to claim it before
+   * the call is ended. A stream that nothing claims means the handoff
+   * failed before reaching this object (a coordinator error, an exception,
+   * a crashed or missing background handoff): without this, the stream was
+   * dropped silently and the caller stayed connected — and billed — in
+   * silence. Overridable in tests.
+   */
+  protected unclaimedStreamMs = ARRIVAL_TTL_MS;
   private arrived = new Map<string, AudioMediaBridge>();
   private active = new Set<string>();
   private readonly state: DurableObjectState;
@@ -371,7 +393,18 @@ export class VobizCallSessionDurableObject {
     // The WS connection beat the webhook's start-runtime call — hold it
     // briefly rather than dropping it, exactly like Exotel's DO.
     this.arrived.set(providerCallId, bridge);
-    setTimeout(() => this.arrived.delete(providerCallId), ARRIVAL_TTL_MS);
+    setTimeout(() => {
+      // Claimed by a start (removed from `arrived`) or released by a hang-up:
+      // nothing to do. Otherwise no runtime will ever serve this call.
+      if (this.arrived.get(providerCallId) !== bridge) return;
+      this.arrived.delete(providerCallId);
+      console.error("vobiz_call_session_do:unclaimed_stream", {
+        doId: this.state.id.toString(),
+        providerCallId: maskCallSid(providerCallId),
+        waitedMs: this.unclaimedStreamMs,
+      });
+      void this.hangUpUnstartedCall(providerCallId).finally(() => bridge.close());
+    }, this.unclaimedStreamMs);
   }
 
   private release(providerCallId: string): void {
@@ -404,16 +437,20 @@ export class VobizCallSessionDurableObject {
       return Promise.resolve(already);
     }
     return new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        this.waiters.delete(providerCallId);
+      const onTimeout = () => {
+        // Only this wait's own entry — never a different wait's.
+        if (this.waiters.get(providerCallId) === waiter) this.waiters.delete(providerCallId);
         console.info("vobiz_call_session_do:await_bridge_timeout", {
           doId: this.state.id.toString(),
           providerCallId: maskCallSid(providerCallId),
           timeoutMs,
         });
         resolve(null);
-      }, timeoutMs);
-      this.waiters.set(providerCallId, {
+      };
+      const timeout = setTimeout(onTimeout, timeoutMs);
+      const waiter: PendingWaiter = {
+        deadline: Date.now() + timeoutMs,
+        onTimeout,
         resolve: (bridge) => {
           console.info("vobiz_call_session_do:await_bridge_resolved_by_waiter", {
             doId: this.state.id.toString(),
@@ -423,8 +460,56 @@ export class VobizCallSessionDurableObject {
           resolve(bridge);
         },
         timeout,
-      });
+      };
+      this.waiters.set(providerCallId, waiter);
     });
+  }
+
+  /** A joined start asked to wait longer: the single wait now ends at the later deadline. */
+  private extendWait(providerCallId: string, timeoutMs: number): void {
+    const waiter = this.waiters.get(providerCallId);
+    if (!waiter) return;
+    const deadline = Date.now() + timeoutMs;
+    if (deadline <= waiter.deadline) return;
+    clearTimeout(waiter.timeout);
+    waiter.deadline = deadline;
+    waiter.timeout = setTimeout(waiter.onTimeout, timeoutMs);
+  }
+
+  /**
+   * Ends a call whose runtime could not start because no media stream ever
+   * arrived. Vobiz has already been told to stream (vobiz-answer), so the
+   * call is connected: without this the caller hears silence until they
+   * hang up, and the call is billed for that time. Best effort — a failure
+   * is logged (masked id only), never thrown. Overridable in tests (the
+   * provider boundary).
+   */
+  protected async hangUpUnstartedCall(providerCallId: string): Promise<void> {
+    const masked = maskCallSid(providerCallId);
+    try {
+      const { getTelephonyAdapter } = await import("../telephony.server.ts");
+      const adapter = getTelephonyAdapter("vobiz");
+      if (!adapter?.hangupCall) {
+        console.error("vobiz_call_session_do:unstarted_call_not_hung_up", {
+          providerCallId: masked,
+          reason: "vobiz_not_configured",
+        });
+        return;
+      }
+      const outcome = await hangupWithRetry(
+        { hangupCall: adapter.hangupCall.bind(adapter) },
+        providerCallId,
+      );
+      console.info("vobiz_call_session_do:unstarted_call_hung_up", {
+        providerCallId: masked,
+        outcome,
+      });
+    } catch (err) {
+      console.error("vobiz_call_session_do:unstarted_call_not_hung_up", {
+        providerCallId: masked,
+        reason: (err as Error).message,
+      });
+    }
   }
 
   /* ------------------------------------------------------------------ */
@@ -467,6 +552,29 @@ export class VobizCallSessionDurableObject {
       } satisfies VobizAgentRuntimeRpcResult);
     }
 
+    const pending = this.inflight.get(body.providerCallId);
+    if (pending) {
+      this.extendWait(body.providerCallId, requestedTimeoutMs);
+      console.info("vobiz_call_session_do:start_runtime_joined_inflight", {
+        callId: body.callId,
+        providerCallId: maskedProviderCallId,
+      });
+      return jsonResponse(await pending);
+    }
+    const run = this.startRuntimeOnce(body, requestedTimeoutMs, maskedProviderCallId);
+    this.inflight.set(body.providerCallId, run);
+    try {
+      return jsonResponse(await run);
+    } finally {
+      if (this.inflight.get(body.providerCallId) === run) this.inflight.delete(body.providerCallId);
+    }
+  }
+
+  private async startRuntimeOnce(
+    body: VobizStartRuntimeRpcInput,
+    requestedTimeoutMs: number,
+    maskedProviderCallId: unknown,
+  ): Promise<VobizAgentRuntimeRpcResult> {
     const bridgeWaitStarted = Date.now();
     const bridge = await this.awaitBridge(body.providerCallId, requestedTimeoutMs);
     const waitedMs = Date.now() - bridgeWaitStarted;
@@ -480,10 +588,19 @@ export class VobizCallSessionDurableObject {
         arrivedSize: this.arrived.size,
         waitersSize: this.waiters.size,
       });
-      return jsonResponse({
+      // A runtime started meanwhile by another path is never hung up.
+      const running = getActiveSession(body.callId);
+      if (running) {
+        return {
+          handled: running.state !== "failed",
+          note: `Voice runtime already running (runtime session ${running.runtimeSessionId}).`,
+        };
+      }
+      await this.hangUpUnstartedCall(body.providerCallId);
+      return {
         handled: false,
-        note: "The provider does not expose a live audio channel yet — the runtime cannot start without one.",
-      } satisfies VobizAgentRuntimeRpcResult);
+        note: "The provider does not expose a live audio channel yet — the runtime cannot start without one. The call was ended so the caller is not left in silence.",
+      };
     }
     console.info("vobiz_call_session_do:start_runtime_bridge_found", {
       doId: this.state.id.toString(),
@@ -517,21 +634,39 @@ export class VobizCallSessionDurableObject {
         const { getTelephonyAdapter } = await import("../telephony.server.ts");
         const adapter = getTelephonyAdapter("vobiz");
         if (!adapter?.hangupCall) throw new Error("Vobiz adapter is not configured.");
-        return adapter.hangupCall(body.providerCallId);
+        return hangupWithRetry(
+          { hangupCall: adapter.hangupCall.bind(adapter) },
+          body.providerCallId,
+        );
       },
-    });
+    }).catch((err: unknown) => ({ startError: err as Error }));
+    if ("startError" in handle) {
+      // The stream is already taken, so the unclaimed-stream watchdog will
+      // not end this call: end it here, or the caller is left in silence.
+      console.error("vobiz_call_session_do:start_runtime_threw", {
+        callId: body.callId,
+        providerCallId: maskCallSid(body.providerCallId),
+        message: handle.startError.message,
+      });
+      await this.hangUpUnstartedCall(body.providerCallId);
+      bridge.close();
+      return {
+        handled: false,
+        note: "The voice runtime could not start (unexpected error). The call was ended so the caller is not left in silence.",
+      };
+    }
 
     console.info("vobiz_call_session_do:start_runtime_completed", {
       callId: body.callId,
       state: handle.state,
     });
-    return jsonResponse({
+    return {
       handled: handle.state !== "failed",
       note:
         handle.state === "failed"
           ? "The voice runtime failed to start — see server logs for the specific STT/TTS connection error."
           : `Voice runtime started (runtime session ${handle.runtimeSessionId}).`,
-    } satisfies VobizAgentRuntimeRpcResult);
+    };
   }
 
   private async handleTerminateRuntime(request: Request): Promise<Response> {

@@ -95,6 +95,7 @@ import {
 } from "./voice-languages.ts";
 import { localizedFallback } from "./voice-fallback-messages.ts";
 import {
+  anythingElseQuestion,
   askedAnythingElse,
   callOutcomeLine,
   callerBookingIntentAnyLanguage,
@@ -122,6 +123,11 @@ import {
   optionReference,
   isCorrection,
   WHICH_ONE_QUESTION,
+  BOOKING_HESITATION,
+  CALLER_ID_REJECTED,
+  parseNameIntroduction,
+  removeMessageSentClaims,
+  splitSentences,
 } from "./voice-intent-lexicon.ts";
 import type { ClaudeTool } from "./claude.server.ts";
 import { zonedWallTimeToUtc, dayOfWeekInTimezone } from "./calendar/timezone.ts";
@@ -949,6 +955,20 @@ interface Session {
   silenceFinalNoticeSent: boolean;
   /** Bounded wait for a PaymentCaptured/Failed/Expired event, armed only while state is "waiting_on_payment" — see armPaymentWaitTimer. */
   paymentWaitTimer: ReturnType<typeof setTimeout> | null;
+  /**
+   * A payment link really went out to the caller over WhatsApp on this call
+   * (a successful request_payment / create_payment_required_booking tool
+   * call) — the one verified message delivery the voice runtime knows of,
+   * so a sentence about it is not an unsupported claim (see
+   * guardMessageSentClaims).
+   */
+  paymentLinkSentThisCall: boolean;
+  /**
+   * Names the caller said are not theirs ("నా పేరు రవి కాదు", "my name is
+   * not Ravi"), lower-cased. The model's state block can never put one back
+   * for the rest of the call; the caller saying it plainly again lifts it.
+   */
+  rejectedCustomerNames: string[];
   /** Frames arriving after the bridge exists but before STT has connected — see startRuntimeSession. */
   pendingInboundFrames: AudioFrame[];
   /** Guards against a provider redelivering the exact same final_transcript event — see onSttEvent. */
@@ -2249,7 +2269,12 @@ export function textForSpeech(text: string): string {
 export function chunkIntoSentences(text: string): string[] {
   const trimmed = text.trim();
   if (!trimmed) return [];
-  const parts = trimmed.match(/[^.!?।\n]+[.!?।\n]*/g) ?? [trimmed];
+  // Boundaries only where a sentence really ends (splitSentences): an
+  // email, URL, decimal price or "Dr." is never cut into two TTS requests.
+  const parts = trimmed
+    .split(/(?<=\n)/)
+    .flatMap((line) => splitSentences(line))
+    .filter((part) => part.length > 0);
   const chunks: string[] = [];
   let buffer = "";
   for (const part of parts) {
@@ -2516,7 +2541,15 @@ export function mergeAppointmentState(
     phoneIssue = null;
   } else if (!current.phone && extractedResult && !extractedResult.ok) {
     phoneIssue = extractedResult.reason;
-  } else if (!current.phone && markerPhone) {
+  } else if (
+    !current.phone &&
+    markerPhone &&
+    // After the caller declined (or is unsure about) the calling number,
+    // only a number in their own words counts — the model re-typing the
+    // caller ID into its state block must never select it.
+    current.callerIdChoice !== "declined" &&
+    current.callerIdChoice !== "clarifying"
+  ) {
     phone = markerPhone;
     phoneSource = "caller_provided";
     phoneIssue = null;
@@ -2901,6 +2934,9 @@ export function callerAuthorizesBooking(
   runtimeBookingQuestion: string | null = null,
 ): boolean {
   if (BOOKING_NEGATION_PATTERN.test(text) || isPresenceCheck(text)) return false;
+  // "yes, one second" / "yes, hold on" / "sure, let me think": a pause or a
+  // hedge alongside a yes is never consent.
+  if (BOOKING_HESITATION.test(text)) return false;
   // The same rules in every supported language: a refusal never counts, and
   // an explicit "book it" ("बुक कर दो", "బుక్ చేయండి") always does.
   const native = callerBookingIntentAnyLanguage(text);
@@ -3333,7 +3369,9 @@ export function parseCallerIntentFromText(text: string): CallerIntentSignals {
     : null;
   const explicitTime = extractExplicitTime(text) ?? explicitTimeAnyLanguage(text);
   const bookingConfirmed =
-    BOOKING_CONFIRMATION_PATTERN.test(text) && !BOOKING_NEGATION_PATTERN.test(text);
+    BOOKING_CONFIRMATION_PATTERN.test(text) &&
+    !BOOKING_NEGATION_PATTERN.test(text) &&
+    !BOOKING_HESITATION.test(text);
   const reminderRequested = REMINDER_PATTERN.test(text);
   const phone = extractPhoneNumber(text);
   const email = extractEmail(text);
@@ -3578,17 +3616,30 @@ function nativeCallerName(text: string, agentAskedForName: boolean): string | nu
  */
 export function resolveCallerIdAnswer(
   text: string,
-  state: Pick<AppointmentState, "phone" | "callerIdChoice">,
+  state: Pick<AppointmentState, "phone" | "callerIdChoice"> &
+    Partial<Pick<AppointmentState, "phoneSource">>,
   callerId: string | null,
   phoneCountry: string | null = null,
 ):
   | (Pick<AppointmentState, "callerIdChoice"> &
       Partial<Pick<AppointmentState, "phone" | "phoneSource" | "phoneIssue">>)
   | null {
-  if (state.phone || !callerId) return null;
+  if (!callerId) return null;
+  // "ఈ నెంబర్ కాదు", "same number kaadu", "इस नंबर पर नहीं", "not this
+  // number": the caller rejects the calling number itself. That never
+  // selects it, whatever else the turn says ("అవును, ఈ నెంబర్ కాదు").
+  const rejected = CALLER_ID_REJECTED.test(text);
+  if (state.phone) {
+    // Only the caller ID itself can be rejected; a number the caller gave
+    // is kept (a spoken correction is handled by mergeAppointmentState).
+    return rejected && state.phoneSource === "caller_id" && !extractPhoneNumber(text)
+      ? { callerIdChoice: "declined", phone: null, phoneSource: null, phoneIssue: null }
+      : null;
+  }
   const spoken = extractPhoneNumber(text);
   if (
     !spoken &&
+    !rejected &&
     CALLER_ID_EXPLICIT_PATTERN.test(text) &&
     !CALLER_ID_NEGATED_PATTERN.test(text) &&
     !CALLER_ID_HEDGE_PATTERN.test(text)
@@ -3613,6 +3664,24 @@ export function resolveCallerIdAnswer(
       : { callerIdChoice: "declined", phoneIssue: normalized.reason };
   }
   const hedged = CALLER_ID_HEDGE_PATTERN.test(text);
+  if (rejected) {
+    // A yes and a rejection together, with no other number named, is
+    // contradictory: one clarification, then the normal number request.
+    const firstWord = text.trim().split(/[\s,.!?।]+/)[0] ?? "";
+    const affirmed =
+      AFFIRMATIVE_PATTERN.test(text) ||
+      confirmationAnswerAnyLanguage(text) === "yes" ||
+      (firstWord !== "" && confirmationAnswerAnyLanguage(firstWord) === "yes");
+    // (Not CALLER_ID_DIFFERENT_PATTERN: it also matches "not this number".)
+    const namesAnother =
+      /వేరే|వేరొక|दूसर|अलग|\b(?:vere|vera|dusra|doosra|alag|another|different|other|new|separate)\b/iu.test(
+        text,
+      );
+    if (affirmed && !namesAnother) {
+      return { callerIdChoice: state.callerIdChoice === "clarifying" ? "declined" : "clarifying" };
+    }
+    return { callerIdChoice: "declined" };
+  }
   if (!hedged && CALLER_ID_DIFFERENT_PATTERN.test(text)) return { callerIdChoice: "declined" };
   // The same answer in the caller's own language ("అవును", "हाँ, इसी नंबर
   // पर", "వేరే నంబర్") — without it a Telugu or Hindi "yes" read as
@@ -4456,6 +4525,15 @@ async function getReply(
       const enteredPaymentWait = result.toolCalls.some(
         (t) => t.name === "request_payment" && !t.isError,
       );
+      if (
+        result.toolCalls.some(
+          (t) =>
+            (t.name === "request_payment" || t.name === "create_payment_required_booking") &&
+            !t.isError,
+        )
+      ) {
+        session.paymentLinkSentThisCall = true;
+      }
       const outcome = bookingOutcome as BookingOutcome | null;
       return {
         reply: result.reply,
@@ -4917,6 +4995,28 @@ function immediateCallerAck(
 const PHRASING_LLM_TIMEOUT_MS = 6_000;
 
 /**
+ * Removes sentences telling the caller an SMS, WhatsApp, text or email was
+ * or will be sent to them (removeMessageSentClaims) — the runtime holds no
+ * record of any such delivery, so the claim is unsupported. The one
+ * verified delivery, a payment link sent this call, lets the wording stand.
+ * Returns the guarded text ("" when nothing is left).
+ */
+function guardMessageSentClaims(session: Session, text: string, path: string): string {
+  if (session.paymentLinkSentThisCall) return text;
+  const guarded = removeMessageSentClaims(text);
+  if (guarded.removed === 0) return text;
+  log("message_sent_claim_removed", session, { sentences: guarded.removed, path });
+  return guarded.reply;
+}
+
+/** What is said when a reply was nothing but an unsupported message claim: the step the call is on, in its language. */
+function stepAfterRemovedClaim(session: Session): string {
+  const language = responseLanguageFor(session);
+  if (language === "en-IN") return pendingStepQuestion(session);
+  return missingDetailQuestionFor(session) ?? anythingElseQuestion(language);
+}
+
+/**
  * `localFallback` is a plain, already caller-facing sentence (never an
  * LLM-prompt-style instruction, unlike `facts`) — spoken verbatim when
  * this function's own LLM call is slow enough to exceed
@@ -5021,11 +5121,21 @@ async function composeHonestBookingReply(
       });
       return localFallback;
     }
+    // Model wording may not claim a message was sent (see guardMessageSentClaims).
+    const guarded = guardMessageSentClaims(session, spoken, "booking_reply");
+    if (!guarded) {
+      namedLog("voice:final_response", session, {
+        latency_ms: Date.now() - startedAt,
+        replyLength: localFallback.length,
+        fellBackToCannedReply: true,
+      });
+      return localFallback;
+    }
     namedLog("voice:final_response", session, {
       latency_ms: Date.now() - startedAt,
-      replyLength: spoken.length,
+      replyLength: guarded.length,
     });
-    return spoken;
+    return guarded;
   } catch (err) {
     log("booking_reply_composition_failed", session, { message: (err as Error).message });
     namedLog("voice:final_response", session, {
@@ -7687,14 +7797,61 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
       phone_issue: callerIdAnswer.phoneIssue ?? null,
     });
   }
+  // A name given with a negation ("నా పేరు రవి కాదు, రాజు", "mera naam Ravi
+  // nahi, Raju", "my name is not Ravi, it is Raju") corrects the name even
+  // when one is known, and outranks the model's state block for this turn
+  // (re-applied after the merge below). A rejected name with no correction
+  // is cleared so it is asked again — never re-typed back by the model.
+  const introduction = parseNameIntroduction(text);
+  let callerCorrectedName: string | null = null;
+  const rejectName = (...names: string[]) => {
+    for (const n of names.map((x) => x.toLowerCase())) {
+      if (!session.rejectedCustomerNames.includes(n)) session.rejectedCustomerNames.push(n);
+    }
+  };
+  if (introduction?.name && !introduction.rejected) {
+    // Said plainly again ("my name is Ravi"): no longer rejected.
+    const said = introduction.name.toLowerCase();
+    session.rejectedCustomerNames = session.rejectedCustomerNames.filter((n) => n !== said);
+  }
+  if (introduction?.rejected) {
+    const known = session.appointmentState.customerName;
+    if (introduction.name) {
+      callerCorrectedName = introduction.name;
+      rejectName(introduction.rejected);
+      // "Ravi" known from the model, "రవి కాదు" from the caller: the scripts
+      // can't be compared, so the known name is not trusted either.
+      if (known && known.toLowerCase() !== introduction.name.toLowerCase()) {
+        const latin = (n: string) => /^[\p{Script=Latin}\s.'-]+$/u.test(n);
+        if (latin(known) !== latin(introduction.rejected)) rejectName(known);
+      }
+      session.appointmentState = { ...session.appointmentState, customerName: introduction.name };
+      log("caller_name_corrected", session, {});
+    } else if (known) {
+      // The same name, or one in another script ("Ravi" from the model,
+      // "రవి" from the caller) that can't be compared: not trusted either.
+      const latin = (n: string) => /^[\p{Script=Latin}\s.'-]+$/u.test(n);
+      if (
+        known.toLowerCase() === introduction.rejected.toLowerCase() ||
+        latin(known) !== latin(introduction.rejected)
+      ) {
+        rejectName(known, introduction.rejected);
+        session.appointmentState = { ...session.appointmentState, customerName: null };
+        log("caller_name_rejected", session, {});
+      }
+    }
+  }
   // The caller's name from their own words, when not already known — the
   // model's state block does not reliably carry it (see extractCallerName).
-  if (!session.appointmentState.customerName) {
+  // An introduction that holds no name ("నా పేరు చెప్పాను కదా", "mera naam
+  // nahi bataunga") captures nothing.
+  if (!session.appointmentState.customerName && !introduction?.rejected) {
     const lastAgentTurn = [...session.turns].reverse().find((t) => t.role === "assistant");
     const agentAskedForName = Boolean(
       lastAgentTurn && NAME_QUESTION_PATTERN.test(lastAgentTurn.text),
     );
-    const name = extractCallerName(text, agentAskedForName);
+    const name =
+      introduction && !introduction.name ? null : extractCallerName(text, agentAskedForName);
     if (name) {
       session.appointmentState = { ...session.appointmentState, customerName: name };
       log("caller_name_captured", session, { asked: agentAskedForName });
@@ -8081,6 +8238,27 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
               callerDateExplicit: callerSaidExplicitDay(session, callerIntent),
             },
           );
+          // The caller's own negated name correction wins over the model's
+          // state block, which may still carry the old (rejected) name.
+          if (callerCorrectedName && appointmentState.customerName !== callerCorrectedName) {
+            log("caller_name_kept_over_marker", session, {});
+            appointmentState = { ...appointmentState, customerName: callerCorrectedName };
+          } else if (
+            appointmentState.customerName &&
+            session.rejectedCustomerNames.includes(appointmentState.customerName.toLowerCase())
+          ) {
+            // The model re-typed a name the caller rejected: keep the name
+            // known before this turn (if it isn't rejected too), else none.
+            const before = previousAppointmentState.customerName;
+            log("caller_name_rejection_kept_over_marker", session, {});
+            appointmentState = {
+              ...appointmentState,
+              customerName:
+                before && !session.rejectedCustomerNames.includes(before.toLowerCase())
+                  ? before
+                  : null,
+            };
+          }
           // A day that has already passed is never the appointment day (see
           // mergeAppointmentState's `today`); logged so a model still working
           // from a stale "today" shows up. The date itself is not logged.
@@ -8487,6 +8665,10 @@ async function handleUserUtterance(session: Session, text: string, immediateAck:
         return;
       }
 
+      // No SMS, WhatsApp or email goes out from this call (unless a payment
+      // link really did): a sentence claiming one is dropped; contact
+      // details and everything else in the reply are kept as they are.
+      reply = guardMessageSentClaims(session, reply, "reply") || stepAfterRemovedClaim(session);
       // No transfer, callback or message-taking exists on this line: a
       // reply promising one is replaced by the honest line in the caller's
       // language (what to do instead), never spoken.
@@ -9382,6 +9564,8 @@ export async function startRuntimeSession(
     silencePromptSent: false,
     silenceFinalNoticeSent: false,
     paymentWaitTimer: null,
+    paymentLinkSentThisCall: false,
+    rejectedCustomerNames: [],
     pendingInboundFrames: [],
     lastFinalTranscript: null,
     firstInboundFrameLogged: false,
