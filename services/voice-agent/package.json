@@ -1,0 +1,33 @@
+{
+  "name": "@clickai/voice-agent",
+  "private": true,
+  "type": "module",
+  "description": "ClickAI LiveKit voice agent: Vobiz SIP -> LiveKit -> this worker -> klyro. Long-running Node process, deployed separately from the klyro Cloudflare Worker.",
+  "scripts": {
+    "start": "node --experimental-strip-types src/worker.ts start",
+    "dev": "node --experimental-strip-types src/worker.ts dev",
+    "download-files": "livekit-agents download-files",
+    "typecheck": "tsc --noEmit -p .",
+    "test": "node --experimental-strip-types --test --test-reporter=spec \"tests/*.spec.ts\"",
+    "provision:sip": "node --experimental-strip-types deploy/livekit/provision-sip.ts",
+    "bench": "node --experimental-strip-types bench/latency.ts"
+  },
+  "dependencies": {
+    "@livekit/agents": "1.9.5",
+    "@livekit/agents-plugin-anthropic": "1.9.5",
+    "@livekit/agents-plugin-livekit": "1.9.5",
+    "@livekit/agents-plugin-openai": "1.9.5",
+    "@livekit/agents-plugin-sarvam": "1.9.5",
+    "@livekit/agents-plugin-silero": "1.9.5",
+    "@livekit/rtc-node": "1.2.1",
+    "livekit-server-sdk": "2.19.2",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.2",
+    "typescript": "5.6.3"
+  },
+  "engines": {
+    "node": ">=22.6"
+  }
+}

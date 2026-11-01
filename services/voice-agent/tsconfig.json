@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["node"],
+    "lib": ["ES2023"]
+  },
+  "include": [
+    "src/**/*.ts",
+    "tests/**/*.ts",
+    "../../src/lib/voice-intent-lexicon.ts",
+    "../../src/lib/voice-languages.ts",
+    "deploy/**/*.ts"
+  ]
+}

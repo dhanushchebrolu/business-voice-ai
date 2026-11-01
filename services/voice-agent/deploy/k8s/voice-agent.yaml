@@ -1,0 +1,77 @@
+# ClickAI voice agent on Kubernetes (any provider). One namespace per environment
+# (clickai-dev / clickai-staging / clickai-prod); secrets come from the
+# environment's secret manager into the Secret "voice-agent-secrets" (keys =
+# names in .env.example). Image: built from the repo root, tagged by git SHA.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voice-agent
+  labels: { app: voice-agent }
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } # never drop capacity during a rollout
+  selector:
+    matchLabels: { app: voice-agent }
+  template:
+    metadata:
+      labels: { app: voice-agent }
+    spec:
+      # SIGTERM -> the worker drains (stops taking calls, lets active calls finish
+      # up to DRAIN_TIMEOUT_MS = 15 min). Grace period must exceed the drain timeout.
+      terminationGracePeriodSeconds: 960
+      securityContext: { runAsNonRoot: true, runAsUser: 1000 }
+      containers:
+        - name: voice-agent
+          image: REGISTRY/clickai-voice-agent:GIT_SHA
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef: { name: voice-agent-secrets }
+          env:
+            - { name: APP_ENV, value: production }
+            - { name: MAX_CONCURRENT_SESSIONS, value: "8" }
+            - { name: HEALTH_PORT, value: "8081" }
+          ports:
+            - { name: health, containerPort: 8081 }
+          # LiveKit's built-in health server: 200 only when connected to LiveKit
+          # and the inference (turn-detector) process is running.
+          readinessProbe:
+            httpGet: { path: /, port: health }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /, port: health }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 6
+          resources:
+            requests: { cpu: "2", memory: 3Gi }
+            limits: { cpu: "4", memory: 6Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: voice-agent
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: voice-agent }
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 55 } }
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 900 # scale-in waits; each removed pod drains its calls first
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: voice-agent
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: voice-agent }

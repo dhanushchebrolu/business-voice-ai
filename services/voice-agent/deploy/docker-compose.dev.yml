@@ -1,0 +1,22 @@
+# Local development stack: LiveKit server in --dev mode + the agent.
+# SIP is NOT included: local SIP needs livekit-sip + Redis + a public IP for
+# Vobiz; use a LiveKit Cloud development project for SIP tests (RUNBOOK.md).
+# Run from the repository root:
+#   docker compose -f services/voice-agent/deploy/docker-compose.dev.yml up --build
+services:
+  livekit:
+    image: livekit/livekit-server:v1.9.1
+    command: --dev --bind 0.0.0.0
+    ports: ["7880:7880", "7881:7881", "50000-50100:50000-50100/udp"]
+  voice-agent:
+    build:
+      context: ../../..
+      dockerfile: services/voice-agent/Dockerfile
+    command: ["node", "--experimental-strip-types", "src/worker.ts", "dev"]
+    env_file: ../.env
+    environment:
+      APP_ENV: development
+      LIVEKIT_URL: ws://livekit:7880
+      LIVEKIT_API_KEY: devkey
+      LIVEKIT_API_SECRET: secret
+    depends_on: [livekit]
