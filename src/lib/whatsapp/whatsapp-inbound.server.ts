@@ -15,15 +15,24 @@
  *      worker (whatsapp-ai-reply.server.ts) without blocking the
  *      acknowledgement.
  *
- * Idempotency: the delivery's `event_id` is claimed in webhook_events
- * (provider='vobiz_whatsapp') and each message is unique per (connection,
- * wa_message_id). If processing fails part-way, the claim is released and
- * the error propagates (the route answers 5xx) so Vobiz retries; messages
- * already stored are skipped on the retry, and only messages stored for the
- * first time are passed on for a reply.
+ * Idempotency and recovery: the delivery's `event_id` is claimed in
+ * webhook_events (provider='vobiz_whatsapp') with a lease, and each message
+ * is unique per (connection, wa_message_id). Event states
+ * (20261029090000): processed (processed_at set); deferred (error set,
+ * next_attempt_at in the future — no live connection yet, or a status for a
+ * message whose WhatsApp id isn't recorded yet); retained for an operator
+ * (error set, next_attempt_at NULL — routing conflict, no phone number id,
+ * retries exhausted); in progress (error NULL, next_attempt_at = lease end).
+ * Due events are replayed by replayDueVobizWebhookEvents (dispatch cron) or
+ * by Vobiz's own redelivery, at most WEBHOOK_MAX_ATTEMPTS times in total. A
+ * storage failure leaves the event due and propagates (the route answers
+ * 5xx). Replays are idempotent: messages already stored are skipped, statuses
+ * only move forward, a consent signal is recorded once, and only messages
+ * stored for the first time are passed on for a reply.
  *
  * Tenant identity comes only from the connection row matched by the
- * payload's phone_number_id — never from anything else in the payload.
+ * payload's phone_number_id — never from anything else in the payload (a
+ * channel_id, where present, must agree with it).
  *
  * A customer's inbound message is never treated as proof of payment,
  * confirmation or anything payment-state-related.
@@ -88,6 +97,31 @@ function mapInboundMessageType(metaType: string | undefined): string {
   }
 }
 
+async function resolveConnectionByVobizChannelId(
+  supabaseAdmin: Client,
+  channelId: string,
+): Promise<{ id: string; organization_id: string; business_id: string | null } | null> {
+  const { data, error } = await supabaseAdmin
+    .from("whatsapp_connections")
+    .select("id, organization_id, business_id")
+    .eq("vobiz_channel_id", channelId)
+    .neq("status", "disconnected")
+    .maybeSingle();
+  if (error) throw error;
+  return data;
+}
+
+function topLevelKeys(rawBody: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(rawBody);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? Object.keys(parsed).slice(0, 20)
+      : [];
+  } catch {
+    return ["(not JSON)"];
+  }
+}
+
 async function resolveConnectionByPhoneNumberId(
   supabaseAdmin: Client,
   phoneNumberId: string,
@@ -114,26 +148,47 @@ function statusErrorMessage(status: MetaStatusUpdate): string | null {
 /** Meta's "this user has stopped marketing messages from businesses" delivery error. */
 export const META_MARKETING_OPT_OUT_ERROR = 131050;
 
+/**
+ * Applies one status to this connection's message with that WhatsApp id.
+ * "unmatched": no message of this connection has the id (yet) — e.g. the
+ * status arrived before the send was recorded, or Vobiz returned no
+ * meta_message_id at send time. The caller keeps the event for a retry.
+ * "stale": the message is already further along (out of order / repeat).
+ */
 async function applyStatusUpdate(
   supabaseAdmin: Client,
   connection: { id: string; organization_id: string; business_id: string | null },
   status: MetaStatusUpdate,
-): Promise<void> {
+): Promise<"applied" | "stale" | "unmatched" | "skipped"> {
   const connectionId = connection.id;
-  if (!status.id || !status.status) return;
+  if (!status.id || !status.status) return "skipped";
   const replaceable = STATUS_MAY_REPLACE[status.status];
-  if (!replaceable) return; // Unrecognized Meta status — never guess, just skip.
+  if (!replaceable) return "skipped"; // Unrecognized Meta status — never guess, just skip.
   const update: Database["public"]["Tables"]["whatsapp_messages"]["Update"] = {
     status: status.status,
   };
   if (status.status === "failed") update.error_message = statusErrorMessage(status);
-  const { error } = await supabaseAdmin
+  const { data: changed, error } = await supabaseAdmin
     .from("whatsapp_messages")
     .update(update)
     .eq("whatsapp_connection_id", connectionId)
     .eq("wa_message_id", status.id)
-    .in("status", [...replaceable]);
+    .in("status", [...replaceable])
+    .select("id");
   if (error) throw error;
+  let outcome: "applied" | "stale" | "unmatched" = "applied";
+  if ((changed ?? []).length === 0) {
+    // Nothing moved: either the message is already further along (normal), or
+    // no stored message of this connection has this wamid (yet).
+    const { data: known, error: knownError } = await supabaseAdmin
+      .from("whatsapp_messages")
+      .select("id")
+      .eq("whatsapp_connection_id", connectionId)
+      .eq("wa_message_id", status.id)
+      .limit(1);
+    if (knownError) throw knownError;
+    outcome = (known ?? []).length === 0 ? "unmatched" : "stale";
+  }
 
   // The customer told WhatsApp they don't want marketing from businesses:
   // record it so no campaign targets them again.
@@ -143,7 +198,19 @@ async function applyStatusUpdate(
     connection.business_id
   ) {
     const waId = status.recipient_id;
-    if (waId && /^[1-9]\d{6,14}$/.test(waId)) {
+    const evidence = `meta_error:${META_MARKETING_OPT_OUT_ERROR}:${status.id}`;
+    // A redelivered or replayed event must not record the same signal twice.
+    const { data: already, error: alreadyError } = waId
+      ? await supabaseAdmin
+          .from("whatsapp_consent_events")
+          .select("id")
+          .eq("business_id", connection.business_id)
+          .eq("wa_id", waId)
+          .eq("evidence", evidence)
+          .limit(1)
+      : { data: [], error: null };
+    if (alreadyError) throw alreadyError;
+    if (waId && /^[1-9]\d{6,14}$/.test(waId) && (already ?? []).length === 0) {
       await recordConsentEvent(supabaseAdmin, {
         organizationId: connection.organization_id,
         businessId: connection.business_id,
@@ -151,11 +218,12 @@ async function applyStatusUpdate(
         scope: "marketing",
         action: "opt_out",
         source: "meta_signal",
-        evidence: `meta_error:${META_MARKETING_OPT_OUT_ERROR}:${status.id}`,
+        evidence,
         occurredAt: consentEventTime(status.timestamp, new Date()),
       });
     }
   }
+  return outcome;
 }
 
 /** Stores one inbound message. Returns its row id when it was stored for the first time, null when it already existed (a Meta retry). */
@@ -226,106 +294,362 @@ async function persistInboundMessage(
 }
 
 export interface ProcessInboundWebhookResult {
-  outcome: "duplicate" | "processed" | "ignored";
+  /**
+   * - processed: applied (or nothing in it was for this codebase, e.g. `call.*`
+   *   is "ignored")
+   * - duplicate: already processed, or another worker holds it right now
+   * - deferred: kept for a bounded retry (no live connection yet, or a status
+   *   for a message whose WhatsApp id isn't known yet)
+   * - retained: kept for an operator, never applied automatically (routing
+   *   conflict, no phone number id, retries exhausted)
+   * - unrecognized: signed by Vobiz but not the documented envelope; kept
+   */
+  outcome: "duplicate" | "processed" | "ignored" | "deferred" | "retained" | "unrecognized";
   /** Inbound text messages stored for the first time by this delivery — the ones that may get an AI reply. */
   newInboundTextMessageIds: string[];
+}
+
+/** Attempts per event (first delivery included) before it is kept for an operator. */
+export const WEBHOOK_MAX_ATTEMPTS = 8;
+/** Wait before the next attempt, by attempts made so far (1 → 1 min … 7+ → 6 h). */
+const RETRY_DELAYS_MS = [
+  60_000,
+  2 * 60_000,
+  5 * 60_000,
+  15 * 60_000,
+  30 * 60_000,
+  60 * 60_000,
+  3 * 3_600_000,
+  6 * 3_600_000,
+];
+/** How long a worker holds an event it is applying before another may take it over. */
+export const WEBHOOK_LEASE_MS = 5 * 60_000;
+/** The provider name for signed deliveries without the documented envelope (keyed by the body's hash, so they never collide with real event ids). */
+export const VOBIZ_UNRECOGNIZED_PROVIDER = "vobiz_whatsapp_unrecognized";
+
+function retryDelayMs(attempts: number): number {
+  return RETRY_DELAYS_MS[Math.min(Math.max(attempts, 1), RETRY_DELAYS_MS.length) - 1]!;
+}
+
+type EventRow = {
+  id: string;
+  event_id: string;
+  event_type: string | null;
+  payload: Json;
+  attempts: number;
+  processed_at: string | null;
+  next_attempt_at: string | null;
+  error: string | null;
+};
+const EVENT_COLUMNS =
+  "id, event_id, event_type, payload, attempts, processed_at, next_attempt_at, error";
+
+/** What applying one event's change value found. */
+type Applied =
+  | { kind: "done"; newInboundTextMessageIds: string[] }
+  | {
+      kind: "defer";
+      reason: "no_live_connection" | "status_unmatched";
+      newInboundTextMessageIds: string[];
+    }
+  | { kind: "terminal"; reason: "missing_phone_number_id" | "routing_conflict" };
+
+/**
+ * Applies one stored Vobiz envelope. Tenant identity comes only from the live
+ * connection matched by `payload.metadata.phone_number_id` (Vobiz's Events
+ * Reference: the payload is the WhatsApp Cloud API change value). A
+ * `channel_id`, where a delivery carries one, is only a cross-check — never
+ * the sole routing key, since that field's placement is not confirmed.
+ * Everything here is idempotent, so a replay can't duplicate a message, a
+ * status change or a consent record.
+ */
+async function applyEnvelope(
+  supabaseAdmin: Client,
+  eventId: string,
+  envelope: Record<string, unknown>,
+): Promise<Applied> {
+  const value = (envelope["payload"] ?? {}) as MetaWebhookValue;
+  const phoneNumberId = value.metadata?.phone_number_id ?? null;
+  const channelId =
+    (typeof envelope["channel_id"] === "string" && envelope["channel_id"]) ||
+    (typeof (value as Record<string, unknown>)["channel_id"] === "string" &&
+      ((value as Record<string, unknown>)["channel_id"] as string)) ||
+    null;
+  if (!phoneNumberId) {
+    console.error("whatsapp_webhook:payload_without_phone_number_id", {
+      eventId,
+      keys: value && typeof value === "object" ? Object.keys(value).slice(0, 20) : [],
+    });
+    return { kind: "terminal", reason: "missing_phone_number_id" };
+  }
+  const connection = await resolveConnectionByPhoneNumberId(supabaseAdmin, phoneNumberId);
+  if (connection && channelId) {
+    const byChannel = await resolveConnectionByVobizChannelId(supabaseAdmin, channelId);
+    if (!byChannel || byChannel.id !== connection.id) {
+      // The two identifiers disagree: never guess which tenant it belongs to.
+      console.error("whatsapp_webhook:routing_conflict", { eventId, phoneNumberId, channelId });
+      return { kind: "terminal", reason: "routing_conflict" };
+    }
+  }
+  if (!connection) {
+    // E.g. the event arrived before onboarding saved the connection.
+    console.warn("whatsapp_webhook:no_live_connection", { eventId, phoneNumberId });
+    return { kind: "defer", reason: "no_live_connection", newInboundTextMessageIds: [] };
+  }
+
+  let unmatched = 0;
+  for (const status of value.statuses ?? []) {
+    if ((await applyStatusUpdate(supabaseAdmin, connection, status)) === "unmatched") unmatched++;
+  }
+  const newInboundTextMessageIds: string[] = [];
+  for (const message of value.messages ?? []) {
+    const contactName = value.contacts?.find((c) => c.wa_id === message.from)?.profile?.name;
+    const storedId = await persistInboundMessage(
+      supabaseAdmin,
+      connection,
+      message,
+      contactName ?? value.contacts?.[0]?.profile?.name,
+    );
+    if (storedId && message.type === "text" && message.text?.body) {
+      newInboundTextMessageIds.push(storedId);
+    }
+  }
+  if (unmatched > 0) {
+    console.warn("whatsapp_webhook:status_unmatched", {
+      eventId,
+      connectionId: connection.id,
+      unmatched,
+    });
+    return { kind: "defer", reason: "status_unmatched", newInboundTextMessageIds };
+  }
+  return { kind: "done", newInboundTextMessageIds };
+}
+
+/**
+ * Applies an event this worker has claimed and records the result on its
+ * row: processed, deferred (next attempt scheduled), or terminal (kept, with
+ * the reason). A database failure leaves it immediately due again and is
+ * rethrown, so the caller can answer 5xx and Vobiz redelivers; attempts are
+ * bounded either way.
+ */
+async function applyClaimed(
+  supabaseAdmin: Client,
+  row: { id: string; event_id: string; payload: Json; attempts: number },
+  now: Date,
+): Promise<ProcessInboundWebhookResult> {
+  const finish = async (patch: Database["public"]["Tables"]["webhook_events"]["Update"]) => {
+    const { error } = await supabaseAdmin.from("webhook_events").update(patch).eq("id", row.id);
+    if (error) throw error;
+  };
+  const exhausted = row.attempts >= WEBHOOK_MAX_ATTEMPTS;
+  let applied: Applied;
+  try {
+    applied = await applyEnvelope(
+      supabaseAdmin,
+      row.event_id,
+      (row.payload ?? {}) as Record<string, unknown>,
+    );
+  } catch (err) {
+    const code = (err as { code?: string } | null)?.code ?? "unknown";
+    await supabaseAdmin
+      .from("webhook_events")
+      .update({
+        error: `retryable:${String(code).slice(0, 40)}`,
+        next_attempt_at: exhausted ? null : now.toISOString(),
+      })
+      .eq("id", row.id);
+    throw err;
+  }
+  if (applied.kind === "done") {
+    await finish({ processed_at: now.toISOString(), error: null, next_attempt_at: null });
+    return { outcome: "processed", newInboundTextMessageIds: applied.newInboundTextMessageIds };
+  }
+  if (applied.kind === "terminal") {
+    await finish({ error: applied.reason, next_attempt_at: null });
+    return { outcome: "retained", newInboundTextMessageIds: [] };
+  }
+  if (exhausted) {
+    console.error("whatsapp_webhook:retries_exhausted", {
+      eventId: row.event_id,
+      reason: applied.reason,
+      attempts: row.attempts,
+    });
+    await finish({ error: `gave_up:${applied.reason}`, next_attempt_at: null });
+    return { outcome: "retained", newInboundTextMessageIds: applied.newInboundTextMessageIds };
+  }
+  await finish({
+    error: applied.reason,
+    next_attempt_at: new Date(now.getTime() + retryDelayMs(row.attempts)).toISOString(),
+  });
+  return { outcome: "deferred", newInboundTextMessageIds: applied.newInboundTextMessageIds };
+}
+
+/**
+ * Takes an existing, due event for this worker: only when it isn't processed,
+ * isn't terminal, and is due (a pending retry, or an in-progress claim whose
+ * lease ran out). Optimistic on `attempts`, so two workers can't both take it.
+ */
+async function claimExisting(
+  supabaseAdmin: Client,
+  row: EventRow,
+  now: Date,
+): Promise<{ id: string; event_id: string; payload: Json; attempts: number } | null> {
+  if (row.processed_at || !row.next_attempt_at) return null;
+  if (new Date(row.next_attempt_at).getTime() > now.getTime()) return null;
+  const attempts = row.attempts + 1;
+  const { data, error } = await supabaseAdmin
+    .from("webhook_events")
+    .update({
+      attempts,
+      next_attempt_at: new Date(now.getTime() + WEBHOOK_LEASE_MS).toISOString(),
+    })
+    .eq("id", row.id)
+    .eq("attempts", row.attempts)
+    .is("processed_at", null)
+    .select("id");
+  if (error) throw error;
+  if ((data ?? []).length === 0) return null;
+  return { id: row.id, event_id: row.event_id, payload: row.payload, attempts };
+}
+
+async function sha256Hex(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 /**
  * Process one already signature-verified Vobiz delivery
  * (vobiz-webhook.server.ts). The envelope's `event_id` is claimed in
- * webhook_events, so a redelivery is a duplicate; each message is also
- * unique per (connection, wa_message_id), so the same message in another
- * event is stored once. Only `message.inbound` and `message.status` carry
- * WhatsApp data; other events (`call.*`) are acknowledged and ignored.
- * Throws (after releasing the claim) if anything fails, so the caller can
- * answer 5xx and Vobiz retries.
+ * webhook_events; a redelivery of a processed event is a duplicate, while a
+ * redelivery of a deferred one is another (bounded) attempt. Only
+ * `message.inbound` and `message.status` carry WhatsApp data; other
+ * documented events (`call.*`) are acknowledged and ignored. A delivery
+ * without the documented envelope is kept, keyed by the SHA-256 of its
+ * exact bytes (never a made-up event id), and never applied.
+ * Throws if storage fails, so the caller can answer 5xx and Vobiz retries.
  */
 export async function processVobizWhatsAppWebhook(
   supabaseAdmin: Client,
-  input: { rawBody: string },
+  input: { rawBody: string; now?: Date },
 ): Promise<ProcessInboundWebhookResult & { eventType: string | null }> {
+  const now = input.now ?? new Date();
   const envelope = parseVobizWebhookEnvelope(input.rawBody);
-  if (!envelope) return { outcome: "ignored", newInboundTextMessageIds: [], eventType: null };
+  if (!envelope) {
+    // Signed by Vobiz but not the documented envelope (e.g. no event_id):
+    // kept for an operator, never applied. Only key names are logged.
+    console.error("whatsapp_webhook:envelope_unrecognized", { keys: topLevelKeys(input.rawBody) });
+    let stored: Json;
+    try {
+      stored = JSON.parse(input.rawBody) as Json;
+    } catch {
+      stored = { unparseable: true, bytes: input.rawBody.length };
+    }
+    const { error } = await supabaseAdmin.from("webhook_events").insert({
+      provider: VOBIZ_UNRECOGNIZED_PROVIDER,
+      event_id: `sha256:${await sha256Hex(input.rawBody)}`,
+      event_type: null,
+      payload: stored,
+      attempts: 1,
+      error: "unrecognized_envelope",
+      next_attempt_at: null,
+    });
+    if (error && error.code !== "23505") throw error;
+    return { outcome: "unrecognized", newInboundTextMessageIds: [], eventType: null };
+  }
   if (envelope.eventType !== "message.inbound" && envelope.eventType !== "message.status") {
     return { outcome: "ignored", newInboundTextMessageIds: [], eventType: envelope.eventType };
   }
-  const result = await processWhatsAppWebhookValues(supabaseAdmin, {
-    provider: VOBIZ_WEBHOOK_PROVIDER,
-    eventId: envelope.eventId,
-    eventType: envelope.eventType,
-    payload: envelope.payload as Json,
-    values: [envelope.payload as MetaWebhookValue],
-  });
+
+  // The whole envelope is kept, so a replay applies exactly what Vobiz sent.
+  const stored = JSON.parse(input.rawBody) as Json;
+  const { data: inserted, error: insertError } = await supabaseAdmin
+    .from("webhook_events")
+    .insert({
+      provider: VOBIZ_WEBHOOK_PROVIDER,
+      event_id: envelope.eventId,
+      event_type: envelope.eventType,
+      payload: stored,
+      attempts: 1,
+      next_attempt_at: new Date(now.getTime() + WEBHOOK_LEASE_MS).toISOString(),
+    })
+    .select("id")
+    .single();
+  let claimed: { id: string; event_id: string; payload: Json; attempts: number } | null = null;
+  if (insertError) {
+    if (insertError.code !== "23505") throw insertError;
+    const { data: existing, error: readError } = await supabaseAdmin
+      .from("webhook_events")
+      .select(EVENT_COLUMNS)
+      .eq("provider", VOBIZ_WEBHOOK_PROVIDER)
+      .eq("event_id", envelope.eventId)
+      .maybeSingle();
+    if (readError) throw readError;
+    claimed = existing ? await claimExisting(supabaseAdmin, existing as EventRow, now) : null;
+    if (!claimed) {
+      return { outcome: "duplicate", newInboundTextMessageIds: [], eventType: envelope.eventType };
+    }
+  } else {
+    claimed = { id: inserted.id, event_id: envelope.eventId, payload: stored, attempts: 1 };
+  }
+  const result = await applyClaimed(supabaseAdmin, claimed, now);
   return { ...result, eventType: envelope.eventType };
 }
 
-/** Claims the event, then applies each WhatsApp Cloud API change value (statuses, then messages). */
-async function processWhatsAppWebhookValues(
+export interface ReplaySummary {
+  examined: number;
+  processed: number;
+  deferred: number;
+  retained: number;
+  failed: number;
+  /** Inbound texts first stored by a replay (for the AI reply worker). */
+  newInboundTextMessageIds: string[];
+}
+
+/**
+ * Bounded replay of due Vobiz events (deferred ones, and claims whose
+ * worker died): at most `limit` per run, each at most WEBHOOK_MAX_ATTEMPTS
+ * times in total, so this can never loop. Run from the dispatch cron.
+ */
+export async function replayDueVobizWebhookEvents(
   supabaseAdmin: Client,
-  input: {
-    provider: string;
-    eventId: string;
-    eventType: string;
-    payload: Json;
-    values: MetaWebhookValue[];
-  },
-): Promise<ProcessInboundWebhookResult> {
-  const { error: dedupeError } = await supabaseAdmin.from("webhook_events").insert({
-    provider: input.provider,
-    event_id: input.eventId,
-    event_type: input.eventType,
-    payload: input.payload,
-  });
-  if (dedupeError) {
-    if (dedupeError.code === "23505") return { outcome: "duplicate", newInboundTextMessageIds: [] };
-    throw dedupeError;
-  }
-
-  const newInboundTextMessageIds: string[] = [];
-  let didAnything = false;
-  try {
-    for (const value of input.values) {
-      const phoneNumberId = value.metadata?.phone_number_id;
-      if (!phoneNumberId) continue;
-      const connection = await resolveConnectionByPhoneNumberId(supabaseAdmin, phoneNumberId);
-      if (!connection) continue;
-
-      for (const status of value.statuses ?? []) {
-        await applyStatusUpdate(supabaseAdmin, connection, status);
-        didAnything = true;
-      }
-
-      for (const message of value.messages ?? []) {
-        const contactName = value.contacts?.find((c) => c.wa_id === message.from)?.profile?.name;
-        const storedId = await persistInboundMessage(
-          supabaseAdmin,
-          connection,
-          message,
-          contactName ?? value.contacts?.[0]?.profile?.name,
-        );
-        if (storedId && message.type === "text" && message.text?.body) {
-          newInboundTextMessageIds.push(storedId);
-        }
-        didAnything = true;
-      }
-    }
-  } catch (err) {
-    // Release the claim so Vobiz's retry is processed rather than skipped as
-    // a duplicate. Messages already stored are idempotent on the retry.
-    await supabaseAdmin
-      .from("webhook_events")
-      .delete()
-      .eq("provider", input.provider)
-      .eq("event_id", input.eventId);
-    throw err;
-  }
-
-  await supabaseAdmin
+  opts: { now?: Date; limit?: number } = {},
+): Promise<ReplaySummary> {
+  const now = opts.now ?? new Date();
+  const summary: ReplaySummary = {
+    examined: 0,
+    processed: 0,
+    deferred: 0,
+    retained: 0,
+    failed: 0,
+    newInboundTextMessageIds: [],
+  };
+  const { data: due, error } = await supabaseAdmin
     .from("webhook_events")
-    .update({ processed_at: new Date().toISOString() })
-    .eq("provider", input.provider)
-    .eq("event_id", input.eventId);
-
-  return { outcome: didAnything ? "processed" : "ignored", newInboundTextMessageIds };
+    .select(EVENT_COLUMNS)
+    .eq("provider", VOBIZ_WEBHOOK_PROVIDER)
+    .is("processed_at", null)
+    .not("next_attempt_at", "is", null)
+    .lte("next_attempt_at", now.toISOString())
+    .order("next_attempt_at", { ascending: true })
+    .limit(opts.limit ?? 50);
+  if (error) throw error;
+  for (const row of (due ?? []) as EventRow[]) {
+    summary.examined++;
+    const claimed = await claimExisting(supabaseAdmin, row, now);
+    if (!claimed) continue;
+    try {
+      const r = await applyClaimed(supabaseAdmin, claimed, now);
+      if (r.outcome === "processed") summary.processed++;
+      else if (r.outcome === "deferred") summary.deferred++;
+      else summary.retained++;
+      summary.newInboundTextMessageIds.push(...r.newInboundTextMessageIds);
+    } catch (err) {
+      summary.failed++;
+      console.error("whatsapp_webhook:replay_failed", {
+        eventId: row.event_id,
+        code: (err as { code?: string } | null)?.code ?? null,
+      });
+    }
+  }
+  return summary;
 }

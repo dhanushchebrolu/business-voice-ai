@@ -161,6 +161,20 @@ describe("isWithinCustomerServiceWindow", () => {
 });
 
 describe("sendWhatsAppConversationMessage", () => {
+  test("after an ambiguous 502, sending again with the same key never reaches Vobiz a second time", async () => {
+    const db = createFakeDb(seed({ lastInboundAt: hoursAgo(1) }));
+    const meta = fakeMeta([502, 200]);
+    const first = await send(db, {}, meta);
+    assert.equal(first.outcome, "failed");
+    assert.equal((first as { ambiguous?: boolean }).ambiguous, true);
+    const again = await send(db, {}, meta);
+    assert.notEqual(again.outcome, "sent");
+    assert.equal(meta.calls.length, 1, "the possibly-delivered message is not sent again");
+    const rows = db.rows("whatsapp_messages").filter((m) => m["direction"] === "outbound");
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]!["status"], "queued");
+  });
+
   test("sends a text inside the window through Vobiz and records 'sent' with the wamid and Vobiz's id", async () => {
     const db = createFakeDb(seed());
     const meta = fakeMeta([200]);
@@ -477,9 +491,9 @@ describe("deliverWhatsAppMessage — retries and failures", () => {
       { fetchImpl: meta.fetchImpl, sleep: async (ms) => void sleeps.push(ms) },
     );
 
-  test("retries Meta 429 and 5xx with backoff, then succeeds", async () => {
+  test("retries Vobiz 429 (it didn't act) with backoff, then succeeds", async () => {
     const { db, connection } = queued();
-    const meta = fakeMeta([429, 503, 200]);
+    const meta = fakeMeta([429, 429, 200]);
     const sleeps: number[] = [];
     const result = await deliver(db, connection, meta, sleeps);
     assert.equal(result.outcome, "sent");
@@ -488,16 +502,63 @@ describe("deliverWhatsAppMessage — retries and failures", () => {
     assert.equal(db.rows("whatsapp_messages")[0]!["attempts"], 3);
   });
 
-  test("stops after WHATSAPP_SEND_MAX_ATTEMPTS and records 'failed' with the reason", async () => {
+  test("stops after WHATSAPP_SEND_MAX_ATTEMPTS 429s and records 'failed' (retryable later)", async () => {
     const { db, connection } = queued();
-    const meta = fakeMeta([500]);
+    const meta = fakeMeta([429]);
     const result = await deliver(db, connection, meta);
     assert.equal(result.outcome, "failed");
+    assert.equal(result.outcome === "failed" && result.retryable, true);
     assert.equal(meta.calls.length, WHATSAPP_SEND_MAX_ATTEMPTS);
     const row = db.rows("whatsapp_messages")[0]!;
     assert.equal(row["status"], "failed");
     assert.equal(row["attempts"], WHATSAPP_SEND_MAX_ATTEMPTS);
     assert.ok(typeof row["error_message"] === "string" && row["error_message"].length > 0);
+  });
+
+  test("500, 502 and 504 are outcome unknown: sent once, never retried, the row stays queued and marked", async () => {
+    for (const status of [500, 502, 504]) {
+      const { db, connection } = queued();
+      const meta = fakeMeta([status, 200]);
+      const result = await deliver(db, connection, meta);
+      assert.equal(result.outcome, "failed");
+      assert.equal(result.outcome === "failed" && result.ambiguous, true, String(status));
+      assert.equal(result.outcome === "failed" && result.retryable, false);
+      assert.equal(meta.calls.length, 1, `${status} must not be resent`);
+      const row = db.rows("whatsapp_messages")[0]!;
+      assert.equal(row["status"], "queued", "still holds its idempotency key");
+      const meta2 = row["metadata"] as Record<string, unknown>;
+      assert.equal(meta2["delivery_outcome"], "unknown");
+      assert.equal(meta2["provider_http_status"], status);
+      assert.match(String(row["error_message"]), /Delivery outcome unknown/);
+    }
+  });
+
+  test("a send response with Vobiz's id but no wamid is 'sent' with provider_message_id, wamid left empty", async () => {
+    const { db, connection } = queued();
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ id: "vmsg-1", status: "pending", meta_message_id: null }), {
+        status: 201,
+      })) as unknown as typeof fetch;
+    const result = await deliverWhatsAppMessage(
+      db.client,
+      { messageRowId: "row-1", connection, to: "1", payload: { kind: "text", body: "hi" } },
+      { fetchImpl, sleep: noSleep },
+    );
+    assert.deepEqual(result, { outcome: "sent", waMessageId: null, providerMessageId: "vmsg-1" });
+    const row = db.rows("whatsapp_messages")[0]!;
+    assert.equal(row["status"], "sent");
+    assert.equal(row["provider_message_id"], "vmsg-1");
+    assert.equal(row["wa_message_id"], null, "Vobiz's id is never used as the wamid");
+  });
+
+  test("a send response with both ids records both, separately", async () => {
+    const { db, connection } = queued();
+    const result = await deliver(db, connection, fakeMeta([201]));
+    assert.equal(result.outcome, "sent");
+    const row = db.rows("whatsapp_messages")[0]!;
+    assert.equal(row["provider_message_id"], "vmsg.SENT1");
+    assert.equal(row["wa_message_id"], "wamid.SENT1");
+    assert.equal((row["metadata"] as Record<string, unknown>)["delivery_outcome"], "accepted");
   });
 
   test("a rejection (4xx) is never retried", async () => {

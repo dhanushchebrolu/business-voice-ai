@@ -96,14 +96,15 @@ export async function provisionOrganizationAfterPayment(
     // rather than claiming a second one from the pool.
     const { data: existingNumbers } = await supabaseAdmin
       .from("phone_numbers")
-      .select(
-        "id, status, provider, connection_id, agent_config_id, provider_deployment_id, inbound_enabled",
-      )
+      .select("*")
       .eq("organization_id", organizationId)
       .neq("status", "released")
       .order("created_at", { ascending: true });
 
-    let numberRow = existingNumbers?.[0] ?? null;
+    // Voice provisioning only ever looks at numbers that carry voice (a
+    // ClickAI WhatsApp-only number is skipped). In code, not the query, so
+    // this works on a database without the column too.
+    let numberRow = existingNumbers?.find((n) => n.voice_capable !== false) ?? null;
 
     if (!numberRow) {
       const claimed = await claimAvailablePhoneNumber(supabaseAdmin, {

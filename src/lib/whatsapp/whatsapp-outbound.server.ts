@@ -21,14 +21,21 @@
  *     a customer); Vobiz's 429s are retried with backoff.
  *   - Reliability: a 'queued' row is written before calling Vobiz; each send
  *     has a timeout and at most WHATSAPP_SEND_MAX_ATTEMPTS attempts, retried
- *     only when Vobiz answered 429 or 5xx — never for a rejection, and never
- *     when the outcome is unknown (a timeout, a dropped connection, or a
- *     2xx without a message id), since Vobiz may already have sent it
- *     and WhatsApp has no idempotency key. The row ends 'sent' (accepted by
- *     Vobiz: Vobiz's message id in metadata.vobiz_message_id, and the wamid
- *     in wa_message_id once Vobiz returns it) or 'failed' (with a
- *     customer-safe reason). 'delivered'/'read' only ever come from Vobiz's
- *     message.status webhook.
+ *     only when Vobiz answered 429 (rate limited, so it didn't act) — never
+ *     for a rejection, and never when the outcome is unknown: a timeout, a
+ *     dropped connection, a 5xx (a gateway can fail after Vobiz accepted the
+ *     message) or a 2xx without a message id. Vobiz documents no idempotency
+ *     key, so such a message is never sent again automatically: the row
+ *     stays 'queued' (holding its idempotency key) with
+ *     metadata.delivery_outcome = "unknown" for an operator to check.
+ *     The row ends 'sent' (accepted by Vobiz — not delivered — with Vobiz's
+ *     message id in provider_message_id, and the wamid in wa_message_id when
+ *     Vobiz returns it) or 'failed' (with a customer-safe reason).
+ *     'delivered'/'read'/'failed' later only ever come from Vobiz's
+ *     message.status webhook, which names the wamid; a status for a message
+ *     whose wamid Vobiz didn't return at send time can't be matched (Vobiz
+ *     documents no other identifier in it) and stays unresolved — see
+ *     whatsapp-inbound.server.ts.
  *
  * Vobiz holds the Meta credentials. ClickAI's Vobiz API credentials are read
  * from the environment at send time and never logged or stored.
@@ -87,9 +94,23 @@ export function isWithinCustomerServiceWindow(lastInboundAt: string | null, now:
   return Number.isFinite(at) && now.getTime() - at < WHATSAPP_WINDOW_MS;
 }
 
-/** Retry only when Vobiz actually answered with 429/5xx (so it didn't accept the message). */
+/** Retry only when Vobiz answered 429 (so it didn't accept the message). */
 function isRetryable(err: unknown): boolean {
   return err instanceof VobizApiError && err.isRetryable;
+}
+
+/** The row's metadata merged with `extra` (metadata holds origin and the idempotency key). */
+async function mergedMetadata(
+  supabaseAdmin: Client,
+  messageRowId: string,
+  extra: Record<string, Json>,
+): Promise<Json> {
+  const { data: current } = await supabaseAdmin
+    .from("whatsapp_messages")
+    .select("metadata")
+    .eq("id", messageRowId)
+    .maybeSingle();
+  return { ...((current?.metadata ?? {}) as Record<string, Json>), ...extra } as Json;
 }
 
 /**
@@ -122,17 +143,23 @@ export async function deliverWhatsAppMessage(
     return { outcome: "failed" as const, error, retryable };
   };
   /**
-   * The request may have reached Vobiz (no response, or a 2xx without a
-   * message id). The row stays 'queued' — still a live message for its
+   * The request may have reached Vobiz (no response, a 5xx, or a 2xx without
+   * a message id). The row stays 'queued' — still a live message for its
    * idempotency key — so no later attempt with the same key can send it
-   * again; the error says why it was never confirmed.
+   * again; metadata.delivery_outcome marks it for an operator.
    */
-  const unknownOutcome = async (error: string, attempts: number) => {
+  const unknownOutcome = async (cause: string, attempts: number, err: unknown) => {
+    const error = `Delivery outcome unknown (${cause}); not retried, Vobiz may already have delivered it.`;
     const { error: writeError } = await supabaseAdmin
       .from("whatsapp_messages")
       .update({
-        error_message: `Delivery outcome unknown (${error}); not retried, Vobiz may already have delivered it.`,
+        error_message: error,
         attempts,
+        metadata: await mergedMetadata(supabaseAdmin, input.messageRowId, {
+          delivery_outcome: "unknown",
+          provider_error_kind: err instanceof VobizApiError ? err.kind : "unknown",
+          provider_http_status: err instanceof VobizApiError ? err.status : null,
+        }),
       })
       .eq("id", input.messageRowId);
     if (writeError) {
@@ -169,22 +196,22 @@ export async function deliverWhatsAppMessage(
         to: input.to,
         payload: input.payload,
       });
-      // Vobiz accepted it (201, status "pending"). The wamid that delivery
-      // statuses refer to may still be null; Vobiz's own id is always kept.
-      const { data: current } = await supabaseAdmin
-        .from("whatsapp_messages")
-        .select("metadata")
-        .eq("id", input.messageRowId)
-        .maybeSingle();
-      const metadata = (current?.metadata ?? {}) as Record<string, Json>;
+      // Vobiz accepted it (201, status "pending") — accepted, not delivered.
+      // The wamid that delivery statuses refer to may still be null; Vobiz's
+      // own id is always kept (queryable, unique per connection). The two are
+      // different identifiers and are never used in place of each other.
       const { error: writeError } = await supabaseAdmin
         .from("whatsapp_messages")
         .update({
           status: "sent",
           wa_message_id: sent.metaMessageId,
+          provider_message_id: sent.id,
           attempts: attempt,
           error_message: null,
-          metadata: { ...metadata, vobiz_message_id: sent.id } as Json,
+          metadata: await mergedMetadata(supabaseAdmin, input.messageRowId, {
+            vobiz_message_id: sent.id,
+            delivery_outcome: "accepted",
+          }),
         })
         .eq("id", input.messageRowId);
       if (writeError) {
@@ -203,11 +230,11 @@ export async function deliverWhatsAppMessage(
           attempt,
           status: err instanceof VobizApiError ? err.status : null,
         });
-        // No response, or a 2xx without a message id: Vobiz may have taken it.
-        if (!(err instanceof VobizApiError) || err.kind !== "http") {
-          return unknownOutcome(lastError, attempt);
+        // No response, a 5xx, or a 2xx without a message id: Vobiz may have taken it.
+        if (!(err instanceof VobizApiError) || err.isAmbiguous) {
+          return unknownOutcome(lastError, attempt, err);
         }
-        // Retryable later only when Vobiz answered 429/5xx: it didn't accept the message.
+        // Retryable later only when Vobiz answered 429: it didn't accept the message.
         return fail(lastError, attempt, isRetryable(err));
       }
       await sleep(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));

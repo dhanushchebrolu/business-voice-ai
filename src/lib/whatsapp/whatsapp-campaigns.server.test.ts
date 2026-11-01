@@ -434,19 +434,38 @@ describe("dispatchWhatsAppCampaigns", () => {
     assert.equal(db.rows("whatsapp_campaigns")[0]!["status"], "completed");
   });
 
-  test("Meta 5xx: retried later, bounded; a rejection fails the recipient without retry", async () => {
+  test("Vobiz 429: retried later, bounded; a 5xx is never resent; a rejection fails without retry", async () => {
     const db = createFakeDb(seed(), { now: () => NOW });
     await launch(db);
-    await dispatch(db, fakeMeta([503]));
+    await dispatch(db, fakeMeta([429]));
     const r = recipients(db);
     assert.equal(r["919800000001"]!["status"], "pending");
     assert.equal(r["919800000001"]!["attempts"], 1);
     let t = NOW.getTime();
     for (let i = 1; i < MAX_RECIPIENT_ATTEMPTS; i++) {
       t += 60 * 60_000;
-      await dispatch(db, fakeMeta([503]), new Date(t));
+      await dispatch(db, fakeMeta([429]), new Date(t));
     }
     assert.equal(recipients(db)["919800000001"]!["status"], "failed");
+
+    // A 503 may have been sent (a gateway can fail after Vobiz accepted it):
+    // the recipient is closed with "outcome unknown" and never sent again.
+    const db5 = createFakeDb(seed(), { now: () => NOW });
+    await launch(db5);
+    const first = fakeMeta([503]);
+    await dispatch(db5, first);
+    const sentOnce = first.sent.length;
+    const r5 = recipients(db5)["919800000001"]!;
+    assert.equal(r5["status"], "failed");
+    assert.match(String(r5["error"]), /Delivery outcome unknown/);
+    const later = fakeMeta([200]);
+    await dispatch(db5, later, new Date(NOW.getTime() + 3 * 3_600_000));
+    assert.ok(sentOnce >= 1);
+    assert.equal(
+      later.sent.filter((body) => body["to"] === "+919800000001").length,
+      0,
+      "the possibly-delivered message is not resent",
+    );
 
     const db2 = createFakeDb(seed(), { now: () => NOW });
     await launch(db2);

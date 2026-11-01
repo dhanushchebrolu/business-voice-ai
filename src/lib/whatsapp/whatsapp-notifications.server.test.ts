@@ -416,12 +416,24 @@ describe("booking notifications", () => {
     assert.equal(row(db, "n-booking_confirmed")["status"], "skipped");
   });
 
-  test("Meta 5xx: retried later with backoff, then sent once", async () => {
+  test("Vobiz 5xx: outcome unknown — the notification fails and is never sent again", async () => {
     const db = createFakeDb(
       { ...seed(), whatsapp_notifications: [notification("booking_confirmed")] },
       { now: () => NOW },
     );
-    const failing = fakeMeta([503]);
+    await run(db, fakeMeta([503]));
+    assert.equal(row(db, "n-booking_confirmed")["status"], "failed");
+    const later = fakeMeta();
+    await run(db, later, new Date(NOW.getTime() + 60 * 60_000));
+    assert.equal(later.sent.length, 0, "a possibly-delivered notification is not resent");
+  });
+
+  test("Vobiz 429: retried later with backoff, then sent once", async () => {
+    const db = createFakeDb(
+      { ...seed(), whatsapp_notifications: [notification("booking_confirmed")] },
+      { now: () => NOW },
+    );
+    const failing = fakeMeta([429]);
     const first = await run(db, failing);
     assert.equal(first.retry, 1);
     const n = row(db, "n-booking_confirmed");
@@ -442,7 +454,7 @@ describe("booking notifications", () => {
       },
       { now: () => NOW },
     );
-    await run(db, fakeMeta([503]));
+    await run(db, fakeMeta([429]));
     assert.equal(row(db, "n-booking_confirmed")["status"], "failed");
   });
 

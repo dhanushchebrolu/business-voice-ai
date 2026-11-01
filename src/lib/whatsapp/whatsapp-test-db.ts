@@ -33,6 +33,8 @@ const UNIQUE_KEYS: Record<
   whatsapp_conversations: [{ cols: ["whatsapp_connection_id", "wa_id"] }],
   whatsapp_messages: [
     { cols: ["whatsapp_connection_id", "wa_message_id"], partial: true },
+    // 20261029090000: Vobiz's message id, unique per connection.
+    { cols: ["whatsapp_connection_id", "provider_message_id"], partial: true },
     { cols: ["reply_to_message_id"], partial: true },
     {
       cols: ["whatsapp_connection_id", "metadata->>idempotency_key"],
@@ -43,13 +45,28 @@ const UNIQUE_KEYS: Record<
   whatsapp_connections: [
     { cols: ["phone_number_id"], partial: true, where: (r) => r["status"] !== "disconnected" },
     { cols: ["vobiz_channel_id"], partial: true, where: (r) => r["status"] !== "disconnected" },
+    { cols: ["inventory_number_id"], partial: true, where: (r) => r["status"] !== "disconnected" },
   ],
   whatsapp_number_orders: [
     {
       cols: ["organization_id", "phone_number"],
+      partial: true,
+      where: (r) => ["requested", "pending", "completed", "unknown"].includes(String(r["status"])),
+    },
+    // 20261028090000: one live order per number, platform-wide.
+    {
+      cols: ["phone_number"],
       where: (r) => ["requested", "pending", "completed", "unknown"].includes(String(r["status"])),
     },
     { cols: ["vobiz_order_id"], partial: true },
+    { cols: ["phone_number_inventory_id"], partial: true },
+  ],
+  phone_numbers: [
+    {
+      cols: ["e164"],
+      where: (r) =>
+        r["whatsapp_capable"] === true && !["released", "failed"].includes(String(r["status"])),
+    },
   ],
   whatsapp_notifications: [{ cols: ["dedupe_key"] }],
   whatsapp_campaign_recipients: [{ cols: ["campaign_id", "wa_id"] }],
@@ -64,6 +81,19 @@ const UNIQUE_KEYS: Record<
 };
 
 const DEFAULTS: Record<string, (nowIso: string) => Row> = {
+  webhook_events: () => ({
+    event_type: null,
+    processed_at: null,
+    error: null,
+    attempts: 0,
+    next_attempt_at: null,
+  }),
+  whatsapp_byon_verifications: () => ({
+    state: "requested",
+    provider_verification_id: null,
+    provider_status: null,
+    expires_at: null,
+  }),
   whatsapp_conversations: () => ({
     ai_enabled: true,
     handoff_requested_at: null,
@@ -77,6 +107,7 @@ const DEFAULTS: Record<string, (nowIso: string) => Row> = {
     attempts: 0,
     reply_to_message_id: null,
     wa_message_id: null,
+    provider_message_id: null,
     content: null,
     error_message: null,
     contact_id: null,
@@ -141,10 +172,10 @@ type Pred = (row: Row) => boolean;
 
 export interface FakeDbOptions {
   now?: () => Date;
-  /** Return an error to make the matching operation fail (e.g. inject a DB outage). */
+  /** Return an error to make the matching operation fail (e.g. inject a DB outage). RPCs are `rpc:<name>`. */
   failWhen?: (
     table: string,
-    op: "select" | "insert" | "upsert" | "update" | "delete",
+    op: "select" | "insert" | "upsert" | "update" | "delete" | "rpc",
   ) => DbError | null;
   /** Like PostgREST's max-rows: a select returns at most this many rows (silently). */
   maxRows?: number;
@@ -302,6 +333,11 @@ export function createFakeDb(seed: Record<string, Row[]> = {}, options: FakeDbOp
         return chain;
       },
       not(col: string, operator: string, v: unknown) {
+        if (operator === "in" && typeof v === "string") {
+          const excluded = v.replace(/^\(|\)$/g, "").split(",");
+          preds.push((r) => !excluded.includes(String(read(r, col))));
+          return chain;
+        }
         if (operator !== "is" || v !== null)
           throw new Error(`fake db: unsupported not(${operator})`);
         preds.push((r) => read(r, col) !== null);
@@ -398,11 +434,75 @@ export function createFakeDb(seed: Record<string, Row[]> = {}, options: FakeDbOp
     return { data: null, error: null };
   }
 
+  /** Mirrors public.record_whatsapp_number_purchase (20261028090000): all or nothing. */
+  function recordNumberPurchase(args: Record<string, unknown>): Result {
+    const order = table("whatsapp_number_orders").find(
+      (o) => o["id"] === args["_order_id"] && o["status"] === "requested" && !o["vobiz_order_id"],
+    );
+    if (!order)
+      return {
+        data: null,
+        error: { code: "P0002", message: "whatsapp_number_order_not_requested" },
+      };
+    const number = withDefaults("phone_numbers", {
+      organization_id: args["_organization_id"],
+      e164: order["phone_number"],
+      display_number: order["phone_number"],
+      country: args["_country"] ?? "IN",
+      provider: "vobiz",
+      status: "provisioning",
+      voice_capable: false,
+      whatsapp_capable: true,
+      inbound_enabled: false,
+      outbound_enabled: false,
+      provisioned_by: args["_provisioned_by"],
+      metadata: { whatsapp_number_order_id: order["id"], vobiz_order_id: args["_vobiz_order_id"] },
+    });
+    if (uniqueViolation("phone_numbers", number)) return { data: null, error: DUP };
+    table("phone_numbers").push(number);
+    Object.assign(order, {
+      status: args["_order_status"],
+      vobiz_order_id: args["_vobiz_order_id"],
+      failure_reason: null,
+      phone_number_inventory_id: number["id"],
+    });
+    return { data: number["id"], error: null };
+  }
+
+  /**
+   * Mirrors public.claim_whatsapp_byon_verification (20261029090000). The
+   * fake runs each call to completion synchronously, which is exactly the
+   * serialization the real function's advisory lock provides.
+   */
+  function claimByonVerification(args: Record<string, unknown>): Result {
+    const since = now().getTime() - Number(args["_window_seconds"]) * 1000;
+    const used = table("whatsapp_byon_verifications").filter(
+      (v) =>
+        v["organization_id"] === args["_organization_id"] &&
+        v["state"] !== "rejected" &&
+        new Date(String(v["created_at"])).getTime() > since,
+    ).length;
+    if (used >= Number(args["_limit"])) return { data: null, error: null };
+    const row = withDefaults("whatsapp_byon_verifications", {
+      organization_id: args["_organization_id"],
+      phone_number: args["_phone_number"],
+      method: args["_method"],
+    });
+    table("whatsapp_byon_verifications").push(row);
+    return { data: row["id"], error: null };
+  }
+
   const client = {
     rpc(name: string, args: Record<string, unknown>) {
       log.push({ table: `rpc:${name}`, op: "rpc" });
+      const injected = options.failWhen?.(`rpc:${name}`, "rpc");
+      if (injected) return Promise.resolve({ data: null, error: injected });
       if (name === "enqueue_whatsapp_notification")
         return Promise.resolve(enqueueNotification(args));
+      if (name === "record_whatsapp_number_purchase")
+        return Promise.resolve(recordNumberPurchase(args));
+      if (name === "claim_whatsapp_byon_verification")
+        return Promise.resolve(claimByonVerification(args));
       return Promise.resolve({
         data: null,
         error: { code: "42883", message: `fake db: no rpc ${name}` },

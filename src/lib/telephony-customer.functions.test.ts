@@ -61,7 +61,9 @@ describe("organization resolution never trusts a client-supplied id", () => {
 
 describe("the phone feature gate runs before any request is queued, and rejects even a direct call", () => {
   test('assertFeatureUnlocked(organizationId, "phone") is called — the same gate checkTelephonyAccess enforces for real calls', () => {
-    const gateIdx = src.indexOf('assertFeatureUnlocked(organizationId, "phone")');
+    const gateIdx = src.indexOf(
+      'assertFeatureUnlocked(organizationId, "phone", featureLockedAs(context.supabase))',
+    );
     const insertIdx = src.indexOf('.from("customer_events")');
     assert.ok(gateIdx > -1 && insertIdx > -1);
     assert.ok(gateIdx < insertIdx, "the feature gate must run before the request is queued");
@@ -71,7 +73,10 @@ describe("the phone feature gate runs before any request is queued, and rejects 
     // Confirmed against feature-gate.server.ts's own contract: assertFeatureUnlocked
     // throws on !gate.allowed and returns void otherwise — no return value this
     // file could accidentally ignore.
-    assert.match(src, /await assertFeatureUnlocked\(organizationId, "phone"\);/);
+    assert.match(
+      src,
+      /await assertFeatureUnlocked\(organizationId, "phone", featureLockedAs\(context\.supabase\)\);/,
+    );
   });
 });
 
@@ -94,5 +99,17 @@ describe("provider readiness is reported, never fabricated", () => {
     assert.ok(idx > -1);
     const block = src.slice(idx, idx + 200);
     assert.match(block, /eq\("provider", "sarvam"\)/);
+  });
+});
+
+describe("the phone gate is evaluated as the signed-in caller, not the service role", () => {
+  test("feature_locked is called through the caller's own client (service_role has no EXECUTE on it)", () => {
+    assert.match(
+      src,
+      /import \{ featureLockedAs \} from "@\/lib\/whatsapp\/whatsapp-feature-gate\.server"/,
+    );
+    assert.match(src, /featureLockedAs\(context\.supabase\)/);
+    // The default (service-role) RPC is never used for this gate.
+    assert.doesNotMatch(src, /assertFeatureUnlocked\(organizationId, "phone"\)/);
   });
 });

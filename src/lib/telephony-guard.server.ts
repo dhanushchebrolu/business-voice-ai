@@ -68,6 +68,9 @@ export async function resolveActivePhoneNumberByDestination(
     .ilike("provider", provider)
     .eq("status", "active")
     .maybeSingle();
+  // A WhatsApp-only number never routes a call. Checked here rather than in
+  // the query so routing keeps working on a database without the column.
+  if (data?.voice_capable === false) return null;
   return data ?? null;
 }
 
@@ -115,6 +118,12 @@ export async function checkTelephonyAccess(
       allowed: false,
       reason: "This phone number is not assigned to this organization.",
       phoneNumber: null,
+    };
+  if (number.voice_capable === false)
+    return {
+      allowed: false,
+      reason: "This is a WhatsApp-only number; it doesn't take calls.",
+      phoneNumber: number,
     };
   if (number.status !== "active")
     return {

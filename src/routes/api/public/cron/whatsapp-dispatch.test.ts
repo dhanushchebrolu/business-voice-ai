@@ -23,10 +23,23 @@ describe("WhatsApp dispatch cron", () => {
   });
 
   test("runs every step independently (one failure doesn't stop the rest) and reports failure as 500", () => {
-    for (const step of ["expiredProposals", "remindersEnqueued", "notifications", "campaigns"]) {
+    for (const step of [
+      "expiredProposals",
+      "remindersEnqueued",
+      "notifications",
+      "campaigns",
+      "webhookReplay",
+    ]) {
       assert.match(code, new RegExp(`await step\\("${step}"`));
     }
     assert.match(code, /status: errors\.length > 0 \? 500 : 200/);
+  });
+
+  test("webhook replay is bounded and returns counts only (no ids or content)", () => {
+    assert.match(code, /replayDueVobizWebhookEvents\(supabaseAdmin, \{ now \}\)/);
+    const step = code.slice(code.indexOf('step("webhookReplay"'));
+    assert.match(step, /examined: r\.examined,[\s\S]*failed: r\.failed,/);
+    assert.doesNotMatch(step.slice(step.indexOf("return {")), /newInboundTextMessageIds/);
   });
 
   test("takes nothing from the request and returns counts only", () => {

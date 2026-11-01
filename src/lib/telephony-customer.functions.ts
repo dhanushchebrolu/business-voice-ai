@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { assertFeatureUnlocked } from "@/lib/feature-gate.server";
+import { featureLockedAs } from "@/lib/whatsapp/whatsapp-feature-gate.server";
 
 /**
  * Customer-facing phone-number request. Real Sarvam number rental has no
@@ -45,19 +46,23 @@ export const requestPhoneNumber = createServerFn({ method: "POST" })
 
     // 3. Phone-number feature access + customer/service lock state — the
     // exact gate checkTelephonyAccess (Phase D) already enforces for real
-    // calls, reused here rather than re-derived.
-    await assertFeatureUnlocked(organizationId, "phone");
+    // calls, reused here rather than re-derived. Evaluated with the caller's
+    // own client: feature_locked() is executable by `authenticated` only, so
+    // through the service role it fails ("Could not evaluate ... entitlement")
+    // — see whatsapp-feature-gate.server.ts. The function is SECURITY DEFINER
+    // and ignores the caller, so the answer is the same.
+    await assertFeatureUnlocked(organizationId, "phone", featureLockedAs(context.supabase));
 
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
     // Idempotent: already has a live number -> nothing to request.
-    const { data: existingNumber } = await supabaseAdmin
+    // Only numbers that carry voice count (not a WhatsApp-only number).
+    const { data: liveNumbers } = await supabaseAdmin
       .from("phone_numbers")
-      .select("id")
+      .select("*")
       .eq("organization_id", organizationId)
-      .neq("status", "released")
-      .limit(1)
-      .maybeSingle();
+      .neq("status", "released");
+    const existingNumber = (liveNumbers ?? []).find((n) => n.voice_capable !== false);
     if (existingNumber) {
       return {
         ok: true,

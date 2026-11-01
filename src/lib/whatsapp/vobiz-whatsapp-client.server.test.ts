@@ -5,6 +5,7 @@ import {
   VobizWhatsAppClient,
   parseAvailableNumbers,
   parseTemplates,
+  parseVerificationResponse,
 } from "./vobiz-whatsapp-client.server.ts";
 
 /**
@@ -21,7 +22,15 @@ const META_TOKEN = "EAAtestSystemUserTokenValue1234567890";
 
 type Call = { url: string; method: string; headers: Record<string, string>; body: unknown };
 
-function fake(responses: (number | { status: number; body: unknown } | "timeout" | "network")[]) {
+function fake(
+  responses: (
+    | number
+    | { status: number; body: unknown }
+    | { status: number; raw: string }
+    | "timeout"
+    | "network"
+  )[],
+) {
   const calls: Call[] = [];
   let i = 0;
   const fetchImpl = (async (url: string, init: RequestInit) => {
@@ -38,6 +47,7 @@ function fake(responses: (number | { status: number; body: unknown } | "timeout"
       e.name = "AbortError";
       throw e;
     }
+    if (typeof r !== "number" && "raw" in r) return new Response(r.raw, { status: r.status });
     const { status, body } = typeof r === "number" ? { status: r, body: {} } : r;
     return new Response(JSON.stringify(body), { status });
   }) as unknown as typeof fetch;
@@ -227,13 +237,16 @@ describe("errors", () => {
     );
   });
 
-  test("timeouts, network failures, 429/5xx and rejections are distinguished", async () => {
+  test("timeouts, network failures, 429, 5xx and rejections are distinguished (5xx is ambiguous, not retryable)", async () => {
     const cases: [Parameters<typeof fake>[0][number], (e: VobizApiError) => void][] = [
-      ["timeout", (e) => assert.equal(e.kind, "timeout")],
-      ["network", (e) => assert.equal(e.kind, "network")],
-      [429, (e) => assert.ok(e.isRetryable && !e.isRejection)],
-      [503, (e) => assert.ok(e.isRetryable && !e.isRejection)],
-      [400, (e) => assert.ok(e.isRejection && !e.isRetryable)],
+      ["timeout", (e) => assert.ok(e.kind === "timeout" && e.isAmbiguous && !e.isRetryable)],
+      ["network", (e) => assert.ok(e.kind === "network" && e.isAmbiguous && !e.isRetryable)],
+      [429, (e) => assert.ok(e.isRetryable && !e.isRejection && !e.isAmbiguous)],
+      [500, (e) => assert.ok(e.isAmbiguous && !e.isRetryable && !e.isRejection)],
+      [502, (e) => assert.ok(e.isAmbiguous && !e.isRetryable && !e.isRejection)],
+      [503, (e) => assert.ok(e.isAmbiguous && !e.isRetryable && !e.isRejection)],
+      [504, (e) => assert.ok(e.isAmbiguous && !e.isRetryable && !e.isRejection)],
+      [400, (e) => assert.ok(e.isRejection && !e.isRetryable && !e.isAmbiguous)],
       [401, (e) => assert.match(e.message, /credentials/)],
     ];
     for (const [response, check] of cases) {
@@ -324,5 +337,116 @@ describe("defensive parsing of responses not seen in full", () => {
         bodyText: "Hi {{1}}, see you at {{2}} on {{3}}.",
       },
     ]);
+  });
+});
+
+describe("BYON verification request: accepted is not delivered", () => {
+  const verify = (client: VobizWhatsAppClient) =>
+    client.startByonVerification({ phoneNumber: "+919876543210", method: "voice" });
+
+  test("the documented 2xx (id, status 'pending', expires_at) is 'pending' with only those validated fields", async () => {
+    const { client } = fake([
+      {
+        status: 200,
+        body: {
+          id: "6f1c2a9e-0d3b-4e8f-9a51-2b7c8d9e0f12",
+          phone_number: "+919876543210",
+          status: "pending",
+          expires_at: "2026-10-28T10:10:00Z",
+          otp: "999999",
+        },
+      },
+    ]);
+    const r = await verify(client);
+    assert.deepEqual(r, {
+      kind: "pending",
+      verificationId: "6f1c2a9e-0d3b-4e8f-9a51-2b7c8d9e0f12",
+      status: "pending",
+      expiresAt: "2026-10-28T10:10:00.000Z",
+    });
+    assert.doesNotMatch(JSON.stringify(r), /999999|9876543210/);
+  });
+
+  test("a pending answer without expires_at is still pending, with no expiry invented", () => {
+    assert.deepEqual(parseVerificationResponse({ id: "ver_1", status: "PENDING" }), {
+      kind: "pending",
+      verificationId: "ver_1",
+      status: "pending",
+      expiresAt: null,
+    });
+  });
+
+  test("an unexpected status is 'unrecognized' — no failure or success is inferred", () => {
+    for (const status of ["sent", "failed", "queued", "delivered"]) {
+      const r = parseVerificationResponse({ id: "ver_1", status });
+      assert.equal(r.kind, "unrecognized", status);
+      assert.equal(r.kind === "unrecognized" && r.reason, "unexpected_status");
+      assert.equal(r.status, status);
+    }
+  });
+
+  test("a missing or unusable verification id, or missing status, is 'unrecognized'", () => {
+    const cases: [unknown, string][] = [
+      [{ status: "pending" }, "missing_id"],
+      [{ id: "", status: "pending" }, "missing_id"],
+      [{ id: "has spaces and ; drop", status: "pending" }, "missing_id"],
+      [{ id: 42, status: "pending" }, "missing_id"],
+      [{ id: "ver_1" }, "missing_status"],
+      [{ id: "ver_1", status: "pending; DROP" }, "missing_status"],
+      [{ id: "ver_1", status: "pending", expires_at: "not a date" }, "invalid_expires_at"],
+      [{ id: "ver_1", status: "pending", expires_at: 12 }, "invalid_expires_at"],
+      [[], "not_an_object"],
+      ["text", "not_an_object"],
+      [null, "empty_or_malformed_body"],
+    ];
+    for (const [body, reason] of cases) {
+      const r = parseVerificationResponse(body);
+      assert.equal(r.kind, "unrecognized", JSON.stringify(body));
+      assert.equal(r.kind === "unrecognized" && r.reason, reason, JSON.stringify(body));
+    }
+    // Only the body's key names are kept for diagnostics, never values.
+    const r = parseVerificationResponse({ ok: true, message: "secret-ish" });
+    assert.deepEqual(r.kind === "unrecognized" && r.keys, ["ok", "message"]);
+    assert.doesNotMatch(JSON.stringify(r), /secret-ish/);
+  });
+
+  test("an envelope ({ data: {...} }) holding the documented fields is read the same way", () => {
+    assert.equal(
+      parseVerificationResponse({ data: { id: "ver_1", status: "pending" } }).kind,
+      "pending",
+    );
+  });
+
+  test("malformed JSON and an empty 2xx body are 'unrecognized', not success", async () => {
+    for (const raw of ["{not json", ""]) {
+      const { client } = fake([{ status: 200, raw }]);
+      const r = await verify(client);
+      assert.equal(r.kind, "unrecognized", JSON.stringify(raw));
+      assert.equal(r.kind === "unrecognized" && r.reason, "empty_or_malformed_body");
+    }
+  });
+
+  test("4xx is a rejection; 5xx and 429 are errors; timeout and network failure are errors — never 'pending'", async () => {
+    const rejected = fake([{ status: 422, body: { message: "Number not eligible" } }]);
+    await assert.rejects(
+      verify(rejected.client),
+      (e: unknown) =>
+        e instanceof VobizApiError && e.isRejection && /Number not eligible/.test(e.message),
+    );
+    for (const status of [429, 500, 502, 504]) {
+      const { client } = fake([status]);
+      await assert.rejects(
+        verify(client),
+        (e: unknown) =>
+          e instanceof VobizApiError && e.kind === "http" && e.status === status && !e.isRejection,
+      );
+    }
+    for (const r of ["timeout", "network"] as const) {
+      const { client } = fake([r]);
+      await assert.rejects(
+        verify(client),
+        (e: unknown) => e instanceof VobizApiError && e.kind === r,
+      );
+    }
   });
 });

@@ -221,3 +221,27 @@ describe('resolveActivePhoneNumberByDestination: production incident regression 
     );
   });
 });
+
+describe("WhatsApp-only inventory numbers never take calls", () => {
+  const guardSrc = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "telephony-guard.server.ts"),
+    "utf8",
+  );
+  const fnBody = (name: string) => {
+    const start = guardSrc.indexOf(`export async function ${name}`);
+    return guardSrc.slice(start, guardSrc.indexOf("\n}\n", start));
+  };
+
+  test("inbound routing resolves nothing for a WhatsApp-only number (checked in code, so it also works before the migration)", () => {
+    const fn = fnBody("resolveActivePhoneNumberByDestination");
+    assert.match(fn, /if \(data\?\.voice_capable === false\) return null;/);
+    assert.doesNotMatch(fn, /\.eq\("voice_capable"/);
+  });
+
+  test("the pre-call gate refuses a WhatsApp-only number before its status/direction checks", () => {
+    const fn = fnBody("checkTelephonyAccess");
+    const deny = fn.indexOf("number.voice_capable === false");
+    assert.ok(deny > -1);
+    assert.ok(deny < fn.indexOf('number.status !== "active"'));
+  });
+});

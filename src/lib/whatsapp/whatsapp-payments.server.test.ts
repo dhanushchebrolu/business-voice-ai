@@ -209,7 +209,9 @@ describe("sendWhatsAppPaymentMessage — 24h window / template requirement", () 
       purpose: "payment_link",
       idempotency_key: "payment_link:pr-1",
       vobiz_message_id: "vmsg.T1",
+      delivery_outcome: "accepted",
     });
+    assert.equal(row!["provider_message_id"], "vmsg.T1");
   });
 
   test("an approved template mapped in the registry wins over the environment fallback; an unapproved one is never used", async () => {

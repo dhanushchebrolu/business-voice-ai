@@ -47,6 +47,8 @@ const MUTATING_FUNCTIONS = [
   "releasePhoneNumber",
   "setNumberDirection",
   "retryProvisioning",
+  "purchaseWhatsAppNumber",
+  "searchVobizWhatsAppNumbers",
 ];
 
 describe("every phone-number mutation requires platform-admin authorization before any DB write", () => {
@@ -200,5 +202,78 @@ describe("retryProvisioning — the admin Retry action calls the same orchestrat
 
   test("returns the shared function's result object directly — no summarized/reshaped subset that could drift from what actually happened", () => {
     assert.match(fnSrc, /return result;/);
+  });
+});
+
+describe("WhatsApp numbers bought through ClickAI's Vobiz account (platform admins only)", () => {
+  const purchase = extractFn("purchaseWhatsAppNumber");
+
+  test("the platform-admin gate runs before Vobiz or the database is touched", () => {
+    const adminIdx = purchase.indexOf(
+      'assertPlatformAdmin(context.supabase, context.userId, "numbers.write")',
+    );
+    assert.ok(adminIdx > -1);
+    for (const later of ["vobizWhatsApp()", "purchaseNumberForOrganization(", "client.server"]) {
+      const idx = purchase.indexOf(later);
+      assert.ok(idx > adminIdx, `${later} must come after the admin gate`);
+    }
+  });
+
+  test("the buyer recorded is the verified admin, never a client-supplied user id", () => {
+    assert.match(purchase, /requestedBy: admin\.userId/);
+    assert.doesNotMatch(purchase, /data\.(userId|requestedBy|role)/);
+  });
+
+  test("an explicit confirmation and a reason are required", () => {
+    assert.match(purchase, /input\.confirm !== true/);
+    assert.match(purchase, /A reason is required/);
+  });
+
+  test("successful and failed purchases are both audited", () => {
+    assert.match(purchase, /action: "WHATSAPP_NUMBER_PURCHASED"/);
+    assert.match(purchase, /action: "WHATSAPP_NUMBER_PURCHASE_FAILED"/);
+  });
+
+  test("the purchase list is admin-gated", () => {
+    assert.match(
+      extractFn("listWhatsAppNumberOrders"),
+      /assertPlatformAdmin\(context\.supabase, context\.userId, "customers\.read"\)/,
+    );
+  });
+
+  test("a number connected to WhatsApp can't be reassigned or released (checked before any write or provider call)", () => {
+    for (const name of ["reassignPhoneNumber", "releasePhoneNumber"]) {
+      const fnSrc = extractFn(name);
+      const guard = fnSrc.indexOf(
+        "await assertNotConnectedToWhatsApp(supabaseAdmin, data.numberId)",
+      );
+      assert.ok(guard > -1, name);
+      assert.ok(guard < fnSrc.indexOf(".update("), `${name}: guard before the update`);
+      if (name === "releasePhoneNumber")
+        assert.ok(
+          guard < fnSrc.indexOf("adapter.releaseNumber("),
+          "guard before the provider release",
+        );
+    }
+  });
+
+  test("reassignment is conditional on the row as read (two concurrent reassignments can't both win)", () => {
+    const fnSrc = extractFn("reassignPhoneNumber");
+    assert.match(fnSrc, /\.eq\("status", before\.status\)/);
+    assert.match(fnSrc, /update\.eq\("organization_id", before\.organization_id\)/);
+    assert.match(fnSrc, /update\.is\("organization_id", null\)/);
+    assert.match(fnSrc, /changed while you were reassigning it/);
+  });
+
+  test("a WhatsApp-only number can't be enabled for calls", () => {
+    const fnSrc = extractFn("setNumberDirection");
+    assert.match(fnSrc, /data\.enabled && before\.voice_capable === false/);
+  });
+
+  test("voice reassign/release still work before 20261028090000 (missing column = nothing connected)", () => {
+    const helper = src.slice(src.indexOf("async function assertNotConnectedToWhatsApp"));
+    const body = helper.slice(0, helper.indexOf("\n}\n"));
+    assert.match(body, /code === "42703"\) return;/);
+    assert.ok(body.indexOf('"42703"') < body.indexOf("if (error) throw error;"));
   });
 });

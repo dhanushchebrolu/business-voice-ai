@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { useState } from "react";
-import { Phone, Plus } from "lucide-react";
+import { MessageCircle, Phone, Plus } from "lucide-react";
 import { toast } from "sonner";
 import {
   listPhoneNumbers,
@@ -12,6 +12,9 @@ import {
   releasePhoneNumber,
   setNumberDirection,
   listTelephonyProviderDefs,
+  searchVobizWhatsAppNumbers,
+  purchaseWhatsAppNumber,
+  listWhatsAppNumberOrders,
 } from "@/lib/telephony-admin.functions";
 import {
   PageHeader,
@@ -58,6 +61,7 @@ function AdminNumbers() {
   const suspend = useServerFn(suspendPhoneNumber);
   const release = useServerFn(releasePhoneNumber);
   const setDirection = useServerFn(setNumberDirection);
+  const fetchOrders = useServerFn(listWhatsAppNumberOrders);
   const queryClient = useQueryClient();
 
   const { data, isLoading, error, refetch } = useQuery({
@@ -68,13 +72,22 @@ function AdminNumbers() {
     queryKey: ["admin-telephony-providers"],
     queryFn: () => fetchProviders(),
   });
+  const { data: orders } = useQuery({
+    queryKey: ["admin-whatsapp-number-orders"],
+    queryFn: () => fetchOrders(),
+    retry: false,
+  });
 
   const [addOpen, setAddOpen] = useState(false);
+  const [buyOpen, setBuyOpen] = useState(false);
   const [target, setTarget] = useState<{ row: NumberRow; action: "suspend" | "release" } | null>(
     null,
   );
 
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: ["admin-numbers"] });
+  const invalidate = () => {
+    void queryClient.invalidateQueries({ queryKey: ["admin-numbers"] });
+    void queryClient.invalidateQueries({ queryKey: ["admin-whatsapp-number-orders"] });
+  };
 
   if (isLoading) return <LoadingState label="Loading phone numbers" />;
   if (error)
@@ -93,9 +106,14 @@ function AdminNumbers() {
         title="Phone numbers"
         description="Provision, assign, suspend and release numbers. Every number belongs to exactly one active customer at a time."
         actions={
-          <Button size="sm" onClick={() => setAddOpen(true)}>
-            <Plus className="mr-1.5 size-3.5" /> Provision number
-          </Button>
+          <div className="flex gap-2">
+            <Button size="sm" variant="outline" onClick={() => setBuyOpen(true)}>
+              <MessageCircle className="mr-1.5 size-3.5" /> Buy WhatsApp number
+            </Button>
+            <Button size="sm" onClick={() => setAddOpen(true)}>
+              <Plus className="mr-1.5 size-3.5" /> Provision number
+            </Button>
+          </div>
         }
       />
 
@@ -114,6 +132,7 @@ function AdminNumbers() {
                   <th className="py-2 pr-4">Number</th>
                   <th className="py-2 pr-4">Customer</th>
                   <th className="py-2 pr-4">Provider</th>
+                  <th className="py-2 pr-4">Used for</th>
                   <th className="py-2 pr-4">Status</th>
                   <th className="py-2 pr-4">Inbound</th>
                   <th className="py-2 pr-4">Outbound</th>
@@ -129,13 +148,21 @@ function AdminNumbers() {
                       <p className="font-mono text-[11px] text-muted-foreground">{n.clientId}</p>
                     </td>
                     <td className="py-2.5 pr-4 text-xs">{n.provider}</td>
+                    <td className="py-2.5 pr-4 text-xs">
+                      {[
+                        n.voice_capable !== false ? "Voice" : null,
+                        n.whatsapp_capable ? "WhatsApp" : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" + ")}
+                    </td>
                     <td className="py-2.5 pr-4">
                       <StatusPill tone={STATUS_TONE[n.status] ?? "idle"}>{n.status}</StatusPill>
                     </td>
                     <td className="py-2.5 pr-4">
                       <Switch
                         checked={n.inbound_enabled}
-                        disabled={n.status !== "active"}
+                        disabled={n.status !== "active" || n.voice_capable === false}
                         onCheckedChange={async (checked) => {
                           try {
                             await setDirection({
@@ -156,7 +183,7 @@ function AdminNumbers() {
                     <td className="py-2.5 pr-4">
                       <Switch
                         checked={n.outbound_enabled}
-                        disabled={n.status !== "active"}
+                        disabled={n.status !== "active" || n.voice_capable === false}
                         onCheckedChange={async (checked) => {
                           try {
                             await setDirection({
@@ -226,6 +253,42 @@ function AdminNumbers() {
           </div>
         )}
       </SectionCard>
+
+      {orders && orders.length > 0 ? (
+        <SectionCard
+          title="WhatsApp number purchases"
+          description="Orders placed through ClickAI's Vobiz account. A 'requested' or 'unknown' order needs reconciling in the Vobiz account before anyone orders that number again."
+        >
+          <ul className="divide-y divide-border text-sm">
+            {orders.map((o) => (
+              <li key={o.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
+                <span className="font-mono text-xs">{o.phoneNumber}</span>
+                <span className="text-xs text-muted-foreground">
+                  {new Date(o.createdAt).toLocaleString()}
+                  {o.vobizOrderId ? ` · Vobiz ${o.vobizOrderId}` : ""}
+                  {` · ref ${o.id}`}
+                </span>
+                <StatusPill
+                  tone={
+                    o.status === "requested" || o.status === "unknown" || o.status === "failed"
+                      ? "error"
+                      : o.status === "completed"
+                        ? "live"
+                        : "ready"
+                  }
+                >
+                  {o.status}
+                </StatusPill>
+                {o.failureReason ? (
+                  <p className="w-full text-xs text-muted-foreground">{o.failureReason}</p>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </SectionCard>
+      ) : null}
+
+      <BuyWhatsAppNumberDialog open={buyOpen} onOpenChange={setBuyOpen} onPurchased={invalidate} />
 
       <AddNumberDialog
         open={addOpen}
@@ -338,6 +401,147 @@ function AddNumberDialog({
             }}
           >
             {busy ? "Provisioning…" : "Provision"}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+/**
+ * Buys a WhatsApp-ready number through ClickAI's Vobiz account for one
+ * client (platform admins only — enforced server-side by
+ * purchaseWhatsAppNumber). The number appears above as 'provisioning' for
+ * that client; Activate it, and the client can connect it to their
+ * WhatsApp Business Account.
+ */
+function BuyWhatsAppNumberDialog({
+  open,
+  onOpenChange,
+  onPurchased,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onPurchased: () => void;
+}) {
+  const search = useServerFn(searchVobizWhatsAppNumbers);
+  const purchase = useServerFn(purchaseWhatsAppNumber);
+  const [orgId, setOrgId] = useState("");
+  const [country, setCountry] = useState("IN");
+  const [numbers, setNumbers] = useState<string[] | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const reset = () => {
+    setNumbers(null);
+    setSelected(null);
+    setReason("");
+  };
+
+  return (
+    <AlertDialog open={open} onOpenChange={(next) => !busy && onOpenChange(next)}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Buy a WhatsApp number</AlertDialogTitle>
+        </AlertDialogHeader>
+        <div className="space-y-2.5">
+          <Input
+            placeholder="Client organization ID"
+            value={orgId}
+            onChange={(e) => setOrgId(e.target.value)}
+          />
+          <div className="flex gap-2">
+            <Input
+              className="w-20 uppercase"
+              maxLength={2}
+              value={country}
+              onChange={(e) => setCountry(e.target.value.toUpperCase())}
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy || country.length !== 2}
+              onClick={async () => {
+                setBusy(true);
+                try {
+                  const r = await search({ data: { country } });
+                  setNumbers(r.numbers);
+                  setSelected(null);
+                } catch (err) {
+                  toast.error(err instanceof Error ? err.message : "Search failed");
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              Search available numbers
+            </Button>
+          </div>
+          {numbers ? (
+            numbers.length === 0 ? (
+              <p className="text-xs text-muted-foreground">Vobiz has no numbers available.</p>
+            ) : (
+              <ul className="max-h-48 divide-y divide-border overflow-y-auto rounded-lg border border-border">
+                {numbers.map((n) => (
+                  <li key={n}>
+                    <button
+                      type="button"
+                      className={`w-full px-3 py-1.5 text-left font-mono text-xs ${selected === n ? "bg-muted" : ""}`}
+                      onClick={() => setSelected(n)}
+                    >
+                      {n}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )
+          ) : null}
+          <Input
+            placeholder="Reason (recorded in the audit log)"
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+          />
+          <p className="text-xs text-muted-foreground">
+            This buys the number on ClickAI's Vobiz account and is charged. Buying the same number
+            again never places a second order.
+          </p>
+        </div>
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            disabled={busy || !orgId.trim() || !selected || !reason.trim()}
+            onClick={async (e) => {
+              e.preventDefault();
+              if (!selected) return;
+              setBusy(true);
+              try {
+                const r = await purchase({
+                  data: {
+                    orgId: orgId.trim(),
+                    phoneNumber: selected,
+                    country,
+                    reason: reason.trim(),
+                    confirm: true,
+                  },
+                });
+                toast.success(
+                  r.alreadyOrdered
+                    ? `${r.phoneNumber} is already on order (${r.status}).`
+                    : `Bought ${r.phoneNumber} (${r.status}). Activate it when ready.`,
+                );
+                onPurchased();
+                reset();
+                onOpenChange(false);
+              } catch (err) {
+                toast.error(err instanceof Error ? err.message : "Purchase failed");
+                onPurchased();
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            {busy ? "Working…" : selected ? `Buy ${selected}` : "Buy"}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

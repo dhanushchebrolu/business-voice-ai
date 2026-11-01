@@ -126,9 +126,12 @@ export async function checkProvisioningReadiness(orgId: string): Promise<Provisi
 
   const { data: numbers } = await supabaseAdmin
     .from("phone_numbers")
-    .select("status, provider, provider_deployment_id")
+    .select("*")
     .eq("organization_id", orgId);
-  const activeNumbers = (numbers ?? []).filter((n) => n.status === "active");
+  // Voice readiness: a WhatsApp-only number doesn't count as a phone line.
+  const activeNumbers = (numbers ?? []).filter(
+    (n) => n.status === "active" && n.voice_capable !== false,
+  );
   checks.push({
     key: "phone",
     label: "Phone number",

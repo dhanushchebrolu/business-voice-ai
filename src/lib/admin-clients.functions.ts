@@ -635,11 +635,12 @@ export const getKlyroRuntimeReadiness = createServerFn({ method: "GET" })
 
     const { data: numbers } = await supabaseAdmin
       .from("phone_numbers")
-      .select("provider, status")
+      .select("*")
       .eq("organization_id", data.orgId)
       .neq("status", "released")
       .order("created_at", { ascending: true });
-    const assignedNumber = numbers?.[0] ?? null;
+    // Voice runtime readiness: WhatsApp-only numbers don't take calls.
+    const assignedNumber = numbers?.find((n) => n.voice_capable !== false) ?? null;
 
     return computeKlyroRuntimeReadiness({
       exotelCredentialsPresent: Boolean(exotelStatus?.configured),

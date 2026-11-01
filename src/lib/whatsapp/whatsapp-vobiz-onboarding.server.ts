@@ -8,23 +8,32 @@
  *      created with the business's own Meta WABA id, phone number id and
  *      Meta system-user token. The token is passed straight to Vobiz (which
  *      stores it write-only) and never stored or logged by ClickAI.
- *   2. Buy a number through Vobiz ('buy_from_vobiz'): search availability,
- *      place an order (a purchase-lock row is written first, so a repeat can
- *      never buy twice), then create the channel from the completed order.
+ *   2. A ClickAI number ('buy_from_vobiz'): only a platform admin buys one,
+ *      through ClickAI's Vobiz account, for one organization
+ *      (purchaseNumberForOrganization — a purchase-lock row is written
+ *      first, so a repeat can never buy twice). The purchase lands in the
+ *      phone-number inventory (phone_numbers, WhatsApp-capable) and, once an
+ *      admin has activated it, the organization's owner/admin connects it to
+ *      their WhatsApp Business Account (connectAssignedNumber). Customers
+ *      can't buy numbers.
  *   3. Embedded Signup through Vobiz ('embedded_signup'): the browser runs
  *      Meta's Embedded Signup popup with the Meta app Vobiz exchanges codes
  *      for, and the resulting OAuth code + WABA id are handed to Vobiz.
  *
- * Callers own authentication and authorization: every function here takes
+ * Callers own authentication and authorization: the customer functions take
  * a scope already resolved by requireWhatsAppManager (owner/admin of the
- * target business's organization) and a Vobiz client. All writes use the
- * service role and filter by that scope's organization explicitly.
+ * target business's organization), the purchase functions are called only
+ * after assertPlatformAdmin. All writes use the service role and filter by
+ * the scope's organization explicitly.
  *
  * Partial failures: a channel Vobiz created during a request whose response
  * was lost (timeout, network, conflict) is found again with
  * `GET /channels/whatsapp` and adopted, so a retry never needs a second
- * channel. A number already live for another organization is refused
- * before Vobiz is asked to do anything.
+ * channel — unless that channel belongs to another WhatsApp Business
+ * Account or another organization. A number live for another organization,
+ * or held in ClickAI's inventory by another organization (or unassigned),
+ * is refused before Vobiz is asked to do anything; the database enforces
+ * the same (20261028090000).
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
@@ -57,7 +66,9 @@ export class WhatsAppOnboardingError extends Error {
     | "rate_limited"
     | "order_not_ready"
     | "not_found"
-    | "incomplete_channel";
+    | "incomplete_channel"
+    | "verification_expired"
+    | "recovery_refused";
   constructor(message: string, code: WhatsAppOnboardingError["code"]) {
     super(message);
     this.code = code;
@@ -146,43 +157,128 @@ async function guardPhoneNumber(admin: Client, scope: WhatsAppManagerScope, phon
   return existing;
 }
 
-/** After a lost/conflicting response: the channel Vobiz may already have created for this number. */
-async function recoverChannel(
-  vobiz: Vobiz,
-  match: {
-    phoneNumberId?: string | null;
-    phoneNumber?: string | null;
-    numberOrderId?: string | null;
-  },
-): Promise<VobizChannel | null> {
+/** Ways the same E.164 number may be stored. */
+function numberForms(e164: string): string[] {
+  return [e164, e164.replace(/^\+/, "")];
+}
+
+/** Refuses a number ClickAI holds in its inventory for another organization (or unassigned). */
+async function guardInventoryNumber(admin: Client, scope: WhatsAppManagerScope, e164: string) {
+  const { data, error } = await admin
+    .from("phone_numbers")
+    .select("id, organization_id")
+    .in("e164", numberForms(e164))
+    .not("status", "in", "(released,failed)");
+  if (error) throw error;
+  if ((data ?? []).some((n) => n.organization_id !== scope.organizationId)) {
+    throw new WhatsAppOnboardingError(
+      "This number belongs to another ClickAI account.",
+      "duplicate_phone_number",
+    );
+  }
+}
+
+/** The ownership triggers' refusals (20261028090000), as onboarding errors. */
+function ownershipError(error: {
+  code?: string;
+  message?: string;
+}): WhatsAppOnboardingError | null {
+  if (error.code !== "P0001") return null;
+  if (/whatsapp_number_owned_elsewhere/.test(error.message ?? "")) {
+    return new WhatsAppOnboardingError(
+      "This number belongs to another ClickAI account.",
+      "duplicate_phone_number",
+    );
+  }
+  if (/whatsapp_number_not_assigned/.test(error.message ?? "")) {
+    return new WhatsAppOnboardingError(
+      "This number isn't an active ClickAI number of this workspace.",
+      "not_found",
+    );
+  }
+  return null;
+}
+
+/**
+ * What a recovered channel must match. Recovery searches every channel on
+ * ClickAI's (single) Vobiz account, so a number match alone is never
+ * enough: the channel must be on the expected WhatsApp Business Account and
+ * carry the expected Meta phone number id (BYON, Embedded Signup) or Vobiz
+ * number order (a ClickAI number, whose phone number id Meta assigns later).
+ */
+interface RecoveryMatch {
+  wabaId: string;
+  phoneNumberId?: string | null;
+  numberOrderId?: string | null;
+  phoneNumber?: string | null;
+}
+
+const RECOVERY_REFUSED =
+  "Vobiz already has a WhatsApp channel for this number that ClickAI can't safely link to this account. Contact ClickAI support to resolve it.";
+
+/** Exported for tests: is this listed channel the one this request created? */
+export function recoveryVerdict(
+  c: VobizChannel,
+  match: RecoveryMatch,
+): "adopt" | "conflict" | "unrelated" {
+  const samePhoneNumberId = Boolean(match.phoneNumberId && c.phoneNumberId === match.phoneNumberId);
+  const sameOrder = Boolean(match.numberOrderId && c.numberOrderId === match.numberOrderId);
+  const sameNumber = Boolean(match.phoneNumber && c.phoneNumber === match.phoneNumber);
+  if (!samePhoneNumberId && !sameOrder && !sameNumber) return "unrelated";
+  // Every identifier the request knows must be present on the channel and equal.
+  if (!c.wabaId || c.wabaId !== match.wabaId) return "conflict";
+  if (match.phoneNumberId && c.phoneNumberId !== match.phoneNumberId) return "conflict";
+  if (match.numberOrderId && c.numberOrderId !== match.numberOrderId) return "conflict";
+  if (!match.phoneNumberId && !match.numberOrderId) return "conflict";
+  if (match.phoneNumber && c.phoneNumber && c.phoneNumber !== match.phoneNumber) return "conflict";
+  return "adopt";
+}
+
+/**
+ * After a lost/conflicting response: the channel Vobiz may already have
+ * created for this request. Null when there's nothing to adopt; refuses
+ * (for an administrator to resolve) when a channel for the number exists
+ * but doesn't match every expected identifier, or more than one matches.
+ * Ownership in ClickAI (a channel another organization has used) is checked
+ * again in persistChannel.
+ */
+async function recoverChannel(vobiz: Vobiz, match: RecoveryMatch): Promise<VobizChannel | null> {
   let channels: VobizChannel[];
   try {
     channels = await vobiz.listChannels();
   } catch {
     return null;
   }
-  return (
-    channels.find(
-      (c) =>
-        (match.phoneNumberId && c.phoneNumberId === match.phoneNumberId) ||
-        (match.numberOrderId && c.numberOrderId === match.numberOrderId) ||
-        (match.phoneNumber && c.phoneNumber === match.phoneNumber),
-    ) ?? null
-  );
+  const adoptable: VobizChannel[] = [];
+  let conflicts = 0;
+  for (const c of channels) {
+    const verdict = recoveryVerdict(c, match);
+    if (verdict === "adopt") adoptable.push(c);
+    else if (verdict === "conflict") conflicts++;
+  }
+  if (adoptable.length === 1) return adoptable[0]!;
+  if (adoptable.length > 1 || conflicts > 0) {
+    console.error("whatsapp_onboarding:recovery_refused", {
+      adoptable: adoptable.length,
+      conflicts,
+    });
+    throw new WhatsAppOnboardingError(RECOVERY_REFUSED, "recovery_refused");
+  }
+  return null;
 }
 
 /** Creates the channel, adopting one Vobiz already made if the response was lost or conflicted. */
 async function createOrRecover(
   vobiz: Vobiz,
   create: () => Promise<VobizChannel>,
-  match: Parameters<typeof recoverChannel>[1],
+  match: RecoveryMatch,
 ): Promise<VobizChannel> {
   try {
     return await create();
   } catch (err) {
-    const recoverable =
-      err instanceof VobizApiError &&
-      (err.kind !== "http" || err.status === 409 || err.isRetryable);
+    // Vobiz may have created it (no response, 5xx, unusable 2xx) or says it
+    // exists (409): look for it — the strict match in recoverChannel decides.
+    const recoverable = err instanceof VobizApiError && (err.isAmbiguous || err.status === 409);
     if (recoverable) {
       const existing = await recoverChannel(vobiz, match);
       if (existing) return existing;
@@ -203,6 +299,8 @@ async function persistChannel(
     wabaId: string;
     displayName?: string | null | undefined;
     numberOrderId?: string | null | undefined;
+    /** The ClickAI inventory number this channel was made from. */
+    inventoryNumberId?: string | null | undefined;
   },
 ): Promise<string> {
   const phoneNumberId = channel.phoneNumberId ?? input.phoneNumberId;
@@ -211,6 +309,33 @@ async function persistChannel(
       `Vobiz created the channel (${channel.id}) but didn't return its WhatsApp phone number id, so ClickAI can't route its messages yet. Contact support with this channel id.`,
       "incomplete_channel",
     );
+  }
+  // Whatever Vobiz returned (created or recovered) must be the channel this
+  // request asked for: never another WhatsApp Business Account's channel or
+  // another phone number id's (it would carry someone else's Meta credentials).
+  if (
+    (channel.wabaId && channel.wabaId !== input.wabaId) ||
+    (channel.phoneNumberId && input.phoneNumberId && channel.phoneNumberId !== input.phoneNumberId)
+  ) {
+    console.error("whatsapp_onboarding:channel_identity_mismatch", {
+      channelId: channel.id,
+      mode: input.mode,
+    });
+    throw new WhatsAppOnboardingError(RECOVERY_REFUSED, "recovery_refused");
+  }
+  // A channel another organization has used (even one it has disconnected)
+  // is never handed to this one: it carries that organization's WhatsApp
+  // Business Account and history.
+  const { data: foreign, error: foreignError } = await admin
+    .from("whatsapp_connections")
+    .select("id")
+    .eq("vobiz_channel_id", channel.id)
+    .neq("organization_id", scope.organizationId)
+    .limit(1);
+  if (foreignError) throw foreignError;
+  if ((foreign ?? []).length > 0) {
+    console.error("whatsapp_onboarding:channel_owned_elsewhere", { channelId: channel.id });
+    throw new WhatsAppOnboardingError(RECOVERY_REFUSED, "recovery_refused");
   }
   const now = new Date().toISOString();
   const row = {
@@ -225,6 +350,7 @@ async function persistChannel(
     vobiz_channel_id: channel.id,
     number_onboarding_mode: input.mode,
     vobiz_number_order_id: channel.numberOrderId ?? input.numberOrderId ?? null,
+    inventory_number_id: input.inventoryNumberId ?? null,
     // Vobiz holds the Meta credentials; nothing for ClickAI to keep.
     access_token_ciphertext: null,
     two_step_pin_ciphertext: null,
@@ -242,7 +368,7 @@ async function persistChannel(
       .update(row)
       .eq("id", existing.id)
       .eq("organization_id", scope.organizationId);
-    if (error) throw error;
+    if (error) throw ownershipError(error) ?? error;
     return existing.id;
   }
   const { data, error } = await admin
@@ -252,12 +378,22 @@ async function persistChannel(
     .single();
   if (error) {
     if ((error as { code?: string }).code === "23505") {
+      // A concurrent request of this same organization may have just recorded
+      // this very channel: that is the same connection, not a conflict.
+      const { data: winner, error: winnerError } = await admin
+        .from("whatsapp_connections")
+        .select("id, organization_id, vobiz_channel_id")
+        .eq("vobiz_channel_id", channel.id)
+        .neq("status", "disconnected")
+        .maybeSingle();
+      if (winnerError) throw winnerError;
+      if (winner && winner.organization_id === scope.organizationId) return winner.id;
       throw new WhatsAppOnboardingError(
         "This WhatsApp number is already connected to a different ClickAI account.",
         "duplicate_phone_number",
       );
     }
-    throw error;
+    throw ownershipError(error) ?? error;
   }
   return data.id;
 }
@@ -265,41 +401,178 @@ async function persistChannel(
 // ---------------------------------------------------------------------------
 // 1. Bring your own number
 
+/**
+ * The result of asking Vobiz to send a BYON code. Neither state means a code
+ * was delivered — Vobiz documents no delivery confirmation for these codes —
+ * and the number is not verified or connected until connectByon succeeds.
+ *   - `verification_requested`: Vobiz accepted the request (2xx, status
+ *     "pending", with its verification id and, if given, the expiry).
+ *   - `verification_unconfirmed`: Vobiz answered 2xx, but not with a
+ *     response ClickAI recognizes; a code may or may not have been sent.
+ */
+export type ByonVerificationResult =
+  | {
+      phoneNumber: string;
+      state: "verification_requested";
+      deliveryConfirmed: false;
+      providerReference: string;
+      providerStatus: "pending";
+      expiresAt: string | null;
+    }
+  | {
+      phoneNumber: string;
+      state: "verification_unconfirmed";
+      deliveryConfirmed: false;
+      providerReference: string | null;
+      providerStatus: string | null;
+      expiresAt: null;
+    };
+
+/** Kept for callers that named the earlier single-state type. */
+export type ByonVerificationRequested = ByonVerificationResult;
+
+const BYON_RATE_WINDOW_SECONDS = 60 * 60;
+
+async function setVerificationState(
+  admin: Client,
+  verificationRowId: string,
+  patch: Database["public"]["Tables"]["whatsapp_byon_verifications"]["Update"],
+): Promise<void> {
+  const { error } = await admin
+    .from("whatsapp_byon_verifications")
+    .update(patch)
+    .eq("id", verificationRowId);
+  if (error) throw error;
+}
+
 export async function startByonVerification(
   admin: Client,
   scope: WhatsAppManagerScope,
   input: { phoneNumber: string; method: "sms" | "voice" },
-  deps: { vobiz: Vobiz; now?: () => Date },
-): Promise<{ phoneNumber: string }> {
+  deps: { vobiz: Vobiz },
+): Promise<ByonVerificationResult> {
   const phoneNumber = requireE164(input.phoneNumber);
-  const now = (deps.now ?? (() => new Date()))();
-  const { count, error } = await admin
-    .from("customer_events")
-    .select("id", { count: "exact", head: true })
-    .eq("organization_id", scope.organizationId)
-    .eq("kind", "whatsapp_byon_otp_requested")
-    .gte("created_at", new Date(now.getTime() - 60 * 60_000).toISOString());
-  if (error) throw error;
-  if ((count ?? 0) >= BYON_OTP_REQUESTS_PER_HOUR) {
+  // Never text/call a verification code to a number ClickAI holds for someone else.
+  await guardInventoryNumber(admin, scope, phoneNumber);
+
+  // The hourly limit, atomically: the claim and its row are one serialized
+  // step per organization (20261029090000), so concurrent requests can't
+  // all pass the same count. Every claim counts unless Vobiz refused it.
+  const { data: verificationRowId, error: claimError } = await admin.rpc(
+    "claim_whatsapp_byon_verification",
+    {
+      _organization_id: scope.organizationId,
+      _phone_number: phoneNumber,
+      _method: input.method,
+      _limit: BYON_OTP_REQUESTS_PER_HOUR,
+      _window_seconds: BYON_RATE_WINDOW_SECONDS,
+    },
+  );
+  if (claimError) throw claimError;
+  if (!verificationRowId) {
     throw new WhatsAppOnboardingError(
       "Too many verification codes requested. Please wait an hour and try again.",
       "rate_limited",
     );
   }
+
+  let answer: Awaited<ReturnType<Vobiz["startByonVerification"]>>;
   try {
-    await deps.vobiz.startByonVerification({ phoneNumber, method: input.method });
+    answer = await deps.vobiz.startByonVerification({ phoneNumber, method: input.method });
   } catch (err) {
-    throw fromVobiz(err);
+    if (err instanceof VobizApiError && err.isRejection) {
+      // Vobiz refused (4xx): no code was sent, so this attempt doesn't count.
+      await setVerificationState(admin, verificationRowId, { state: "rejected" });
+      throw fromVobiz(err);
+    }
+    // Timeout, network failure, 429 or 5xx: Vobiz may still have sent a code.
+    await setVerificationState(admin, verificationRowId, { state: "unavailable" });
+    console.warn("whatsapp_byon:verify_outcome_unknown", {
+      kind: err instanceof VobizApiError ? err.kind : "unknown",
+      status: err instanceof VobizApiError ? err.status : null,
+    });
+    throw new WhatsAppOnboardingError(
+      "Vobiz didn't confirm the verification request, so ClickAI can't tell whether a code was sent. If a code arrives in the next few minutes you can still enter it; otherwise wait a few minutes before requesting another.",
+      "provider_unavailable",
+    );
   }
+
+  if (answer.kind === "unrecognized") {
+    // Never treated as success or as failure: logged with validated fields only.
+    console.warn("whatsapp_byon:verify_response_unrecognized", {
+      reason: answer.reason,
+      status: answer.status,
+      keys: answer.keys,
+    });
+  }
+  await setVerificationState(
+    admin,
+    verificationRowId,
+    answer.kind === "pending"
+      ? {
+          state: "pending",
+          provider_verification_id: answer.verificationId,
+          provider_status: answer.status,
+          expires_at: answer.expiresAt,
+        }
+      : {
+          state: "unrecognized",
+          provider_verification_id: answer.verificationId,
+          provider_status: answer.status,
+        },
+  );
+  // The organization's timeline. Only what Vobiz said — never the code, the
+  // token or credentials — and never a claim that the code was delivered.
   const { error: logError } = await admin.from("customer_events").insert({
     organization_id: scope.organizationId,
     kind: "whatsapp_byon_otp_requested",
-    title: "WhatsApp number verification code requested",
+    title:
+      answer.kind === "pending"
+        ? "WhatsApp verification requested (accepted by Vobiz; delivery not confirmed)"
+        : "WhatsApp verification requested (Vobiz's answer not recognized; outcome unknown)",
     detail: `${phoneNumber} via ${input.method}`,
-    metadata: { method: input.method },
+    metadata: {
+      method: input.method,
+      state: answer.kind === "pending" ? "verification_requested" : "verification_unconfirmed",
+      provider_status: answer.status,
+      provider_reference: answer.verificationId,
+      provider_response_recognized: answer.kind === "pending",
+      expires_at: answer.kind === "pending" ? answer.expiresAt : null,
+      verification_id: verificationRowId,
+    },
   });
   if (logError) throw logError;
-  return { phoneNumber };
+
+  return answer.kind === "pending"
+    ? {
+        phoneNumber,
+        state: "verification_requested",
+        deliveryConfirmed: false,
+        providerReference: answer.verificationId,
+        providerStatus: "pending",
+        expiresAt: answer.expiresAt,
+      }
+    : {
+        phoneNumber,
+        state: "verification_unconfirmed",
+        deliveryConfirmed: false,
+        providerReference: answer.verificationId,
+        providerStatus: answer.status,
+        expiresAt: null,
+      };
+}
+
+/** The latest code request for this number by this organization, if any. */
+async function latestVerification(admin: Client, organizationId: string, phoneNumber: string) {
+  const { data, error } = await admin
+    .from("whatsapp_byon_verifications")
+    .select("id, state, expires_at")
+    .eq("organization_id", organizationId)
+    .eq("phone_number", phoneNumber)
+    .order("created_at", { ascending: false })
+    .limit(1);
+  if (error) throw error;
+  return data?.[0] ?? null;
 }
 
 export async function connectByon(
@@ -313,7 +586,7 @@ export async function connectByon(
     accessToken: string;
     displayName?: string | null | undefined;
   },
-  deps: { vobiz: Vobiz },
+  deps: { vobiz: Vobiz; now?: () => Date },
 ): Promise<ConnectedWhatsAppNumber> {
   const phoneNumber = requireE164(input.phoneNumber);
   const wabaId = requireMetaId(input.wabaId, "WhatsApp Business Account ID");
@@ -330,6 +603,7 @@ export async function connectByon(
     );
   }
 
+  await guardInventoryNumber(admin, scope, phoneNumber);
   const existing = await guardPhoneNumber(admin, scope, phoneNumberId);
   if (existing && existing.provider === "vobiz" && existing.vobiz_channel_id) {
     return {
@@ -341,11 +615,27 @@ export async function connectByon(
     };
   }
 
+  // Vobiz told us when the latest code expires: don't send a code we know
+  // is stale. (No recorded request — e.g. one made before this was tracked —
+  // leaves the check to Vobiz.)
+  const latest = await latestVerification(admin, scope.organizationId, phoneNumber);
+  const now = (deps.now ?? (() => new Date()))();
+  if (
+    latest?.state === "pending" &&
+    latest.expires_at &&
+    new Date(latest.expires_at).getTime() <= now.getTime()
+  ) {
+    throw new WhatsAppOnboardingError(
+      "This verification code has expired. Request a new code.",
+      "verification_expired",
+    );
+  }
   try {
     await deps.vobiz.confirmByonVerification({ phoneNumber, otpCode });
   } catch (err) {
     throw fromVobiz(err);
   }
+  if (latest) await setVerificationState(admin, latest.id, { state: "confirmed" });
   const channel = await createOrRecover(
     deps.vobiz,
     () =>
@@ -357,7 +647,7 @@ export async function connectByon(
         accessToken,
         displayName: input.displayName ?? undefined,
       }),
-    { phoneNumberId, phoneNumber },
+    { phoneNumberId, phoneNumber, wabaId },
   );
   const connectionId = await persistChannel(admin, scope, channel, {
     mode: "bring_your_own",
@@ -376,16 +666,13 @@ export async function connectByon(
 }
 
 // ---------------------------------------------------------------------------
-// 2. Buy a number through Vobiz
+// 2. ClickAI numbers: bought by a platform admin, connected by the customer
 
 export async function searchNumbers(
   input: { country: string },
   deps: { vobiz: Vobiz },
 ): Promise<string[]> {
-  const country = input.country.trim().toUpperCase();
-  if (!/^[A-Z]{2}$/.test(country)) {
-    throw new WhatsAppOnboardingError("Choose a country.", "invalid_input");
-  }
+  const country = requireCountry(input.country);
   try {
     return await deps.vobiz.searchAvailableNumbers({ country });
   } catch (err) {
@@ -393,12 +680,23 @@ export async function searchNumbers(
   }
 }
 
+function requireCountry(value: string): string {
+  const country = value.trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(country)) {
+    throw new WhatsAppOnboardingError("Choose a country.", "invalid_input");
+  }
+  return country;
+}
+
 export interface WhatsAppNumberOrderView {
   id: string;
   phoneNumber: string;
   status: string;
   failureReason: string | null;
-  connectionId: string | null;
+  vobizOrderId: string | null;
+  /** The phone_numbers row the purchase created, once recorded. */
+  inventoryNumberId: string | null;
+  createdAt: string;
 }
 
 function orderView(row: {
@@ -406,38 +704,62 @@ function orderView(row: {
   phone_number: string;
   status: string;
   failure_reason: string | null;
-  whatsapp_connection_id: string | null;
+  vobiz_order_id: string | null;
+  phone_number_inventory_id: string | null;
+  created_at: string;
 }): WhatsAppNumberOrderView {
   return {
     id: row.id,
     phoneNumber: row.phone_number,
     status: row.status,
     failureReason: row.failure_reason,
-    connectionId: row.whatsapp_connection_id,
+    vobizOrderId: row.vobiz_order_id,
+    inventoryNumberId: row.phone_number_inventory_id,
+    createdAt: row.created_at,
   };
 }
 
 const ORDER_COLUMNS =
-  "id, phone_number, status, failure_reason, whatsapp_connection_id, vobiz_order_id";
+  "id, phone_number, status, failure_reason, vobiz_order_id, phone_number_inventory_id, created_at";
+const LIVE_ORDER_STATUSES = ["requested", "pending", "completed", "unknown"];
 
 /**
- * Buys a number. The 'requested' row is the purchase lock (unique per
- * organization and number while live): a double click or a retry finds the
- * existing order instead of buying again. A request whose outcome is
- * unknown (no response) is marked 'unknown' and never retried here.
+ * Buys a WhatsApp number through ClickAI's Vobiz account for one
+ * organization. Platform admins only — the caller must have run
+ * assertPlatformAdmin(…, "numbers.write"); customers have no path here.
+ *
+ * - Refused up front if ClickAI already holds the number (any
+ *   organization) or a customer has it live on WhatsApp.
+ * - The 'requested' order row is the purchase lock, unique per number
+ *   platform-wide: a double click, a retry or a second admin finds the
+ *   existing order instead of buying again.
+ * - No usable response from Vobiz → 'unknown', never retried here.
+ * - Accepted → record_whatsapp_number_purchase records the order and
+ *   creates the organization's inventory number ('provisioning', WhatsApp
+ *   only) in one transaction. If that fails, the 'requested' lock stays
+ *   (the number can't be bought again) and both ids are logged for support.
  */
-export async function orderNumber(
+export async function purchaseNumberForOrganization(
   admin: Client,
-  scope: WhatsAppManagerScope,
-  input: { phoneNumber: string; requestedBy: string },
+  input: { organizationId: string; phoneNumber: string; country: string; requestedBy: string },
   deps: { vobiz: Vobiz },
 ): Promise<WhatsAppNumberOrderView & { alreadyOrdered: boolean }> {
   const phoneNumber = requireE164(input.phoneNumber);
+  const country = requireCountry(input.country);
+
+  const { data: org, error: orgError } = await admin
+    .from("organizations")
+    .select("id")
+    .eq("id", input.organizationId)
+    .maybeSingle();
+  if (orgError) throw orgError;
+  if (!org) throw new WhatsAppOnboardingError("Client not found.", "not_found");
+
   const { data: lock, error: lockError } = await admin
     .from("whatsapp_number_orders")
     .insert({
-      organization_id: scope.organizationId,
-      business_id: scope.businessId,
+      organization_id: null,
+      business_id: null,
       requested_by: input.requestedBy,
       phone_number: phoneNumber,
       status: "requested",
@@ -449,113 +771,200 @@ export async function orderNumber(
     const { data: live, error: liveError } = await admin
       .from("whatsapp_number_orders")
       .select(ORDER_COLUMNS)
-      .eq("organization_id", scope.organizationId)
       .eq("phone_number", phoneNumber)
-      .in("status", ["requested", "pending", "completed", "unknown"])
+      .in("status", LIVE_ORDER_STATUSES)
       .maybeSingle();
     if (liveError) throw liveError;
     if (!live) throw lockError;
     return { ...orderView(live), alreadyOrdered: true };
   }
 
-  try {
-    const order = await deps.vobiz.createNumberOrder({ phoneNumber });
-    const status = ["pending", "completed", "failed", "cancelled"].includes(order.status)
-      ? order.status
-      : "pending";
-    const { data: updated, error } = await admin
+  const release = async (failureReason: string) => {
+    await admin
       .from("whatsapp_number_orders")
-      .update({
-        status,
-        vobiz_order_id: order.id,
-        failure_reason: order.failureReason?.slice(0, 500) ?? null,
-      })
+      .update({ status: "failed", failure_reason: failureReason.slice(0, 500) })
       .eq("id", lock.id)
-      .eq("organization_id", scope.organizationId)
-      .select(ORDER_COLUMNS)
-      .single();
-    if (error) throw error;
-    return { ...orderView(updated), alreadyOrdered: false };
+      .eq("status", "requested");
+  };
+
+  // Checked under the lock, so a concurrent purchase can't slip between.
+  const { data: held, error: heldError } = await admin
+    .from("phone_numbers")
+    .select("id")
+    .in("e164", numberForms(phoneNumber))
+    .not("status", "in", "(released,failed)")
+    .limit(1);
+  if (heldError) {
+    await release("Couldn't check the inventory; nothing was bought.");
+    throw heldError;
+  }
+  const { data: customerOwned, error: ownedError } = await admin
+    .from("whatsapp_connections")
+    .select("id")
+    .in("display_phone_number", numberForms(phoneNumber))
+    .neq("status", "disconnected")
+    .limit(1);
+  if (ownedError) {
+    await release("Couldn't check existing connections; nothing was bought.");
+    throw ownedError;
+  }
+  if ((held ?? []).length > 0 || (customerOwned ?? []).length > 0) {
+    await release("Already held by ClickAI or connected by a customer; nothing was bought.");
+    throw new WhatsAppOnboardingError(
+      "ClickAI already holds this number, or a customer has it connected to WhatsApp.",
+      "duplicate_phone_number",
+    );
+  }
+
+  let order: Awaited<ReturnType<Vobiz["createNumberOrder"]>>;
+  try {
+    order = await deps.vobiz.createNumberOrder({ phoneNumber });
   } catch (err) {
     if (err instanceof VobizApiError && err.isRejection) {
-      await admin
-        .from("whatsapp_number_orders")
-        .update({ status: "failed", failure_reason: err.message.slice(0, 500) })
-        .eq("id", lock.id)
-        .eq("organization_id", scope.organizationId);
+      await release(err.message);
       throw fromVobiz(err);
     }
     if (err instanceof VobizApiError && err.isRetryable) {
-      // Vobiz answered 429/5xx: it didn't take the order. Release the lock.
-      await admin
-        .from("whatsapp_number_orders")
-        .update({ status: "failed", failure_reason: "Vobiz was unavailable; nothing was bought." })
-        .eq("id", lock.id)
-        .eq("organization_id", scope.organizationId);
+      // Vobiz answered 429 (rate limited): it didn't take the order. Release the lock.
+      await release("Vobiz was rate limiting requests; nothing was bought.");
       throw fromVobiz(err);
     }
-    // No (usable) response: Vobiz may or may not have bought it. Never retry blindly.
+    // No (usable) response, or a 5xx: Vobiz may or may not have bought it.
+    // Never retry blindly.
     await admin
       .from("whatsapp_number_orders")
       .update({
         status: "unknown",
         failure_reason:
-          "Vobiz didn't confirm this order. It may still have been placed; check with support before ordering again.",
+          "Vobiz didn't confirm this order. It may still have been placed; check the Vobiz account before ordering again.",
       })
       .eq("id", lock.id)
-      .eq("organization_id", scope.organizationId);
+      .eq("status", "requested");
     throw new WhatsAppOnboardingError(
-      "Vobiz didn't confirm the order. It may still have been placed — please contact support before trying again.",
+      "Vobiz didn't confirm the order. It may still have been placed — check the Vobiz account before trying again.",
       "provider_unavailable",
     );
   }
+
+  if (order.status === "failed" || order.status === "cancelled") {
+    const { data: closed, error } = await admin
+      .from("whatsapp_number_orders")
+      .update({
+        status: order.status,
+        vobiz_order_id: order.id,
+        failure_reason: order.failureReason?.slice(0, 500) ?? null,
+      })
+      .eq("id", lock.id)
+      .select(ORDER_COLUMNS)
+      .single();
+    if (error) {
+      console.error("whatsapp_number_order:unrecorded", {
+        orderRowId: lock.id,
+        vobizOrderId: order.id,
+      });
+      throw error;
+    }
+    return { ...orderView(closed), alreadyOrdered: false };
+  }
+
+  // Vobiz accepted (and charges for) the order.
+  const { data: numberId, error: recordError } = await admin.rpc(
+    "record_whatsapp_number_purchase",
+    {
+      _order_id: lock.id,
+      _organization_id: input.organizationId,
+      _vobiz_order_id: order.id,
+      _order_status: order.status === "completed" ? "completed" : "pending",
+      _country: country,
+      _provisioned_by: input.requestedBy,
+    },
+  );
+  if (recordError || !numberId) {
+    console.error("whatsapp_number_order:unrecorded", {
+      orderRowId: lock.id,
+      vobizOrderId: order.id,
+    });
+    throw new WhatsAppOnboardingError(
+      `Vobiz accepted the order (${order.id}), but ClickAI couldn't record it. Don't order again — reconcile order ${lock.id}.`,
+      "provider_unavailable",
+    );
+  }
+  const { data: recorded, error } = await admin
+    .from("whatsapp_number_orders")
+    .select(ORDER_COLUMNS)
+    .eq("id", lock.id)
+    .single();
+  if (error) throw error;
+  return { ...orderView(recorded), alreadyOrdered: false };
 }
 
-export async function listNumberOrders(
-  admin: Client,
-  organizationId: string,
-): Promise<WhatsAppNumberOrderView[]> {
+/** Recent purchases, for the platform admin (orders are platform records, not tenant data). */
+export async function listNumberOrders(admin: Client): Promise<WhatsAppNumberOrderView[]> {
   const { data, error } = await admin
     .from("whatsapp_number_orders")
     .select(ORDER_COLUMNS)
-    .eq("organization_id", organizationId)
     .order("created_at", { ascending: false })
-    .limit(20);
+    .limit(50);
   if (error) throw error;
   return (data ?? []).map(orderView);
 }
 
-/** Creates the channel from a bought number once Vobiz has completed the order. */
-export async function connectPurchasedNumber(
+/**
+ * Connects a ClickAI number assigned to this organization to the
+ * customer's WhatsApp Business Account. The number must be in this
+ * organization's inventory, WhatsApp-capable and activated by an admin.
+ */
+export async function connectAssignedNumber(
   admin: Client,
   scope: WhatsAppManagerScope,
-  input: { orderId: string; wabaId: string; displayName?: string | null | undefined },
+  input: { numberId: string; wabaId: string; displayName?: string | null | undefined },
   deps: { vobiz: Vobiz },
 ): Promise<ConnectedWhatsAppNumber> {
   const wabaId = requireMetaId(input.wabaId, "WhatsApp Business Account ID");
-  const { data: order, error } = await admin
-    .from("whatsapp_number_orders")
-    .select(ORDER_COLUMNS)
-    .eq("id", input.orderId)
+  const { data: number, error } = await admin
+    .from("phone_numbers")
+    .select("id, e164, status, whatsapp_capable")
+    .eq("id", input.numberId)
     .eq("organization_id", scope.organizationId)
     .maybeSingle();
   if (error) throw error;
-  if (!order) throw new WhatsAppOnboardingError("That number order was not found.", "not_found");
-  if (order.status === "connected" && order.whatsapp_connection_id) {
+  if (!number || !number.whatsapp_capable || ["released", "failed"].includes(number.status)) {
+    throw new WhatsAppOnboardingError("That number isn't assigned to this workspace.", "not_found");
+  }
+  if (number.status !== "active") {
+    throw new WhatsAppOnboardingError(
+      "ClickAI is still setting this number up. Try again once it shows as active.",
+      "order_not_ready",
+    );
+  }
+
+  const { data: live, error: liveError } = await admin
+    .from("whatsapp_connections")
+    .select("id")
+    .eq("inventory_number_id", number.id)
+    .eq("organization_id", scope.organizationId)
+    .neq("status", "disconnected")
+    .maybeSingle();
+  if (liveError) throw liveError;
+  if (live) {
     return {
-      connectionId: order.whatsapp_connection_id,
+      connectionId: live.id,
       status: "connected",
-      phoneNumber: order.phone_number,
+      phoneNumber: number.e164,
       numberOnboardingMode: "buy_from_vobiz",
       alreadyConnected: true,
     };
   }
-  if (
-    !order.vobiz_order_id ||
-    ["failed", "cancelled", "unknown", "requested"].includes(order.status)
-  ) {
+
+  const { data: order, error: orderError } = await admin
+    .from("whatsapp_number_orders")
+    .select("vobiz_order_id, status")
+    .eq("phone_number_inventory_id", number.id)
+    .maybeSingle();
+  if (orderError) throw orderError;
+  if (!order?.vobiz_order_id || !["pending", "completed"].includes(order.status)) {
     throw new WhatsAppOnboardingError(
-      "This order can't be connected. Check its status or place a new order.",
+      "This number's purchase isn't complete yet. Contact ClickAI support.",
       "order_not_ready",
     );
   }
@@ -569,10 +978,10 @@ export async function connectPurchasedNumber(
           mode: "buy_from_vobiz",
           wabaId,
           numberOrderId: order.vobiz_order_id!,
-          phoneNumber: order.phone_number,
+          phoneNumber: number.e164,
           displayName: input.displayName ?? undefined,
         }),
-      { numberOrderId: order.vobiz_order_id, phoneNumber: order.phone_number },
+      { numberOrderId: order.vobiz_order_id, phoneNumber: number.e164, wabaId },
     );
   } catch (err) {
     const e = fromVobiz(err);
@@ -588,24 +997,59 @@ export async function connectPurchasedNumber(
   const connectionId = await persistChannel(admin, scope, channel, {
     mode: "buy_from_vobiz",
     phoneNumberId: null,
-    phoneNumber: order.phone_number,
+    phoneNumber: number.e164,
     wabaId,
     displayName: input.displayName,
     numberOrderId: order.vobiz_order_id,
+    inventoryNumberId: number.id,
   });
-  const { error: linkError } = await admin
-    .from("whatsapp_number_orders")
-    .update({ status: "connected", whatsapp_connection_id: connectionId })
-    .eq("id", order.id)
-    .eq("organization_id", scope.organizationId);
-  if (linkError) throw linkError;
   return {
     connectionId,
     status: "connected",
-    phoneNumber: channel.phoneNumber ?? order.phone_number,
+    phoneNumber: channel.phoneNumber ?? number.e164,
     numberOnboardingMode: "buy_from_vobiz",
     alreadyConnected: false,
   };
+}
+
+/**
+ * Asks ClickAI for a WhatsApp number — the same customer_events request
+ * queue the voice "Get a number" request uses (telephony-customer.functions
+ * .ts), read by admins on Customer 360. Nothing is bought here.
+ */
+export async function requestClickAiNumber(
+  admin: Client,
+  scope: WhatsAppManagerScope,
+  input: { actorEmail: string | null },
+): Promise<{ alreadyHasNumber: boolean; alreadyRequested: boolean }> {
+  const { data: assigned, error } = await admin
+    .from("phone_numbers")
+    .select("id")
+    .eq("organization_id", scope.organizationId)
+    .eq("whatsapp_capable", true)
+    .not("status", "in", "(released,failed)")
+    .limit(1);
+  if (error) throw error;
+  if ((assigned ?? []).length > 0) return { alreadyHasNumber: true, alreadyRequested: false };
+
+  const { data: previous, error: previousError } = await admin
+    .from("customer_events")
+    .select("id")
+    .eq("organization_id", scope.organizationId)
+    .eq("kind", "whatsapp_number_requested")
+    .limit(1);
+  if (previousError) throw previousError;
+  if ((previous ?? []).length > 0) return { alreadyHasNumber: false, alreadyRequested: true };
+
+  const { error: insertError } = await admin.from("customer_events").insert({
+    organization_id: scope.organizationId,
+    kind: "whatsapp_number_requested",
+    title: "Customer requested a WhatsApp number",
+    detail: "Buy one from the admin Phone numbers page and activate it for this workspace.",
+    actor_email: input.actorEmail,
+  });
+  if (insertError) throw insertError;
+  return { alreadyHasNumber: false, alreadyRequested: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -637,7 +1081,7 @@ export async function completeEmbeddedSignup(
   const channel = await createOrRecover(
     deps.vobiz,
     () => deps.vobiz.completeEmbeddedSignup({ code, wabaId, phoneNumberId }),
-    { phoneNumberId },
+    { phoneNumberId, wabaId },
   );
   const connectionId = await persistChannel(admin, scope, channel, {
     mode: "embedded_signup",
@@ -718,7 +1162,8 @@ export async function reconnectConnection(
         "duplicate_phone_number",
       );
     }
-    throw updateError;
+    // E.g. a ClickAI number that has since been reassigned to another workspace.
+    throw ownershipError(updateError) ?? updateError;
   }
   return { connectionId: conn.id, status: "connected" };
 }

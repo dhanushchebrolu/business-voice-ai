@@ -89,7 +89,10 @@ function NumbersPage() {
   };
 
   const fee = pricing?.["pricing.phone_service_fee"];
-  const active = numbers?.find((n) => n.status === "active");
+  // This page is the voice service: only numbers that carry voice count
+  // here. WhatsApp-only numbers are listed below and managed on WhatsApp.
+  const voiceNumbers = numbers?.filter((n) => n.voice_capable !== false);
+  const active = voiceNumbers?.find((n) => n.status === "active");
   // Mirrors the same feature_locked("phone") check checkTelephonyAccess
   // enforces server-side (telephony-guard.server.ts) before any real
   // call — this only decides what this page shows, never what's allowed.
@@ -101,7 +104,7 @@ function NumbersPage() {
   // from whichever number is furthest along (the active one, or else the
   // most recently created non-released candidate), matching what
   // provisioning-orchestrator.server.ts itself tracks per organization.
-  const candidateNumber = active ?? numbers?.find((n) => n.status !== "released") ?? null;
+  const candidateNumber = active ?? voiceNumbers?.find((n) => n.status !== "released") ?? null;
   const provisioningStatus = provisioningStatusLabel({
     lifecycleStatus: lifecycle,
     hasNumber: Boolean(candidateNumber),
@@ -232,7 +235,7 @@ function NumbersPage() {
         </SectionCard>
       )}
 
-      {numbers && numbers.length > 1 ? (
+      {numbers && (numbers.length > 1 || numbers.some((n) => n.voice_capable === false)) ? (
         <SectionCard title="All numbers on your workspace">
           <ul className="divide-y divide-border">
             {numbers.map((n) => (
@@ -240,6 +243,14 @@ function NumbersPage() {
                 <div className="flex items-center gap-2.5">
                   <PhoneCall className="size-4 text-muted-foreground" />
                   <span className="font-mono text-sm">{n.e164}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {[
+                      n.voice_capable !== false ? "Voice" : null,
+                      n.whatsapp_capable ? "WhatsApp" : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" + ")}
+                  </span>
                 </div>
                 <StatusPill tone={n.status === "active" ? "live" : "idle"}>{n.status}</StatusPill>
               </li>

@@ -9,23 +9,17 @@ import { Label } from "@/components/ui/label";
 import { PasswordInput } from "@/components/ui/password-input";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { StatusPill } from "@/components/app/primitives";
+import { supabase } from "@/integrations/supabase/client";
 import {
-  AlertDialog,
-  AlertDialogContent,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogCancel,
-  AlertDialogAction,
-} from "@/components/ui/alert-dialog";
+  BYON_ELIGIBILITY_NOTES,
+  byonRequestMessages,
+  type ByonRequestOutcome,
+} from "@/lib/whatsapp/byon-verification-messages";
 import {
   startWhatsAppByonVerification,
   connectWhatsAppByon,
-  searchWhatsAppNumbers,
-  orderWhatsAppNumber,
-  listWhatsAppNumberOrders,
-  connectPurchasedWhatsAppNumber,
+  connectAssignedWhatsAppNumber,
+  requestWhatsAppNumber,
   completeWhatsAppEmbeddedSignup,
 } from "@/lib/whatsapp-onboarding.functions";
 import {
@@ -35,7 +29,8 @@ import {
 
 /**
  * The three ways to connect a WhatsApp number through Vobiz (ClickAI's
- * WhatsApp BSP). Every step runs server-side (whatsapp-onboarding.functions
+ * WhatsApp BSP): the customer's own number (BYON), a number ClickAI bought
+ * and assigned to the workspace, or Embedded Signup. Every step runs server-side (whatsapp-onboarding.functions
  * → whatsapp-vobiz-onboarding.server.ts) as an owner/admin of the selected
  * business's organization. The browser never holds a Vobiz credential; the
  * Meta token a BYON customer pastes is sent once to the server, which hands
@@ -122,14 +117,14 @@ export function WhatsAppConnectOptions({
     <Tabs defaultValue="byon" className="w-full">
       <TabsList className="mb-4 flex h-auto flex-wrap">
         <TabsTrigger value="byon">Bring your own number</TabsTrigger>
-        <TabsTrigger value="buy">Buy a number</TabsTrigger>
+        <TabsTrigger value="clickai">Number from ClickAI</TabsTrigger>
         <TabsTrigger value="embedded">Embedded Signup</TabsTrigger>
       </TabsList>
       <TabsContent value="byon">
         <ByonOption businessId={businessId} disabled={disabled} onConnected={onConnected} />
       </TabsContent>
-      <TabsContent value="buy">
-        <BuyOption
+      <TabsContent value="clickai">
+        <ClickAiNumberOption
           orgId={orgId}
           businessId={businessId}
           disabled={disabled}
@@ -162,7 +157,9 @@ function ByonOption({
   const connect = useServerFn(connectWhatsAppByon);
   const [phoneNumber, setPhoneNumber] = useState("");
   const [method, setMethod] = useState<"sms" | "voice">("sms");
-  const [codeSentTo, setCodeSentTo] = useState<string | null>(null);
+  // The number a verification was requested for, and what Vobiz answered.
+  const [requested, setRequested] = useState<ByonRequestOutcome | null>(null);
+  const codeSentTo = requested?.phoneNumber ?? null;
   const [otpCode, setOtpCode] = useState("");
   const [wabaId, setWabaId] = useState("");
   const [phoneNumberId, setPhoneNumberId] = useState("");
@@ -176,8 +173,17 @@ function ByonOption({
     setBusy("code");
     try {
       const r = await sendCode({ data: { businessId, phoneNumber, method } });
-      setCodeSentTo(r.phoneNumber);
-      toast.success(`Verification code sent to ${r.phoneNumber}.`);
+      const outcome: ByonRequestOutcome = {
+        phoneNumber: r.phoneNumber,
+        state: r.state,
+        expiresAt: r.expiresAt,
+      };
+      setRequested(outcome);
+      // At most "Vobiz accepted the request": delivery is never confirmed and
+      // the number isn't verified or connected yet.
+      const messages = byonRequestMessages(outcome);
+      if (messages.tone === "success") toast.success(messages.toast);
+      else toast.warning(messages.toast);
     } catch (e) {
       setError(errorText(e, "Couldn't send the verification code."));
     } finally {
@@ -205,7 +211,7 @@ function ByonOption({
       toast.success(
         r.alreadyConnected ? "This number is already connected." : "WhatsApp connected.",
       );
-      setCodeSentTo(null);
+      setRequested(null);
       setOtpCode("");
       await onConnected();
     } catch (e) {
@@ -217,11 +223,11 @@ function ByonOption({
 
   return (
     <div className="max-w-lg space-y-4">
-      <p className="text-xs text-muted-foreground">
-        Connect a number you already own that has a WhatsApp Business Account in Meta Business
-        Manager. Vobiz verifies you own it with a one-time code, then connects it. The number can't
-        stay on another WhatsApp provider or the WhatsApp app.
-      </p>
+      {BYON_ELIGIBILITY_NOTES.map((note) => (
+        <p key={note} className="text-xs text-muted-foreground">
+          {note}
+        </p>
+      ))}
       <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
         <Field id="byon-phone" label="Phone number (international format)">
           <Input
@@ -257,11 +263,14 @@ function ByonOption({
           disabled={disabled || busy !== null || !phoneNumber.trim()}
         >
           {busy === "code" ? <Loader2 className="mr-1.5 size-3.5 animate-spin" /> : null}
-          Send verification code
+          Request verification code
         </Button>
       ) : (
         <div className="space-y-3 rounded-lg border border-border p-3">
-          <Field id="byon-otp" label={`Code sent to ${codeSentTo}`}>
+          {requested ? (
+            <p className="text-xs text-muted-foreground">{byonRequestMessages(requested).panel}</p>
+          ) : null}
+          <Field id="byon-otp" label={`Verification code for ${codeSentTo}`}>
             <Input
               id="byon-otp"
               inputMode="numeric"
@@ -328,7 +337,7 @@ function ByonOption({
               variant="outline"
               disabled={busy !== null}
               onClick={() => {
-                setCodeSentTo(null);
+                setRequested(null);
                 setOtpCode("");
                 setError(null);
               }}
@@ -343,16 +352,20 @@ function ByonOption({
   );
 }
 
-// 2. Buy a number through Vobiz ------------------------------------------------
+// 2. A number from ClickAI ------------------------------------------------------
+//
+// ClickAI buys WhatsApp numbers (platform admins only) and assigns them to a
+// workspace; this tab lists the ones assigned here and connects them to the
+// customer's WhatsApp Business Account. Customers can't buy numbers.
 
-function orderTone(status: string): "live" | "ready" | "idle" | "error" {
-  if (status === "connected") return "live";
-  if (status === "completed" || status === "pending" || status === "requested") return "ready";
-  if (status === "failed" || status === "cancelled" || status === "unknown") return "error";
+function numberTone(status: string, connected: boolean): "live" | "ready" | "idle" | "error" {
+  if (connected) return "live";
+  if (status === "active") return "ready";
+  if (status === "suspended") return "error";
   return "idle";
 }
 
-function BuyOption({
+function ClickAiNumberOption({
   orgId,
   businessId,
   disabled,
@@ -363,67 +376,51 @@ function BuyOption({
   disabled: boolean;
   onConnected: () => Promise<void> | void;
 }) {
-  const search = useServerFn(searchWhatsAppNumbers);
-  const order = useServerFn(orderWhatsAppNumber);
-  const listOrders = useServerFn(listWhatsAppNumberOrders);
-  const connect = useServerFn(connectPurchasedWhatsAppNumber);
+  const connect = useServerFn(connectAssignedWhatsAppNumber);
+  const request = useServerFn(requestWhatsAppNumber);
   const queryClient = useQueryClient();
-  const { data: orders } = useQuery({
-    queryKey: ["whatsapp-number-orders", orgId],
-    queryFn: () => listOrders(),
-    retry: false,
+  // RLS-scoped reads: members only ever see their own organization's rows.
+  const { data, isLoading } = useQuery({
+    queryKey: ["whatsapp-assigned-numbers", orgId],
+    queryFn: async () => {
+      const [numbers, connections] = await Promise.all([
+        supabase
+          .from("phone_numbers")
+          .select("id, e164, status")
+          .eq("organization_id", orgId)
+          .eq("whatsapp_capable", true)
+          .not("status", "in", "(released,failed)")
+          .order("created_at"),
+        supabase
+          .from("whatsapp_connections")
+          .select("id, inventory_number_id")
+          .eq("organization_id", orgId)
+          .neq("status", "disconnected")
+          .not("inventory_number_id", "is", null),
+      ]);
+      if (numbers.error) throw numbers.error;
+      if (connections.error) throw connections.error;
+      const connected = new Set((connections.data ?? []).map((c) => c.inventory_number_id));
+      return (numbers.data ?? []).map((n) => ({ ...n, connected: connected.has(n.id) }));
+    },
   });
-  const [country, setCountry] = useState("IN");
-  const [numbers, setNumbers] = useState<string[] | null>(null);
-  const [confirming, setConfirming] = useState<string | null>(null);
   const [wabaIds, setWabaIds] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const refreshOrders = () =>
-    queryClient.invalidateQueries({ queryKey: ["whatsapp-number-orders", orgId] });
+  const refresh = () =>
+    queryClient.invalidateQueries({ queryKey: ["whatsapp-assigned-numbers", orgId] });
 
-  const onSearch = async () => {
+  const onConnect = async (numberId: string) => {
     setError(null);
-    setBusy("search");
+    setBusy(`connect:${numberId}`);
     try {
-      const r = await search({ data: { businessId, country } });
-      setNumbers(r.numbers);
-    } catch (e) {
-      setError(errorText(e, "Couldn't search for numbers."));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const onBuy = async (phoneNumber: string) => {
-    setConfirming(null);
-    setError(null);
-    setBusy(`buy:${phoneNumber}`);
-    try {
-      const r = await order({ data: { businessId, phoneNumber, confirm: true } });
-      toast.success(
-        r.alreadyOrdered
-          ? `${r.phoneNumber} is already on order.`
-          : `Ordered ${r.phoneNumber} (${r.status}).`,
-      );
-      await refreshOrders();
-    } catch (e) {
-      setError(errorText(e, "Couldn't order the number."));
-      await refreshOrders();
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const onConnectOrder = async (orderId: string) => {
-    setError(null);
-    setBusy(`connect:${orderId}`);
-    try {
-      const r = await connect({ data: { businessId, orderId, wabaId: wabaIds[orderId] ?? "" } });
+      const r = await connect({
+        data: { businessId, numberId, wabaId: wabaIds[numberId] ?? "" },
+      });
       toast.success(
         r.alreadyConnected ? "This number is already connected." : "WhatsApp connected.",
       );
-      await refreshOrders();
+      await refresh();
       await onConnected();
     } catch (e) {
       setError(errorText(e, "Couldn't connect the number."));
@@ -432,85 +429,85 @@ function BuyOption({
     }
   };
 
+  const onRequest = async () => {
+    setError(null);
+    setBusy("request");
+    try {
+      const r = await request({ data: { businessId } });
+      toast.success(
+        r.alreadyHasNumber
+          ? "ClickAI has already assigned you a number."
+          : r.alreadyRequested
+            ? "Your request is already with our team."
+            : "Request sent — our team will assign you a number.",
+      );
+      await refresh();
+    } catch (e) {
+      setError(errorText(e, "Couldn't send the request."));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const numbers = data ?? [];
   return (
     <div className="max-w-lg space-y-4">
       <p className="text-xs text-muted-foreground">
-        Get a new WhatsApp-ready number from Vobiz. Once Vobiz completes the order, connect it to
-        your WhatsApp Business Account.
+        Use a WhatsApp-ready number provided by ClickAI. Our team buys and assigns it to your
+        workspace; once it shows as active, connect it to your WhatsApp Business Account.
       </p>
-      <div className="flex items-end gap-2">
-        <Field id="buy-country" label="Country code">
-          <Input
-            id="buy-country"
-            className="w-20 uppercase"
-            maxLength={2}
-            value={country}
-            onChange={(e) => setCountry(e.target.value.toUpperCase())}
-          />
-        </Field>
-        <Button
-          size="sm"
-          onClick={onSearch}
-          disabled={disabled || busy !== null || country.length !== 2}
-        >
-          {busy === "search" ? <Loader2 className="mr-1.5 size-3.5 animate-spin" /> : null}
-          Search numbers
-        </Button>
-      </div>
-
-      {numbers ? (
-        numbers.length === 0 ? (
-          <p className="text-xs text-muted-foreground">
-            No numbers available right now. Try again later.
-          </p>
-        ) : (
-          <ul className="divide-y divide-border rounded-lg border border-border">
-            {numbers.map((n) => (
-              <li key={n} className="flex items-center justify-between px-3 py-2">
-                <span className="font-mono text-sm">{n}</span>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={disabled || busy !== null}
-                  onClick={() => setConfirming(n)}
-                >
-                  {busy === `buy:${n}` ? (
-                    <Loader2 className="mr-1.5 size-3.5 animate-spin" />
-                  ) : null}
-                  Buy
-                </Button>
-              </li>
-            ))}
-          </ul>
-        )
-      ) : null}
-
-      {orders && orders.length > 0 ? (
+      {isLoading ? (
+        <p className="text-xs text-muted-foreground">Loading your numbers…</p>
+      ) : numbers.length === 0 ? (
         <div className="space-y-2">
-          <p className="text-xs font-medium text-muted-foreground">Your number orders</p>
-          {orders.map((o) => (
-            <div key={o.id} className="space-y-2 rounded-lg border border-border p-3">
+          <p className="text-xs text-muted-foreground">
+            No ClickAI number is assigned to this workspace yet.
+          </p>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={disabled || busy !== null}
+            onClick={onRequest}
+          >
+            {busy === "request" ? <Loader2 className="mr-1.5 size-3.5 animate-spin" /> : null}
+            Ask ClickAI for a number
+          </Button>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {numbers.map((n) => (
+            <div key={n.id} className="space-y-2 rounded-lg border border-border p-3">
               <div className="flex items-center justify-between gap-2">
-                <span className="font-mono text-sm">{o.phoneNumber}</span>
-                <StatusPill tone={orderTone(o.status)}>{o.status}</StatusPill>
+                <span className="font-mono text-sm">{n.e164}</span>
+                <StatusPill tone={numberTone(n.status, n.connected)}>
+                  {n.connected
+                    ? "connected"
+                    : n.status === "active"
+                      ? "ready to connect"
+                      : n.status}
+                </StatusPill>
               </div>
-              {o.failureReason ? <p className="text-xs text-warning">{o.failureReason}</p> : null}
-              {o.status === "pending" || o.status === "completed" ? (
+              {!n.connected && n.status !== "active" ? (
+                <p className="text-xs text-muted-foreground">
+                  ClickAI is still setting this number up.
+                </p>
+              ) : null}
+              {!n.connected && n.status === "active" ? (
                 <div className="flex items-end gap-2">
-                  <Field id={`waba-${o.id}`} label="WhatsApp Business Account ID">
+                  <Field id={`waba-${n.id}`} label="WhatsApp Business Account ID">
                     <Input
-                      id={`waba-${o.id}`}
+                      id={`waba-${n.id}`}
                       inputMode="numeric"
-                      value={wabaIds[o.id] ?? ""}
-                      onChange={(e) => setWabaIds((w) => ({ ...w, [o.id]: e.target.value }))}
+                      value={wabaIds[n.id] ?? ""}
+                      onChange={(e) => setWabaIds((w) => ({ ...w, [n.id]: e.target.value }))}
                     />
                   </Field>
                   <Button
                     size="sm"
-                    disabled={disabled || busy !== null || !(wabaIds[o.id] ?? "").trim()}
-                    onClick={() => onConnectOrder(o.id)}
+                    disabled={disabled || busy !== null || !(wabaIds[n.id] ?? "").trim()}
+                    onClick={() => onConnect(n.id)}
                   >
-                    {busy === `connect:${o.id}` ? (
+                    {busy === `connect:${n.id}` ? (
                       <Loader2 className="mr-1.5 size-3.5 animate-spin" />
                     ) : null}
                     Connect
@@ -520,30 +517,8 @@ function BuyOption({
             </div>
           ))}
         </div>
-      ) : null}
-
+      )}
       <ErrorLine message={error} />
-
-      <AlertDialog
-        open={confirming !== null}
-        onOpenChange={(open) => (!open ? setConfirming(null) : null)}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Buy {confirming}?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This orders the number from Vobiz and is charged. Ordering the same number again won't
-              buy it twice.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={() => confirming && onBuy(confirming)}>
-              Buy number
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </div>
   );
 }

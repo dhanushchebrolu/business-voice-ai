@@ -9,7 +9,11 @@ import { authenticateCronRequest } from "@/integrations/supabase/cron-auth";
  *   1. expire booking proposals nobody confirmed in time;
  *   2. enqueue 24-hour booking reminders;
  *   3. send due booking/payment notifications (whatsapp_notifications);
- *   4. send the next rate-limited batch of each running campaign.
+ *   4. send the next rate-limited batch of each running campaign;
+ *   5. replay due Vobiz webhook events that couldn't be applied yet (no live
+ *      connection yet, or a status for a message not yet recorded) — a
+ *      bounded batch, each event a bounded number of times — and hand any
+ *      inbound text first stored by the replay to the AI reply worker.
  * Returns counts only — never message content or numbers.
  */
 export const Route = createFileRoute("/api/public/cron/whatsapp-dispatch")({
@@ -24,6 +28,8 @@ export const Route = createFileRoute("/api/public/cron/whatsapp-dispatch")({
           await import("@/lib/whatsapp/whatsapp-notifications.server");
         const { dispatchWhatsAppCampaigns } =
           await import("@/lib/whatsapp/whatsapp-campaigns.server");
+        const { replayDueVobizWebhookEvents } =
+          await import("@/lib/whatsapp/whatsapp-inbound.server");
 
         const now = new Date();
         const summary: Record<string, unknown> = {};
@@ -53,6 +59,21 @@ export const Route = createFileRoute("/api/public/cron/whatsapp-dispatch")({
             status: c.status,
           })),
         );
+        await step("webhookReplay", async () => {
+          const r = await replayDueVobizWebhookEvents(supabaseAdmin, { now });
+          if (r.newInboundTextMessageIds.length > 0) {
+            const { replyToInboundWhatsAppMessages } =
+              await import("@/lib/whatsapp/whatsapp-ai-reply.server");
+            await replyToInboundWhatsAppMessages(supabaseAdmin, r.newInboundTextMessageIds);
+          }
+          return {
+            examined: r.examined,
+            processed: r.processed,
+            deferred: r.deferred,
+            retained: r.retained,
+            failed: r.failed,
+          };
+        });
         return new Response(JSON.stringify({ ...summary, errors }), {
           status: errors.length > 0 ? 500 : 200,
           headers: { "content-type": "application/json" },

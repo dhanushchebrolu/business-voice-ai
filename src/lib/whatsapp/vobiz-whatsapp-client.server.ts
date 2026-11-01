@@ -46,15 +46,24 @@ export class VobizApiError extends Error {
     this.kind = kind;
     this.status = status;
   }
-  /** Vobiz answered and refused: never worth repeating unchanged. */
+  /** Vobiz answered and refused (4xx other than 429): it did not act; never worth repeating unchanged. */
   get isRejection(): boolean {
     return this.kind === "http" && this.status !== null && this.status < 500 && this.status !== 429;
   }
-  /** Vobiz answered 429/5xx: it did not act, a later retry is safe. */
+  /**
+   * Vobiz answered 429 (rate limited): it did not act, so a later retry is
+   * safe. Only 429 — a 5xx can come from a gateway after Vobiz already acted,
+   * and Vobiz documents no idempotency key, so a 5xx is ambiguous, not retryable.
+   */
   get isRetryable(): boolean {
-    return (
-      this.kind === "http" && this.status !== null && (this.status === 429 || this.status >= 500)
-    );
+    return this.kind === "http" && this.status === 429;
+  }
+  /**
+   * The request may have taken effect: no response (timeout, network), a 5xx,
+   * or a 2xx ClickAI couldn't use. Never repeat such a request blindly.
+   */
+  get isAmbiguous(): boolean {
+    return this.kind !== "http" || (this.status !== null && this.status >= 500);
   }
 }
 
@@ -94,6 +103,80 @@ export interface VobizSentMessage {
   status: string | null;
   /** The WhatsApp wamid, or null until Meta has accepted the message. */
   metaMessageId: string | null;
+}
+
+/**
+ * What Vobiz answered (2xx) to a BYON verification request
+ * (`POST /numbers/whatsapp/bring-your-own/verify`). Vobiz's documented
+ * example (docs page as quoted by search results; not seen in full) is
+ * `{ id, phone_number, status: "pending", expires_at }`.
+ *
+ * - "pending": the documented answer — Vobiz ACCEPTED the request. That is
+ *   not delivery: Vobiz documents no delivery confirmation for these codes,
+ *   so nothing here (or in ClickAI) ever claims a code arrived.
+ * - "unrecognized": a 2xx ClickAI can't interpret — empty or non-JSON body,
+ *   no usable `id`, no `status`, a status other than "pending", or an
+ *   `expires_at` that isn't a timestamp. Vobiz documents no other statuses,
+ *   so no meaning (failure or success) is inferred from them; the outcome is
+ *   unknown and a code may or may not have been sent.
+ *
+ * Only these validated, non-secret fields are kept. `status` is kept only if
+ * it looks like a status word, `keys` are the body's top-level key names
+ * (never values) for diagnostics.
+ */
+export type VobizVerificationRequest =
+  | {
+      kind: "pending";
+      verificationId: string;
+      status: "pending";
+      /** ISO timestamp, or null when Vobiz gave none. */
+      expiresAt: string | null;
+    }
+  | {
+      kind: "unrecognized";
+      reason:
+        | "empty_or_malformed_body"
+        | "not_an_object"
+        | "missing_id"
+        | "missing_status"
+        | "unexpected_status"
+        | "invalid_expires_at";
+      verificationId: string | null;
+      status: string | null;
+      keys: string[];
+    };
+
+const VERIFICATION_ID = /^[A-Za-z0-9_-]{1,100}$/;
+const STATUS_WORD = /^[A-Za-z_]{1,40}$/;
+
+export function parseVerificationResponse(body: unknown): VobizVerificationRequest {
+  const keys = isRecord(body) ? Object.keys(body).slice(0, 20) : [];
+  const unrecognized = (
+    reason: Extract<VobizVerificationRequest, { kind: "unrecognized" }>["reason"],
+    verificationId: string | null = null,
+    status: string | null = null,
+  ): VobizVerificationRequest => ({ kind: "unrecognized", reason, verificationId, status, keys });
+
+  if (body === null || body === undefined) return unrecognized("empty_or_malformed_body");
+  if (!isRecord(body)) return unrecognized("not_an_object");
+  const v = unwrap(body, ["data", "verification"])!;
+  const rawId = str(v["id"]);
+  const verificationId = rawId && VERIFICATION_ID.test(rawId) ? rawId : null;
+  const rawStatus = str(v["status"]);
+  const status = rawStatus && STATUS_WORD.test(rawStatus) ? rawStatus.toLowerCase() : null;
+  if (!verificationId) return unrecognized("missing_id", null, status);
+  if (!status) return unrecognized("missing_status", verificationId, null);
+  if (status !== "pending") return unrecognized("unexpected_status", verificationId, status);
+  let expiresAt: string | null = null;
+  if (v["expires_at"] !== undefined && v["expires_at"] !== null) {
+    const raw = str(v["expires_at"]);
+    const at = raw ? new Date(raw) : null;
+    if (!at || Number.isNaN(at.getTime())) {
+      return unrecognized("invalid_expires_at", verificationId, status);
+    }
+    expiresAt = at.toISOString();
+  }
+  return { kind: "pending", verificationId, status: "pending", expiresAt };
 }
 
 export interface VobizTemplate {
@@ -309,15 +392,21 @@ export class VobizWhatsAppClient {
     return channel;
   }
 
-  /** BYON step 1: Vobiz sends an OTP to the number (`sms` or `voice`). */
+  /**
+   * BYON step 1: asks Vobiz to send a code to the number (`sms` or `voice`).
+   * A resolved promise means Vobiz answered 2xx — see VobizVerificationRequest
+   * for what that does and doesn't establish. Throws VobizApiError otherwise.
+   */
   async startByonVerification(input: {
     phoneNumber: string;
     method: "sms" | "voice";
-  }): Promise<void> {
-    await this.request("POST", "/numbers/whatsapp/bring-your-own/verify", {
-      phone_number: input.phoneNumber,
-      verification_method: input.method,
-    });
+  }): Promise<VobizVerificationRequest> {
+    return parseVerificationResponse(
+      await this.request("POST", "/numbers/whatsapp/bring-your-own/verify", {
+        phone_number: input.phoneNumber,
+        verification_method: input.method,
+      }),
+    );
   }
 
   /** BYON step 2: confirm the OTP the business received. */

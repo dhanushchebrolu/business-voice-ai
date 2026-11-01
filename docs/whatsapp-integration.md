@@ -30,23 +30,49 @@ Each ends in a Vobiz channel recorded as a `whatsapp_connections` row
 live for another organization is refused before Vobiz is called; a repeat
 request for an already connected number returns it without calling Vobiz
 again; a channel Vobiz created during a request whose response was lost is
-found with `GET /channels/whatsapp` and adopted.
+found with `GET /channels/whatsapp` and adopted **only** if it carries every
+identifier the request expects (the same WABA id, and the same Meta phone
+number id — or, for a ClickAI number, the same Vobiz number order) and no
+other organization has ever used it in ClickAI. A number match alone is never
+enough; a mismatch, a missing identifier or two candidates stops recovery
+with `recovery_refused` ("contact ClickAI support") for an administrator to
+resolve. Disconnecting never deletes the Vobiz channel.
 
-1. **Bring your own number** (`bring_your_own`): Vobiz sends an OTP by SMS or
-   voice call (`POST /numbers/whatsapp/bring-your-own/verify`, at most 5 per
-   organization per hour); the business enters it with its WABA ID, phone
-   number ID and Meta system-user token (`.../confirm`, then
+1. **Bring your own number** (`bring_your_own`): the eligibility rules are
+   shown first (the number needs a WABA in Meta Business Manager, one provider
+   only, and can't stay registered in the WhatsApp / WhatsApp Business app —
+   ClickAI never unregisters anything). ClickAI asks Vobiz to send a code by
+   SMS or voice call (`POST /numbers/whatsapp/bring-your-own/verify`, at most
+   5 counted requests per organization per hour, claimed atomically in
+   `whatsapp_byon_verifications`); the business enters it with its WABA ID,
+   phone number ID and Meta system-user token (`.../confirm`, then
    `POST /channels/whatsapp` with `number_provider: "meta_direct"`). The
    token goes to Vobiz in that one request; ClickAI never stores or logs it.
-2. **Buy a number through Vobiz** (`buy_from_vobiz`): search
-   (`GET /numbers/whatsapp/availability`), confirm, order
-   (`POST /numbers/whatsapp/orders`). A `whatsapp_number_orders` row is
-   written **before** Vobiz is asked to buy and is unique per organization and
-   number while live, so a double click or retry never buys twice; a request
-   whose outcome is unknown is marked `unknown` and never retried
-   automatically. Once Vobiz completes the order, connect it with a WABA ID
-   (`POST /channels/whatsapp` with `number_order_id`); before then Vobiz
-   refuses and the UI says the order isn't ready.
+   Vobiz documents no delivery confirmation for these codes, so the UI says at
+   most "Verification request accepted. Delivery has not been confirmed."
+2. **A number from ClickAI** (`buy_from_vobiz`): customers can't buy
+   numbers. A platform admin (`numbers.write`) buys one on ClickAI's Vobiz
+   account for a client from **Admin → Phone numbers → Buy WhatsApp number**
+   (`GET /numbers/whatsapp/availability`, confirm,
+   `POST /numbers/whatsapp/orders`). A `whatsapp_number_orders` row (no
+   organization: a platform record) is written **before** Vobiz is asked to
+   buy and is unique per number platform-wide while live, so a double click,
+   retry or second admin never buys twice; an unknown outcome is marked
+   `unknown` and never retried. An accepted order and the client's
+   `phone_numbers` row (`provisioning`, `whatsapp_capable`, not
+   `voice_capable`) are recorded in one transaction
+   (`record_whatsapp_number_purchase`); if that fails the lock stays and both
+   ids are logged (`whatsapp_number_order:unrecorded`) for reconciliation.
+   The admin activates the number with the existing **Activate** action; the
+   client's owner/admin then connects it on the WhatsApp page with their WABA
+   ID (`POST /channels/whatsapp` with `number_order_id`). A client without
+   one can ask for a number (a `whatsapp_number_requested` customer event).
+   A number connected to WhatsApp can't be reassigned or released until it
+   is disconnected, and a channel that belongs to another WABA or another
+   organization is never adopted. Not verified against Vobiz: whether a
+   channel from a reassigned number must be deleted at Vobiz before the new
+   client can link the order (Vobiz then refuses, and the client sees "not
+   ready"); this needs Vobiz's confirmation before any number is reassigned.
 3. **Embedded Signup through Vobiz** (`embedded_signup`): Meta's own popup runs
    in the browser with the Meta app and Embedded Signup configuration that
    Vobiz exchanges codes for (`VITE_VOBIZ_WHATSAPP_ES_*`); the resulting code,
@@ -74,11 +100,13 @@ if the channel still exists at Vobiz and the number isn't live elsewhere.
 1. Vobiz POSTs to `/api/public/webhooks/whatsapp` (ClickAI's one account-level subscription, `POST /api/v1/messaging/webhooks`). Events: `message.inbound`, `message.status` (sent/delivered/read/failed); `call.*` is acknowledged and ignored.
 2. **Signature.** `X-Webhook-Signature` must be the hex HMAC-SHA256 of the raw body with `VOBIZ_WHATSAPP_WEBHOOK_SECRET` (no prefix), or the route answers `401` before reading anything (`whatsapp-webhook-handler.server.ts`).
 3. **Store** (`whatsapp-inbound.server.ts`):
-   - Vobiz's `event_id` is claimed in `webhook_events` (`provider = 'vobiz_whatsapp'`); the payload is the WhatsApp Cloud API change value;
+   - Vobiz's `event_id` is claimed in `webhook_events` (`provider = 'vobiz_whatsapp'`, the whole envelope kept as `payload`); its `payload` field is the WhatsApp Cloud API change value;
    - messages are unique per `(connection, wa_message_id)`;
    - statuses only move forward, within the connection the payload names;
-   - the tenant comes only from `phone_number_id`;
-   - if anything fails, the claim is released and the route answers `500`, so Vobiz retries.
+   - the tenant comes only from `metadata.phone_number_id`; a `channel_id`, if present, must name the same connection (else the event is retained, `routing_conflict`);
+   - an event that can't be applied yet — no live connection for its number (e.g. it arrived before onboarding saved the connection), or a status for a message whose wamid isn't recorded yet — is **deferred**, never marked processed: replayed by the dispatch cron (and by Vobiz's redelivery) with backoff (1 min … 6 h), at most 8 attempts, then retained (`gave_up:*`);
+   - an event that must not be applied automatically (no `phone_number_id`, routing conflict) is **retained** for an operator; a signed body without the documented envelope (e.g. no `event_id`) is kept under `provider = 'vobiz_whatsapp_unrecognized'`, keyed by the SHA-256 of its bytes — never a made-up event id — and never applied;
+   - if storage fails, the event stays due and the route answers `500`, so Vobiz retries (bounded).
 4. Meta's error `131050` ("user stopped marketing messages") on a delivery status is recorded as a marketing opt-out.
 5. Vobiz gets its `200` at once. Replies run in the background (`whatsapp-ai-reply.server.ts`), one per inbound message (a claimed row, unique `reply_to_message_id`):
    1. **STOP / START.** STOP is recorded as an opt-out for both scopes; START only opts back in to booking and payment messages (marketing needs its own explicit opt-in). Recorded even when AI is off, no agent is assigned, the number isn't connected or the 24-hour window has closed; acknowledged only when the number is connected and the window is open.
@@ -144,8 +172,8 @@ The worker (`whatsapp-notifications.server.ts`, run by the dispatch cron):
 
   Database errors in any of these checks throw (fail closed): nothing is sent.
 
-- **Retries** with exponential backoff, up to 5 attempts, only when safe (Vobiz answered 429/5xx, or a transient DB error). A rejection is never repeated.
-- **Unknown outcomes** (a timeout after the request left, or a 2xx without a message id): the message row **stays `queued`**, with "Delivery outcome unknown" in `error_message`. It therefore keeps blocking every later attempt with the same idempotency key (inline sender, outbox, campaign), so it is never sent twice. It needs a person to check. A staff reply in this state is shown as "Delivery unknown" (not "Not sent"), and sending the same draft again reuses its request id, so it can't go out twice. A campaign recipient stuck this way is marked failed ("Delivery unknown") after its attempts run out, so the campaign can complete.
+- **Retries** with exponential backoff, up to 5 attempts, only when safe (Vobiz answered 429, or a transient DB error). A rejection is never repeated. A **5xx is not retried**: a gateway can fail after Vobiz accepted the message, and Vobiz documents no idempotency key.
+- **Unknown outcomes** (a timeout after the request left, a 5xx, or a 2xx without a message id): the message row **stays `queued`**, with "Delivery outcome unknown" in `error_message` and `metadata.delivery_outcome = "unknown"` (plus the error kind and HTTP status). It therefore keeps blocking every later attempt with the same idempotency key (inline sender, outbox, campaign), so it is never sent twice. It needs a person to check. A staff reply in this state is shown as "Delivery unknown" (not "Not sent"), and sending the same draft again reuses its request id, so it can't go out twice. A campaign recipient stuck this way is marked failed ("Delivery unknown") after its attempts run out, so the campaign can complete.
 - **Skips stale rows:** anything older than 48 h is skipped, never sent late.
 
 Payment truth is never touched: the worker only reads `payment_requests` and `bookings`. Payment messages are re-checked against the current state before sending: "payment didn't go through, try again" only while the request is still payable (`CREATED`/`PENDING`), and no "booking confirmed" for a booking cancelled meanwhile. A WhatsApp failure never undoes a capture. The webhook's inline consumer now records `whatsapp_error` (instead of a misleading `whatsapp_dispatched_at`) and the outbox retries.
@@ -220,7 +248,7 @@ No longer used by WhatsApp: `META_WHATSAPP_CONFIG_ID`, `WHATSAPP_CREDENTIAL_ENCR
 
 **"WhatsApp is not configured on this deployment yet."** A connection step shows this when `VOBIZ_AUTH_ID` or `VOBIZ_AUTH_TOKEN` is missing on the Worker; the Worker log `whatsapp_onboarding:not_configured` lists the missing names (never values). Missing `VITE_VOBIZ_WHATSAPP_ES_*` only disables Embedded Signup (the build log line `[build-env-diagnostic] WhatsApp Embedded Signup (Vobiz) build vars:` names them).
 
-**One-time Vobiz setup:** create the webhook subscription (`POST /api/v1/messaging/webhooks` with `url = https://app.clickai.in/api/public/webhooks/whatsapp` and a strong random `secret`, stored as `VOBIZ_WHATSAPP_WEBHOOK_SECRET`); ask Vobiz for the Embedded Signup Meta app/config ids if that option is wanted.
+**One-time Vobiz setup:** see "Production setup: Vobiz webhook" below. Ask Vobiz for the Embedded Signup Meta app/config ids if that option is wanted.
 
 **Cron** (external scheduler, `POST` with `Authorization: Bearer $LOVABLE_CRON_SECRET`):
 
@@ -238,7 +266,29 @@ Templates with named parameters aren't supported.
 
 ## Database migrations
 
-Six new files, all additive and idempotent: `20261013090000` (server-role grants on the integration tables), `20261019090000`, `20261020090000`, `20261022090000`, `20261026090000` (owner/admin-only bot assignment) and `20261027090000` (Vobiz channels and number orders). This work did not apply any of them anywhere, and production state is unverified: no production database access was used.
+Eight new files, all additive and idempotent: `20261013090000` (server-role grants on the integration tables), `20261019090000`, `20261020090000`, `20261022090000`, `20261026090000` (owner/admin-only bot assignment), `20261027090000` (Vobiz channels and number orders), `20261028090000` (ClickAI numbers in the phone-number inventory) and `20261029090000` (Vobiz reliability). This work did not apply any of them anywhere, and production state is unverified: no production database access was used.
+
+### `20261029090000_whatsapp_vobiz_reliability.sql`
+
+- **Adds:**
+  - table `whatsapp_byon_verifications` (one row per BYON code request: Vobiz's verification id, status and expiry — never the code or a token; RLS on, server role only) and `claim_whatsapp_byon_verification()` (the per-organization hourly limit, serialized with an advisory lock so concurrent requests can't bypass it; server role only);
+  - `webhook_events.attempts` (default 0) / `next_attempt_at`, plus a partial index for due retries — the deferred / retained states above; other providers' rows are untouched;
+  - `whatsapp_messages.provider_message_id` (Vobiz's message id from the send response), unique per connection; backfilled from `metadata.vobiz_message_id` where unambiguous.
+- **Impact:** one new table and function, defaulted/nullable columns (no rewrite), one bounded backfill `UPDATE` of `whatsapp_messages`, new indexes. Works with the code before and after this change.
+- **Order:** after `20260923090000`; does **not** need `20261028090000` (tested on a database without it). **Apply before deploying the code that uses it** (the BYON request calls the function).
+- **Rollback:** SQL in the migration's header (code first; `metadata.vobiz_message_id` is still written).
+- **Test:** `supabase/migrations/whatsapp_vobiz_reliability.pg.test.ts`.
+
+### `20261028090000_whatsapp_clickai_number_inventory.sql`
+
+- **Adds:**
+  - `phone_numbers.voice_capable` (default true) / `whatsapp_capable` (default false), at least one true; every existing number becomes voice-only, and voice code only considers `voice_capable` rows;
+  - one live `whatsapp_number_orders` row per number platform-wide; nullable `organization_id`; `phone_number_inventory_id`;
+  - `whatsapp_connections.inventory_number_id`, one live connection per inventory number;
+  - ownership triggers on both tables (advisory-locked per number): no live connection for a number another organization holds or that is unassigned; no inventory assignment of a number another organization has live on WhatsApp; no reassignment/release while connected;
+  - `record_whatsapp_number_purchase()` (service role only).
+- **Impact:** defaulted columns (no rewrite); index builds on `phone_numbers` and `whatsapp_connections` (both small). The triggers refuse a write that would put one number in two organizations — including, for voice, adding a number another organization has connected to WhatsApp.
+- **Pre-check (read-only):** `SELECT p.e164, p.organization_id, c.organization_id FROM phone_numbers p JOIN whatsapp_connections c ON regexp_replace(c.display_phone_number,'[^0-9]','','g') = regexp_replace(p.e164,'[^0-9]','','g') WHERE c.status <> 'disconnected' AND p.status NOT IN ('released','failed') AND p.organization_id IS DISTINCT FROM c.organization_id;` — expected empty; existing conflicting pairs aren't rejected by the migration, but reassigning or reconnecting those rows is then refused.
 
 ### `20261019090000_whatsapp_ai_replies.sql`
 
@@ -330,7 +380,7 @@ Six new files, all additive and idempotent: `20261013090000` (server-role grants
 
 1. Back up.
 2. Apply to a non-production branch/project and run the pre-checks and tests there.
-3. Apply to production in order (20261013, 20261019, 20261020, 20261022, 20261026, then 20261027).
+3. Apply to production in order (20261013, 20261019, 20261020, 20261022, 20261026, 20261027, then 20261029; 20261028 only together with the code that needs it).
 4. Deploy the code.
 5. Turn on notifications for one business.
 
@@ -356,3 +406,71 @@ node --test supabase/migrations/whatsapp_*.pg.test.ts
 ```
 
 The in-memory database used by the library tests (`src/lib/whatsapp/whatsapp-test-db.ts`) mirrors the real unique constraints. Vobiz itself is always a mocked stand-in in these tests (request/response shapes from Vobiz's documentation); no test calls the real Vobiz API. The PostgreSQL suites prove the real behaviour (triggers, RLS, grants, PostgREST filters).
+
+## Diagnosing onboarding and webhooks
+
+- **BYON states** (`whatsapp_byon_verifications.state`): `requested` (claimed, Vobiz not answered), `pending` (Vobiz answered 2xx with its id and status `pending` — accepted, **not** delivered), `unrecognized` (2xx ClickAI couldn't interpret: empty/malformed body, no usable id, no status, a status other than `pending`, a bad `expires_at` — outcome unknown, no meaning inferred), `unavailable` (timeout / network / 429 / 5xx — outcome unknown, still counted), `rejected` (4xx — no code sent, not counted), `confirmed` (the code was confirmed). A code is refused before Vobiz is asked when the latest `pending` request's `expires_at` has passed. The `whatsapp_byon_otp_requested` timeline event is written for `pending` and `unrecognized` answers only. Delivery is never confirmed by ClickAI. A number is verified only when `connectByon` succeeds, and connected only when a `whatsapp_connections` row with `status = 'connected'` exists.
+- **Log lines** (no secrets, codes or message content):
+  - `whatsapp:schema_mismatch` — a WhatsApp action hit a missing column/table (e.g. 42703 before `20261027090000`); the customer sees "a database update is pending".
+  - `whatsapp_byon:verify_response_unrecognized` — a 2xx verify answer ClickAI couldn't interpret (`reason`, a validated `status`, key names; no values).
+  - `whatsapp_byon:verify_outcome_unknown` — timeout / network / 429 / 5xx on a verify request (error kind and HTTP status only).
+  - `whatsapp_onboarding:recovery_refused`, `whatsapp_onboarding:channel_identity_mismatch`, `whatsapp_onboarding:channel_owned_elsewhere` — channel recovery stopped for an administrator (counts or Vobiz channel id only).
+  - `whatsapp_webhook:envelope_unrecognized` (key names), `whatsapp_webhook:payload_without_phone_number_id`, `whatsapp_webhook:routing_conflict` — retained events; `whatsapp_webhook:no_live_connection`, `whatsapp_webhook:status_unmatched` — deferred events; `whatsapp_webhook:retries_exhausted`, `whatsapp_webhook:replay_failed`.
+  - Find them: `SELECT event_id, event_type, attempts, error, next_attempt_at FROM webhook_events WHERE provider LIKE 'vobiz_whatsapp%' AND processed_at IS NULL ORDER BY created_at DESC;`
+- **Routing.** A delivery is matched only by `payload.metadata.phone_number_id` (Vobiz's Events Reference: the payload is a slice of the Cloud API change value). Vobiz's Quick Start example shows a different, flat shape (top-level `channel_id`, flat `message`, no `event_id`); it is not confirmed, so such a delivery is kept as unrecognized, not applied. Which shape Vobiz actually sends is unconfirmed: check `webhook_events.payload` after the first real delivery.
+- **Delivery statuses** are matched by the wamid in `statuses[].id` (Vobiz's documented correlation). Vobiz's own message id is stored (`whatsapp_messages.provider_message_id`) but is never used as a wamid; Vobiz documents no other identifier in `message.status`. A message whose send returned `meta_message_id: null` therefore can't be matched: its statuses are deferred, retried, then retained (`gave_up:status_unmatched`) and the message stays `sent`. Resolving that needs Vobiz to confirm which identifier a status carries or how to look up the wamid.
+- **Numbers in the WhatsApp / WhatsApp Business app** can't be connected with BYON until that account is deleted (Vobiz: one provider per number, not on the consumer apps). Coexistence (keeping the app) is not documented by Vobiz and is not supported here.
+
+## Production setup: Vobiz webhook
+
+What ClickAI implements (`src/routes/api/public/webhooks/whatsapp.ts` → `whatsapp-webhook-handler.server.ts`):
+
+| Item      | Value                                                                                                                                           |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| URL       | `https://app.clickai.in/api/public/webhooks/whatsapp` (POST only; no GET handshake)                                                             |
+| Events    | `message.inbound`, `message.status`; `call.*` is acknowledged and ignored                                                                       |
+| Signature | `X-Webhook-Signature` = hex HMAC-SHA256 of the raw body with the subscription secret, no prefix                                                 |
+| Secret    | Worker secret `VOBIZ_WHATSAPP_WEBHOOK_SECRET`; missing → every delivery is answered `401`                                                       |
+| Body      | Vobiz envelope `event_id`, `event_type`, `account_id`, `occurred_at`, `payload` (payload = WhatsApp Cloud API change value)                     |
+| Responses | `200` with the outcome (processed/duplicate/ignored/deferred/retained/unrecognized), `401` bad signature, `500` storage failure (Vobiz retries) |
+
+Vobiz's documentation (vobiz-mcp-server `skills/vobiz-whatsapp/SKILL.md`) says only: subscriptions are managed at `POST|GET /webhooks` and `DELETE /webhooks/{id}` under `https://api.vobiz.ai/api/v1/messaging`, deliveries are signed with the subscription `secret`, and the secret is never returned after creation. It does **not** document the request fields (URL, event selection), who generates the secret, or whether one subscription covers every channel on the account. Create the subscription in the Vobiz Console's Webhooks page (or confirm the API fields with Vobiz first), and:
+
+1. Only after the new code is deployed and its migrations (through `20261029090000`) are applied: today's production route is the retired Meta webhook and rejects Vobiz deliveries.
+2. Set `VOBIZ_WHATSAPP_WEBHOOK_SECRET` to the subscription's secret before (or together with) creating the subscription; copy it at creation, Vobiz won't show it again.
+3. Subscribe `message.inbound` and `message.status`.
+4. Check: an unsigned POST to the URL returns `401`; a real inbound message appears in the WhatsApp inbox.
+
+A channel created in the Vobiz Console (outside ClickAI) has no `whatsapp_connections` row, so its messages are ignored until it is connected to a workspace from ClickAI.
+
+## Production setup: migration reconciliation
+
+Production (2026-10-27): of `20261024`–`20261028`, only `20261025090000_whatsapp_vobiz_onboarding` is applied. That file is not in this repository; its contents were never reviewed here. Read-only steps before applying anything:
+
+```sql
+-- 1. Full applied history (expect 47 known versions plus 20261025090000):
+SELECT version, name FROM supabase_migrations.schema_migrations ORDER BY version;
+-- 2. Exactly what 20261025 executed (the CLI stores the statements):
+SELECT statements FROM supabase_migrations.schema_migrations WHERE version = '20261025090000';
+-- 3. Objects 20261027/20261028 create that may already exist from 20261025:
+SELECT table_name, column_name, data_type, column_default, is_nullable
+  FROM information_schema.columns
+ WHERE table_schema = 'public'
+   AND ((table_name = 'whatsapp_connections' AND column_name IN
+         ('provider','vobiz_channel_id','number_onboarding_mode','vobiz_number_order_id','inventory_number_id'))
+     OR (table_name = 'phone_numbers' AND column_name IN ('voice_capable','whatsapp_capable'))
+     OR table_name = 'whatsapp_number_orders');
+SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint
+ WHERE conrelid IN ('public.whatsapp_connections'::regclass, 'public.phone_numbers'::regclass)
+   AND conname LIKE ANY (ARRAY['whatsapp_connections_%','phone_numbers_%']);
+SELECT indexname, indexdef FROM pg_indexes
+ WHERE schemaname = 'public' AND tablename IN ('whatsapp_connections','phone_numbers','whatsapp_number_orders');
+SELECT p.proname, pg_get_function_identity_arguments(p.oid) FROM pg_proc p
+  JOIN pg_namespace n ON n.oid = p.pronamespace
+ WHERE n.nspname = 'public' AND p.proname IN
+   ('phone_number_key','enforce_whatsapp_connection_number_owner','enforce_phone_number_whatsapp_owner','record_whatsapp_number_purchase');
+-- 4. The Vobiz channel already in production, if 20261025 stored it:
+SELECT id, organization_id, status, phone_number_id, display_phone_number FROM public.whatsapp_connections;
+```
+
+Then: add the exact `20261025090000` file (copied from the machine that applied it, not rewritten) to `supabase/migrations/` so the replay tests cover it and `supabase db push` stops reporting a remote-only version, and re-review `20261027`/`20261028` against it — their `IF NOT EXISTS` / `duplicate_object` guards would silently keep a same-named object from `20261025` even if its definition differs.

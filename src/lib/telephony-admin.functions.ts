@@ -6,6 +6,11 @@ import { provisionOrganizationAfterPayment } from "@/lib/provisioning-orchestrat
 import { TelephonyAdapterError } from "@/lib/telephony/adapter";
 import { VobizTelephonyAdapter } from "@/lib/telephony/vobiz-provider";
 import type { Json } from "@/integrations/supabase/types";
+import {
+  VobizWhatsAppClient,
+  missingVobizWhatsAppSettings,
+  resolveVobizWhatsAppConfig,
+} from "@/lib/whatsapp/vobiz-whatsapp-client.server";
 
 /**
  * Admin telephony control plane: phone-number lifecycle and the
@@ -244,7 +249,7 @@ export const activatePhoneNumber = createServerFn({ method: "POST" })
       if ((error as { code?: string }).code === "23505") {
         throw new Error("This number is already active on another organization.");
       }
-      throw error;
+      throw numberOwnershipError(error) ?? error;
     }
 
     await writeAudit(admin, {
@@ -284,8 +289,11 @@ export const reassignPhoneNumber = createServerFn({ method: "POST" })
       .eq("id", data.toOrgId)
       .maybeSingle();
     if (!destOrg) throw new Error("Destination client not found");
+    await assertNotConnectedToWhatsApp(supabaseAdmin, data.numberId);
 
-    const { error } = await supabaseAdmin
+    // Conditional on the row being exactly as read, so two concurrent
+    // reassignments can't both win.
+    let update = supabaseAdmin
       .from("phone_numbers")
       .update({
         organization_id: data.toOrgId,
@@ -296,8 +304,15 @@ export const reassignPhoneNumber = createServerFn({ method: "POST" })
         outbound_enabled: false,
         suspended_reason: null,
       })
-      .eq("id", data.numberId);
-    if (error) throw error;
+      .eq("id", data.numberId)
+      .eq("status", before.status);
+    update = before.organization_id
+      ? update.eq("organization_id", before.organization_id)
+      : update.is("organization_id", null);
+    const { data: moved, error } = await update.select("id");
+    if (error) throw numberOwnershipError(error) ?? error;
+    if (!moved || moved.length === 0)
+      throw new Error("This number changed while you were reassigning it. Reload and try again.");
 
     await writeAudit(admin, {
       action: "NUMBER_REASSIGNED",
@@ -365,6 +380,7 @@ export const releasePhoneNumber = createServerFn({ method: "POST" })
       .maybeSingle();
     if (!before) throw new Error("Number not found");
     if (before.status === "released") throw new Error("This number is already released");
+    await assertNotConnectedToWhatsApp(supabaseAdmin, data.numberId);
 
     if (before.provider_number_id) {
       const adapter = getTelephonyAdapter(before.provider);
@@ -388,7 +404,7 @@ export const releasePhoneNumber = createServerFn({ method: "POST" })
         outbound_enabled: false,
       })
       .eq("id", data.numberId);
-    if (error) throw error;
+    if (error) throw numberOwnershipError(error) ?? error;
 
     await writeAudit(admin, {
       action: "NUMBER_RELEASED",
@@ -424,12 +440,14 @@ export const setNumberDirection = createServerFn({ method: "POST" })
 
     const { data: before } = await supabaseAdmin
       .from("phone_numbers")
-      .select("status, organization_id, inbound_enabled, outbound_enabled")
+      .select("*")
       .eq("id", data.numberId)
       .maybeSingle();
     if (!before) throw new Error("Number not found");
     if (data.enabled && before.status !== "active")
       throw new Error("Only an active number can have inbound/outbound enabled");
+    if (data.enabled && before.voice_capable === false)
+      throw new Error("This is a WhatsApp-only number — it can't take calls.");
 
     const column = data.direction === "inbound" ? "inbound_enabled" : "outbound_enabled";
     const { error } = await supabaseAdmin
@@ -490,6 +508,149 @@ export const retryProvisioning = createServerFn({ method: "POST" })
     });
 
     return result;
+  });
+
+/* ------------------------------------------------------------------ */
+/* WhatsApp numbers bought through ClickAI's Vobiz account             */
+/* ------------------------------------------------------------------ */
+
+type AdminClient = Awaited<typeof import("@/integrations/supabase/client.server")>["supabaseAdmin"];
+
+/** A number with a live WhatsApp connection stays with its organization until disconnected. */
+async function assertNotConnectedToWhatsApp(supabaseAdmin: AdminClient, numberId: string) {
+  const { data, error } = await supabaseAdmin
+    .from("whatsapp_connections")
+    .select("id")
+    .eq("inventory_number_id", numberId)
+    .neq("status", "disconnected")
+    .limit(1);
+  // 42703 = the column doesn't exist yet (20261028090000 not applied): no
+  // connection can have been made from an inventory number, so nothing to
+  // protect — voice reassign/release keep working before the migration.
+  if (error && (error as { code?: string }).code === "42703") return;
+  if (error) throw error;
+  if ((data ?? []).length > 0)
+    throw new Error(
+      "This number is connected to WhatsApp. The customer (or support) must disconnect it first.",
+    );
+}
+
+/** The database's ownership refusals (20261028090000), as admin-readable errors. */
+function numberOwnershipError(error: { code?: string; message?: string }): Error | null {
+  if (error.code !== "P0001") return null;
+  if (/whatsapp_number_connected/.test(error.message ?? ""))
+    return new Error(
+      "This number is connected to WhatsApp. The customer (or support) must disconnect it first.",
+    );
+  if (/whatsapp_number_owned_elsewhere/.test(error.message ?? ""))
+    return new Error("Another organization holds this number (or has it connected to WhatsApp).");
+  return null;
+}
+
+function vobizWhatsApp(): VobizWhatsAppClient {
+  const config = resolveVobizWhatsAppConfig();
+  if (!config) {
+    console.error("whatsapp_admin:not_configured", { missing: missingVobizWhatsAppSettings() });
+    throw new Error("Vobiz WhatsApp is not configured on this deployment.");
+  }
+  return new VobizWhatsAppClient(config);
+}
+
+/** Numbers Vobiz can sell right now (read-only; nothing is bought). */
+export const searchVobizWhatsAppNumbers = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { country: string }) => {
+    if (!input?.country || !/^[A-Za-z]{2}$/.test(input.country))
+      throw new Error("A two-letter country code is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
+    const { searchNumbers } = await import("@/lib/whatsapp/whatsapp-vobiz-onboarding.server");
+    return { numbers: await searchNumbers({ country: data.country }, { vobiz: vobizWhatsApp() }) };
+  });
+
+interface PurchaseWhatsAppNumberInput {
+  orgId: string;
+  phoneNumber: string;
+  country: string;
+  reason: string;
+  /** Buying spends money on ClickAI's Vobiz account: the confirm dialog must send this. */
+  confirm: true;
+}
+
+/**
+ * Buys a WhatsApp number through ClickAI's Vobiz account for one client
+ * organization — platform admins with "numbers.write" only; there is no
+ * customer path. The number lands in phone_numbers for that organization
+ * ('provisioning', WhatsApp only) and goes live through the same Activate
+ * action as every other number; the customer then connects it to their
+ * WhatsApp Business Account. Idempotent per number (see
+ * purchaseNumberForOrganization) and audited, including failures.
+ */
+export const purchaseWhatsAppNumber = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: PurchaseWhatsAppNumberInput) => {
+    if (!input?.orgId) throw new Error("orgId is required");
+    if (!input.phoneNumber?.trim()) throw new Error("phoneNumber is required");
+    if (!input.country) throw new Error("country is required");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    if (input.confirm !== true) throw new Error("Confirm the purchase first");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
+    const vobiz = vobizWhatsApp();
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { purchaseNumberForOrganization } =
+      await import("@/lib/whatsapp/whatsapp-vobiz-onboarding.server");
+    try {
+      const order = await purchaseNumberForOrganization(
+        supabaseAdmin,
+        {
+          organizationId: data.orgId,
+          phoneNumber: data.phoneNumber,
+          country: data.country,
+          requestedBy: admin.userId,
+        },
+        { vobiz },
+      );
+      if (!order.alreadyOrdered) {
+        await writeAudit(admin, {
+          action: "WHATSAPP_NUMBER_PURCHASED",
+          entityType: "phone_number",
+          entityId: order.inventoryNumberId,
+          organizationId: data.orgId,
+          newValue: {
+            e164: order.phoneNumber,
+            orderId: order.id,
+            vobizOrderId: order.vobizOrderId,
+            status: order.status,
+          },
+          reason: data.reason,
+        });
+      }
+      return order;
+    } catch (err) {
+      await writeAudit(admin, {
+        action: "WHATSAPP_NUMBER_PURCHASE_FAILED",
+        entityType: "phone_number",
+        organizationId: data.orgId,
+        newValue: { e164: data.phoneNumber, error: (err as Error).message.slice(0, 300) },
+        reason: data.reason,
+      });
+      throw err;
+    }
+  });
+
+/** Recent WhatsApp number purchases, including ones that need reconciling ('requested'/'unknown'). */
+export const listWhatsAppNumberOrders = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    await assertPlatformAdmin(context.supabase, context.userId, "customers.read");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { listNumberOrders } = await import("@/lib/whatsapp/whatsapp-vobiz-onboarding.server");
+    return listNumberOrders(supabaseAdmin);
   });
 
 /* ------------------------------------------------------------------ */

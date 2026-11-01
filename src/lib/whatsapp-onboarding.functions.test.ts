@@ -28,9 +28,8 @@ function handler(name: string): string {
 const MUTATIONS = [
   "startWhatsAppByonVerification",
   "connectWhatsAppByon",
-  "searchWhatsAppNumbers",
-  "orderWhatsAppNumber",
-  "connectPurchasedWhatsAppNumber",
+  "connectAssignedWhatsAppNumber",
+  "requestWhatsAppNumber",
   "completeWhatsAppEmbeddedSignup",
 ];
 
@@ -39,7 +38,6 @@ describe("authentication, authorization, feature gate", () => {
     for (const name of [
       ...MUTATIONS,
       "reconnectWhatsAppConnection",
-      "listWhatsAppNumberOrders",
       "listDisconnectedWhatsAppNumbers",
     ]) {
       assert.match(handler(name), /\.middleware\(\[requireSupabaseAuth\]\)/, name);
@@ -49,12 +47,12 @@ describe("authentication, authorization, feature gate", () => {
   test("every onboarding step resolves owner/admin scope from the target and checks the WhatsApp feature gate", () => {
     assert.match(
       code,
-      /async function managerScope[\s\S]*?requireWhatsAppManager\([\s\S]*?assertFeatureUnlocked\(scope\.organizationId, "whatsapp"\)/,
+      /async function managerScope[\s\S]*?requireWhatsAppManager\([\s\S]*?assertWhatsAppUnlockedForCaller\(context\.supabase, scope\.organizationId\)/,
     );
     for (const name of MUTATIONS) {
       assert.match(
         handler(name),
-        /await managerScope\(supabaseAdmin, context\.userId, data\.businessId\)/,
+        /await managerScope\(supabaseAdmin, context, data\.businessId\)/,
         name,
       );
     }
@@ -63,7 +61,12 @@ describe("authentication, authorization, feature gate", () => {
       reconnect,
       /requireWhatsAppManager\(supabaseAdmin, context\.userId, \{\s*connectionId: data\.connectionId,?\s*\}\)/,
     );
-    assert.match(reconnect, /assertFeatureUnlocked\(scope\.organizationId, "whatsapp"\)/);
+    assert.match(
+      reconnect,
+      /assertWhatsAppUnlockedForCaller\(context\.supabase, scope\.organizationId\)/,
+    );
+    // The gate is never evaluated through the service role (no EXECUTE on feature_locked).
+    assert.doesNotMatch(code, /assertFeatureUnlocked\(/);
   });
 
   test("no input schema accepts an organization id", () => {
@@ -71,8 +74,25 @@ describe("authentication, authorization, feature gate", () => {
     assert.doesNotMatch(code, /data\.organizationId/);
   });
 
-  test("buying a number requires an explicit confirmation", () => {
-    assert.match(handler("orderWhatsAppNumber"), /confirm: z\.literal\(true\)/);
+  test("customers can't buy numbers: nothing here searches, orders or records a Vobiz purchase", () => {
+    for (const gone of [
+      "searchWhatsAppNumbers",
+      "orderWhatsAppNumber",
+      "listWhatsAppNumberOrders",
+      "connectPurchasedWhatsAppNumber",
+    ]) {
+      assert.doesNotMatch(code, new RegExp(`export const ${gone}\\b`), gone);
+    }
+    assert.doesNotMatch(
+      code,
+      /purchaseNumberForOrganization|searchNumbers|createNumberOrder|record_whatsapp_number_purchase|listNumberOrders/,
+    );
+  });
+
+  test("an assigned ClickAI number is identified by id only; its organization comes from the scope", () => {
+    const connect = handler("connectAssignedWhatsAppNumber");
+    assert.match(connect, /numberId: z\.string\(\)\.uuid\(\)/);
+    assert.match(connect, /connectAssignedNumber\(supabaseAdmin, scope, data, \{ vobiz \}\)/);
   });
 });
 
@@ -95,6 +115,26 @@ describe("secrets", () => {
     assert.doesNotMatch(
       code,
       /MetaWhatsAppClient|resolveMetaWhatsAppConfig|META_APP_SECRET|exchangeAuthorizationCode/,
+    );
+  });
+});
+
+describe("schema contract (production 42703 incident)", () => {
+  test("every onboarding action runs inside withSchemaContract, named after itself", () => {
+    for (const name of [...MUTATIONS, "reconnectWhatsAppConnection"]) {
+      assert.match(
+        handler(name),
+        new RegExp(`withSchemaContract\\("${name}", async \\(\\) =>`),
+        name,
+      );
+    }
+  });
+
+  test("the WhatsApp page's disconnected list tolerates a database without the Vobiz columns (logged, empty)", () => {
+    const list = handler("listDisconnectedWhatsAppNumbers");
+    assert.match(
+      list,
+      /if \(isSchemaMismatch\(error\)\) \{\s*logSchemaMismatch\("listDisconnectedWhatsAppNumbers", error\);\s*return \[\];/,
     );
   });
 });

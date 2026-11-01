@@ -448,3 +448,63 @@ describe("provisionOrganizationAfterPayment — lifecycle_status only ever advan
     assert.equal((orgUpdate!.payload as { lifecycle_status: string }).lifecycle_status, "active");
   });
 });
+
+describe("provisionOrganizationAfterPayment — ClickAI WhatsApp-only numbers", () => {
+  test("a WhatsApp-only number on the org is not treated as its phone line; a voice number is claimed instead", async () => {
+    const whatsappOnly = {
+      ...POOL_NUMBER,
+      id: "num_wa",
+      organization_id: "org_1",
+      status: "active",
+      provider: "vobiz",
+      voice_capable: false,
+      whatsapp_capable: true,
+    };
+    const { client, calls } = makeFakeSupabase({
+      organizations: {
+        select: [{ data: ORG_ROW, error: null }],
+        update: [{ data: null, error: null }],
+      },
+      phone_numbers: {
+        select: [
+          { data: [whatsappOnly], error: null }, // the org's numbers
+          { data: [{ id: "num_1" }], error: null }, // pool candidate
+        ],
+        update: [
+          { data: [{ ...POOL_NUMBER, organization_id: "org_1", status: "reserved" }], error: null },
+        ],
+      },
+      telephony_connections: { select: [{ data: null, error: null }] },
+      agent_configs: { select: [{ data: null, error: null }] },
+    });
+
+    const result = await provisionOrganizationAfterPayment(client, "org_1");
+
+    assert.equal(result.numberClaimedNow, true);
+    assert.equal(result.phoneNumberId, "num_1");
+    assert.ok(
+      !calls.some(
+        (c) =>
+          c.table === "phone_numbers" &&
+          c.type === "update" &&
+          JSON.stringify(c.payload).includes("num_wa"),
+      ),
+    );
+  });
+
+  test("rows from a database without the capability columns are still voice numbers", async () => {
+    const legacy = { ...POOL_NUMBER, organization_id: "org_1", status: "provisioning" };
+    const { client } = makeFakeSupabase({
+      organizations: {
+        select: [{ data: ORG_ROW, error: null }],
+        update: [{ data: null, error: null }],
+      },
+      phone_numbers: { select: [{ data: [legacy], error: null }] },
+      telephony_connections: { select: [{ data: null, error: null }] },
+      agent_configs: { select: [{ data: null, error: null }] },
+    });
+    const result = await provisionOrganizationAfterPayment(client, "org_1");
+    assert.equal(result.phoneNumberId, "num_1");
+    assert.equal(result.numberClaimedNow, false);
+  });
+});

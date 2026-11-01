@@ -8,11 +8,15 @@
  *      must be the hex HMAC-SHA256 of the exact raw body with
  *      VOBIZ_WHATSAPP_WEBHOOK_SECRET, or 401.
  *   2. Store statuses / inbound messages (whatsapp-inbound.server.ts),
- *      deduplicated on Vobiz's event_id.
- *   3. Answer 200 straight away; AI replies to newly stored inbound texts
- *      run in the background, never delaying the acknowledgement.
- *   4. If storing fails, the claim was released: answer 500 so Vobiz
- *      retries. Nothing from the payload is logged.
+ *      deduplicated on Vobiz's event_id. An event that can't be applied yet
+ *      (no live connection, a status for an unrecorded message) is kept and
+ *      replayed later; one that must not be applied automatically (routing
+ *      conflict, no phone number id, not the documented envelope) is kept
+ *      for an operator. Either way it is never marked processed.
+ *   3. Answer 200 with the outcome straight away; AI replies to newly
+ *      stored inbound texts run in the background.
+ *   4. If storing fails, the event stays due: answer 500 so Vobiz retries
+ *      (bounded). Nothing from the payload is logged.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
@@ -57,7 +61,7 @@ export async function handleWhatsAppWebhookPost(
     }
     return json({ outcome: result.outcome });
   } catch (err) {
-    // The event's claim was released: answer 5xx so Vobiz retries it.
+    // The event stays due (bounded attempts): answer 5xx so Vobiz retries it.
     console.error(
       "whatsapp_webhook:processing_failed",
       err instanceof Error

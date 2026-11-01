@@ -1781,6 +1781,8 @@ export type Database = {
           status: string;
           suspended_reason: string | null;
           updated_at: string;
+          voice_capable: boolean;
+          whatsapp_capable: boolean;
         };
         Insert: {
           agent_config_id?: string | null;
@@ -1806,6 +1808,8 @@ export type Database = {
           status?: string;
           suspended_reason?: string | null;
           updated_at?: string;
+          voice_capable?: boolean;
+          whatsapp_capable?: boolean;
         };
         Update: {
           agent_config_id?: string | null;
@@ -1831,6 +1835,8 @@ export type Database = {
           status?: string;
           suspended_reason?: string | null;
           updated_at?: string;
+          voice_capable?: boolean;
+          whatsapp_capable?: boolean;
         };
         Relationships: [
           {
@@ -2449,31 +2455,37 @@ export type Database = {
       };
       webhook_events: {
         Row: {
+          attempts: number;
           created_at: string;
           error: string | null;
           event_id: string;
           event_type: string | null;
           id: string;
+          next_attempt_at: string | null;
           payload: Json;
           processed_at: string | null;
           provider: string;
         };
         Insert: {
+          attempts?: number;
           created_at?: string;
           error?: string | null;
           event_id: string;
           event_type?: string | null;
           id?: string;
+          next_attempt_at?: string | null;
           payload: Json;
           processed_at?: string | null;
           provider: string;
         };
         Update: {
+          attempts?: number;
           created_at?: string;
           error?: string | null;
           event_id?: string;
           event_type?: string | null;
           id?: string;
+          next_attempt_at?: string | null;
           payload?: Json;
           processed_at?: string | null;
           provider?: string;
@@ -2518,6 +2530,53 @@ export type Database = {
           subject_type?: string;
         };
         Relationships: [];
+      };
+      whatsapp_byon_verifications: {
+        Row: {
+          created_at: string;
+          expires_at: string | null;
+          id: string;
+          method: string;
+          organization_id: string;
+          phone_number: string;
+          provider_status: string | null;
+          provider_verification_id: string | null;
+          state: string;
+          updated_at: string;
+        };
+        Insert: {
+          created_at?: string;
+          expires_at?: string | null;
+          id?: string;
+          method: string;
+          organization_id: string;
+          phone_number: string;
+          provider_status?: string | null;
+          provider_verification_id?: string | null;
+          state?: string;
+          updated_at?: string;
+        };
+        Update: {
+          created_at?: string;
+          expires_at?: string | null;
+          id?: string;
+          method?: string;
+          organization_id?: string;
+          phone_number?: string;
+          provider_status?: string | null;
+          provider_verification_id?: string | null;
+          state?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "whatsapp_byon_verifications_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
       };
       whatsapp_campaign_recipients: {
         Row: {
@@ -2646,6 +2705,7 @@ export type Database = {
           disconnected_at: string | null;
           display_phone_number: string | null;
           id: string;
+          inventory_number_id: string | null;
           last_connected_at: string | null;
           last_error: string | null;
           metadata: Json;
@@ -2675,6 +2735,7 @@ export type Database = {
           disconnected_at?: string | null;
           display_phone_number?: string | null;
           id?: string;
+          inventory_number_id?: string | null;
           last_connected_at?: string | null;
           last_error?: string | null;
           metadata?: Json;
@@ -2704,6 +2765,7 @@ export type Database = {
           disconnected_at?: string | null;
           display_phone_number?: string | null;
           id?: string;
+          inventory_number_id?: string | null;
           last_connected_at?: string | null;
           last_error?: string | null;
           metadata?: Json;
@@ -2880,6 +2942,7 @@ export type Database = {
           metadata: Json;
           occurred_at: string;
           organization_id: string;
+          provider_message_id: string | null;
           reply_to_message_id: string | null;
           status: string;
           wa_message_id: string | null;
@@ -2898,6 +2961,7 @@ export type Database = {
           metadata?: Json;
           occurred_at?: string;
           organization_id: string;
+          provider_message_id?: string | null;
           reply_to_message_id?: string | null;
           status?: string;
           wa_message_id?: string | null;
@@ -2916,6 +2980,7 @@ export type Database = {
           metadata?: Json;
           occurred_at?: string;
           organization_id?: string;
+          provider_message_id?: string | null;
           reply_to_message_id?: string | null;
           status?: string;
           wa_message_id?: string | null;
@@ -4106,8 +4171,9 @@ export type Database = {
           created_at: string;
           failure_reason: string | null;
           id: string;
-          organization_id: string;
+          organization_id: string | null;
           phone_number: string;
+          phone_number_inventory_id: string | null;
           requested_by: string | null;
           status: string;
           updated_at: string;
@@ -4119,8 +4185,9 @@ export type Database = {
           created_at?: string;
           failure_reason?: string | null;
           id?: string;
-          organization_id: string;
+          organization_id?: string | null;
           phone_number: string;
+          phone_number_inventory_id?: string | null;
           requested_by?: string | null;
           status?: string;
           updated_at?: string;
@@ -4132,8 +4199,9 @@ export type Database = {
           created_at?: string;
           failure_reason?: string | null;
           id?: string;
-          organization_id?: string;
+          organization_id?: string | null;
           phone_number?: string;
+          phone_number_inventory_id?: string | null;
           requested_by?: string | null;
           status?: string;
           updated_at?: string;
@@ -4478,6 +4546,27 @@ export type Database = {
           p_payment_request_id: string | null;
         };
         Returns: undefined;
+      };
+      claim_whatsapp_byon_verification: {
+        Args: {
+          _limit: number;
+          _method: string;
+          _organization_id: string;
+          _phone_number: string;
+          _window_seconds: number;
+        };
+        Returns: string | null;
+      };
+      record_whatsapp_number_purchase: {
+        Args: {
+          _country: string;
+          _order_id: string;
+          _order_status: string;
+          _organization_id: string;
+          _provisioned_by: string;
+          _vobiz_order_id: string;
+        };
+        Returns: string;
       };
       reschedule_booking_atomic: {
         Args: {

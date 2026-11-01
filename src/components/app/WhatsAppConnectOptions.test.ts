@@ -17,9 +17,9 @@ const src = readFileSync(
 const code = src.replace(/\/\*\*[\s\S]*?\*\//g, "");
 
 describe("the three Vobiz connection options", () => {
-  test("Bring your own number, Buy a number and Embedded Signup are all offered", () => {
+  test("Bring your own number, a number from ClickAI and Embedded Signup are all offered", () => {
     assert.match(code, /<TabsTrigger value="byon">Bring your own number<\/TabsTrigger>/);
-    assert.match(code, /<TabsTrigger value="buy">Buy a number<\/TabsTrigger>/);
+    assert.match(code, /<TabsTrigger value="clickai">Number from ClickAI<\/TabsTrigger>/);
     assert.match(code, /<TabsTrigger value="embedded">Embedded Signup<\/TabsTrigger>/);
   });
 
@@ -27,9 +27,8 @@ describe("the three Vobiz connection options", () => {
     for (const fn of [
       "startWhatsAppByonVerification",
       "connectWhatsAppByon",
-      "searchWhatsAppNumbers",
-      "orderWhatsAppNumber",
-      "connectPurchasedWhatsAppNumber",
+      "connectAssignedWhatsAppNumber",
+      "requestWhatsAppNumber",
       "completeWhatsAppEmbeddedSignup",
     ]) {
       assert.match(code, new RegExp(`useServerFn\\(${fn}\\)`), fn);
@@ -39,9 +38,19 @@ describe("the three Vobiz connection options", () => {
 });
 
 describe("safety in the UI", () => {
-  test("buying is behind a confirmation dialog and sends confirm: true", () => {
-    assert.match(code, /<AlertDialogTitle>Buy \{confirming\}\?<\/AlertDialogTitle>/);
-    assert.match(code, /order\(\{ data: \{ businessId, phoneNumber, confirm: true \} \}\)/);
+  test("customers can't buy numbers: no search, order or purchase call from the customer UI", () => {
+    assert.doesNotMatch(
+      code,
+      /searchWhatsAppNumbers|orderWhatsAppNumber|purchaseWhatsAppNumber|searchVobizWhatsAppNumbers|telephony-admin/,
+    );
+  });
+
+  test("assigned numbers are read through RLS for this organization only, WhatsApp-capable and not released", () => {
+    assert.match(
+      code,
+      /\.from\("phone_numbers"\)[\s\S]*?\.eq\("organization_id", orgId\)[\s\S]*?\.eq\("whatsapp_capable", true\)/,
+    );
+    assert.match(code, /\.not\("status", "in", "\(released,failed\)"\)/);
   });
 
   test("the BYON Meta token is a password field and is cleared after a successful connect", () => {
@@ -63,5 +72,29 @@ describe("safety in the UI", () => {
 
   test("only the minimal Embedded Signup result plus the business id reaches the server", () => {
     assert.match(code, /complete\(\{ data: \{ \.\.\.outcome\.result, businessId \} \}\)/);
+  });
+});
+
+describe("BYON wording: a code request is not a delivery", () => {
+  test("after a request, the UI shows only the shared wording — never that a code was sent or delivered", () => {
+    assert.doesNotMatch(
+      code,
+      /Verification code sent to|code should reach|Send verification code/i,
+    );
+    // Both the toast and the panel come from byon-verification-messages.ts
+    // (its wording is tested at runtime in byon-verification-messages.test.ts).
+    assert.match(code, /byonRequestMessages\(outcome\)/);
+    assert.match(code, /byonRequestMessages\(requested\)\.panel/);
+    assert.match(code, /toast\.warning\(messages\.toast\)/);
+  });
+
+  test("the eligibility rules are shown before a code is requested", () => {
+    assert.match(code, /BYON_ELIGIBILITY_NOTES\.map/);
+    const eligibility = code.indexOf("BYON_ELIGIBILITY_NOTES.map");
+    const button = code.indexOf("Request verification code");
+    assert.ok(
+      eligibility > 0 && eligibility < button,
+      "eligibility notes come before the request button",
+    );
   });
 });

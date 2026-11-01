@@ -47,6 +47,13 @@ export interface VobizWebhookEnvelope {
   occurredAt: string | null;
   /** The WhatsApp Cloud API change value (metadata/contacts/messages/statuses). */
   payload: Record<string, unknown>;
+  /**
+   * Vobiz's channel UUID, when the delivery carries one (`channel_id` on the
+   * envelope or in `payload`; only Vobiz's Quick Start example shows it, so
+   * its placement is unconfirmed). Only ever a cross-check against the
+   * connection routed by `metadata.phone_number_id` — never a routing key.
+   */
+  channelId: string | null;
 }
 
 /** Null for anything that isn't a well-formed Vobiz envelope (never guessed at). */
@@ -64,10 +71,16 @@ export function parseVobizWebhookEnvelope(rawBody: string): VobizWebhookEnvelope
   const payload = b["payload"];
   if (!eventId || !eventType) return null;
   if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return null;
+  const p = payload as Record<string, unknown>;
+  const channelId =
+    (typeof b["channel_id"] === "string" && b["channel_id"]) ||
+    (typeof p["channel_id"] === "string" && p["channel_id"]) ||
+    null;
   return {
     eventId,
     eventType,
     occurredAt: typeof b["occurred_at"] === "string" ? b["occurred_at"] : null,
-    payload: payload as Record<string, unknown>,
+    payload: p,
+    channelId,
   };
 }

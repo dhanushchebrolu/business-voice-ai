@@ -120,7 +120,7 @@ describe("processing", () => {
     assert.equal(replies.flat().length, 1);
   });
 
-  test("a storage failure answers 500 (so Vobiz retries), releases the claim, and logs no payload", async () => {
+  test("a storage failure answers 500 (so Vobiz retries), keeps the event due, and logs no payload", async () => {
     let fail = true;
     const { db, deps } = harness({
       failWhen: (table, op) =>
@@ -141,7 +141,12 @@ describe("processing", () => {
     } finally {
       console.error = original;
     }
-    assert.equal(db.rows("webhook_events").length, 0, "claim released for the retry");
+    const [kept] = db.rows("webhook_events");
+    assert.equal(kept!["processed_at"], null, "not marked processed");
+    assert.ok(
+      new Date(String(kept!["next_attempt_at"])).getTime() <= Date.now(),
+      "due for the retry",
+    );
     assert.ok(logged.every((l) => !l.includes("secret appointment")));
     fail = false;
     const retry = await handleWhatsAppWebhookPost(
@@ -151,16 +156,41 @@ describe("processing", () => {
     assert.deepEqual(await retry.json(), { outcome: "processed" });
   });
 
-  test("a delivery for an unknown number is acknowledged and stores nothing", async () => {
+  test("a delivery for an unknown number is acknowledged, stores no message, and is kept for a retry", async () => {
     const { db, deps, replies } = harness();
     const body = delivery("evt-u", "wamid.u").replace('"PN_A"', '"PN_UNKNOWN"');
-    const res = await handleWhatsAppWebhookPost(
-      request(body, signVobizWebhookBody(body, SECRET)),
-      deps,
-    );
+    const warn = console.warn;
+    console.warn = () => {};
+    let res: Response;
+    try {
+      res = await handleWhatsAppWebhookPost(
+        request(body, signVobizWebhookBody(body, SECRET)),
+        deps,
+      );
+    } finally {
+      console.warn = warn;
+    }
     assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { outcome: "ignored" });
+    assert.deepEqual(await res.json(), { outcome: "deferred" });
     assert.equal(db.rows("whatsapp_messages").length, 0);
     assert.equal(replies.length, 0);
+    assert.equal(db.rows("webhook_events")[0]!["error"], "no_live_connection");
+  });
+
+  test("an invalid signature is refused before anything is stored, even for a known event", async () => {
+    const { db, deps } = harness();
+    const body = delivery("evt-sig", "wamid.sig");
+    const err = console.error;
+    console.error = () => {};
+    try {
+      for (const sig of [null, "", "00".repeat(32), signVobizWebhookBody(body, "wrong-secret")]) {
+        const res = await handleWhatsAppWebhookPost(request(body, sig), deps);
+        assert.equal(res.status, 401);
+      }
+    } finally {
+      console.error = err;
+    }
+    assert.equal(db.rows("webhook_events").length, 0);
+    assert.equal(db.rows("whatsapp_messages").length, 0);
   });
 });

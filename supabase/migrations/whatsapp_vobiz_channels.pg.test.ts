@@ -218,8 +218,10 @@ describe("whatsapp_number_orders", () => {
     const again = sql(order(ORG, "+918000000001", "pending"));
     assert.notEqual(again.status, 0);
     assert.match(again.stderr, /idx_whatsapp_number_orders_one_live|duplicate key/);
-    // Another organization's interest in the same number isn't blocked by ours.
-    assert.equal(sql(order(OTHER_ORG, "+918000000001")).status, 0);
+    // Since 20261028090000 the lock is platform-wide: nobody else can order it either.
+    const elsewhere = sql(order(OTHER_ORG, "+918000000001"));
+    assert.notEqual(elsewhere.status, 0);
+    assert.match(elsewhere.stderr, /idx_whatsapp_number_orders_one_live_number/);
     // A failed order frees the number for a new attempt.
     assert.equal(
       sql(

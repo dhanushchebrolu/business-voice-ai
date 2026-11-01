@@ -1,8 +1,13 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
-import { assertFeatureUnlocked } from "@/lib/feature-gate.server";
+import { assertWhatsAppUnlockedForCaller } from "@/lib/whatsapp/whatsapp-feature-gate.server";
 import { requireWhatsAppManager } from "@/lib/whatsapp/whatsapp-access.server";
+import {
+  isSchemaMismatch,
+  logSchemaMismatch,
+  withSchemaContract,
+} from "@/lib/whatsapp/whatsapp-schema-contract.server";
 import {
   VobizWhatsAppClient,
   missingVobizWhatsAppSettings,
@@ -11,7 +16,9 @@ import {
 
 /**
  * Customer-facing WhatsApp onboarding through Vobiz (ClickAI's WhatsApp
- * BSP): the three connection options, plus reconnect. The logic lives in
+ * BSP): bring your own number, a ClickAI-provided number (assigned by a
+ * platform admin — customers never buy one), Embedded Signup, plus
+ * reconnect. The logic lives in
  * whatsapp-vobiz-onboarding.server.ts; these wrappers only authenticate,
  * authorize and wire dependencies:
  *
@@ -20,7 +27,7 @@ import {
  *     business (or the caller's only workspace) / the target connection,
  *     and the caller must be an owner or admin of exactly it. No input
  *     schema has an organization id.
- *   - assertFeatureUnlocked(organizationId, "whatsapp"): the same billing /
+ *   - assertWhatsAppUnlockedForCaller: the same billing /
  *     feature gate as before.
  *   - Vobiz credentials are read server-side only (VOBIZ_AUTH_ID /
  *     VOBIZ_AUTH_TOKEN); if missing, the names (never values) are logged and
@@ -44,18 +51,22 @@ async function deps() {
   return { supabaseAdmin, vobiz };
 }
 
-/** owner/admin scope for an optional target business, feature gate included. */
+/**
+ * owner/admin scope for an optional target business, feature gate included.
+ * The gate is evaluated with the caller's own client: feature_locked() is
+ * executable by `authenticated` only (whatsapp-feature-gate.server.ts).
+ */
 async function managerScope(
   supabaseAdmin: Awaited<ReturnType<typeof deps>>["supabaseAdmin"],
-  userId: string,
+  context: { userId: string; supabase: Parameters<typeof assertWhatsAppUnlockedForCaller>[0] },
   businessId: string | null | undefined,
 ) {
   const scope = await requireWhatsAppManager(
     supabaseAdmin,
-    userId,
+    context.userId,
     businessId ? { businessId } : { workspace: true },
   );
-  await assertFeatureUnlocked(scope.organizationId, "whatsapp");
+  await assertWhatsAppUnlockedForCaller(context.supabase, scope.organizationId);
   return scope;
 }
 
@@ -83,13 +94,15 @@ export const startWhatsAppByonVerification = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) =>
     z.object({ businessId, phoneNumber: e164, method: z.enum(["sms", "voice"]) }).parse(input),
   )
-  .handler(async ({ data, context }) => {
-    const { supabaseAdmin, vobiz } = await deps();
-    const scope = await managerScope(supabaseAdmin, context.userId, data.businessId);
-    const { startByonVerification } =
-      await import("@/lib/whatsapp/whatsapp-vobiz-onboarding.server");
-    return startByonVerification(supabaseAdmin, scope, data, { vobiz });
-  });
+  .handler(({ data, context }) =>
+    withSchemaContract("startWhatsAppByonVerification", async () => {
+      const { supabaseAdmin, vobiz } = await deps();
+      const scope = await managerScope(supabaseAdmin, context, data.businessId);
+      const { startByonVerification } =
+        await import("@/lib/whatsapp/whatsapp-vobiz-onboarding.server");
+      return startByonVerification(supabaseAdmin, scope, data, { vobiz });
+    }),
+  );
 
 export const connectWhatsAppByon = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
@@ -106,122 +119,86 @@ export const connectWhatsAppByon = createServerFn({ method: "POST" })
       })
       .parse(input),
   )
-  .handler(async ({ data, context }) => {
-    const { supabaseAdmin, vobiz } = await deps();
-    const scope = await managerScope(supabaseAdmin, context.userId, data.businessId);
-    const { connectByon } = await import("@/lib/whatsapp/whatsapp-vobiz-onboarding.server");
-    const result = await connectByon(supabaseAdmin, scope, data, { vobiz });
-    if (!result.alreadyConnected) {
-      await timeline(
-        supabaseAdmin,
-        scope.organizationId,
-        (context.claims["email"] as string) ?? null,
-        {
-          kind: "whatsapp_connected",
-          title: "WhatsApp connected (your own number via Vobiz)",
-          detail: result.phoneNumber ?? result.connectionId,
-          metadata: { connection_id: result.connectionId, mode: "bring_your_own" },
-        },
-      );
-    }
-    return result;
-  });
+  .handler(({ data, context }) =>
+    withSchemaContract("connectWhatsAppByon", async () => {
+      const { supabaseAdmin, vobiz } = await deps();
+      const scope = await managerScope(supabaseAdmin, context, data.businessId);
+      const { connectByon } = await import("@/lib/whatsapp/whatsapp-vobiz-onboarding.server");
+      const result = await connectByon(supabaseAdmin, scope, data, { vobiz });
+      if (!result.alreadyConnected) {
+        await timeline(
+          supabaseAdmin,
+          scope.organizationId,
+          (context.claims["email"] as string) ?? null,
+          {
+            kind: "whatsapp_connected",
+            title: "WhatsApp connected (your own number via Vobiz)",
+            detail: result.phoneNumber ?? result.connectionId,
+            metadata: { connection_id: result.connectionId, mode: "bring_your_own" },
+          },
+        );
+      }
+      return result;
+    }),
+  );
 
-// 2. Buy a number through Vobiz ------------------------------------------------
+// 2. A ClickAI number ---------------------------------------------------------
+//
+// Customers can't buy numbers: ClickAI's platform admins buy them
+// (telephony-admin.functions.ts purchaseWhatsAppNumber) and assign them to
+// an organization. Here the organization's owner/admin connects an
+// assigned number to their WhatsApp Business Account, or asks for one.
 
-export const searchWhatsAppNumbers = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
-  .inputValidator((input: unknown) =>
-    z.object({ businessId, country: z.string().length(2) }).parse(input),
-  )
-  .handler(async ({ data, context }) => {
-    const { supabaseAdmin, vobiz } = await deps();
-    await managerScope(supabaseAdmin, context.userId, data.businessId);
-    const { searchNumbers } = await import("@/lib/whatsapp/whatsapp-vobiz-onboarding.server");
-    return { numbers: await searchNumbers({ country: data.country }, { vobiz }) };
-  });
-
-export const orderWhatsAppNumber = createServerFn({ method: "POST" })
+export const connectAssignedWhatsAppNumber = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) =>
     z
       .object({
         businessId,
-        phoneNumber: e164,
-        // Buying spends money on ClickAI's Vobiz account: the browser must
-        // send an explicit confirmation from the confirm dialog.
-        confirm: z.literal(true),
-      })
-      .parse(input),
-  )
-  .handler(async ({ data, context }) => {
-    const { supabaseAdmin, vobiz } = await deps();
-    const scope = await managerScope(supabaseAdmin, context.userId, data.businessId);
-    const { orderNumber } = await import("@/lib/whatsapp/whatsapp-vobiz-onboarding.server");
-    const order = await orderNumber(
-      supabaseAdmin,
-      scope,
-      { phoneNumber: data.phoneNumber, requestedBy: context.userId },
-      { vobiz },
-    );
-    if (!order.alreadyOrdered) {
-      await timeline(
-        supabaseAdmin,
-        scope.organizationId,
-        (context.claims["email"] as string) ?? null,
-        {
-          kind: "whatsapp_number_ordered",
-          title: "WhatsApp number ordered from Vobiz",
-          detail: `${order.phoneNumber} — ${order.status}`,
-          metadata: { order_id: order.id },
-        },
-      );
-    }
-    return order;
-  });
-
-export const listWhatsAppNumberOrders = createServerFn({ method: "GET" })
-  .middleware([requireSupabaseAuth])
-  .handler(async ({ context }) => {
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const scope = await requireWhatsAppManager(supabaseAdmin, context.userId, { workspace: true });
-    const { listNumberOrders } = await import("@/lib/whatsapp/whatsapp-vobiz-onboarding.server");
-    return listNumberOrders(supabaseAdmin, scope.organizationId);
-  });
-
-export const connectPurchasedWhatsAppNumber = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
-  .inputValidator((input: unknown) =>
-    z
-      .object({
-        businessId,
-        orderId: z.string().uuid(),
+        numberId: z.string().uuid(),
         wabaId: metaId,
         displayName: z.string().max(120).optional().nullable(),
       })
       .parse(input),
   )
-  .handler(async ({ data, context }) => {
-    const { supabaseAdmin, vobiz } = await deps();
-    const scope = await managerScope(supabaseAdmin, context.userId, data.businessId);
-    const { connectPurchasedNumber } =
-      await import("@/lib/whatsapp/whatsapp-vobiz-onboarding.server");
-    const result = await connectPurchasedNumber(supabaseAdmin, scope, data, { vobiz });
-    if (!result.alreadyConnected) {
-      await timeline(
-        supabaseAdmin,
-        scope.organizationId,
-        (context.claims["email"] as string) ?? null,
-        {
-          kind: "whatsapp_connected",
-          title: "WhatsApp connected (number bought through Vobiz)",
-          detail: result.phoneNumber ?? result.connectionId,
-          metadata: { connection_id: result.connectionId, mode: "buy_from_vobiz" },
-        },
-      );
-    }
-    return result;
-  });
+  .handler(({ data, context }) =>
+    withSchemaContract("connectAssignedWhatsAppNumber", async () => {
+      const { supabaseAdmin, vobiz } = await deps();
+      const scope = await managerScope(supabaseAdmin, context, data.businessId);
+      const { connectAssignedNumber } =
+        await import("@/lib/whatsapp/whatsapp-vobiz-onboarding.server");
+      const result = await connectAssignedNumber(supabaseAdmin, scope, data, { vobiz });
+      if (!result.alreadyConnected) {
+        await timeline(
+          supabaseAdmin,
+          scope.organizationId,
+          (context.claims["email"] as string) ?? null,
+          {
+            kind: "whatsapp_connected",
+            title: "WhatsApp connected (ClickAI number)",
+            detail: result.phoneNumber ?? result.connectionId,
+            metadata: { connection_id: result.connectionId, mode: "buy_from_vobiz" },
+          },
+        );
+      }
+      return result;
+    }),
+  );
+
+export const requestWhatsAppNumber = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: unknown) => z.object({ businessId }).parse(input ?? {}))
+  .handler(({ data, context }) =>
+    withSchemaContract("requestWhatsAppNumber", async () => {
+      const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+      const scope = await managerScope(supabaseAdmin, context, data.businessId);
+      const { requestClickAiNumber } =
+        await import("@/lib/whatsapp/whatsapp-vobiz-onboarding.server");
+      return requestClickAiNumber(supabaseAdmin, scope, {
+        actorEmail: (context.claims["email"] as string | undefined) ?? null,
+      });
+    }),
+  );
 
 // 3. Embedded Signup through Vobiz ---------------------------------------------
 
@@ -237,58 +214,63 @@ export const completeWhatsAppEmbeddedSignup = createServerFn({ method: "POST" })
       })
       .parse(input),
   )
-  .handler(async ({ data, context }) => {
-    const { supabaseAdmin, vobiz } = await deps();
-    const scope = await managerScope(supabaseAdmin, context.userId, data.businessId);
-    const { completeEmbeddedSignup } =
-      await import("@/lib/whatsapp/whatsapp-vobiz-onboarding.server");
-    const result = await completeEmbeddedSignup(supabaseAdmin, scope, data, { vobiz });
-    if (!result.alreadyConnected) {
-      await timeline(
-        supabaseAdmin,
-        scope.organizationId,
-        (context.claims["email"] as string) ?? null,
-        {
-          kind: "whatsapp_connected",
-          title: "WhatsApp connected (Embedded Signup via Vobiz)",
-          detail: result.phoneNumber ?? result.connectionId,
-          metadata: { connection_id: result.connectionId, mode: "embedded_signup" },
-        },
-      );
-    }
-    return result;
-  });
+  .handler(({ data, context }) =>
+    withSchemaContract("completeWhatsAppEmbeddedSignup", async () => {
+      const { supabaseAdmin, vobiz } = await deps();
+      const scope = await managerScope(supabaseAdmin, context, data.businessId);
+      const { completeEmbeddedSignup } =
+        await import("@/lib/whatsapp/whatsapp-vobiz-onboarding.server");
+      const result = await completeEmbeddedSignup(supabaseAdmin, scope, data, { vobiz });
+      if (!result.alreadyConnected) {
+        await timeline(
+          supabaseAdmin,
+          scope.organizationId,
+          (context.claims["email"] as string) ?? null,
+          {
+            kind: "whatsapp_connected",
+            title: "WhatsApp connected (Embedded Signup via Vobiz)",
+            detail: result.phoneNumber ?? result.connectionId,
+            metadata: { connection_id: result.connectionId, mode: "embedded_signup" },
+          },
+        );
+      }
+      return result;
+    }),
+  );
 
 // Reconnect ----------------------------------------------------------------
 
 export const reconnectWhatsAppConnection = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: unknown) => z.object({ connectionId: z.string().uuid() }).parse(input))
-  .handler(async ({ data, context }) => {
-    const { supabaseAdmin, vobiz } = await deps();
-    const scope = await requireWhatsAppManager(supabaseAdmin, context.userId, {
-      connectionId: data.connectionId,
-    });
-    await assertFeatureUnlocked(scope.organizationId, "whatsapp");
-    const { reconnectConnection } = await import("@/lib/whatsapp/whatsapp-vobiz-onboarding.server");
-    const result = await reconnectConnection(
-      supabaseAdmin,
-      { ...scope, connectionId: data.connectionId },
-      { vobiz },
-    );
-    await timeline(
-      supabaseAdmin,
-      scope.organizationId,
-      (context.claims["email"] as string) ?? null,
-      {
-        kind: "whatsapp_reconnected",
-        title: "WhatsApp reconnected",
-        detail: result.connectionId,
-        metadata: { connection_id: result.connectionId },
-      },
-    );
-    return result;
-  });
+  .handler(({ data, context }) =>
+    withSchemaContract("reconnectWhatsAppConnection", async () => {
+      const { supabaseAdmin, vobiz } = await deps();
+      const scope = await requireWhatsAppManager(supabaseAdmin, context.userId, {
+        connectionId: data.connectionId,
+      });
+      await assertWhatsAppUnlockedForCaller(context.supabase, scope.organizationId);
+      const { reconnectConnection } =
+        await import("@/lib/whatsapp/whatsapp-vobiz-onboarding.server");
+      const result = await reconnectConnection(
+        supabaseAdmin,
+        { ...scope, connectionId: data.connectionId },
+        { vobiz },
+      );
+      await timeline(
+        supabaseAdmin,
+        scope.organizationId,
+        (context.claims["email"] as string) ?? null,
+        {
+          kind: "whatsapp_reconnected",
+          title: "WhatsApp reconnected",
+          detail: result.connectionId,
+          metadata: { connection_id: result.connectionId },
+        },
+      );
+      return result;
+    }),
+  );
 
 /** Disconnected Vobiz numbers this organization can reconnect (no channel id or credential is returned). */
 export const listDisconnectedWhatsAppNumbers = createServerFn({ method: "GET" })
@@ -304,6 +286,14 @@ export const listDisconnectedWhatsAppNumbers = createServerFn({ method: "GET" })
       .eq("provider", "vobiz")
       .order("disconnected_at", { ascending: false })
       .limit(20);
-    if (error) throw error;
+    if (error) {
+      // A database without the Vobiz columns must not break the whole page:
+      // there is nothing reconnectable on it, and the cause is logged.
+      if (isSchemaMismatch(error)) {
+        logSchemaMismatch("listDisconnectedWhatsAppNumbers", error);
+        return [];
+      }
+      throw error;
+    }
     return data ?? [];
   });
