@@ -15,16 +15,22 @@ import { Route as AcceptableUsePolicyRouteImport } from './routes/acceptable-use
 import { Route as AccountRouteImport } from './routes/account'
 import { Route as AdminRouteImport } from './routes/admin'
 import { Route as AiDisclaimerRouteImport } from './routes/ai-disclaimer'
+import { Route as AiVoiceAgentsRouteImport } from './routes/ai-voice-agents'
 import { Route as AppRouteImport } from './routes/app'
+import { Route as AppointmentAutomationRouteImport } from './routes/appointment-automation'
 import { Route as AuthRouteImport } from './routes/auth'
+import { Route as BusinessAutomationRouteImport } from './routes/business-automation'
 import { Route as ContactRouteImport } from './routes/contact'
 import { Route as CookiePolicyRouteImport } from './routes/cookie-policy'
+import { Route as IntegrationsRouteImport } from './routes/integrations'
 import { Route as MessagingPolicyRouteImport } from './routes/messaging-policy'
 import { Route as PricingRouteImport } from './routes/pricing'
 import { Route as PrivacyPolicyRouteImport } from './routes/privacy-policy'
 import { Route as RefundCancellationPolicyRouteImport } from './routes/refund-cancellation-policy'
 import { Route as ResetPasswordRouteImport } from './routes/reset-password'
+import { Route as SolutionsRouteImport } from './routes/solutions'
 import { Route as TermsRouteImport } from './routes/terms'
+import { Route as WhatsappAiAgentsRouteImport } from './routes/whatsapp-ai-agents'
 import { Route as AccountIndexRouteImport } from './routes/account.index'
 import { Route as AccountSettingsRouteImport } from './routes/account.settings'
 import { Route as AdminIndexRouteImport } from './routes/admin.index'
@@ -111,14 +117,29 @@ const AiDisclaimerRoute = AiDisclaimerRouteImport.update({
   path: '/ai-disclaimer',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AiVoiceAgentsRoute = AiVoiceAgentsRouteImport.update({
+  id: '/ai-voice-agents',
+  path: '/ai-voice-agents',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AppRoute = AppRouteImport.update({
   id: '/app',
   path: '/app',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AppointmentAutomationRoute = AppointmentAutomationRouteImport.update({
+  id: '/appointment-automation',
+  path: '/appointment-automation',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AuthRoute = AuthRouteImport.update({
   id: '/auth',
   path: '/auth',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const BusinessAutomationRoute = BusinessAutomationRouteImport.update({
+  id: '/business-automation',
+  path: '/business-automation',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ContactRoute = ContactRouteImport.update({
@@ -129,6 +150,11 @@ const ContactRoute = ContactRouteImport.update({
 const CookiePolicyRoute = CookiePolicyRouteImport.update({
   id: '/cookie-policy',
   path: '/cookie-policy',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const IntegrationsRoute = IntegrationsRouteImport.update({
+  id: '/integrations',
+  path: '/integrations',
   getParentRoute: () => rootRouteImport,
 } as any)
 const MessagingPolicyRoute = MessagingPolicyRouteImport.update({
@@ -157,9 +183,19 @@ const ResetPasswordRoute = ResetPasswordRouteImport.update({
   path: '/reset-password',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SolutionsRoute = SolutionsRouteImport.update({
+  id: '/solutions',
+  path: '/solutions',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const TermsRoute = TermsRouteImport.update({
   id: '/terms',
   path: '/terms',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const WhatsappAiAgentsRoute = WhatsappAiAgentsRouteImport.update({
+  id: '/whatsapp-ai-agents',
+  path: '/whatsapp-ai-agents',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AccountIndexRoute = AccountIndexRouteImport.update({
@@ -462,16 +498,22 @@ export interface FileRoutesByFullPath {
   '/account': typeof AccountRouteWithChildren
   '/admin': typeof AdminRouteWithChildren
   '/ai-disclaimer': typeof AiDisclaimerRoute
+  '/ai-voice-agents': typeof AiVoiceAgentsRoute
   '/app': typeof AppRouteWithChildren
+  '/appointment-automation': typeof AppointmentAutomationRoute
   '/auth': typeof AuthRouteWithChildren
+  '/business-automation': typeof BusinessAutomationRoute
   '/contact': typeof ContactRoute
   '/cookie-policy': typeof CookiePolicyRoute
+  '/integrations': typeof IntegrationsRoute
   '/messaging-policy': typeof MessagingPolicyRoute
   '/pricing': typeof PricingRoute
   '/privacy-policy': typeof PrivacyPolicyRoute
   '/refund-cancellation-policy': typeof RefundCancellationPolicyRoute
   '/reset-password': typeof ResetPasswordRoute
+  '/solutions': typeof SolutionsRoute
   '/terms': typeof TermsRoute
+  '/whatsapp-ai-agents': typeof WhatsappAiAgentsRoute
   '/account/settings': typeof AccountSettingsRoute
   '/admin/audit': typeof AdminAuditRoute
   '/admin/billing': typeof AdminBillingRoute
@@ -533,15 +575,21 @@ export interface FileRoutesByTo {
   '/about': typeof AboutRoute
   '/acceptable-use-policy': typeof AcceptableUsePolicyRoute
   '/ai-disclaimer': typeof AiDisclaimerRoute
+  '/ai-voice-agents': typeof AiVoiceAgentsRoute
+  '/appointment-automation': typeof AppointmentAutomationRoute
   '/auth': typeof AuthRouteWithChildren
+  '/business-automation': typeof BusinessAutomationRoute
   '/contact': typeof ContactRoute
   '/cookie-policy': typeof CookiePolicyRoute
+  '/integrations': typeof IntegrationsRoute
   '/messaging-policy': typeof MessagingPolicyRoute
   '/pricing': typeof PricingRoute
   '/privacy-policy': typeof PrivacyPolicyRoute
   '/refund-cancellation-policy': typeof RefundCancellationPolicyRoute
   '/reset-password': typeof ResetPasswordRoute
+  '/solutions': typeof SolutionsRoute
   '/terms': typeof TermsRoute
+  '/whatsapp-ai-agents': typeof WhatsappAiAgentsRoute
   '/account/settings': typeof AccountSettingsRoute
   '/admin/audit': typeof AdminAuditRoute
   '/admin/billing': typeof AdminBillingRoute
@@ -605,16 +653,22 @@ export interface FileRoutesById {
   '/account': typeof AccountRouteWithChildren
   '/admin': typeof AdminRouteWithChildren
   '/ai-disclaimer': typeof AiDisclaimerRoute
+  '/ai-voice-agents': typeof AiVoiceAgentsRoute
   '/app': typeof AppRouteWithChildren
+  '/appointment-automation': typeof AppointmentAutomationRoute
   '/auth': typeof AuthRouteWithChildren
+  '/business-automation': typeof BusinessAutomationRoute
   '/contact': typeof ContactRoute
   '/cookie-policy': typeof CookiePolicyRoute
+  '/integrations': typeof IntegrationsRoute
   '/messaging-policy': typeof MessagingPolicyRoute
   '/pricing': typeof PricingRoute
   '/privacy-policy': typeof PrivacyPolicyRoute
   '/refund-cancellation-policy': typeof RefundCancellationPolicyRoute
   '/reset-password': typeof ResetPasswordRoute
+  '/solutions': typeof SolutionsRoute
   '/terms': typeof TermsRoute
+  '/whatsapp-ai-agents': typeof WhatsappAiAgentsRoute
   '/account/settings': typeof AccountSettingsRoute
   '/admin/audit': typeof AdminAuditRoute
   '/admin/billing': typeof AdminBillingRoute
@@ -680,16 +734,22 @@ export interface FileRouteTypes {
     | '/account'
     | '/admin'
     | '/ai-disclaimer'
+    | '/ai-voice-agents'
     | '/app'
+    | '/appointment-automation'
     | '/auth'
+    | '/business-automation'
     | '/contact'
     | '/cookie-policy'
+    | '/integrations'
     | '/messaging-policy'
     | '/pricing'
     | '/privacy-policy'
     | '/refund-cancellation-policy'
     | '/reset-password'
+    | '/solutions'
     | '/terms'
+    | '/whatsapp-ai-agents'
     | '/account/settings'
     | '/admin/audit'
     | '/admin/billing'
@@ -751,15 +811,21 @@ export interface FileRouteTypes {
     | '/about'
     | '/acceptable-use-policy'
     | '/ai-disclaimer'
+    | '/ai-voice-agents'
+    | '/appointment-automation'
     | '/auth'
+    | '/business-automation'
     | '/contact'
     | '/cookie-policy'
+    | '/integrations'
     | '/messaging-policy'
     | '/pricing'
     | '/privacy-policy'
     | '/refund-cancellation-policy'
     | '/reset-password'
+    | '/solutions'
     | '/terms'
+    | '/whatsapp-ai-agents'
     | '/account/settings'
     | '/admin/audit'
     | '/admin/billing'
@@ -822,16 +888,22 @@ export interface FileRouteTypes {
     | '/account'
     | '/admin'
     | '/ai-disclaimer'
+    | '/ai-voice-agents'
     | '/app'
+    | '/appointment-automation'
     | '/auth'
+    | '/business-automation'
     | '/contact'
     | '/cookie-policy'
+    | '/integrations'
     | '/messaging-policy'
     | '/pricing'
     | '/privacy-policy'
     | '/refund-cancellation-policy'
     | '/reset-password'
+    | '/solutions'
     | '/terms'
+    | '/whatsapp-ai-agents'
     | '/account/settings'
     | '/admin/audit'
     | '/admin/billing'
@@ -896,16 +968,22 @@ export interface RootRouteChildren {
   AccountRoute: typeof AccountRouteWithChildren
   AdminRoute: typeof AdminRouteWithChildren
   AiDisclaimerRoute: typeof AiDisclaimerRoute
+  AiVoiceAgentsRoute: typeof AiVoiceAgentsRoute
   AppRoute: typeof AppRouteWithChildren
+  AppointmentAutomationRoute: typeof AppointmentAutomationRoute
   AuthRoute: typeof AuthRouteWithChildren
+  BusinessAutomationRoute: typeof BusinessAutomationRoute
   ContactRoute: typeof ContactRoute
   CookiePolicyRoute: typeof CookiePolicyRoute
+  IntegrationsRoute: typeof IntegrationsRoute
   MessagingPolicyRoute: typeof MessagingPolicyRoute
   PricingRoute: typeof PricingRoute
   PrivacyPolicyRoute: typeof PrivacyPolicyRoute
   RefundCancellationPolicyRoute: typeof RefundCancellationPolicyRoute
   ResetPasswordRoute: typeof ResetPasswordRoute
+  SolutionsRoute: typeof SolutionsRoute
   TermsRoute: typeof TermsRoute
+  WhatsappAiAgentsRoute: typeof WhatsappAiAgentsRoute
   ApiPublicCronDispatchCampaignsRoute: typeof ApiPublicCronDispatchCampaignsRoute
   ApiPublicCronExpirePaymentsRoute: typeof ApiPublicCronExpirePaymentsRoute
   ApiPublicCronSyncGoogleCalendarsRoute: typeof ApiPublicCronSyncGoogleCalendarsRoute
@@ -969,6 +1047,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AiDisclaimerRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/ai-voice-agents': {
+      id: '/ai-voice-agents'
+      path: '/ai-voice-agents'
+      fullPath: '/ai-voice-agents'
+      preLoaderRoute: typeof AiVoiceAgentsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/app': {
       id: '/app'
       path: '/app'
@@ -976,11 +1061,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/appointment-automation': {
+      id: '/appointment-automation'
+      path: '/appointment-automation'
+      fullPath: '/appointment-automation'
+      preLoaderRoute: typeof AppointmentAutomationRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/auth': {
       id: '/auth'
       path: '/auth'
       fullPath: '/auth'
       preLoaderRoute: typeof AuthRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/business-automation': {
+      id: '/business-automation'
+      path: '/business-automation'
+      fullPath: '/business-automation'
+      preLoaderRoute: typeof BusinessAutomationRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/contact': {
@@ -995,6 +1094,13 @@ declare module '@tanstack/react-router' {
       path: '/cookie-policy'
       fullPath: '/cookie-policy'
       preLoaderRoute: typeof CookiePolicyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/integrations': {
+      id: '/integrations'
+      path: '/integrations'
+      fullPath: '/integrations'
+      preLoaderRoute: typeof IntegrationsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/messaging-policy': {
@@ -1032,11 +1138,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ResetPasswordRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/solutions': {
+      id: '/solutions'
+      path: '/solutions'
+      fullPath: '/solutions'
+      preLoaderRoute: typeof SolutionsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/terms': {
       id: '/terms'
       path: '/terms'
       fullPath: '/terms'
       preLoaderRoute: typeof TermsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/whatsapp-ai-agents': {
+      id: '/whatsapp-ai-agents'
+      path: '/whatsapp-ai-agents'
+      fullPath: '/whatsapp-ai-agents'
+      preLoaderRoute: typeof WhatsappAiAgentsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/account/': {
@@ -1563,16 +1683,22 @@ const rootRouteChildren: RootRouteChildren = {
   AccountRoute: AccountRouteWithChildren,
   AdminRoute: AdminRouteWithChildren,
   AiDisclaimerRoute: AiDisclaimerRoute,
+  AiVoiceAgentsRoute: AiVoiceAgentsRoute,
   AppRoute: AppRouteWithChildren,
+  AppointmentAutomationRoute: AppointmentAutomationRoute,
   AuthRoute: AuthRouteWithChildren,
+  BusinessAutomationRoute: BusinessAutomationRoute,
   ContactRoute: ContactRoute,
   CookiePolicyRoute: CookiePolicyRoute,
+  IntegrationsRoute: IntegrationsRoute,
   MessagingPolicyRoute: MessagingPolicyRoute,
   PricingRoute: PricingRoute,
   PrivacyPolicyRoute: PrivacyPolicyRoute,
   RefundCancellationPolicyRoute: RefundCancellationPolicyRoute,
   ResetPasswordRoute: ResetPasswordRoute,
+  SolutionsRoute: SolutionsRoute,
   TermsRoute: TermsRoute,
+  WhatsappAiAgentsRoute: WhatsappAiAgentsRoute,
   ApiPublicCronDispatchCampaignsRoute: ApiPublicCronDispatchCampaignsRoute,
   ApiPublicCronExpirePaymentsRoute: ApiPublicCronExpirePaymentsRoute,
   ApiPublicCronSyncGoogleCalendarsRoute: ApiPublicCronSyncGoogleCalendarsRoute,

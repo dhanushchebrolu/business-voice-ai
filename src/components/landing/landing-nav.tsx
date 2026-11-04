@@ -4,7 +4,7 @@ import { ChevronDown, Menu, X } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { useDashboardAccess } from "@/components/app/PublicNav";
 import { Button } from "@/components/ui/button";
-import { BUSINESS_TYPES } from "@/lib/business-types";
+import { Logo } from "@/components/app/primitives";
 
 /**
  * White + blue landing-page navigation: logo left, Products / Pricing /
@@ -16,7 +16,7 @@ import { BUSINESS_TYPES } from "@/lib/business-types";
  * delegated to useDashboardAccess (PublicNav.tsx), the same backend-
  * authoritative rule /app itself enforces, never re-derived here.
  *
- * Every dropdown item is a real scroll-to-section link, not a placeholder:
+ * Product items link to their own pages; the other dropdown items are real scroll-to-section links, not a placeholder:
  * this component is only ever rendered on "/" (the landing page itself —
  * see landing-nav.test.ts), so a plain in-page scroll is always correct
  * and never needs a cross-route hash. Product items target the id each
@@ -29,24 +29,24 @@ function scrollToSection(id: string) {
   document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
-const PRODUCT_ITEMS: { label: string; targetId: string; blurb: string }[] = [
+const PRODUCT_ITEMS = [
+  { label: "AI Voice Agents", to: "/ai-voice-agents", blurb: "Answer business calls 24/7." },
   {
-    label: "AI Sales Executive",
-    targetId: "ai-sales-executive",
-    blurb: "Turn enquiries into customers.",
-  },
-  { label: "AI Receptionist", targetId: "ai-receptionist", blurb: "Your 24/7 front desk." },
-  {
-    label: "AI Order Booking",
-    targetId: "ai-order-booking",
-    blurb: "Take bookings. Process orders.",
+    label: "WhatsApp AI Agents",
+    to: "/whatsapp-ai-agents",
+    blurb: "Reply to customers on WhatsApp.",
   },
   {
-    label: "AI Customer Care",
-    targetId: "ai-customer-care",
-    blurb: "Delight your customers, every time.",
+    label: "Appointment Automation",
+    to: "/appointment-automation",
+    blurb: "Bookings with calendar sync.",
   },
-];
+  {
+    label: "Business Automation",
+    to: "/business-automation",
+    blurb: "Conversations into workflows.",
+  },
+] as const;
 
 const INTEGRATION_ITEMS: { label: string; targetId: string }[] = [
   { label: "WhatsApp", targetId: "integrations" },
@@ -57,10 +57,14 @@ const INTEGRATION_ITEMS: { label: string; targetId: string }[] = [
   { label: "WooCommerce", targetId: "integrations" },
 ];
 
-const INDUSTRY_ITEMS: { label: string; targetId: string }[] = BUSINESS_TYPES.map((t) => ({
-  label: t.label,
-  targetId: "industries",
-}));
+const SOLUTION_ITEMS = [
+  { label: "Healthcare and clinics", hash: "healthcare" },
+  { label: "Restaurants and hospitality", hash: "restaurants" },
+  { label: "Real estate", hash: "real-estate" },
+  { label: "Education", hash: "education" },
+  { label: "Retail and local business", hash: "retail" },
+  { label: "Professional services", hash: "professional-services" },
+] as const;
 
 /**
  * A single, self-closing dropdown: click to open, click outside / Escape /
@@ -147,14 +151,8 @@ export function LandingNav() {
     <>
       <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/85 backdrop-blur">
         <div className="mx-auto flex h-20 max-w-[1400px] items-center justify-between px-5 sm:px-8">
-          <Link to="/" className="flex items-center gap-2">
-            <span
-              className="grid size-7 place-items-center rounded-full bg-violet-600 text-[11px] font-semibold text-white"
-              aria-hidden="true"
-            >
-              C
-            </span>
-            <span className="text-[15px] font-semibold tracking-tight text-slate-900">ClickAI</span>
+          <Link to="/" aria-label="ClickAI home">
+            <Logo />
           </Link>
 
           <nav className="hidden items-center gap-8 md:flex" aria-label="Primary">
@@ -164,19 +162,16 @@ export function LandingNav() {
               renderPanel={(close) => (
                 <div className="space-y-1">
                   {PRODUCT_ITEMS.map((item) => (
-                    <button
-                      key={item.targetId}
-                      type="button"
+                    <Link
+                      key={item.to}
+                      to={item.to}
                       role="menuitem"
-                      onClick={() => {
-                        close();
-                        scrollToSection(item.targetId);
-                      }}
+                      onClick={close}
                       className="block w-full rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-violet-50"
                     >
                       <span className="block text-sm font-medium text-slate-900">{item.label}</span>
                       <span className="mt-0.5 block text-xs text-slate-500">{item.blurb}</span>
-                    </button>
+                    </Link>
                   ))}
                 </div>
               )}
@@ -187,6 +182,13 @@ export function LandingNav() {
               className="text-sm text-slate-600 transition-colors hover:text-violet-600"
             >
               Pricing
+            </Link>
+
+            <Link
+              to="/about"
+              className="text-sm text-slate-600 transition-colors hover:text-violet-600"
+            >
+              About
             </Link>
 
             <NavDropdown
@@ -213,23 +215,21 @@ export function LandingNav() {
             />
 
             <NavDropdown
-              label="Industries"
-              panelClassName="w-[560px]"
+              label="Solutions"
+              panelClassName="w-[420px]"
               renderPanel={(close) => (
-                <div className="grid grid-cols-3 gap-1">
-                  {INDUSTRY_ITEMS.map((item) => (
-                    <button
-                      key={item.label}
-                      type="button"
+                <div className="grid grid-cols-2 gap-1">
+                  {SOLUTION_ITEMS.map((item) => (
+                    <Link
+                      key={item.hash}
+                      to="/solutions"
+                      hash={item.hash}
                       role="menuitem"
-                      onClick={() => {
-                        close();
-                        scrollToSection(item.targetId);
-                      }}
+                      onClick={close}
                       className="rounded-lg px-3 py-2 text-left text-sm text-slate-700 transition-colors hover:bg-violet-50 hover:text-violet-700"
                     >
                       {item.label}
-                    </button>
+                    </Link>
                   ))}
                 </div>
               )}
@@ -264,7 +264,7 @@ export function LandingNav() {
                 size="sm"
                 className="rounded-full bg-violet-600 px-5 text-white hover:bg-violet-700"
               >
-                Contact
+                Book a Demo
               </Button>
             </Link>
 
@@ -300,7 +300,7 @@ export function LandingNav() {
           className="fixed inset-0 z-50 flex flex-col overflow-y-auto bg-white px-6 py-6"
         >
           <div className="mx-auto flex w-full max-w-[1400px] items-center justify-between">
-            <span className="text-[15px] font-semibold tracking-tight text-slate-900">ClickAI</span>
+            <Logo />
             <button
               type="button"
               className="grid size-9 place-items-center rounded-full border border-slate-200 text-slate-700"
@@ -314,18 +314,29 @@ export function LandingNav() {
           <div className="mx-auto flex w-full max-w-[1400px] flex-1 flex-col justify-center gap-10 py-10 sm:flex-row sm:items-center sm:justify-between">
             <nav className="flex flex-col gap-1" aria-label="Primary">
               {PRODUCT_ITEMS.map((item) => (
-                <button
-                  key={item.targetId}
-                  type="button"
-                  onClick={() => {
-                    setMenuOpen(false);
-                    scrollToSection(item.targetId);
-                  }}
+                <Link
+                  key={item.to}
+                  to={item.to}
+                  onClick={() => setMenuOpen(false)}
                   className="rounded-lg px-2 py-3 text-left font-serif text-3xl text-slate-800 hover:text-violet-600 sm:text-4xl"
                 >
                   {item.label}
-                </button>
+                </Link>
               ))}
+              <Link
+                to="/solutions"
+                onClick={() => setMenuOpen(false)}
+                className="rounded-lg px-2 py-3 font-serif text-3xl text-slate-800 hover:text-violet-600 sm:text-4xl"
+              >
+                Solutions
+              </Link>
+              <Link
+                to="/about"
+                onClick={() => setMenuOpen(false)}
+                className="rounded-lg px-2 py-3 font-serif text-3xl text-slate-800 hover:text-violet-600 sm:text-4xl"
+              >
+                About
+              </Link>
               <Link
                 to="/pricing"
                 onClick={() => setMenuOpen(false)}
@@ -343,22 +354,12 @@ export function LandingNav() {
               >
                 Integrations
               </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setMenuOpen(false);
-                  scrollToSection("industries");
-                }}
-                className="rounded-lg px-2 py-3 text-left font-serif text-3xl text-slate-800 hover:text-violet-600 sm:text-4xl"
-              >
-                Industries
-              </button>
               <Link
                 to="/contact"
                 onClick={() => setMenuOpen(false)}
                 className="rounded-lg px-2 py-3 font-serif text-3xl text-slate-800 hover:text-violet-600 sm:text-4xl"
               >
-                Contact
+                Book a Demo
               </Link>
             </nav>
 

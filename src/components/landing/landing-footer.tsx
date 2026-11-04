@@ -1,5 +1,6 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import { ShieldCheck, Lock, Headset } from "lucide-react";
+import { Logo } from "@/components/app/primitives";
 import { CLICKAI_LEGAL_NAME, CLICKAI_ADDRESS_LINES } from "@/lib/company-info";
 
 /**
@@ -98,7 +99,7 @@ export function LandingFooter() {
       <div className="mx-auto max-w-[1200px] px-5 sm:px-8">
         <div className="grid gap-10 border-b border-slate-200 pb-12 sm:grid-cols-2">
           <div>
-            <span className="text-[15px] font-semibold tracking-tight text-slate-900">ClickAI</span>
+            <Logo />
             <p className="mt-3 max-w-xs text-sm leading-relaxed text-slate-500">
               AI employees for sales, customer support, bookings, and business automation.
               AI-powered voice, messaging, and workflow automation for businesses.

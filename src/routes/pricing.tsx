@@ -1,6 +1,8 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { Check, ArrowLeft } from "lucide-react";
-import { Logo, StatusPill } from "@/components/app/primitives";
+import { Check } from "lucide-react";
+import { StatusPill } from "@/components/app/primitives";
+import { LandingNav } from "@/components/landing/landing-nav";
+import { LandingFooter } from "@/components/landing/landing-footer";
 import { Button } from "@/components/ui/button";
 
 export const Route = createFileRoute("/pricing")({
@@ -17,6 +19,7 @@ export const Route = createFileRoute("/pricing")({
         content: "Starter, Professional and Business plans with included call minutes.",
       },
     ],
+    links: [{ rel: "canonical", href: "https://clickai.in/pricing" }],
   }),
   component: Pricing,
 });
@@ -69,19 +72,7 @@ export const PLANS = [
 function Pricing() {
   return (
     <div className="theme-light min-h-screen bg-background">
-      <header className="border-b border-border">
-        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-5">
-          <Link to="/">
-            <Logo />
-          </Link>
-          <Link
-            to="/"
-            className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
-          >
-            <ArrowLeft className="size-3.5" /> Home
-          </Link>
-        </div>
-      </header>
+      <LandingNav />
 
       <main className="mx-auto max-w-6xl px-5 py-16">
         <StatusPill tone="accent">Plans</StatusPill>
@@ -138,7 +129,25 @@ function Pricing() {
           setup payment is confirmed, and the billing screen will show a clear “payment provider not
           connected” state until Razorpay is configured.
         </p>
+
+        <section className="mt-10 max-w-3xl">
+          <h2 className="text-lg font-semibold tracking-tight">What else you may pay for</h2>
+          <ul className="mt-3 list-disc space-y-2 pl-5 text-sm text-muted-foreground">
+            <li>Call minutes beyond your plan, billed from your wallet at your workspace rate.</li>
+            <li>Telephony and AI usage costs follow the usage of your workspace.</li>
+            <li>WhatsApp conversation charges set by Meta apply when you use WhatsApp.</li>
+            <li>Custom integrations are scoped and quoted per project.</li>
+          </ul>
+          <p className="mt-4 text-sm text-muted-foreground">
+            Need something different, or want a quote first?{" "}
+            <Link to="/contact" className="font-medium text-primary underline">
+              Book a Demo
+            </Link>
+            .
+          </p>
+        </section>
       </main>
+      <LandingFooter />
     </div>
   );
 }
