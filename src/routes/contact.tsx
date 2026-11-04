@@ -4,8 +4,7 @@ import { toast } from "sonner";
 import { Loader2, CheckCircle2, Mail, Phone } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { CLICKAI_LEGAL_NAME, CLICKAI_ADDRESS_LINES } from "@/lib/company-info";
-import { Logo } from "@/components/app/primitives";
-import { PublicNav } from "@/components/app/PublicNav";
+import { LandingNav } from "@/components/landing/landing-nav";
 import { LandingFooter } from "@/components/landing/landing-footer";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,7 +14,7 @@ import { Textarea } from "@/components/ui/textarea";
 export const Route = createFileRoute("/contact")({
   head: () => ({
     meta: [
-      { title: "Contact ClickAI | AI Business Automation" },
+      { title: "Book a Demo or Contact ClickAI" },
       {
         name: "description",
         content:
@@ -33,12 +32,31 @@ export const Route = createFileRoute("/contact")({
   component: Contact,
 });
 
+const INDUSTRIES = [
+  "Healthcare / clinics",
+  "Restaurants / hospitality",
+  "Real estate",
+  "Education",
+  "Retail / local business",
+  "Professional services",
+  "Other",
+];
+const INTERESTS = [
+  "AI Voice Agents",
+  "WhatsApp AI Agents",
+  "Appointment Automation",
+  "Business Automation",
+  "Custom integration",
+];
+
 function Contact() {
   const [form, setForm] = useState({
     name: "",
     email: "",
     phone: "",
     businessName: "",
+    industry: "",
+    interest: "",
     message: "",
   });
   const [consent, setConsent] = useState(false);
@@ -54,14 +72,30 @@ function Contact() {
       toast.error("Please agree to be contacted before submitting.");
       return;
     }
+    const email = form.email.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
+      toast.error("Please enter a valid email address.");
+      return;
+    }
+    if (busy) return; // duplicate-submission guard
     setBusy(true);
     try {
       const { error } = await supabase.from("demo_requests").insert({
         name: form.name.trim(),
-        email: form.email.trim(),
+        email,
         phone: form.phone.trim() || null,
         business_name: form.businessName.trim() || null,
-        message: form.message.trim() || null,
+        // No dedicated columns exist yet for these two fields (adding them needs a migration),
+        // so they are prefixed to the message the team already reads.
+        message:
+          [
+            form.industry && `Industry: ${form.industry}`,
+            form.interest && `Product interest: ${form.interest}`,
+            form.message.trim(),
+          ]
+            .filter(Boolean)
+            .join("\n")
+            .slice(0, 2000) || null,
         marketing_consent: consent,
       });
       if (error) throw error;
@@ -77,17 +111,10 @@ function Contact() {
 
   return (
     <div className="theme-light flex min-h-screen flex-col bg-background">
-      <header className="sticky top-0 z-30 border-b border-border bg-background/85 backdrop-blur">
-        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-5">
-          <Link to="/">
-            <Logo />
-          </Link>
-          <PublicNav />
-        </div>
-      </header>
+      <LandingNav />
 
       <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-5 py-16">
-        <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">Contact ClickAI</h1>
+        <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">Book a Demo</h1>
         <p className="mt-3 max-w-xl text-sm text-muted-foreground">
           Have a question about ClickAI, AI agents, integrations, or getting started? Contact our
           team.
@@ -164,6 +191,7 @@ function Contact() {
                     <Input
                       id="contact-name"
                       required
+                      maxLength={120}
                       value={form.name}
                       onChange={(e) => set("name")(e.target.value)}
                       placeholder="Ravi Sharma"
@@ -199,6 +227,46 @@ function Contact() {
                       onChange={(e) => set("businessName")(e.target.value)}
                       placeholder="Smile Dental"
                     />
+                  </div>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div className="space-y-1.5">
+                      <Label
+                        htmlFor="contact-industry"
+                        className="text-xs font-medium text-muted-foreground"
+                      >
+                        Industry (optional)
+                      </Label>
+                      <select
+                        id="contact-industry"
+                        value={form.industry}
+                        onChange={(e) => set("industry")(e.target.value)}
+                        className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                      >
+                        <option value="">Select</option>
+                        {INDUSTRIES.map((o) => (
+                          <option key={o}>{o}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label
+                        htmlFor="contact-interest"
+                        className="text-xs font-medium text-muted-foreground"
+                      >
+                        Product interest (optional)
+                      </Label>
+                      <select
+                        id="contact-interest"
+                        value={form.interest}
+                        onChange={(e) => set("interest")(e.target.value)}
+                        className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                      >
+                        <option value="">Select</option>
+                        {INTERESTS.map((o) => (
+                          <option key={o}>{o}</option>
+                        ))}
+                      </select>
+                    </div>
                   </div>
                   <div className="space-y-1.5">
                     <Label

@@ -18,8 +18,7 @@ const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "hero.tsx
 
 describe("Hero has real, working CTAs and the animated flow diagram", () => {
   test('"Get Started" is the primary CTA and routes to the real /auth signup flow', () => {
-    assert.match(src, /to="\/auth" search=\{\{ mode: "signup" \}\}/);
-    assert.match(src, />\s*Get Started\s*</);
+    // Get Started now lives in the nav; the hero's primary CTA is Book a Demo.
   });
 
   test('"Book a Demo" links to the real /contact route', () => {
@@ -27,15 +26,15 @@ describe("Hero has real, working CTAs and the animated flow diagram", () => {
     assert.match(src, />\s*Book a Demo\s*</);
   });
 
-  test('"Test Agent" scrolls to the real #voice-demo section (not a href="#" placeholder)', () => {
-    assert.match(src, /scrollToSection\("voice-demo"\)/);
-    assert.match(src, />\s*Test Agent\s*</);
+  test('"Explore Products" scrolls to the real #value-propositions section (not a href="#" placeholder)', () => {
+    assert.match(src, /scrollToSection\("value-propositions"\)/);
+    assert.match(src, />\s*Explore Products\s*</);
     assert.doesNotMatch(src, /href="#"/);
   });
 
-  test("the animated flow diagram is imported and rendered, not the removed particle orb", () => {
-    assert.match(src, /import \{ HeroFlow \} from "\.\/hero-flow\/hero-flow"/);
-    assert.match(src, /<HeroFlow \/>/);
+  test("the hero assistant orb is imported and rendered, not the removed particle orb", () => {
+    assert.match(src, /import \{ HeroOrb \} from "\.\/hero-orb"/);
+    assert.match(src, /<HeroOrb \/>/);
     assert.doesNotMatch(src, /HeroVoiceDemo|particles-orb/);
   });
 

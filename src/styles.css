@@ -134,6 +134,16 @@
  * already build entirely from these tokens.
  */
 .theme-light {
+  /* Pages that forget text-foreground would otherwise inherit the dark theme's near-white body text. */
+  color: var(--foreground);
+  /* Brand blue: public pages use hard-coded violet-* utilities; remap the scale here so the whole site reads electric blue. */
+  --color-violet-50: oklch(0.97 0.015 255);
+  --color-violet-100: oklch(0.93 0.035 256);
+  --color-violet-200: oklch(0.88 0.07 257);
+  --color-violet-400: oklch(0.7 0.15 258);
+  --color-violet-500: oklch(0.62 0.2 260);
+  --color-violet-600: oklch(0.55 0.23 262);
+  --color-violet-700: oklch(0.48 0.22 263);
   --background: oklch(1 0 0);
   --foreground: oklch(0.21 0.04 265.75);
   --surface: oklch(0.98 0.006 255);
@@ -143,7 +153,7 @@
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.21 0.04 265.75);
 
-  --primary: oklch(0.541 0.249 293.01);
+  --primary: oklch(0.55 0.23 262);
   --primary-foreground: oklch(0.99 0 0);
   --secondary: oklch(0.97 0.014 254.6);
   --secondary-foreground: oklch(0.21 0.04 265.75);
@@ -298,3 +308,13 @@
   }
 }
 
+
+/* Smooth in-page anchor scrolling that clears the sticky header; off for reduced-motion users. */
+html {
+  scroll-padding-top: 6rem;
+}
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
+}

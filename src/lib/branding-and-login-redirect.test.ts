@@ -131,7 +131,7 @@ describe("authenticated dashboard chrome and branding say ClickAI, never Klyro",
     assert.match(src, /export function Logo/);
     const logoStart = src.indexOf("export function Logo");
     const logoEnd = src.indexOf("\n}", logoStart);
-    assert.match(src.slice(logoStart, logoEnd), />ClickAI</);
+    assert.match(src.slice(logoStart, logoEnd), /alt="ClickAI"/);
   });
 
   test("Shell.tsx (the authenticated dashboard frame) renders <Logo />, reusing the one brand component rather than its own literal name", () => {

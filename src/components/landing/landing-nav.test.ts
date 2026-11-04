@@ -23,22 +23,22 @@ describe("LandingNav reuses the existing dashboard-access hook and has only real
     assert.match(src, /useDashboardAccess\(\)/);
   });
 
-  test("top-level bar is Products / Pricing / Integrations / Industries, plus a persistent Contact CTA", () => {
+  test("top-level bar is Products / Pricing / Integrations / Solutions, plus a persistent Contact CTA", () => {
     assert.match(src, /label="Products"/);
     assert.match(src, /to="\/pricing"/);
     assert.match(src, /label="Integrations"/);
-    assert.match(src, /label="Industries"/);
+    assert.match(src, /label="Solutions"/);
     assert.match(src, /to="\/contact"/);
   });
 
-  test("Products dropdown lists all four AI employee products, each targeting a real product-card id", () => {
-    for (const [label, targetId] of [
-      ["AI Sales Executive", "ai-sales-executive"],
-      ["AI Receptionist", "ai-receptionist"],
-      ["AI Order Booking", "ai-order-booking"],
-      ["AI Customer Care", "ai-customer-care"],
+  test("Products dropdown links to the four real product pages", () => {
+    for (const [label, to] of [
+      ["AI Voice Agents", "/ai-voice-agents"],
+      ["WhatsApp AI Agents", "/whatsapp-ai-agents"],
+      ["Appointment Automation", "/appointment-automation"],
+      ["Business Automation", "/business-automation"],
     ]) {
-      assert.match(src, new RegExp(`label: "${label}",\\s*targetId: "${targetId}"`));
+      assert.match(src, new RegExp(`label: "${label}",\\s*to: "${to}"`));
     }
   });
 
@@ -55,19 +55,22 @@ describe("LandingNav reuses the existing dashboard-access hook and has only real
     }
   });
 
-  test("Industries dropdown is built from the shared BUSINESS_TYPES source of truth, not a separately-maintained list", () => {
-    assert.match(src, /from "@\/lib\/business-types"/);
-    assert.match(src, /BUSINESS_TYPES\.map/);
-    assert.match(src, /targetId: "industries"/);
+  test("Solutions dropdown links each industry to its real section on /solutions", () => {
+    for (const hash of [
+      "healthcare",
+      "restaurants",
+      "real-estate",
+      "education",
+      "retail",
+      "professional-services",
+    ]) {
+      assert.match(src, new RegExp(`hash: "${hash}"`));
+    }
+    assert.match(src, /to="\/solutions"/);
   });
 
-  test("no invented /product, /solutions, /developers, or /resources routes", () => {
-    for (const invented of [
-      'to="/product"',
-      'to="/solutions"',
-      'to="/developers"',
-      'to="/resources"',
-    ]) {
+  test("no invented /product, /developers, or /resources routes", () => {
+    for (const invented of ['to="/product"', 'to="/developers"', 'to="/resources"']) {
       assert.equal(src.includes(invented), false, `must not link to invented route ${invented}`);
     }
   });

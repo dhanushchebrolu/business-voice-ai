@@ -1,7 +1,6 @@
 import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
-import { Logo } from "@/components/app/primitives";
-import { PublicNav } from "@/components/app/PublicNav";
+import { LandingNav } from "@/components/landing/landing-nav";
 import { LandingFooter } from "@/components/landing/landing-footer";
 
 export interface LegalTocEntry {
@@ -31,14 +30,7 @@ export function LegalLayout({
 }) {
   return (
     <div className="theme-light flex min-h-screen flex-col bg-background">
-      <header className="sticky top-0 z-30 border-b border-border bg-background/85 backdrop-blur">
-        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-5">
-          <Link to="/">
-            <Logo />
-          </Link>
-          <PublicNav />
-        </div>
-      </header>
+      <LandingNav />
 
       <main className="mx-auto w-full max-w-3xl flex-1 px-5 py-16">
         <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">{title}</h1>

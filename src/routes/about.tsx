@@ -1,7 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { CLICKAI_LEGAL_NAME, CLICKAI_ADDRESS_LINES } from "@/lib/company-info";
-import { Logo } from "@/components/app/primitives";
-import { PublicNav } from "@/components/app/PublicNav";
+import { LandingNav } from "@/components/landing/landing-nav";
 import { LandingFooter } from "@/components/landing/landing-footer";
 import { Button } from "@/components/ui/button";
 
@@ -28,14 +27,7 @@ export const Route = createFileRoute("/about")({
 function About() {
   return (
     <div className="theme-light flex min-h-screen flex-col bg-background">
-      <header className="sticky top-0 z-30 border-b border-border bg-background/85 backdrop-blur">
-        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-5">
-          <Link to="/">
-            <Logo />
-          </Link>
-          <PublicNav />
-        </div>
-      </header>
+      <LandingNav />
 
       <main className="mx-auto w-full max-w-3xl flex-1 px-5 py-16">
         <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">About ClickAI</h1>
@@ -63,7 +55,14 @@ function About() {
         </div>
 
         <div className="mt-10 space-y-3">
-          <h2 className="text-lg font-semibold tracking-tight">How we describe ourselves</h2>
+          <h2 className="text-lg font-semibold tracking-tight">Our approach to automation</h2>
+          <p className="text-sm leading-relaxed text-muted-foreground">
+            Automate the repeatable parts — answering the same questions, booking and moving
+            appointments, capturing enquiries — and hand everything else to your team. We tell you
+            plainly what works today and what is custom work, and we keep a person in the loop where
+            it matters.
+          </p>
+          <h2 className="pt-4 text-lg font-semibold tracking-tight">How we describe ourselves</h2>
           <p className="text-sm leading-relaxed text-muted-foreground">
             We don't claim a specific customer count, rating, or certification unless it's true and
             verifiable — if you see a figure like that on this site, it reflects what is actually
@@ -102,7 +101,7 @@ function About() {
           </p>
           <div className="mt-4">
             <Link to="/contact">
-              <Button size="sm">Contact us</Button>
+              <Button size="sm">Book a Demo</Button>
             </Link>
           </div>
         </div>

@@ -8,7 +8,12 @@ import { IndustriesSection } from "@/components/landing/industries-section";
 import { ChannelsSection } from "@/components/landing/channels-section";
 import { FeatureShowcase } from "@/components/landing/feature-showcase";
 import { PaymentFeatureSection } from "@/components/landing/payment-feature-section";
-import { MetricsSection } from "@/components/landing/metrics-section";
+import {
+  ProductsOverview,
+  HowItWorks,
+  WhyClickAI,
+  HomeFaq,
+} from "@/components/landing/home-sections";
 import { IntegrationsSection } from "@/components/landing/integrations-section";
 import { FinalCta } from "@/components/landing/final-cta";
 import { LandingFooter } from "@/components/landing/landing-footer";
@@ -16,7 +21,7 @@ import { LandingFooter } from "@/components/landing/landing-footer";
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
-      { title: "ClickAI — AI employees for sales, reception, bookings and support" },
+      { title: "ClickAI — AI Employees for Your Business, 24/7" },
       {
         name: "description",
         content:
@@ -98,13 +103,16 @@ function Landing() {
       />
       <LandingNav />
       <Hero />
+      <ProductsOverview />
       <ValuePropositions />
       <IndustriesSection />
       <ChannelsSection />
       <FeatureShowcase />
       <PaymentFeatureSection />
       <IntegrationsSection />
-      <MetricsSection />
+      <HowItWorks />
+      <WhyClickAI />
+      <HomeFaq />
       <FinalCta />
       <LandingFooter />
     </div>

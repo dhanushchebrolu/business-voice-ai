@@ -4,12 +4,14 @@ import { Loader2 } from "lucide-react";
 
 export function Logo({ className }: { className?: string }) {
   return (
-    <div className={cn("flex items-center gap-2", className)}>
-      <span className="relative grid size-7 place-items-center rounded-md bg-primary text-primary-foreground">
-        <span className="text-[13px] font-bold leading-none">C</span>
-        <span className="absolute inset-0 rounded-md ring-1 ring-inset ring-primary/40" />
-      </span>
-      <span className="text-[15px] font-semibold tracking-tight">ClickAI</span>
+    <div className={cn("flex items-center", className)}>
+      <img
+        src="/clickai-logo.png"
+        alt="ClickAI"
+        width={741}
+        height={179}
+        className="h-8 w-auto rounded-md bg-white px-2 py-1 sm:h-9 [.theme-light_&]:bg-transparent [.theme-light_&]:p-0"
+      />
     </div>
   );
 }
