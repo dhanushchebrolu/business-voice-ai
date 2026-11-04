@@ -1,6 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { Check } from "lucide-react";
 import { StatusPill } from "@/components/app/primitives";
+import { PageHero } from "@/components/landing/page-hero";
 import { LandingNav } from "@/components/landing/landing-nav";
 import { LandingFooter } from "@/components/landing/landing-footer";
 import { Button } from "@/components/ui/button";
@@ -74,17 +75,13 @@ function Pricing() {
     <div className="theme-light min-h-screen bg-background">
       <LandingNav />
 
+      <PageHero
+        eyebrow="Pricing"
+        title="Pay for a receptionist, not a platform"
+        intro="A one-time setup fee activates your workspace. Call minutes beyond your plan are billed from your wallet at your workspace rate."
+      />
       <main className="mx-auto max-w-6xl px-5 py-16">
-        <StatusPill tone="accent">Plans</StatusPill>
-        <h1 className="mt-5 text-3xl font-semibold tracking-tight sm:text-4xl">
-          Pay for a receptionist, not a platform
-        </h1>
-        <p className="mt-3 max-w-xl text-sm text-muted-foreground">
-          A one-time setup fee activates your workspace. Call minutes beyond your plan are billed
-          from your wallet at your workspace rate.
-        </p>
-
-        <div className="mt-10 grid gap-5 lg:grid-cols-3">
+        <div className="grid gap-5 lg:grid-cols-3">
           {PLANS.map((plan) => (
             <div
               key={plan.id}

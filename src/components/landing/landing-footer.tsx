@@ -1,54 +1,34 @@
-import { Link, useRouterState } from "@tanstack/react-router";
-import { ShieldCheck, Lock, Headset } from "lucide-react";
+import { Link } from "@tanstack/react-router";
 import { Logo } from "@/components/app/primitives";
 import { CLICKAI_LEGAL_NAME, CLICKAI_ADDRESS_LINES } from "@/lib/company-info";
 
 /**
- * No social links and no email-subscribe form are rendered here — this app
- * has no real, verified ClickAI social media URLs to link to, and no
- * backend endpoint to actually collect a newsletter signup, and the brief
- * is explicit: don't invent links and don't build a form that pretends to
- * work. Get in touch, below, is a real link to the existing /contact route
- * instead.
- *
- * Every "scroll to section" link below targets a real, existing id on the
- * homepage (value-propositions.tsx / voice-demo.tsx / feature-showcase.tsx /
- * integrations-section.tsx / industries-section.tsx). This footer is also
- * rendered on /contact, /pricing and every legal page, which don't have
- * those sections mounted — so a section link there is a real navigation
- * (`Link to="/" hash={id}`) to the homepage, not a same-page scroll; see
- * index.tsx's hash-scroll-on-mount effect for the landing side of this.
- * Only on the homepage itself does a section link stay a plain in-page
- * scroll (SectionLink below decides which, from the live pathname).
+ * Dark footer. No social links and no email-subscribe form are rendered:
+ * this app has no verified ClickAI social URLs and no backend to collect a
+ * newsletter signup, so neither is invented. "Get in touch" is a real link
+ * to the existing /contact route. Every link below is a real route.
  */
-const PRODUCT_LINKS: { label: string; targetId: string }[] = [
-  { label: "AI Voice Agents", targetId: "voice-demo" },
-  { label: "AI Sales Agent", targetId: "ai-sales-executive" },
-  { label: "AI Receptionist", targetId: "ai-receptionist" },
-  { label: "AI Customer Support", targetId: "ai-customer-care" },
-  { label: "WhatsApp AI", targetId: "integrations" },
-  { label: "Appointment Booking", targetId: "ai-order-booking" },
-  { label: "Business Automation", targetId: "value-propositions" },
+const PRODUCT_LINKS: { label: string; to: string }[] = [
+  { label: "AI Voice Agents", to: "/ai-voice-agents" },
+  { label: "WhatsApp AI Agents", to: "/whatsapp-ai-agents" },
+  { label: "Appointment Automation", to: "/appointment-automation" },
+  { label: "Business Automation", to: "/business-automation" },
+  { label: "Pricing", to: "/pricing" },
 ];
 
-/** All real verticals covered by the single, real industries-section.tsx on the homepage — not separate thin pages. */
-const SOLUTIONS_LINKS: { label: string; targetId: string }[] = [
-  { label: "Clinics", targetId: "industries" },
-  { label: "Restaurants", targetId: "industries" },
-  { label: "Retail", targetId: "industries" },
-  { label: "Real Estate", targetId: "industries" },
-  { label: "E-commerce", targetId: "industries" },
-  { label: "Local Businesses", targetId: "industries" },
+const SOLUTIONS_LINKS: { label: string; hash: string }[] = [
+  { label: "Healthcare and clinics", hash: "healthcare" },
+  { label: "Restaurants and hospitality", hash: "restaurants" },
+  { label: "Real estate", hash: "real-estate" },
+  { label: "Education", hash: "education" },
+  { label: "Retail and local business", hash: "retail" },
+  { label: "Professional services", hash: "professional-services" },
 ];
 
 const COMPANY_LINKS: { label: string; to: string }[] = [
   { label: "About", to: "/about" },
   { label: "Contact", to: "/contact" },
-  { label: "Pricing", to: "/pricing" },
-];
-
-const RESOURCES_LINKS: { label: string; to?: string; targetId?: string }[] = [
-  { label: "Integrations", targetId: "integrations" },
+  { label: "Integrations", to: "/integrations" },
   { label: "Login", to: "/auth" },
 ];
 
@@ -62,168 +42,98 @@ const LEGAL_LINKS: { label: string; to: string }[] = [
   { label: "AI Disclaimer", to: "/ai-disclaimer" },
 ];
 
-function scrollToSection(id: string) {
-  document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
-}
-
-/** On the homepage, scrolls in place; anywhere else, navigates home with a hash so the same section is reachable from every page. */
-function SectionLink({ label, targetId }: { label: string; targetId: string }) {
-  const isHome = useRouterState({ select: (s) => s.location.pathname }) === "/";
-  if (isHome) {
-    return (
-      <button
-        type="button"
-        onClick={() => scrollToSection(targetId)}
-        className="text-sm text-slate-500 hover:text-violet-600"
-      >
-        {label}
-      </button>
-    );
-  }
-  return (
-    <Link to="/" hash={targetId} className="text-sm text-slate-500 hover:text-violet-600">
-      {label}
-    </Link>
-  );
-}
-
-const TRUST_ROW = [
-  { icon: Lock, label: "Secure communications" },
-  { icon: ShieldCheck, label: "Privacy-focused design" },
-  { icon: Headset, label: "Business support" },
-];
+const LINK =
+  "text-sm text-slate-400 transition-colors hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300";
+const CTA =
+  "mt-6 inline-block rounded-full border border-white/20 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300";
+const HEADING = "text-[11px] font-medium uppercase tracking-[0.16em] text-slate-500";
 
 export function LandingFooter() {
   return (
-    <footer className="border-t border-slate-200 bg-white py-16">
+    <footer className="bg-ink-950 py-16 text-slate-300">
       <div className="mx-auto max-w-[1200px] px-5 sm:px-8">
-        <div className="grid gap-10 border-b border-slate-200 pb-12 sm:grid-cols-2">
+        <div className="grid gap-10 border-b border-white/10 pb-12 lg:grid-cols-[1.2fr_2fr]">
           <div>
-            <Logo />
-            <p className="mt-3 max-w-xs text-sm leading-relaxed text-slate-500">
-              AI employees for sales, customer support, bookings, and business automation.
-              AI-powered voice, messaging, and workflow automation for businesses.
+            <Logo plate />
+            <p className="mt-5 max-w-xs text-sm leading-relaxed text-slate-400">
+              AI employees for calls, WhatsApp, appointments and everyday business workflows.
             </p>
-          </div>
-          <div className="flex items-start sm:justify-end">
-            <Link
-              to="/contact"
-              className="rounded-full border border-violet-200 bg-violet-50 px-5 py-2.5 text-sm font-medium text-violet-700 hover:bg-violet-100"
-            >
+            <Link to="/contact" className={CTA}>
               Get in touch
             </Link>
           </div>
-        </div>
 
-        <div className="grid gap-10 pt-12 sm:grid-cols-2 lg:grid-cols-5">
-          <div>
-            <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-slate-400">
-              Products
-            </p>
-            <ul className="mt-4 space-y-2.5">
-              {PRODUCT_LINKS.map((link) => (
-                <li key={link.label}>
-                  <SectionLink label={link.label} targetId={link.targetId} />
-                </li>
-              ))}
-              <li>
-                <Link to="/pricing" className="text-sm text-slate-500 hover:text-violet-600">
-                  Pricing
-                </Link>
-              </li>
-            </ul>
-          </div>
-
-          <div>
-            <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-slate-400">
-              Solutions
-            </p>
-            <ul className="mt-4 space-y-2.5">
-              {SOLUTIONS_LINKS.map((link) => (
-                <li key={link.label}>
-                  <SectionLink label={link.label} targetId={link.targetId} />
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          <div>
-            <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-slate-400">
-              Company
-            </p>
-            <ul className="mt-4 space-y-2.5">
-              {COMPANY_LINKS.map((link) => (
-                <li key={link.label}>
-                  <Link to={link.to} className="text-sm text-slate-500 hover:text-violet-600">
-                    {link.label}
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          <div>
-            <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-slate-400">
-              Resources
-            </p>
-            <ul className="mt-4 space-y-2.5">
-              {RESOURCES_LINKS.map((link) =>
-                link.to ? (
-                  <li key={link.label}>
-                    <Link to={link.to} className="text-sm text-slate-500 hover:text-violet-600">
-                      {link.label}
+          <div className="grid gap-10 sm:grid-cols-2 lg:grid-cols-4">
+            <nav aria-label="Products">
+              <p className={HEADING}>Products</p>
+              <ul className="mt-4 space-y-2.5">
+                {PRODUCT_LINKS.map((l) => (
+                  <li key={l.label}>
+                    <Link to={l.to} className={LINK}>
+                      {l.label}
                     </Link>
                   </li>
-                ) : (
-                  <li key={link.label}>
-                    <SectionLink label={link.label} targetId={link.targetId!} />
+                ))}
+              </ul>
+            </nav>
+            <nav aria-label="Solutions">
+              <p className={HEADING}>Solutions</p>
+              <ul className="mt-4 space-y-2.5">
+                {SOLUTIONS_LINKS.map((l) => (
+                  <li key={l.label}>
+                    <Link to="/solutions" hash={l.hash} className={LINK}>
+                      {l.label}
+                    </Link>
                   </li>
-                ),
-              )}
-            </ul>
+                ))}
+              </ul>
+            </nav>
+            <nav aria-label="Company">
+              <p className={HEADING}>Company</p>
+              <ul className="mt-4 space-y-2.5">
+                {COMPANY_LINKS.map((l) => (
+                  <li key={l.label}>
+                    <Link to={l.to} className={LINK}>
+                      {l.label}
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </nav>
+            <nav aria-label="Legal">
+              <p className={HEADING}>Legal</p>
+              <ul className="mt-4 space-y-2.5">
+                {LEGAL_LINKS.map((l) => (
+                  <li key={l.label}>
+                    <Link to={l.to} className={LINK}>
+                      {l.label}
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </nav>
           </div>
+        </div>
 
+        <div className="mt-8 grid gap-6 text-xs text-slate-400 sm:grid-cols-2">
           <div>
-            <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-slate-400">
-              Legal
-            </p>
-            <ul className="mt-4 space-y-2.5">
-              {LEGAL_LINKS.map((link) => (
-                <li key={link.label}>
-                  <Link to={link.to} className="text-sm text-slate-500 hover:text-violet-600">
-                    {link.label}
-                  </Link>
-                </li>
-              ))}
-            </ul>
+            <p className="font-medium text-slate-200">{CLICKAI_LEGAL_NAME}</p>
+            {CLICKAI_ADDRESS_LINES.map((line) => (
+              <p key={line}>{line}</p>
+            ))}
           </div>
-        </div>
-
-        <div className="mt-12 flex flex-wrap items-center gap-x-8 gap-y-3 border-t border-slate-200 pt-8">
-          {TRUST_ROW.map(({ icon: Icon, label }) => (
-            <span key={label} className="flex items-center gap-2 text-xs text-slate-400">
-              <Icon className="size-3.5" /> {label}
-            </span>
-          ))}
-        </div>
-
-        <div className="mt-8 border-t border-slate-200 pt-6 text-xs text-slate-400">
-          <p className="font-medium text-slate-500">{CLICKAI_LEGAL_NAME}</p>
-          {CLICKAI_ADDRESS_LINES.map((line) => (
-            <p key={line}>{line}</p>
-          ))}
-          <p className="mt-1">
-            <a href="mailto:hello@clickai.in" className="hover:text-violet-600">
+          <p className="sm:text-right">
+            <a href="mailto:hello@clickai.in" className="hover:text-white">
               hello@clickai.in
             </a>
             {" · "}
-            <a href="tel:+917660001231" className="hover:text-violet-600">
+            <a href="tel:+917660001231" className="hover:text-white">
               +91 76600 01231
             </a>
           </p>
         </div>
 
-        <div className="mt-4 flex flex-col gap-2 text-xs text-slate-400 sm:flex-row sm:items-center sm:justify-between">
+        <div className="mt-8 flex flex-col gap-2 border-t border-white/10 pt-6 text-xs text-slate-500 sm:flex-row sm:items-center sm:justify-between">
           <p>
             © {new Date().getFullYear()} {CLICKAI_LEGAL_NAME}. All rights reserved.
           </p>

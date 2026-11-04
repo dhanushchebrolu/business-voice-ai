@@ -1,5 +1,4 @@
 import { Link } from "@tanstack/react-router";
-import { Sparkles, PhoneCall, Users, AudioLines } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { HeroOrb } from "./hero-orb";
 
@@ -7,54 +6,47 @@ function scrollToSection(id: string) {
   document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
-const FEATURES = [
-  { label: "Live Call Handling", icon: PhoneCall },
-  { label: "Human Handoff", icon: Users },
-  { label: "Natural Voice", icon: AudioLines },
+/** Only integrations that can be connected from the dashboard today (see /integrations). */
+const WORKS_WITH = [
+  "WhatsApp Business Platform",
+  "Voice telephony",
+  "Google Calendar",
+  "Instagram",
+  "Razorpay",
 ];
 
 /**
- * White + violet hero: left-aligned headline/copy/two CTAs/feature strip,
- * right-aligned animated AI-employee workflow diagram (hero-flow/) showing
- * how one AI agent fans out across channels and converges back into
- * customers, leads, and outcomes — built as original ClickAI artwork and
- * copy, no third-party imagery.
- *
- * "Book a Demo" links to the real /contact route (same CTA final-cta.tsx
- * uses); "Test Agent" scrolls to the real #voice-demo section further down
- * the page (feature-showcase.tsx) rather than linking to the authenticated,
- * per-business testAgentText dashboard feature, which requires a signed-in
- * account and an existing agent config neither of which a visitor has yet.
- * That section (voice-demo.tsx) is a separate component from this hero's
- * visual and is untouched by it.
+ * Dark hero: positioning and CTAs on the left, the live website assistant on
+ * the right, set directly on the dark surface (no card) with concentric rings
+ * and a single glow behind the orb. "Book a Demo" links to the real /contact
+ * route; "Explore Products" scrolls to the #products showcase below.
  */
 export function Hero() {
   return (
-    <section className="relative overflow-hidden bg-white">
+    <section className="relative isolate overflow-hidden bg-ink-950 text-white">
+      {/* Fine grid, faded out toward the edges; decorative only. */}
       <div
-        className="pointer-events-none absolute inset-0 grid-noise opacity-40"
         aria-hidden="true"
+        className="absolute inset-0 -z-10 opacity-[0.07] [background-image:linear-gradient(white_1px,transparent_1px),linear-gradient(90deg,white_1px,transparent_1px)] [background-size:56px_56px] [mask-image:radial-gradient(ellipse_70%_60%_at_65%_40%,black,transparent)]"
       />
+      {/* The one glow: sits behind the assistant to anchor it. */}
       <div
-        className="pointer-events-none absolute -left-1/4 top-0 h-[600px] w-[600px] rounded-full bg-violet-100/60 blur-[120px]"
         aria-hidden="true"
-      />
-      <div
-        className="pointer-events-none absolute -right-1/4 bottom-0 h-[500px] w-[500px] rounded-full bg-sky-50 blur-[120px]"
-        aria-hidden="true"
+        className="absolute right-[-10%] top-[8%] -z-10 h-[560px] w-[560px] rounded-full bg-[radial-gradient(closest-side,rgba(37,99,235,0.35),rgba(124,92,255,0.12)_60%,transparent)]"
       />
 
-      <div className="relative mx-auto grid max-w-[1400px] gap-16 px-5 pb-20 pt-14 sm:px-8 sm:pb-28 sm:pt-20 lg:grid-cols-2 lg:items-center lg:gap-8 lg:py-28">
+      <div className="mx-auto grid max-w-[1200px] gap-14 px-5 pb-16 pt-14 sm:px-8 sm:pt-20 lg:grid-cols-[1.05fr_0.95fr] lg:items-center lg:gap-10 lg:pb-24 lg:pt-24">
         <div>
-          <p className="inline-flex items-center gap-1.5 rounded-full border border-violet-200 bg-violet-50 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.2em] text-violet-700">
-            <Sparkles className="size-3" /> Voice · WhatsApp · Appointments
+          <p className="text-xs font-medium uppercase tracking-[0.18em] text-sky-300">
+            Voice · WhatsApp · Appointments · Workflows
           </p>
-          <h1 className="mt-5 font-serif text-[12vw] leading-[1.08] tracking-tight sm:text-6xl lg:text-[60px]">
-            <span className="block text-slate-900">AI Employees for</span>
-            <span className="block text-slate-900">Your Business,</span>
-            <span className="block text-slate-400">24/7</span>
+          <h1 className="mt-5 font-serif text-[clamp(2.75rem,7vw,4.75rem)] leading-[1.02] tracking-tight">
+            AI Employees for Your Business,{" "}
+            <span className="bg-gradient-to-r from-sky-300 to-violet-300 bg-clip-text text-transparent">
+              24/7
+            </span>
           </h1>
-          <p className="mt-6 max-w-md text-sm leading-relaxed text-slate-500 sm:text-base">
+          <p className="mt-6 max-w-lg text-base leading-relaxed text-slate-300 sm:text-lg">
             Automate customer conversations, answer business calls, manage appointments and
             streamline everyday workflows with AI employees built around your business.
           </p>
@@ -63,7 +55,7 @@ export function Hero() {
             <Link to="/contact">
               <Button
                 size="lg"
-                className="rounded-full bg-violet-600 px-6 text-white hover:bg-violet-700"
+                className="h-12 rounded-full bg-violet-600 px-7 text-white shadow-[0_8px_30px_-8px_rgba(37,99,235,0.7)] transition-[transform,background-color] hover:bg-violet-500 active:scale-[0.98]"
               >
                 Book a Demo
               </Button>
@@ -71,29 +63,26 @@ export function Hero() {
             <Button
               size="lg"
               variant="outline"
-              onClick={() => scrollToSection("value-propositions")}
-              className="rounded-full border-slate-300 bg-transparent px-6 text-slate-900 hover:bg-slate-50"
+              onClick={() => scrollToSection("products")}
+              className="h-12 rounded-full border-white/25 bg-transparent px-7 text-white transition-[transform,background-color] hover:bg-white/10 hover:text-white active:scale-[0.98]"
             >
               Explore Products
             </Button>
           </div>
 
-          <div className="mt-10 flex flex-wrap items-center gap-x-6 gap-y-2">
-            {FEATURES.map(({ label, icon: Icon }) => (
-              <span key={label} className="flex items-center gap-1.5 text-xs text-slate-500">
-                <Icon className="size-3.5 text-violet-600" /> {label}
-              </span>
-            ))}
-          </div>
-
-          <p className="mt-10 text-xs text-slate-400">
-            Built for growing businesses across every industry.
-          </p>
+          <dl className="mt-12 max-w-lg border-t border-white/10 pt-6">
+            <dt className="text-[11px] font-medium uppercase tracking-[0.16em] text-slate-400">
+              Connects with
+            </dt>
+            <dd className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5 text-sm text-slate-300">
+              {WORKS_WITH.map((w) => (
+                <span key={w}>{w}</span>
+              ))}
+            </dd>
+          </dl>
         </div>
 
-        <div className="lg:pl-8">
-          <HeroOrb />
-        </div>
+        <HeroOrb />
       </div>
     </section>
   );

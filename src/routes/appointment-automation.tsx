@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { ProductPage, type ProductContent } from "@/components/landing/product-page";
 
 const CONTENT: ProductContent = {
+  surface: "appointments",
   eyebrow: "Appointment Automation",
   title: "Bookings that manage themselves",
   intro:
@@ -40,15 +41,6 @@ const CONTENT: ProductContent = {
       status: "Custom",
     },
   ],
-  example: {
-    heading: "Example of a booking",
-    turns: [
-      { from: "customer", text: "I need an appointment on Thursday." },
-      { from: "ai", text: "Thursday I have 10:00 am and 3:00 pm. Which one?" },
-      { from: "customer", text: "3 pm." },
-      { from: "ai", text: "Booked for Thursday 3:00 pm. I'll send a confirmation." },
-    ],
-  },
   workflow: [
     { step: "Request", detail: "Customer asks by call or WhatsApp." },
     { step: "Check", detail: "Hours, overrides and calendar are checked." },

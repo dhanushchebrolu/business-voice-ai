@@ -43,6 +43,12 @@ describe("LandingFooter has no invented social/company links, no fake form, real
       "/contact",
       "/auth",
       "/about",
+      "/integrations",
+      "/solutions",
+      "/ai-voice-agents",
+      "/whatsapp-ai-agents",
+      "/appointment-automation",
+      "/business-automation",
       "/privacy-policy",
       "/terms",
       "/acceptable-use-policy",
@@ -58,23 +64,18 @@ describe("LandingFooter has no invented social/company links, no fake form, real
     }
   });
 
-  test("every section-scroll link targets a real homepage section id", () => {
-    for (const id of [
-      "voice-demo",
-      "ai-sales-executive",
-      "ai-receptionist",
-      "ai-customer-care",
-      "integrations",
-      "ai-order-booking",
-      "value-propositions",
-      "industries",
+  test("solution links go to real sections of /solutions", () => {
+    for (const hash of [
+      "healthcare",
+      "restaurants",
+      "real-estate",
+      "education",
+      "retail",
+      "professional-services",
     ]) {
-      assert.match(src, new RegExp(`targetId:\\s*"${id}"`));
+      assert.match(src, new RegExp(`hash:\\s*"${hash}"`));
     }
-  });
-
-  test("cross-page section links navigate home with a hash instead of silently no-oping off the homepage", () => {
-    assert.match(code, /Link to="\/" hash=\{targetId\}/);
+    assert.match(code, /Link to="\/solutions" hash=\{l\.hash\}/);
   });
 
   test("the Legal column links to all seven required compliance pages", () => {

@@ -2,7 +2,8 @@ import { cn } from "@/lib/utils";
 import type { ReactNode } from "react";
 import { Loader2 } from "lucide-react";
 
-export function Logo({ className }: { className?: string }) {
+/** `plate` keeps the white plate on dark surfaces (the logo wordmark is dark navy). */
+export function Logo({ className, plate = false }: { className?: string; plate?: boolean }) {
   return (
     <div className={cn("flex items-center", className)}>
       <img
@@ -10,7 +11,10 @@ export function Logo({ className }: { className?: string }) {
         alt="ClickAI"
         width={741}
         height={179}
-        className="h-8 w-auto rounded-md bg-white px-2 py-1 sm:h-9 [.theme-light_&]:bg-transparent [.theme-light_&]:p-0"
+        className={cn(
+          "h-8 w-auto rounded-md bg-white px-2 py-1 sm:h-9",
+          !plate && "[.theme-light_&]:bg-transparent [.theme-light_&]:p-0",
+        )}
       />
     </div>
   );

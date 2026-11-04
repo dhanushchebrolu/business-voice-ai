@@ -2,6 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { CLICKAI_LEGAL_NAME, CLICKAI_ADDRESS_LINES } from "@/lib/company-info";
 import { LandingNav } from "@/components/landing/landing-nav";
 import { LandingFooter } from "@/components/landing/landing-footer";
+import { PageHero } from "@/components/landing/page-hero";
 import { Button } from "@/components/ui/button";
 
 export const Route = createFileRoute("/about")({
@@ -29,13 +30,15 @@ function About() {
     <div className="theme-light flex min-h-screen flex-col bg-background">
       <LandingNav />
 
+      <PageHero
+        eyebrow="About"
+        title="About ClickAI"
+        intro="ClickAI is a business automation platform that provides AI-powered employees and automation tools for businesses."
+      />
       <main className="mx-auto w-full max-w-3xl flex-1 px-5 py-16">
-        <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">About ClickAI</h1>
-        <p className="mt-5 text-sm leading-relaxed text-muted-foreground">
-          ClickAI is a business automation platform that provides AI-powered employees and
-          automation tools for businesses. We help businesses automate repetitive customer
-          interactions and operational workflows — the conversations and bookings that would
-          otherwise take a person's time every day.
+        <p className="text-base leading-relaxed text-muted-foreground">
+          We help businesses automate repetitive customer interactions and operational workflows:
+          the conversations and bookings that would otherwise take a person's time every day.
         </p>
 
         <div className="mt-10 space-y-3">

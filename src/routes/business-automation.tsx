@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { ProductPage, type ProductContent } from "@/components/landing/product-page";
 
 const CONTENT: ProductContent = {
+  surface: "automation",
   eyebrow: "Business Workflow Automation",
   title: "From conversation to completed task",
   intro:
@@ -39,15 +40,6 @@ const CONTENT: ProductContent = {
       status: "Custom",
     },
   ],
-  example: {
-    heading: "Example of a workflow",
-    turns: [
-      { from: "customer", text: "I'd like a quote for next month." },
-      { from: "ai", text: "Happy to help. Can I take your name, number and what you need?" },
-      { from: "customer", text: "Asha, a monthly service plan." },
-      { from: "ai", text: "Thanks Asha. Our team will contact you today." },
-    ],
-  },
   workflow: [
     { step: "Conversation", detail: "A call or message arrives." },
     { step: "Capture", detail: "Details are collected." },

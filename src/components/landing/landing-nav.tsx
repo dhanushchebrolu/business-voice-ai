@@ -118,7 +118,7 @@ function NavDropdown({
         <div
           role="menu"
           aria-label={label}
-          className={`absolute left-1/2 top-full z-50 mt-3 -translate-x-1/2 rounded-2xl border border-slate-200 bg-white p-4 shadow-[0_24px_60px_-20px_rgba(15,23,42,0.25)] ${panelClassName ?? "w-72"}`}
+          className={`animate-menu absolute left-1/2 top-full z-50 mt-3 -translate-x-1/2 rounded-xl border border-slate-200 bg-white p-3 shadow-[0_24px_60px_-24px_rgba(6,11,31,0.35)] ${panelClassName ?? "w-72"}`}
         >
           {renderPanel(close)}
         </div>
@@ -150,12 +150,12 @@ export function LandingNav() {
   return (
     <>
       <header className="sticky top-0 z-40 border-b border-slate-200 bg-white/85 backdrop-blur">
-        <div className="mx-auto flex h-20 max-w-[1400px] items-center justify-between px-5 sm:px-8">
+        <div className="mx-auto flex h-[72px] max-w-[1200px] items-center justify-between px-5 sm:px-8">
           <Link to="/" aria-label="ClickAI home">
             <Logo />
           </Link>
 
-          <nav className="hidden items-center gap-8 md:flex" aria-label="Primary">
+          <nav className="hidden items-center gap-7 lg:flex" aria-label="Primary">
             <NavDropdown
               label="Products"
               panelClassName="w-80"
@@ -268,9 +268,31 @@ export function LandingNav() {
               </Button>
             </Link>
 
+            {session && !loading ? (
+              <div className="hidden items-center gap-2 lg:flex">
+                {hasDashboard ? (
+                  <Link to="/app">
+                    <Button size="sm" variant="outline" className="rounded-full">
+                      Dashboard
+                    </Button>
+                  </Link>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await signOut();
+                    navigate({ to: "/" });
+                  }}
+                  className="rounded-full px-3 py-1.5 text-sm text-slate-600 hover:text-violet-600"
+                >
+                  Sign out
+                </button>
+              </div>
+            ) : null}
+
             <button
               type="button"
-              className="grid size-10 place-items-center rounded-full border border-slate-200 text-slate-700 hover:bg-slate-50"
+              className="grid size-10 place-items-center rounded-full border border-slate-200 text-slate-700 hover:bg-slate-50 lg:hidden"
               aria-expanded={menuOpen}
               aria-controls="landing-menu"
               aria-label={menuOpen ? "Close menu" : "Open menu"}
@@ -297,7 +319,7 @@ export function LandingNav() {
           role="dialog"
           aria-modal="true"
           aria-label="Navigation menu"
-          className="fixed inset-0 z-50 flex flex-col overflow-y-auto bg-white px-6 py-6"
+          className="animate-menu fixed inset-0 z-50 flex flex-col overflow-y-auto bg-white px-6 py-6"
         >
           <div className="mx-auto flex w-full max-w-[1400px] items-center justify-between">
             <Logo />

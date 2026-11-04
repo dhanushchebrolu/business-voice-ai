@@ -1,83 +1,158 @@
 import { Link } from "@tanstack/react-router";
-import { ArrowRight } from "lucide-react";
+import { ArrowRight, ArrowUpRight } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { INTEGRATION_GROUPS } from "@/lib/integrations-catalog";
 import { Reveal } from "./reveal";
+import {
+  AppointmentSurface,
+  AutomationSurface,
+  VoiceSurface,
+  WhatsAppSurface,
+} from "./product-surfaces";
+import { VoiceDemo } from "./voice-demo";
 
 /**
- * Home sections that point to the real product pages. Copy is limited to
- * what the product pages already state; there are no client counts, results
- * or statistics anywhere in this file.
+ * Home sections, in page order. Copy is limited to what the product pages
+ * already state; there are no client counts, results or statistics here.
+ * Surfaces alternate dark / paper / white so the page has rhythm
+ * (docs/design-system.md).
  */
+
+function Eyebrow({ children, dark = false }: { children: string; dark?: boolean }) {
+  return (
+    <p
+      className={`text-xs font-medium uppercase tracking-[0.18em] ${dark ? "text-sky-300" : "text-violet-600"}`}
+    >
+      {children}
+    </p>
+  );
+}
+
+const H2 = "mt-3 font-serif text-4xl leading-[1.05] tracking-tight sm:text-5xl";
+
+/* ───────────── Products: tabbed showcase on paper ───────────── */
 
 const PRODUCTS = [
   {
-    name: "AI Voice Agents",
+    id: "voice",
+    name: "Voice Agents",
     to: "/ai-voice-agents",
-    text: "Answer business calls, book appointments and keep a record of every call.",
-    use: "A clinic whose front desk is busy with patients.",
+    title: "Answer every call, in your business's name",
+    points: [
+      "Answers inbound calls from your hours, services and FAQs",
+      "Books into your calendar during the call",
+      "Every call saved in call history",
+    ],
+    Surface: VoiceSurface,
   },
   {
-    name: "WhatsApp AI Agents",
+    id: "whatsapp",
+    name: "WhatsApp Agents",
     to: "/whatsapp-ai-agents",
-    text: "Reply to enquiries on the official WhatsApp Business Platform and hand over to your team.",
-    use: "A salon confirming and moving bookings.",
+    title: "Reply on WhatsApp without losing control",
+    points: [
+      "Official WhatsApp Business Platform",
+      "Bookings change only after the customer replies YES",
+      "Customers can ask for a person, and AI replies stop",
+    ],
+    Surface: WhatsAppSurface,
   },
   {
-    name: "Appointment Automation",
+    id: "appointments",
+    name: "Appointments",
     to: "/appointment-automation",
-    text: "Working hours, daily overrides and Google Calendar sync for bookings that do not clash.",
-    use: "A consultancy taking calls across time zones.",
+    title: "Bookings that respect your calendar",
+    points: [
+      "Weekly working hours and date-specific overrides",
+      "Google Calendar events block unavailable slots",
+      "Reschedule and cancel by call or WhatsApp",
+    ],
+    Surface: AppointmentSurface,
   },
   {
+    id: "automation",
     name: "Business Automation",
     to: "/business-automation",
-    text: "Turn conversations into leads and follow-ups; connections to your systems are built to order.",
-    use: "A service business re-keying enquiries by hand.",
+    title: "Turn conversations into completed tasks",
+    points: [
+      "Lead details captured in your dashboard",
+      "Payment links through Razorpay once connected",
+      "CRM and database connections are built to order",
+    ],
+    Surface: AutomationSurface,
   },
 ] as const;
 
-export function ProductsOverview() {
+export function ProductShowcase() {
   return (
-    <section id="products" className="border-t border-slate-200 bg-white py-20 sm:py-24">
+    <section id="products" className="bg-paper py-20 sm:py-28">
       <div className="mx-auto max-w-[1200px] px-5 sm:px-8">
-        <p className="text-xs font-medium uppercase tracking-[0.18em] text-violet-600">Products</p>
-        <h2 className="mt-3 max-w-2xl text-3xl font-semibold tracking-tight text-slate-900 sm:text-4xl">
-          Four ways to put an AI employee to work
-        </h2>
         <Reveal>
-          <ul className="mt-10 grid gap-px overflow-hidden rounded-xl border border-slate-200 bg-slate-200 sm:grid-cols-2">
-            {PRODUCTS.map((p) => (
-              <li key={p.to} className="bg-white">
-                <Link
-                  to={p.to}
-                  className="group flex h-full flex-col p-6 transition-colors hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-violet-600"
-                >
-                  <h3 className="text-base font-semibold text-slate-900">{p.name}</h3>
-                  <p className="mt-2 text-sm leading-relaxed text-slate-600">{p.text}</p>
-                  <p className="mt-3 text-xs text-slate-500">Typical use: {p.use}</p>
-                  <span className="mt-4 inline-flex items-center gap-1 text-sm font-medium text-violet-600">
-                    Learn more
-                    <ArrowRight className="size-4 transition-transform group-hover:translate-x-0.5" />
-                  </span>
-                </Link>
-              </li>
-            ))}
-          </ul>
+          <Eyebrow>Products</Eyebrow>
+          <h2 className={`${H2} max-w-2xl text-slate-900`}>
+            Four AI employees, one way of working
+          </h2>
         </Reveal>
-        <p className="mt-5 text-sm text-slate-500">
-          Need to connect something else?{" "}
-          <Link to="/integrations" className="text-violet-600 underline underline-offset-2">
-            See integrations
-          </Link>{" "}
-          or{" "}
-          <Link to="/solutions" className="text-violet-600 underline underline-offset-2">
-            browse by industry
-          </Link>
-          .
-        </p>
+
+        <Tabs defaultValue="voice" className="mt-10">
+          <TabsList
+            aria-label="Products"
+            className="h-auto w-full justify-start gap-6 overflow-x-auto rounded-none border-b border-slate-300 bg-transparent p-0"
+          >
+            {PRODUCTS.map((p) => (
+              <TabsTrigger
+                key={p.id}
+                value={p.id}
+                className="-mb-px rounded-none border-b-2 border-transparent bg-transparent px-0 py-3 text-sm text-slate-600 shadow-none transition-colors hover:text-slate-900 data-[state=active]:border-violet-600 data-[state=active]:bg-transparent data-[state=active]:text-slate-900 data-[state=active]:shadow-none"
+              >
+                {p.name}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+
+          {PRODUCTS.map(({ id, title, points, to, name, Surface }) => (
+            <TabsContent
+              key={id}
+              value={id}
+              className="mt-10 grid animate-menu gap-10 lg:grid-cols-[0.8fr_1.2fr] lg:items-center lg:gap-16"
+            >
+              <div>
+                <h3 className="font-serif text-3xl leading-tight text-slate-900">{title}</h3>
+                <ul className="mt-6 space-y-3 text-sm text-slate-600">
+                  {points.map((pt) => (
+                    <li key={pt} className="flex gap-3 border-t border-slate-200 pt-3">
+                      <span
+                        aria-hidden="true"
+                        className="mt-2 size-1.5 shrink-0 rounded-full bg-violet-600"
+                      />
+                      {pt}
+                    </li>
+                  ))}
+                </ul>
+                <Link
+                  to={to}
+                  className="mt-7 inline-flex items-center gap-1.5 text-sm font-medium text-violet-600 hover:text-violet-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-violet-600"
+                >
+                  Explore {name} <ArrowRight className="size-4" aria-hidden="true" />
+                </Link>
+              </div>
+              <Surface />
+            </TabsContent>
+          ))}
+        </Tabs>
       </div>
     </section>
   );
 }
+
+/* ───────────── How it works: editorial process on white ───────────── */
 
 const STEPS = [
   ["Understand requirements", "We learn how your business takes calls, messages and bookings."],
@@ -95,29 +170,172 @@ const STEPS = [
 
 export function HowItWorks() {
   return (
-    <section className="border-t border-slate-200 bg-slate-50 py-20 sm:py-24">
-      <div className="mx-auto max-w-[1200px] px-5 sm:px-8">
-        <p className="text-xs font-medium uppercase tracking-[0.18em] text-violet-600">
-          How it works
-        </p>
-        <h2 className="mt-3 max-w-2xl text-3xl font-semibold tracking-tight text-slate-900 sm:text-4xl">
-          From first conversation to live in five steps
-        </h2>
+    <section id="process" className="bg-white py-20 sm:py-28">
+      <div className="mx-auto grid max-w-[1200px] gap-12 px-5 sm:px-8 lg:grid-cols-[0.8fr_1.2fr] lg:gap-20">
+        <div className="lg:sticky lg:top-28 lg:self-start">
+          <Eyebrow>How it works</Eyebrow>
+          <h2 className={`${H2} text-slate-900`}>From first conversation to live in five steps</h2>
+          <p className="mt-5 max-w-sm text-sm leading-relaxed text-slate-600">
+            You are not left to configure it alone. We set it up with you, and you decide when it
+            goes live.
+          </p>
+        </div>
+        <ol>
+          {STEPS.map(([title, text], i) => (
+            <li key={title}>
+              <Reveal delay={i * 60}>
+                <div className="grid grid-cols-[4.5rem_1fr] items-baseline gap-4 border-t border-slate-200 py-8">
+                  <span
+                    className="font-serif text-5xl leading-none text-violet-600"
+                    aria-hidden="true"
+                  >
+                    0{i + 1}
+                  </span>
+                  <div>
+                    <h3 className="text-lg font-semibold text-slate-900">{title}</h3>
+                    <p className="mt-2 max-w-md text-sm leading-relaxed text-slate-600">{text}</p>
+                  </div>
+                </div>
+              </Reveal>
+            </li>
+          ))}
+        </ol>
+      </div>
+    </section>
+  );
+}
+
+/* ───────────── Industries: dark list ───────────── */
+
+const INDUSTRIES = [
+  [
+    "healthcare",
+    "Healthcare and clinics",
+    "Appointment calls and changes without tying up the front desk.",
+  ],
+  [
+    "restaurants",
+    "Restaurants and hospitality",
+    "Hours, menu and booking questions during service.",
+  ],
+  ["real-estate", "Real estate", "Enquiries answered and requirements captured at any hour."],
+  ["education", "Education", "Repeat admission and course questions, and counselling slots."],
+  ["retail", "Retail and local business", "Store questions, bookings and payment links."],
+  [
+    "professional-services",
+    "Professional services",
+    "Enquiries captured and consultations booked.",
+  ],
+] as const;
+
+export function IndustriesDark() {
+  return (
+    <section id="industries" className="bg-ink-950 py-20 text-white sm:py-28">
+      <div className="mx-auto grid max-w-[1200px] gap-12 px-5 sm:px-8 lg:grid-cols-[0.8fr_1.2fr] lg:gap-20">
+        <div>
+          <Eyebrow dark>Solutions</Eyebrow>
+          <h2 className={H2}>Built around how your industry takes calls</h2>
+          <p className="mt-5 max-w-sm text-sm leading-relaxed text-slate-300">
+            Same products, different workflows. Each solution page lists what works today and what
+            is custom work. No compliance claims are made.
+          </p>
+          <Link
+            to="/solutions"
+            className="mt-7 inline-flex items-center gap-1.5 text-sm font-medium text-sky-300 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-sky-300"
+          >
+            All solutions <ArrowRight className="size-4" aria-hidden="true" />
+          </Link>
+        </div>
+        <ul className="border-b border-white/10">
+          {INDUSTRIES.map(([hash, name, text]) => (
+            <li key={hash} className="border-t border-white/10">
+              <Link
+                to="/solutions"
+                hash={hash}
+                className="group flex items-center justify-between gap-6 py-6 transition-colors hover:bg-white/[0.03] focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-sky-300"
+              >
+                <span>
+                  <span className="block text-lg font-medium">{name}</span>
+                  <span className="mt-1 block text-sm text-slate-400">{text}</span>
+                </span>
+                <ArrowUpRight
+                  className="size-5 shrink-0 text-slate-500 transition-[transform,color] group-hover:-translate-y-0.5 group-hover:translate-x-0.5 group-hover:text-sky-300 motion-reduce:transition-none"
+                  aria-hidden="true"
+                />
+              </Link>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </section>
+  );
+}
+
+/* ───────────── Integrations: ledger on white ───────────── */
+
+const STATUS_STYLE = {
+  Available: "text-emerald-700",
+  "In development": "text-amber-700",
+  "Custom integration": "text-slate-500",
+} as const;
+
+export function IntegrationsLedger() {
+  return (
+    <section id="integrations" className="bg-white py-20 sm:py-28">
+      <div className="mx-auto grid max-w-[1200px] gap-12 px-5 sm:px-8 lg:grid-cols-[0.8fr_1.2fr] lg:gap-20">
+        <div>
+          <Eyebrow>Integrations</Eyebrow>
+          <h2 className={`${H2} text-slate-900`}>Honest about what connects today</h2>
+          <p className="mt-5 max-w-sm text-sm leading-relaxed text-slate-600">
+            Only integrations with a working connect flow are marked Available. The rest are either
+            in development or built for your project.
+          </p>
+          <Link
+            to="/integrations"
+            className="mt-7 inline-flex items-center gap-1.5 text-sm font-medium text-violet-600 hover:text-violet-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-violet-600"
+          >
+            Full integrations list <ArrowRight className="size-4" aria-hidden="true" />
+          </Link>
+        </div>
         <Reveal>
-          <ol className="mt-10 grid gap-4 md:grid-cols-5">
-            {STEPS.map(([title, text], i) => (
-              <li key={title} className="rounded-xl border border-slate-200 bg-white p-5">
-                <span className="text-xs font-medium text-violet-600">0{i + 1}</span>
-                <h3 className="mt-2 text-sm font-semibold text-slate-900">{title}</h3>
-                <p className="mt-2 text-sm leading-relaxed text-slate-600">{text}</p>
-              </li>
-            ))}
-          </ol>
+          <table className="w-full text-left text-sm">
+            <caption className="sr-only">Integrations and their status</caption>
+            <thead className="text-xs uppercase tracking-[0.14em] text-slate-500">
+              <tr>
+                <th scope="col" className="pb-3 font-medium">
+                  Integration
+                </th>
+                <th scope="col" className="pb-3 font-medium">
+                  Category
+                </th>
+                <th scope="col" className="pb-3 text-right font-medium">
+                  Status
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {INTEGRATION_GROUPS.flatMap((g) =>
+                g.items.map((it) => (
+                  <tr key={`${g.heading}-${it.name}`} className="border-t border-slate-200">
+                    <th scope="row" className="py-3 pr-4 font-medium text-slate-900">
+                      {it.name}
+                    </th>
+                    <td className="py-3 pr-4 text-slate-500">{g.heading}</td>
+                    <td className={`py-3 text-right font-medium ${STATUS_STYLE[it.status]}`}>
+                      {it.status}
+                    </td>
+                  </tr>
+                )),
+              )}
+            </tbody>
+          </table>
         </Reveal>
       </div>
     </section>
   );
 }
+
+/* ───────────── Why ClickAI: paper ───────────── */
 
 const REASONS = [
   ["Always available", "Calls and messages are answered outside business hours too."],
@@ -125,34 +343,66 @@ const REASONS = [
   ["Less repetitive work", "Common questions and bookings no longer take staff time."],
   ["Consistent answers", "The agent answers from the information you gave it."],
   ["Works with what you have", "Google Calendar, WhatsApp and Razorpay today; others on request."],
+  [
+    "A person stays in the loop",
+    "Handoff to your team, with your dashboard showing every conversation.",
+  ],
 ] as const;
 
 export function WhyClickAI() {
   return (
-    <section className="border-t border-slate-200 bg-white py-20 sm:py-24">
-      <div className="mx-auto grid max-w-[1200px] gap-10 px-5 sm:px-8 lg:grid-cols-[1fr_1.4fr]">
-        <div>
-          <p className="text-xs font-medium uppercase tracking-[0.18em] text-violet-600">
-            Why ClickAI
-          </p>
-          <h2 className="mt-3 text-3xl font-semibold tracking-tight text-slate-900 sm:text-4xl">
-            Practical automation for everyday business conversations
-          </h2>
-        </div>
-        <Reveal>
-          <dl className="divide-y divide-slate-200 border-y border-slate-200">
-            {REASONS.map(([t, d]) => (
-              <div key={t} className="grid gap-1 py-4 sm:grid-cols-[200px_1fr] sm:gap-6">
-                <dt className="text-sm font-semibold text-slate-900">{t}</dt>
-                <dd className="text-sm text-slate-600">{d}</dd>
+    <section id="why" className="bg-paper py-20 sm:py-28">
+      <div className="mx-auto max-w-[1200px] px-5 sm:px-8">
+        <Eyebrow>Why ClickAI</Eyebrow>
+        <h2 className={`${H2} max-w-3xl text-slate-900`}>
+          Take the repeat work off your team, keep the relationships with them
+        </h2>
+        <dl className="mt-14 grid gap-x-12 sm:grid-cols-2 lg:grid-cols-3">
+          {REASONS.map(([t, d], i) => (
+            <Reveal key={t} delay={(i % 3) * 70}>
+              <div className="border-t border-slate-300 py-6">
+                <dt className="text-base font-semibold text-slate-900">{t}</dt>
+                <dd className="mt-2 text-sm leading-relaxed text-slate-600">{d}</dd>
               </div>
-            ))}
-          </dl>
-        </Reveal>
+            </Reveal>
+          ))}
+        </dl>
       </div>
     </section>
   );
 }
+
+/* ───────────── Demo: dark, with the real recorded sample ───────────── */
+
+export function HomeDemo() {
+  return (
+    <section id="demo" className="bg-ink-950 py-20 text-white sm:py-28">
+      <div className="mx-auto grid max-w-[1200px] items-center gap-12 px-5 sm:px-8 lg:grid-cols-[0.9fr_1.1fr] lg:gap-20">
+        <div>
+          <Eyebrow dark>Hear it</Eyebrow>
+          <h2 className={H2}>A recorded sample of an AI receptionist</h2>
+          <p className="mt-5 max-w-md text-sm leading-relaxed text-slate-300">
+            This is a pre-recorded sample of a ClickAI voice agent, not a live call. For your own
+            business we configure the agent from your details and let you test it before launch.
+          </p>
+          <Link to="/contact" className="mt-8 inline-block">
+            <Button
+              size="lg"
+              className="h-12 rounded-full bg-violet-600 px-7 text-white hover:bg-violet-500 active:scale-[0.98]"
+            >
+              Book a Demo
+            </Button>
+          </Link>
+        </div>
+        <div className="theme-light rounded-2xl bg-white p-2 shadow-[0_30px_80px_-30px_rgba(0,0,0,0.8)]">
+          <VoiceDemo />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/* ───────────── FAQ ───────────── */
 
 const FAQS = [
   [
@@ -179,27 +429,24 @@ const FAQS = [
 
 export function HomeFaq() {
   return (
-    <section id="faq" className="border-t border-slate-200 bg-slate-50 py-20 sm:py-24">
-      <div className="mx-auto max-w-[800px] px-5 sm:px-8">
-        <h2 className="text-3xl font-semibold tracking-tight text-slate-900 sm:text-4xl">
-          Common questions
-        </h2>
-        <div className="mt-8 divide-y divide-slate-200 border-y border-slate-200">
-          {FAQS.map(([q, a]) => (
-            <details key={q} className="group py-4">
-              <summary className="flex cursor-pointer list-none items-center justify-between gap-4 text-sm font-medium text-slate-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-600">
-                {q}
-                <span
-                  aria-hidden="true"
-                  className="text-slate-400 transition-transform group-open:rotate-45 motion-reduce:transition-none"
-                >
-                  +
-                </span>
-              </summary>
-              <p className="mt-2 text-sm leading-relaxed text-slate-600">{a}</p>
-            </details>
-          ))}
+    <section id="faq" className="bg-white py-20 sm:py-28">
+      <div className="mx-auto grid max-w-[1200px] gap-12 px-5 sm:px-8 lg:grid-cols-[0.8fr_1.2fr] lg:gap-20">
+        <div>
+          <Eyebrow>FAQ</Eyebrow>
+          <h2 className={`${H2} text-slate-900`}>Common questions</h2>
         </div>
+        <Accordion type="single" collapsible className="border-b border-slate-200">
+          {FAQS.map(([q, a], i) => (
+            <AccordionItem key={q} value={`q${i}`} className="border-slate-200">
+              <AccordionTrigger className="py-5 text-base font-medium text-slate-900 hover:no-underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-600">
+                {q}
+              </AccordionTrigger>
+              <AccordionContent className="text-sm leading-relaxed text-slate-600">
+                {a}
+              </AccordionContent>
+            </AccordionItem>
+          ))}
+        </Accordion>
       </div>
     </section>
   );

@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { ProductPage, type ProductContent } from "@/components/landing/product-page";
 
 const CONTENT: ProductContent = {
+  surface: "voice",
   eyebrow: "AI Voice Agents",
   title: "An AI employee that answers your business calls",
   intro:
@@ -50,15 +51,6 @@ const CONTENT: ProductContent = {
       status: "Custom",
     },
   ],
-  example: {
-    heading: "Example of a call",
-    turns: [
-      { from: "customer", text: "Hi, do you have any slots tomorrow afternoon?" },
-      { from: "ai", text: "Yes. I have 2:00 pm and 4:30 pm free. Which suits you?" },
-      { from: "customer", text: "2 pm please." },
-      { from: "ai", text: "Booked for 2:00 pm tomorrow. Can I take your name and number?" },
-    ],
-  },
   workflow: [
     { step: "Call arrives", detail: "A customer calls your business number." },
     { step: "AI answers", detail: "The agent greets in your business's name and listens." },

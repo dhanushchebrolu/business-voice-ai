@@ -236,7 +236,7 @@ export function VoiceDemo() {
                   <span
                     key={i}
                     className={`w-full rounded-full transition-colors ${played ? "bg-violet-600" : "bg-violet-600/15"}`}
-                    style={{ height: `${Math.max(10, level * 100)}%` }}
+                    style={{ height: `${Math.round(Math.max(10, level * 100))}%` }}
                   />
                 );
               })}
