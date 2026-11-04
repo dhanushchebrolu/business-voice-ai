@@ -1,6 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import { LandingNav } from "@/components/landing/landing-nav";
+import { PageHero } from "@/components/landing/page-hero";
 import { LandingFooter } from "@/components/landing/landing-footer";
 
 export interface LegalTocEntry {
@@ -32,10 +33,8 @@ export function LegalLayout({
     <div className="theme-light flex min-h-screen flex-col bg-background">
       <LandingNav />
 
+      <PageHero eyebrow="Legal" title={title} intro={`Last updated: ${lastUpdated}`} />
       <main className="mx-auto w-full max-w-3xl flex-1 px-5 py-16">
-        <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">{title}</h1>
-        <p className="mt-2 text-sm text-muted-foreground">Last updated: {lastUpdated}</p>
-
         {toc && toc.length > 0 ? (
           <nav
             aria-label="Table of contents"

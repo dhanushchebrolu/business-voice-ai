@@ -26,8 +26,8 @@ describe("Hero has real, working CTAs and the animated flow diagram", () => {
     assert.match(src, />\s*Book a Demo\s*</);
   });
 
-  test('"Explore Products" scrolls to the real #value-propositions section (not a href="#" placeholder)', () => {
-    assert.match(src, /scrollToSection\("value-propositions"\)/);
+  test('"Explore Products" scrolls to the real #products section (not a href="#" placeholder)', () => {
+    assert.match(src, /scrollToSection\("products"\)/);
     assert.match(src, />\s*Explore Products\s*</);
     assert.doesNotMatch(src, /href="#"/);
   });

@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { ProductPage, type ProductContent } from "@/components/landing/product-page";
 
 const CONTENT: ProductContent = {
+  surface: "whatsapp",
   eyebrow: "WhatsApp AI Agents",
   title: "Reply to customers on WhatsApp, around the clock",
   intro:
@@ -45,15 +46,6 @@ const CONTENT: ProductContent = {
       status: "Custom",
     },
   ],
-  example: {
-    heading: "Example of a chat",
-    turns: [
-      { from: "customer", text: "Can I move my appointment to Friday?" },
-      { from: "ai", text: "I can move it to Friday 11:00 am. Reply YES to confirm." },
-      { from: "customer", text: "YES" },
-      { from: "ai", text: "Done. Your appointment is now Friday 11:00 am." },
-    ],
-  },
   workflow: [
     {
       step: "Message arrives",

@@ -136,7 +136,7 @@ export function PublicAssistantWidget() {
       <button
         onClick={() => setOpen((v) => !v)}
         aria-label={open ? "Close ClickAI assistant" : "Open ClickAI assistant"}
-        className="fixed bottom-5 right-5 z-40 grid size-14 place-items-center rounded-full bg-primary text-primary-foreground shadow-lg transition-transform hover:scale-105"
+        className="fixed bottom-5 right-5 z-40 grid size-14 place-items-center rounded-full bg-blue-600 text-white shadow-lg transition-transform hover:scale-105"
       >
         {open ? <X className="size-5" /> : <MessageCircle className="size-5" />}
       </button>
@@ -181,9 +181,7 @@ export function PublicAssistantWidget() {
                 key={i}
                 className={cn(
                   "max-w-[85%] rounded-lg px-3 py-2 text-sm",
-                  m.role === "user"
-                    ? "ml-auto bg-primary text-primary-foreground"
-                    : "bg-muted text-foreground",
+                  m.role === "user" ? "ml-auto bg-blue-600 text-white" : "bg-muted text-foreground",
                 )}
               >
                 {m.content}

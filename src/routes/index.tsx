@@ -3,18 +3,15 @@ import { useEffect } from "react";
 import { CLICKAI_BRAND, CLICKAI_LEGAL_NAME, CLICKAI_ADDRESS_JSON_LD } from "@/lib/company-info";
 import { LandingNav } from "@/components/landing/landing-nav";
 import { Hero } from "@/components/landing/hero";
-import { ValuePropositions } from "@/components/landing/value-propositions";
-import { IndustriesSection } from "@/components/landing/industries-section";
-import { ChannelsSection } from "@/components/landing/channels-section";
-import { FeatureShowcase } from "@/components/landing/feature-showcase";
-import { PaymentFeatureSection } from "@/components/landing/payment-feature-section";
 import {
-  ProductsOverview,
+  ProductShowcase,
   HowItWorks,
+  IndustriesDark,
+  IntegrationsLedger,
   WhyClickAI,
+  HomeDemo,
   HomeFaq,
 } from "@/components/landing/home-sections";
-import { IntegrationsSection } from "@/components/landing/integrations-section";
 import { FinalCta } from "@/components/landing/final-cta";
 import { LandingFooter } from "@/components/landing/landing-footer";
 
@@ -103,15 +100,12 @@ function Landing() {
       />
       <LandingNav />
       <Hero />
-      <ProductsOverview />
-      <ValuePropositions />
-      <IndustriesSection />
-      <ChannelsSection />
-      <FeatureShowcase />
-      <PaymentFeatureSection />
-      <IntegrationsSection />
+      <ProductShowcase />
       <HowItWorks />
+      <IndustriesDark />
+      <IntegrationsLedger />
       <WhyClickAI />
+      <HomeDemo />
       <HomeFaq />
       <FinalCta />
       <LandingFooter />

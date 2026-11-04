@@ -188,24 +188,26 @@ export function HeroOrb() {
   return (
     <section
       aria-label="Talk to the ClickAI assistant"
-      className="mx-auto w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-[0_24px_60px_-30px_rgba(15,23,42,0.25)]"
+      className="relative mx-auto w-full max-w-md rounded-2xl border border-white/10 bg-ink-900/70 p-5 shadow-[0_30px_80px_-30px_rgba(0,0,0,0.8)] backdrop-blur-sm"
     >
-      <div className="flex items-center justify-between text-[11px] font-medium text-slate-500">
+      <div className="flex items-center justify-between text-xs font-medium text-slate-400">
         <span>ClickAI website assistant</span>
-        <span className="rounded-full bg-slate-100 px-2 py-0.5">AI answers, not a phone call</span>
+        <span className="rounded-full bg-white/10 px-2 py-0.5 text-slate-300">
+          AI answers, not a phone call
+        </span>
       </div>
 
-      <div className="relative mx-auto mt-4 grid size-48 place-items-center" aria-hidden="true">
+      <div className="relative mx-auto mt-4 grid size-56 place-items-center" aria-hidden="true">
         <span
           className={cn(
-            "absolute inset-0 rounded-full border border-violet-200 transition-opacity duration-300 motion-reduce:transition-none",
-            active ? "opacity-100" : "opacity-40",
+            "absolute inset-0 rounded-full border border-sky-300/30 transition-opacity duration-300 motion-reduce:transition-none",
+            active ? "opacity-100" : "opacity-50",
           )}
         />
         {caps.ready && caps.gpu ? (
           <Suspense fallback={<StaticOrb phase={phase} />}>
             <OrbBloop
-              size={176}
+              size={208}
               demoMode
               state={ORB_STATE[phase === "error" || phase === "denied" ? "idle" : phase]}
               bloopColorMain={palette.main}
@@ -219,7 +221,7 @@ export function HeroOrb() {
         )}
       </div>
 
-      <p role="status" aria-live="polite" className="mt-3 text-center text-sm text-slate-600">
+      <p role="status" aria-live="polite" className="mt-3 text-center text-sm text-slate-300">
         {PHASE_LABEL[phase]}
       </p>
 
@@ -227,13 +229,13 @@ export function HeroOrb() {
         ref={logRef}
         role="log"
         aria-label="Conversation transcript"
-        className="mt-3 max-h-40 min-h-12 space-y-2 overflow-y-auto rounded-lg bg-slate-50 p-3 text-sm"
+        className="mt-3 max-h-40 min-h-12 space-y-2 overflow-y-auto rounded-lg bg-white/5 p-3 text-sm"
       >
         {turns.length === 0 ? (
-          <p className="text-slate-500">Your conversation will appear here.</p>
+          <p className="text-slate-400">Your conversation will appear here.</p>
         ) : (
           turns.map((t, i) => (
-            <p key={i} className={t.role === "user" ? "text-slate-900" : "text-violet-700"}>
+            <p key={i} className={t.role === "user" ? "text-white" : "text-sky-300"}>
               <span className="font-medium">{t.role === "user" ? "You: " : "ClickAI: "}</span>
               {t.content}
             </p>
@@ -248,7 +250,7 @@ export function HeroOrb() {
               type="button"
               disabled={busy}
               onClick={() => void ask(q, false)}
-              className="rounded-full border border-slate-200 px-3 py-1.5 text-xs text-slate-700 transition-colors hover:border-violet-300 hover:text-violet-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-600 disabled:opacity-50"
+              className="rounded-full border border-white/15 px-3 py-1.5 text-xs text-slate-300 transition-colors hover:border-sky-300/60 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-300 disabled:opacity-50"
             >
               {q}
             </button>
@@ -272,7 +274,7 @@ export function HeroOrb() {
           maxLength={800}
           onChange={(e) => setInput(e.target.value)}
           placeholder="Type a question…"
-          className="h-10 min-w-0 flex-1 rounded-lg border border-slate-300 px-3 text-sm text-slate-900 placeholder:text-slate-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-600"
+          className="h-10 min-w-0 flex-1 rounded-lg border border-white/15 bg-white/5 px-3 text-sm text-white placeholder:text-slate-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-300"
         />
         <button
           type="submit"
@@ -289,14 +291,14 @@ export function HeroOrb() {
             aria-pressed={phase === "listening"}
             aria-label={phase === "listening" ? "Stop listening" : "Speak your question"}
             disabled={busy}
-            className="grid size-10 place-items-center rounded-lg border border-slate-300 text-slate-700 transition-transform active:scale-95 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-600 disabled:opacity-50"
+            className="grid size-10 place-items-center rounded-lg border border-white/15 text-slate-200 transition-transform hover:bg-white/10 active:scale-95 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-600 disabled:opacity-50"
           >
             <Mic className="size-4" />
           </button>
         ) : null}
       </form>
 
-      <div className="mt-3 flex items-center justify-between text-xs text-slate-500">
+      <div className="mt-3 flex items-center justify-between text-xs text-slate-400">
         <span>
           {caps.ready && !caps.speech
             ? "Voice input isn't supported in this browser; type instead."
@@ -307,14 +309,14 @@ export function HeroOrb() {
             type="button"
             onClick={stop}
             disabled={!active}
-            className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-slate-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-600 disabled:opacity-40"
+            className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-300 disabled:opacity-40"
           >
             <Square className="size-3" /> Stop
           </button>
           <button
             type="button"
             onClick={reset}
-            className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-slate-100 focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-600"
+            className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-300"
           >
             <RotateCcw className="size-3" /> Restart
           </button>
@@ -329,7 +331,7 @@ function StaticOrb({ phase }: { phase: Phase }) {
   return (
     <span
       className={cn(
-        "block size-36 rounded-full bg-[radial-gradient(circle_at_35%_30%,#dcf7ff,#0181fe_70%,#1d4ed8)] transition-transform duration-500 motion-reduce:transition-none",
+        "block size-44 rounded-full bg-[radial-gradient(circle_at_35%_30%,#dcf7ff,#0181fe_70%,#1d4ed8)] transition-transform duration-500 motion-reduce:transition-none",
         phase === "listening" && "scale-105",
         phase === "thinking" && "scale-95",
         phase === "speaking" && "scale-110",

@@ -6,6 +6,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { CLICKAI_LEGAL_NAME, CLICKAI_ADDRESS_LINES } from "@/lib/company-info";
 import { LandingNav } from "@/components/landing/landing-nav";
 import { LandingFooter } from "@/components/landing/landing-footer";
+import { PageHero } from "@/components/landing/page-hero";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -113,14 +114,13 @@ function Contact() {
     <div className="theme-light flex min-h-screen flex-col bg-background">
       <LandingNav />
 
+      <PageHero
+        eyebrow="Contact"
+        title="Book a Demo"
+        intro="Have a question about ClickAI, AI agents, integrations, or getting started? Contact our team."
+      />
       <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-5 py-16">
-        <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">Book a Demo</h1>
-        <p className="mt-3 max-w-xl text-sm text-muted-foreground">
-          Have a question about ClickAI, AI agents, integrations, or getting started? Contact our
-          team.
-        </p>
-
-        <div className="mt-10 grid gap-10 lg:grid-cols-[320px_1fr]">
+        <div className="grid gap-10 lg:grid-cols-[320px_1fr]">
           <div className="space-y-5">
             <div className="rounded-xl border border-border bg-card p-5">
               <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">

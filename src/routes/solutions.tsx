@@ -1,7 +1,8 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { Button } from "@/components/ui/button";
 import { LandingNav } from "@/components/landing/landing-nav";
 import { LandingFooter } from "@/components/landing/landing-footer";
+import { PageHero } from "@/components/landing/page-hero";
+import { FinalCta } from "@/components/landing/final-cta";
 
 const TITLE = "AI Employees by Industry | ClickAI";
 const DESC =
@@ -97,61 +98,69 @@ function Solutions() {
   return (
     <div className="theme-light min-h-screen bg-white text-slate-900">
       <LandingNav />
-      <main className="mx-auto max-w-[1100px] px-5 py-16 sm:px-8 sm:py-20">
-        <p className="text-xs font-medium uppercase tracking-[0.18em] text-violet-600">Solutions</p>
-        <h1 className="mt-4 max-w-3xl text-4xl font-semibold leading-[1.1] tracking-tight sm:text-5xl">
-          Built around how your business takes calls and messages
-        </h1>
-        <p className="mt-5 max-w-2xl text-base leading-relaxed text-slate-600">
-          The same products fit different industries. Below is what each one typically needs, and
-          what is a custom build. ClickAI does not make compliance or clinical claims.
-        </p>
+      <PageHero
+        eyebrow="Solutions"
+        title="Built around how your business takes calls and messages"
+        intro="The same products fit different industries. Below is what each one typically needs, and what is a custom build. ClickAI does not make compliance or clinical claims."
+      />
+      <main className="mx-auto grid max-w-[1200px] gap-12 px-5 py-16 sm:px-8 sm:py-24 lg:grid-cols-[220px_1fr] lg:gap-20">
+        <nav aria-label="Industries" className="hidden lg:block">
+          <ul className="sticky top-28 space-y-2 text-sm">
+            {INDUSTRIES.map((i) => (
+              <li key={i.id}>
+                <a
+                  href={`#${i.id}`}
+                  className="block border-l-2 border-slate-200 py-1 pl-4 text-slate-500 transition-colors hover:border-violet-600 hover:text-slate-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-600"
+                >
+                  {i.name}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </nav>
 
-        <div className="mt-12 divide-y divide-slate-200 border-y border-slate-200">
+        <div>
           {INDUSTRIES.map((i) => (
-            <section key={i.id} id={i.id} className="grid gap-6 py-10 lg:grid-cols-[260px_1fr]">
-              <h2 className="text-xl font-semibold tracking-tight">{i.name}</h2>
-              <div className="space-y-4 text-sm leading-relaxed text-slate-600">
-                <p>
-                  <span className="font-medium text-slate-900">The problem. </span>
-                  {i.problem}
-                </p>
-                <p>
-                  <span className="font-medium text-slate-900">How ClickAI helps. </span>
-                  {i.help}
-                </p>
-                <p>
-                  <span className="font-medium text-slate-900">Example workflow. </span>
-                  {i.workflow}
-                </p>
-                <p>
-                  <span className="font-medium text-slate-900">Custom. </span>
-                  {i.custom}
-                </p>
-                <p className="flex flex-wrap gap-x-4 gap-y-1">
-                  {i.products.map((k) => (
-                    <Link
-                      key={k}
-                      to={PRODUCTS[k].to}
-                      className="font-medium text-violet-600 underline underline-offset-2"
-                    >
-                      {PRODUCTS[k].label}
-                    </Link>
-                  ))}
-                </p>
-              </div>
+            <section
+              key={i.id}
+              id={i.id}
+              className="border-t border-slate-200 py-10 first:border-t-0 first:pt-0"
+            >
+              <h2 className="font-serif text-3xl tracking-tight">{i.name}</h2>
+              <dl className="mt-6 grid gap-x-10 gap-y-5 text-sm leading-relaxed text-slate-600 sm:grid-cols-2">
+                <div>
+                  <dt className="font-medium text-slate-900">The problem</dt>
+                  <dd className="mt-1">{i.problem}</dd>
+                </div>
+                <div>
+                  <dt className="font-medium text-slate-900">How ClickAI helps</dt>
+                  <dd className="mt-1">{i.help}</dd>
+                </div>
+                <div>
+                  <dt className="font-medium text-slate-900">Example workflow</dt>
+                  <dd className="mt-1">{i.workflow}</dd>
+                </div>
+                <div>
+                  <dt className="font-medium text-slate-900">Custom work</dt>
+                  <dd className="mt-1">{i.custom}</dd>
+                </div>
+              </dl>
+              <p className="mt-6 flex flex-wrap gap-x-5 gap-y-1 text-sm">
+                {i.products.map((k) => (
+                  <Link
+                    key={k}
+                    to={PRODUCTS[k].to}
+                    className="font-medium text-violet-600 underline-offset-4 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-600"
+                  >
+                    {PRODUCTS[k].label}
+                  </Link>
+                ))}
+              </p>
             </section>
           ))}
         </div>
-
-        <div className="mt-12">
-          <Link to="/contact">
-            <Button size="lg" className="rounded-full bg-violet-600 px-6 text-white">
-              Book a Demo
-            </Button>
-          </Link>
-        </div>
       </main>
+      <FinalCta />
       <LandingFooter />
     </div>
   );
