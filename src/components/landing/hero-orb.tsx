@@ -188,143 +188,199 @@ export function HeroOrb() {
   return (
     <section
       aria-label="Talk to the ClickAI assistant"
-      className="relative mx-auto w-full max-w-md rounded-2xl border border-white/10 bg-ink-900/70 p-5 shadow-[0_30px_80px_-30px_rgba(0,0,0,0.8)] backdrop-blur-sm"
+      className="relative mx-auto w-full max-w-[34rem]"
     >
-      <div className="flex items-center justify-between text-xs font-medium text-slate-400">
-        <span>ClickAI website assistant</span>
-        <span className="rounded-full bg-white/10 px-2 py-0.5 text-slate-300">
-          AI answers, not a phone call
-        </span>
-      </div>
-
-      <div className="relative mx-auto mt-4 grid size-56 place-items-center" aria-hidden="true">
+      {/* Crop marks: a technical framing detail, decorative only. */}
+      {[
+        "left-0 top-0 border-l border-t",
+        "right-0 top-0 border-r border-t",
+        "bottom-0 left-0 border-b border-l",
+        "bottom-0 right-0 border-b border-r",
+      ].map((c) => (
         <span
-          className={cn(
-            "absolute inset-0 rounded-full border border-sky-300/30 transition-opacity duration-300 motion-reduce:transition-none",
-            active ? "opacity-100" : "opacity-50",
-          )}
+          key={c}
+          aria-hidden="true"
+          className={`pointer-events-none absolute size-4 border-sky-300/50 ${c}`}
         />
-        {caps.ready && caps.gpu ? (
-          <Suspense fallback={<StaticOrb phase={phase} />}>
-            <OrbBloop
-              size={208}
-              demoMode
-              state={ORB_STATE[phase === "error" || phase === "denied" ? "idle" : phase]}
-              bloopColorMain={palette.main}
-              bloopColorLow={palette.low}
-              bloopColorMid={palette.mid}
-              bloopColorHigh={palette.high}
+      ))}
+
+      <div className="px-5 pb-5 pt-4 sm:px-7">
+        <div className="flex items-center justify-between gap-3 border-b border-white/10 pb-3 font-mono text-xs uppercase tracking-[0.12em] text-slate-400">
+          <span>ClickAI website assistant</span>
+          <span className="flex items-center gap-2 text-slate-300">
+            <span
+              aria-hidden="true"
+              className={cn(
+                "size-1.5 rounded-full",
+                active ? "bg-sky-300" : "bg-slate-500",
+                phase === "error" || phase === "denied" ? "bg-amber-400" : "",
+              )}
             />
-          </Suspense>
-        ) : (
-          <StaticOrb phase={phase} />
-        )}
-      </div>
+            {phase === "denied" ? "mic blocked" : phase}
+          </span>
+        </div>
 
-      <p role="status" aria-live="polite" className="mt-3 text-center text-sm text-slate-300">
-        {PHASE_LABEL[phase]}
-      </p>
+        <div
+          className="relative mx-auto mt-5 grid aspect-square w-full max-w-[19rem] place-items-center"
+          aria-hidden="true"
+        >
+          <svg viewBox="0 0 320 320" className="absolute inset-0 size-full" fill="none">
+            <circle cx="160" cy="160" r="150" stroke="rgba(255,255,255,0.12)" />
+            <circle
+              cx="160"
+              cy="160"
+              r="120"
+              stroke={active ? "rgba(125,211,252,0.55)" : "rgba(125,211,252,0.22)"}
+              strokeDasharray="2 7"
+              className="transition-[stroke] duration-300 motion-reduce:transition-none"
+            />
+            <circle cx="160" cy="160" r="92" stroke="rgba(255,255,255,0.08)" />
+            {TICKS.map(([x1, y1, x2, y2], i) => (
+              <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke="rgba(255,255,255,0.28)" />
+            ))}
+          </svg>
+          {caps.ready && caps.gpu ? (
+            <Suspense fallback={<StaticOrb phase={phase} />}>
+              <OrbBloop
+                size={256}
+                demoMode
+                state={ORB_STATE[phase === "error" || phase === "denied" ? "idle" : phase]}
+                bloopColorMain={palette.main}
+                bloopColorLow={palette.low}
+                bloopColorMid={palette.mid}
+                bloopColorHigh={palette.high}
+              />
+            </Suspense>
+          ) : (
+            <StaticOrb phase={phase} />
+          )}
+        </div>
 
-      <div
-        ref={logRef}
-        role="log"
-        aria-label="Conversation transcript"
-        className="mt-3 max-h-40 min-h-12 space-y-2 overflow-y-auto rounded-lg bg-white/5 p-3 text-sm"
-      >
-        {turns.length === 0 ? (
-          <p className="text-slate-400">Your conversation will appear here.</p>
-        ) : (
-          turns.map((t, i) => (
-            <p key={i} className={t.role === "user" ? "text-white" : "text-sky-300"}>
-              <span className="font-medium">{t.role === "user" ? "You: " : "ClickAI: "}</span>
-              {t.content}
-            </p>
-          ))
-        )}
-      </div>
+        <p role="status" aria-live="polite" className="mt-3 text-center text-sm text-slate-300">
+          {PHASE_LABEL[phase]}
+        </p>
 
-      <ul className="mt-3 flex flex-wrap gap-1.5" aria-label="Suggested questions">
-        {SUGGESTIONS.map((q) => (
-          <li key={q}>
+        <div
+          ref={logRef}
+          role="log"
+          aria-label="Conversation transcript"
+          className="mt-4 max-h-36 min-h-12 space-y-2 overflow-y-auto border-l-2 border-white/15 pl-4 text-sm"
+        >
+          {turns.length === 0 ? (
+            <p className="text-slate-400">Your conversation will appear here.</p>
+          ) : (
+            turns.map((t, i) => (
+              <p key={i} className={t.role === "user" ? "text-white" : "text-sky-300"}>
+                <span className="font-medium">{t.role === "user" ? "You: " : "ClickAI: "}</span>
+                {t.content}
+              </p>
+            ))
+          )}
+        </div>
+
+        <ul
+          className="mt-4 grid border-t border-white/10 sm:grid-cols-2 sm:gap-x-6"
+          aria-label="Suggested questions"
+        >
+          {SUGGESTIONS.map((q) => (
+            <li key={q} className="border-b border-white/10">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void ask(q, false)}
+                className="group flex min-h-11 w-full items-center justify-between gap-2 py-2 text-left text-sm text-slate-300 transition-colors hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-300 disabled:opacity-50"
+              >
+                {q}
+                <span
+                  aria-hidden="true"
+                  className="text-slate-500 transition-transform group-hover:translate-x-0.5 group-hover:text-sky-300 motion-reduce:transition-none"
+                >
+                  →
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+
+        <form
+          className="mt-4 flex items-center gap-2 border-b border-white/25 focus-within:border-sky-300"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void ask(input, false);
+          }}
+        >
+          <label htmlFor="hero-orb-input" className="sr-only">
+            Type your question
+          </label>
+          <input
+            id="hero-orb-input"
+            value={input}
+            maxLength={800}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Type a question…"
+            className="h-12 min-w-0 flex-1 bg-transparent text-base text-white outline-none placeholder:text-slate-500"
+          />
+          {caps.speech ? (
             <button
               type="button"
+              onClick={phase === "listening" ? stop : listen}
+              aria-pressed={phase === "listening"}
+              aria-label={phase === "listening" ? "Stop listening" : "Speak your question"}
               disabled={busy}
-              onClick={() => void ask(q, false)}
-              className="rounded-full border border-white/15 px-3 py-1.5 text-xs text-slate-300 transition-colors hover:border-sky-300/60 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-300 disabled:opacity-50"
+              className="grid size-11 place-items-center rounded-full text-slate-200 transition-[transform,background-color] hover:bg-white/10 active:scale-95 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-300 disabled:opacity-50"
             >
-              {q}
+              <Mic className="size-4" />
             </button>
-          </li>
-        ))}
-      </ul>
+          ) : null}
+          <button
+            type="submit"
+            disabled={busy || !input.trim()}
+            aria-label="Send question"
+            className="grid size-11 place-items-center rounded-full bg-violet-600 text-white transition-[transform,background-color] hover:bg-violet-500 active:scale-95 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300 disabled:opacity-40"
+          >
+            <Send className="size-4" />
+          </button>
+        </form>
 
-      <form
-        className="mt-3 flex items-center gap-2"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void ask(input, false);
-        }}
-      >
-        <label htmlFor="hero-orb-input" className="sr-only">
-          Type your question
-        </label>
-        <input
-          id="hero-orb-input"
-          value={input}
-          maxLength={800}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="Type a question…"
-          className="h-10 min-w-0 flex-1 rounded-lg border border-white/15 bg-white/5 px-3 text-sm text-white placeholder:text-slate-500 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-300"
-        />
-        <button
-          type="submit"
-          disabled={busy || !input.trim()}
-          aria-label="Send question"
-          className="grid size-10 place-items-center rounded-lg bg-violet-600 text-white transition-transform active:scale-95 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-600 disabled:opacity-50"
-        >
-          <Send className="size-4" />
-        </button>
-        {caps.speech ? (
-          <button
-            type="button"
-            onClick={phase === "listening" ? stop : listen}
-            aria-pressed={phase === "listening"}
-            aria-label={phase === "listening" ? "Stop listening" : "Speak your question"}
-            disabled={busy}
-            className="grid size-10 place-items-center rounded-lg border border-white/15 text-slate-200 transition-transform hover:bg-white/10 active:scale-95 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-violet-600 disabled:opacity-50"
-          >
-            <Mic className="size-4" />
-          </button>
-        ) : null}
-      </form>
-
-      <div className="mt-3 flex items-center justify-between text-xs text-slate-400">
-        <span>
-          {caps.ready && !caps.speech
-            ? "Voice input isn't supported in this browser; type instead."
-            : "Voice uses your browser's speech service."}
-        </span>
-        <span className="flex gap-1">
-          <button
-            type="button"
-            onClick={stop}
-            disabled={!active}
-            className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-300 disabled:opacity-40"
-          >
-            <Square className="size-3" /> Stop
-          </button>
-          <button
-            type="button"
-            onClick={reset}
-            className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-300"
-          >
-            <RotateCcw className="size-3" /> Restart
-          </button>
-        </span>
+        <div className="mt-3 flex items-center justify-between gap-3 text-xs text-slate-400">
+          <span>
+            AI answers, not a phone call.{" "}
+            {caps.ready && !caps.speech
+              ? "Voice input isn't supported in this browser; type instead."
+              : "Voice uses your browser's speech service."}
+          </span>
+          <span className="flex shrink-0 gap-1">
+            <button
+              type="button"
+              onClick={stop}
+              disabled={!active}
+              className="inline-flex min-h-8 items-center gap-1 rounded px-2 hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-300 disabled:opacity-40"
+            >
+              <Square className="size-3" /> Stop
+            </button>
+            <button
+              type="button"
+              onClick={reset}
+              className="inline-flex min-h-8 items-center gap-1 rounded px-2 hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-300"
+            >
+              <RotateCcw className="size-3" /> Restart
+            </button>
+          </span>
+        </div>
       </div>
     </section>
   );
 }
+
+/** Tick marks around the outer ring, precomputed to fixed precision so server and client markup match. */
+const TICKS: [string, string, string, string][] = Array.from({ length: 72 }, (_, i) => {
+  const a = (i / 72) * Math.PI * 2;
+  const long = i % 6 === 0;
+  const r1 = long ? 150 : 150;
+  const r2 = long ? 158 : 154;
+  const f = (n: number) => (160 + n).toFixed(2);
+  return [f(Math.cos(a) * r1), f(Math.sin(a) * r1), f(Math.cos(a) * r2), f(Math.sin(a) * r2)];
+});
 
 /** No-WebGPU / reduced-motion / still-loading orb: same state, no canvas. */
 function StaticOrb({ phase }: { phase: Phase }) {
