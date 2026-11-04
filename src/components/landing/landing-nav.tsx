@@ -109,7 +109,7 @@ function NavDropdown({
         aria-haspopup="true"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
-        className="inline-flex items-center gap-1 text-sm text-slate-600 transition-colors hover:text-violet-600"
+        className="inline-flex items-center gap-1 py-2 text-sm text-slate-600 transition-colors hover:text-violet-600"
       >
         {label}
         <ChevronDown className={`size-3.5 transition-transform ${open ? "rotate-180" : ""}`} />
@@ -179,14 +179,14 @@ export function LandingNav() {
 
             <Link
               to="/pricing"
-              className="text-sm text-slate-600 transition-colors hover:text-violet-600"
+              className="inline-block py-2 text-sm text-slate-600 transition-colors hover:text-violet-600"
             >
               Pricing
             </Link>
 
             <Link
               to="/about"
-              className="text-sm text-slate-600 transition-colors hover:text-violet-600"
+              className="inline-block py-2 text-sm text-slate-600 transition-colors hover:text-violet-600"
             >
               About
             </Link>
@@ -251,7 +251,8 @@ export function LandingNav() {
                 <Link to="/auth" search={{ mode: "signup" }}>
                   <Button
                     size="sm"
-                    className="rounded-full bg-violet-600 px-5 text-white hover:bg-violet-700"
+                    variant="outline"
+                    className="rounded-full border-slate-300 px-5 text-slate-800 hover:bg-slate-50"
                   >
                     Get Started
                   </Button>

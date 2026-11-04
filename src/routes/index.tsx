@@ -98,16 +98,24 @@ function Landing() {
         type="application/ld+json"
         dangerouslySetInnerHTML={{ __html: JSON.stringify(ORGANIZATION_JSON_LD) }}
       />
+      <a
+        href="#main"
+        className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[60] focus:rounded-md focus:bg-white focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-slate-900 focus:shadow-lg"
+      >
+        Skip to main content
+      </a>
       <LandingNav />
-      <Hero />
-      <ProductShowcase />
-      <HowItWorks />
-      <IndustriesDark />
-      <IntegrationsLedger />
-      <WhyClickAI />
-      <HomeDemo />
-      <HomeFaq />
-      <FinalCta />
+      <main id="main" tabIndex={-1} className="outline-none">
+        <Hero />
+        <ProductShowcase />
+        <HowItWorks />
+        <IndustriesDark />
+        <IntegrationsLedger />
+        <WhyClickAI />
+        <HomeDemo />
+        <HomeFaq />
+        <FinalCta />
+      </main>
       <LandingFooter />
     </div>
   );

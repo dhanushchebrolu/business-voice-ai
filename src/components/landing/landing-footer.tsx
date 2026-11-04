@@ -43,10 +43,10 @@ const LEGAL_LINKS: { label: string; to: string }[] = [
 ];
 
 const LINK =
-  "text-sm text-slate-400 transition-colors hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300";
+  "inline-block py-1 text-sm text-slate-400 transition-colors hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300";
 const CTA =
   "mt-6 inline-block rounded-full border border-white/20 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-white/10 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300";
-const HEADING = "text-[11px] font-medium uppercase tracking-[0.16em] text-slate-500";
+const HEADING = "text-xs font-medium uppercase tracking-[0.16em] text-slate-500";
 
 export function LandingFooter() {
   return (
@@ -123,11 +123,11 @@ export function LandingFooter() {
             ))}
           </div>
           <p className="sm:text-right">
-            <a href="mailto:hello@clickai.in" className="hover:text-white">
+            <a href="mailto:hello@clickai.in" className="inline-block py-1 hover:text-white">
               hello@clickai.in
             </a>
             {" · "}
-            <a href="tel:+917660001231" className="hover:text-white">
+            <a href="tel:+917660001231" className="inline-block py-1 hover:text-white">
               +91 76600 01231
             </a>
           </p>

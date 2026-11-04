@@ -151,7 +151,7 @@ export function VoiceDemo() {
 
   return (
     <div id="voice-demo" className="relative overflow-hidden rounded-2xl bg-[#f0edf6] p-6">
-      <div className="pointer-events-none absolute inset-0 opacity-70">
+      <div className="pointer-events-none absolute inset-0 opacity-30">
         <ParticleWave
           tone="on-light"
           variant="subtle"
@@ -161,12 +161,14 @@ export function VoiceDemo() {
       </div>
 
       <div className="relative">
-        <p className="text-[11px] font-medium uppercase tracking-[0.16em] text-[#14141a]/40">
-          [2/2]
+        <p className="text-xs font-medium uppercase tracking-[0.16em] text-[#14141a]/40">
+          Recorded sample
         </p>
-        <h3 className="mt-3 text-xl font-semibold tracking-tight text-[#14141a]">Voice AI</h3>
+        <h3 className="mt-3 text-xl font-semibold tracking-tight text-[#14141a]">
+          AI receptionist
+        </h3>
         <p className="mt-2 text-sm leading-relaxed text-[#14141a]/55">
-          Real-time voice conversations, handled end to end.
+          A pre-recorded example conversation, not a live call.
         </p>
 
         <div
@@ -174,7 +176,7 @@ export function VoiceDemo() {
           role="log"
           aria-label="Sample conversation"
         >
-          <span className="text-[10px] font-medium uppercase tracking-[0.12em] text-[#14141a]/35">
+          <span className="text-xs font-medium uppercase tracking-[0.12em] text-[#14141a]/35">
             {activeLine.speaker}
           </span>
           <p className="mt-1">{activeLine.line}</p>
@@ -251,12 +253,12 @@ export function VoiceDemo() {
               <RotateCcw className="size-3" />
             </button>
 
-            <span className="w-14 shrink-0 text-right font-mono text-[10px] tabular-nums text-[#14141a]/45">
+            <span className="w-14 shrink-0 text-right font-mono text-xs tabular-nums text-[#14141a]/45">
               {formatTime(currentTime)} / {formatTime(duration)}
             </span>
           </div>
 
-          {error ? <p className="mt-2 text-[11px] text-red-600">{error}</p> : null}
+          {error ? <p className="mt-2 text-xs text-red-600">{error}</p> : null}
         </div>
       </div>
     </div>

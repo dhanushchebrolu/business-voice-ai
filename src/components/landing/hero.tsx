@@ -2,6 +2,9 @@ import { Link } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import { HeroOrb } from "./hero-orb";
 
+/** Staggered entrance: 40 ms steps (UI/UX Pro Max `stagger-sequence`). */
+const rise = (i: number) => ({ "--i": i }) as React.CSSProperties;
+
 function scrollToSection(id: string) {
   document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
@@ -35,23 +38,32 @@ export function Hero() {
         className="absolute right-[-10%] top-[8%] -z-10 h-[560px] w-[560px] rounded-full bg-[radial-gradient(closest-side,rgba(37,99,235,0.35),rgba(124,92,255,0.12)_60%,transparent)]"
       />
 
-      <div className="mx-auto grid max-w-[1200px] gap-14 px-5 pb-16 pt-14 sm:px-8 sm:pt-20 lg:grid-cols-[1.05fr_0.95fr] lg:items-center lg:gap-10 lg:pb-24 lg:pt-24">
+      <div className="mx-auto grid max-w-[1200px] gap-14 px-5 pb-14 pt-14 sm:px-8 sm:pt-20 lg:grid-cols-[1fr_1fr] lg:items-center lg:gap-16 lg:pb-20 lg:pt-24">
         <div>
-          <p className="text-xs font-medium uppercase tracking-[0.18em] text-sky-300">
+          <p
+            style={rise(0)}
+            className="animate-rise font-mono text-xs uppercase tracking-[0.18em] text-sky-300"
+          >
             Voice · WhatsApp · Appointments · Workflows
           </p>
-          <h1 className="mt-5 font-serif text-[clamp(2.75rem,7vw,4.75rem)] leading-[1.02] tracking-tight">
+          <h1
+            style={rise(1)}
+            className="animate-rise mt-5 font-serif text-[clamp(2.75rem,7vw,4.75rem)] leading-[1.02] tracking-tight"
+          >
             AI Employees for Your Business,{" "}
-            <span className="bg-gradient-to-r from-sky-300 to-violet-300 bg-clip-text text-transparent">
+            <span className="bg-linear-to-r from-sky-300 to-violet-300 bg-clip-text text-transparent">
               24/7
             </span>
           </h1>
-          <p className="mt-6 max-w-lg text-base leading-relaxed text-slate-300 sm:text-lg">
+          <p
+            style={rise(2)}
+            className="animate-rise mt-6 max-w-lg text-base leading-relaxed text-slate-300 sm:text-lg"
+          >
             Automate customer conversations, answer business calls, manage appointments and
             streamline everyday workflows with AI employees built around your business.
           </p>
 
-          <div className="mt-9 flex flex-wrap items-center gap-3">
+          <div style={rise(3)} className="animate-rise mt-9 flex flex-wrap items-center gap-3">
             <Link to="/contact">
               <Button
                 size="lg"
@@ -69,21 +81,29 @@ export function Hero() {
               Explore Products
             </Button>
           </div>
-
-          <dl className="mt-12 max-w-lg border-t border-white/10 pt-6">
-            <dt className="text-[11px] font-medium uppercase tracking-[0.16em] text-slate-400">
-              Connects with
-            </dt>
-            <dd className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5 text-sm text-slate-300">
-              {WORKS_WITH.map((w) => (
-                <span key={w}>{w}</span>
-              ))}
-            </dd>
-          </dl>
         </div>
 
-        <HeroOrb />
+        <div style={rise(2)} className="animate-rise">
+          <HeroOrb />
+        </div>
       </div>
+
+      <dl className="mx-auto max-w-[1200px] border-t border-white/10 px-5 sm:px-8">
+        <dt className="sr-only">Connects with</dt>
+        <dd className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5">
+          {WORKS_WITH.map((w, i) => (
+            <span
+              key={w}
+              className={`border-white/10 py-4 text-sm text-slate-300 lg:border-l lg:px-5 ${i === 0 ? "lg:border-l-0 lg:pl-0" : ""}`}
+            >
+              <span className="block font-mono text-xs uppercase tracking-[0.12em] text-slate-500">
+                0{i + 1}
+              </span>
+              {w}
+            </span>
+          ))}
+        </dd>
+      </dl>
     </section>
   );
 }
