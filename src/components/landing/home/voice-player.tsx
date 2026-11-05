@@ -1,48 +1,52 @@
-import { Check, Pause, Play, RotateCcw } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Logo } from "@/components/app/primitives";
+import { Pause, Play, RotateCcw } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
+import { CallScope, PEAKS_PER_SECOND, type ScopeHandle } from "./call-scope";
 import { prefersReducedMotion } from "./primitives";
+import { useVxTheme } from "./theme";
 import { DEMO_CALL, type RecordedCall } from "./voice-demo-data";
 
 /**
- * Recorded-call player: header, real waveform, transcript and action steps.
- * The waveform is the decoded audio itself (peak per bar), not decoration. When
- * `call.synced` is true the transcript follows the audio (active line, speaker,
- * auto-scroll, click-to-seek) and action steps tick off as playback passes their
- * timestamps. When false (placeholder audio) the transcript is a labelled preview
- * with no sync. Never autoplays; pauses and releases the audio on unmount.
+ * Recorded-call player in the style of a call scope: a scrolling waveform under a
+ * fixed playhead, the transcript beneath it, one transport button. Everything is
+ * driven by the recording in `call` (see voice-demo-data.ts): the waveform is the
+ * decoded audio, the active line follows the segment timestamps, a click on a line
+ * or on the scope seeks. With no `call.src` it shows a recording-pending state and
+ * the sample script, with nothing that moves or syncs. Never autoplays; pauses and
+ * releases the audio on unmount.
  */
 
-const BARS = 72;
 const SEEK_STEP = 5;
+const MANUAL_SCROLL_HOLD_MS = 4000;
 
 const fmt = (s: number) =>
   Number.isFinite(s) && s > 0
     ? `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`
     : "0:00";
 
-/** Peak amplitude per bar, 0..1, from the decoded audio file. Stays null while loading or if it can't be decoded. */
-function usePeaks(src: string): number[] | null {
+/** Peak amplitude (0..1) at PEAKS_PER_SECOND, from the decoded audio file. Null until decoded, or if it can't be. */
+function usePeaks(src: string | null): number[] | null {
   const [peaks, setPeaks] = useState<number[] | null>(null);
   useEffect(() => {
-    let dead = false;
     setPeaks(null);
+    if (!src) return;
+    let dead = false;
     fetch(src)
       .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(String(r.status)))))
       .then((buf) => new OfflineAudioContext(1, 1, 44100).decodeAudioData(buf))
       .then((decoded) => {
         const ch = decoded.getChannelData(0);
-        const size = Math.max(1, Math.floor(ch.length / BARS));
-        const raw = Array.from({ length: BARS }, (_, i) => {
+        const size = Math.max(1, Math.floor(decoded.sampleRate / PEAKS_PER_SECOND));
+        const n = Math.ceil(ch.length / size);
+        const raw = Array.from({ length: n }, (_, i) => {
           let max = 0;
-          for (let j = i * size; j < Math.min(ch.length, (i + 1) * size); j += 8) {
+          for (let j = i * size; j < Math.min(ch.length, (i + 1) * size); j += 4) {
             max = Math.max(max, Math.abs(ch[j] ?? 0));
           }
           return max;
         });
         const top = Math.max(...raw, 0.0001);
-        if (!dead) setPeaks(raw.map((v) => Math.max(0.06, v / top)));
+        if (!dead) setPeaks(raw.map((v) => Math.max(0.04, v / top)));
       })
       .catch(() => {});
     return () => {
@@ -53,33 +57,34 @@ function usePeaks(src: string): number[] | null {
 }
 
 export function VoicePlayer({ call = DEMO_CALL }: { call?: RecordedCall }) {
+  const { src, segments } = call;
+  const pending = src === null;
+  const theme = useVxTheme();
   const audio = useRef<HTMLAudioElement>(null);
-  const wave = useRef<HTMLDivElement>(null);
+  const scope = useRef<ScopeHandle | null>(null);
   const list = useRef<HTMLOListElement>(null);
   const raf = useRef(0);
+  const dragging = useRef(false);
+  const lastManualScroll = useRef(0);
   const [playing, setPlaying] = useState(false);
   const [buffering, setBuffering] = useState(false);
   const [failed, setFailed] = useState(false);
   const [duration, setDuration] = useState(0);
   const [sec, setSec] = useState(0);
   const [active, setActive] = useState(-1);
-  const peaks = usePeaks(call.src);
-  const { synced, segments, actions } = call;
+  const peaks = usePeaks(src);
 
   const sync = useCallback(() => {
     const a = audio.current;
     if (!a) return;
-    const t = a.currentTime;
-    wave.current?.style.setProperty("--p", `${a.duration ? (t / a.duration) * 100 : 0}%`);
-    setSec(Math.floor(t));
-    if (synced) {
-      let idx = -1;
-      segments.forEach((s, i) => {
-        if (t >= s.start) idx = i;
-      });
-      setActive(idx);
-    }
-  }, [synced, segments]);
+    scope.current?.draw(a.currentTime);
+    setSec(Math.floor(a.currentTime));
+    let idx = -1;
+    segments.forEach((s, i) => {
+      if (s.start !== undefined && a.currentTime >= s.start) idx = i;
+    });
+    setActive(idx);
+  }, [segments]);
 
   useEffect(() => {
     if (!playing) return;
@@ -90,6 +95,11 @@ export function VoicePlayer({ call = DEMO_CALL }: { call?: RecordedCall }) {
     tick();
     return () => cancelAnimationFrame(raf.current);
   }, [playing, sync]);
+
+  // Redraw once when peaks or duration arrive (the loop is idle while paused).
+  useEffect(() => {
+    sync();
+  }, [peaks, duration, sync]);
 
   // Metadata can arrive before hydration, so read it once on mount; release the audio on unmount.
   useEffect(() => {
@@ -103,18 +113,18 @@ export function VoicePlayer({ call = DEMO_CALL }: { call?: RecordedCall }) {
     };
   }, []);
 
-  // Keep the active line centred inside the transcript box only (never scrolls the page).
+  // Follow the active line inside the transcript box only, and never while the visitor is scrolling it themselves.
   useEffect(() => {
     const box = list.current;
     const el = box?.children[active] as HTMLElement | undefined;
-    if (!synced || !box || !el) return;
+    if (!box || !el || Date.now() - lastManualScroll.current < MANUAL_SCROLL_HOLD_MS) return;
     const top = el.offsetTop - box.clientHeight / 2 + el.clientHeight / 2;
     box.scrollTo({ top, behavior: prefersReducedMotion() ? "auto" : "smooth" });
-  }, [active, synced]);
+  }, [active]);
 
   async function toggle() {
     const a = audio.current;
-    if (!a) return;
+    if (!a || pending) return;
     if (!a.paused) return a.pause();
     setFailed(false);
     try {
@@ -128,16 +138,36 @@ export function VoicePlayer({ call = DEMO_CALL }: { call?: RecordedCall }) {
     const a = audio.current;
     if (!a || !duration) return;
     a.currentTime = Math.min(Math.max(0, t), duration);
+    lastManualScroll.current = 0;
     sync();
     if (thenPlay && a.paused) void toggle();
   }
 
-  function seekFromPointer(e: React.PointerEvent<HTMLDivElement>) {
-    const r = e.currentTarget.getBoundingClientRect();
-    seekTo(((e.clientX - r.left) / r.width) * duration);
+  // Scope: drag scrubs (the waveform follows the pointer), a click without movement jumps to the clicked time.
+  const press = useRef({ x: 0, t: 0, moved: false });
+  function onScopeDown(e: React.PointerEvent<HTMLDivElement>) {
+    if (!duration || !audio.current) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    press.current = { x: e.clientX, t: audio.current.currentTime, moved: false };
+    dragging.current = true;
   }
-
-  function onWaveKey(e: React.KeyboardEvent) {
+  function onScopeMove(e: React.PointerEvent<HTMLDivElement>) {
+    if (!dragging.current) return;
+    const px = scope.current?.pxPerSecond() ?? 1;
+    const dx = e.clientX - press.current.x;
+    if (Math.abs(dx) > 4) press.current.moved = true;
+    if (press.current.moved) seekTo(press.current.t - dx / px);
+  }
+  function onScopeUp(e: React.PointerEvent<HTMLDivElement>) {
+    if (!dragging.current) return;
+    dragging.current = false;
+    if (!press.current.moved && scope.current) {
+      const r = e.currentTarget.getBoundingClientRect();
+      const px = scope.current.pxPerSecond();
+      seekTo(press.current.t + (e.clientX - r.left - scope.current.playheadX()) / px);
+    }
+  }
+  function onScopeKey(e: React.KeyboardEvent) {
     const a = audio.current;
     if (!a) return;
     const to: Record<string, number> = {
@@ -151,211 +181,176 @@ export function VoicePlayer({ call = DEMO_CALL }: { call?: RecordedCall }) {
     if (e.key in to) {
       e.preventDefault();
       seekTo(to[e.key]!);
+    } else if (e.key === " ") {
+      e.preventDefault();
+      void toggle();
     }
   }
 
-  const bars = useMemo(() => {
-    const total = duration || segments.at(-1)?.end || 1;
-    return (peaks ?? Array.from({ length: BARS }, () => 0.08)).map((h, i) => {
-      const t = ((i + 0.5) / BARS) * total;
-      const seg = synced ? segments.find((s) => t >= s.start && t < s.end) : undefined;
-      return { h, agent: !synced || seg?.speaker === "agent" };
-    });
-  }, [peaks, duration, synced, segments]);
-
-  const state = failed
-    ? "Couldn't load the recording"
-    : buffering
-      ? "Buffering…"
-      : playing
-        ? "Playing"
-        : !duration
-          ? "Loading…"
-          : sec > 0
-            ? "Paused"
-            : "Ready";
-  const speaking = synced && playing && active >= 0 ? segments[active] : undefined;
+  const state = pending
+    ? "Recording coming soon"
+    : failed
+      ? "Couldn't load the recording"
+      : buffering
+        ? "Buffering…"
+        : playing
+          ? "Playing"
+          : !duration
+            ? "Loading…"
+            : sec > 0
+              ? "Paused"
+              : "Ready";
+  const speaking = playing && active >= 0 ? segments[active] : undefined;
+  const nameOf = (s: "customer" | "agent") => (s === "agent" ? "AI Receptionist" : "Customer");
 
   return (
     <div className="border border-[var(--vx-hair)] bg-[var(--vx-card)]">
-      <div className="flex items-start justify-between gap-4 border-b border-[var(--vx-hair)] px-5 py-4">
-        <div>
-          <Logo className="[&_img]:h-6" />
-          <p className="mt-3 font-display text-[18px] leading-tight text-[var(--vx-ink)]">
-            {call.title}
-          </p>
-          <p className="mt-0.5 font-vmono text-[11px] uppercase tracking-[0.1em] text-[var(--vx-muted)]">
-            {call.callType} · {duration ? fmt(duration) : "--:--"}
-          </p>
-        </div>
-        <span className="mt-1 shrink-0 border border-[var(--vx-hair)] px-2 py-1 font-vmono text-[10px] font-medium uppercase tracking-[0.1em] text-[var(--vx-muted)]">
-          {synced ? "Recorded call" : "Placeholder audio"}
+      <div className="flex items-center justify-between gap-3 border-b border-[var(--vx-hair)] px-4 py-2.5 font-vmono text-[12px]">
+        <span className="flex min-w-0 items-center gap-2 truncate whitespace-nowrap text-[var(--vx-ink)]">
+          <span aria-hidden="true" className="size-1.5 bg-[var(--vx-accent)]" />
+          clickai / {call.title.toLowerCase().replace(/\s+/g, "-")}
+        </span>
+        <span className="shrink-0 whitespace-nowrap text-[var(--vx-muted)]">
+          [{pending ? "recording pending" : "recorded call"}]
         </span>
       </div>
 
-      <div className="px-5 pt-5">
-        <div className="flex items-center gap-4">
-          <button
-            type="button"
-            onClick={toggle}
-            disabled={failed}
-            aria-label={playing ? "Pause call recording" : "Play call recording"}
-            className="grid size-14 shrink-0 place-items-center rounded-full bg-[var(--vx-btn)] text-white transition-colors hover:bg-[var(--vx-accent-hot)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--vx-accent)] disabled:opacity-50"
-          >
-            {playing ? (
-              <Pause className="size-5" aria-hidden="true" />
-            ) : (
-              <Play className="ml-0.5 size-5" aria-hidden="true" />
+      <div
+        role="slider"
+        tabIndex={pending ? -1 : 0}
+        aria-label="Recording position"
+        aria-valuemin={0}
+        aria-valuemax={Math.round(duration)}
+        aria-valuenow={sec}
+        aria-valuetext={pending ? "No recording yet" : `${fmt(sec)} of ${fmt(duration)}`}
+        aria-disabled={pending || !duration}
+        onKeyDown={onScopeKey}
+        onPointerDown={onScopeDown}
+        onPointerMove={onScopeMove}
+        onPointerUp={onScopeUp}
+        onPointerCancel={() => (dragging.current = false)}
+        className={cn(
+          "relative h-[172px] touch-pan-y bg-[var(--vx-alt)] focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--vx-accent)] sm:h-[188px]",
+          duration ? "cursor-ew-resize" : "cursor-default",
+        )}
+      >
+        <CallScope
+          peaks={peaks}
+          duration={duration}
+          theme={theme}
+          handleRef={scope}
+          className="absolute inset-0 size-full"
+        />
+        <button
+          type="button"
+          onClick={toggle}
+          onPointerDown={(e) => e.stopPropagation()}
+          disabled={pending || failed}
+          aria-label={
+            pending
+              ? "Recording coming soon"
+              : playing
+                ? "Pause call recording"
+                : "Play call recording"
+          }
+          className={cn(
+            "absolute grid size-14 place-items-center rounded-full bg-[var(--vx-btn)] text-white transition-[transform,background-color] duration-300 hover:bg-[var(--vx-accent-hot)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--vx-accent)] disabled:cursor-not-allowed disabled:opacity-60 motion-reduce:transition-none",
+            playing
+              ? "bottom-3 right-3 scale-[0.72]"
+              : "left-1/2 top-[calc(50%-11px)] -translate-x-1/2 -translate-y-1/2",
+          )}
+        >
+          <Play
+            className={cn(
+              "absolute ml-0.5 size-5 transition-[transform,opacity] duration-200 motion-reduce:transition-none",
+              playing ? "scale-50 opacity-0" : "scale-100 opacity-100",
             )}
-          </button>
-          <div
-            ref={wave}
-            role="slider"
-            tabIndex={0}
-            aria-label="Recording position"
-            aria-valuemin={0}
-            aria-valuemax={Math.round(duration)}
-            aria-valuenow={sec}
-            aria-valuetext={`${fmt(sec)} of ${fmt(duration)}`}
-            aria-disabled={!duration}
-            onKeyDown={onWaveKey}
-            onPointerDown={(e) => {
-              e.currentTarget.setPointerCapture(e.pointerId);
-              seekFromPointer(e);
-            }}
-            onPointerMove={(e) => e.buttons === 1 && seekFromPointer(e)}
-            className="relative h-16 min-w-0 flex-1 cursor-pointer touch-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[var(--vx-accent)]"
-            style={{ "--p": "0%" } as React.CSSProperties}
-          >
-            <div aria-hidden="true" className="absolute inset-0 flex items-center gap-[2px]">
-              {bars.map((b, i) => (
-                <span
-                  key={i}
-                  className="flex-1 bg-[var(--vx-faint)]"
-                  style={{ height: `${Math.round(b.h * 100)}%` }}
-                />
-              ))}
-            </div>
-            <div
-              aria-hidden="true"
-              className="absolute inset-0 flex items-center gap-[2px]"
-              style={{ clipPath: "inset(0 calc(100% - var(--p)) 0 0)" }}
-            >
-              {bars.map((b, i) => (
-                <span
-                  key={i}
-                  className={cn("flex-1", b.agent ? "bg-[var(--vx-accent)]" : "bg-[var(--vx-ink)]")}
-                  style={{ height: `${Math.round(b.h * 100)}%` }}
-                />
-              ))}
-            </div>
-            <span
-              aria-hidden="true"
-              className="absolute inset-y-0 w-px bg-[var(--vx-ink)]"
-              style={{ left: "var(--p)" }}
-            />
-          </div>
-        </div>
-        <div className="mt-2 flex items-center justify-between pl-[72px] font-vmono text-[11px] tabular-nums text-[var(--vx-muted)]">
-          <span>{fmt(sec)}</span>
-          <span role="status" aria-live="polite">
-            {state}
-            {failed ? (
-              <button
-                type="button"
-                onClick={() => {
-                  setFailed(false);
-                  audio.current?.load();
-                }}
-                className="ml-2 inline-flex items-center gap-1 underline underline-offset-2"
-              >
-                <RotateCcw className="size-3" aria-hidden="true" /> Retry
-              </button>
-            ) : null}
+            aria-hidden="true"
+          />
+          <Pause
+            className={cn(
+              "absolute size-5 transition-[transform,opacity] duration-200 motion-reduce:transition-none",
+              playing ? "scale-100 opacity-100" : "scale-50 opacity-0",
+            )}
+            aria-hidden="true"
+          />
+        </button>
+        {!playing ? (
+          <span className="pointer-events-none absolute left-1/2 top-[calc(50%+34px)] -translate-x-1/2 whitespace-nowrap border border-[var(--vx-hair)] bg-[var(--vx-card)] px-2 py-0.5 font-vmono text-[11px] text-[var(--vx-ink)]">
+            {pending ? "Recording coming soon" : failed ? "Couldn't load" : "Listen to the call"}
           </span>
-          <span>{fmt(duration)}</span>
-        </div>
+        ) : null}
       </div>
 
-      <audio
-        ref={audio}
-        src={call.src}
-        preload="metadata"
-        onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
-        onDurationChange={(e) => setDuration(e.currentTarget.duration)}
-        onPlaying={() => {
-          setPlaying(true);
-          setBuffering(false);
-        }}
-        onPause={() => {
-          setPlaying(false);
-          sync();
-        }}
-        onWaiting={() => setBuffering(true)}
-        onCanPlay={() => setBuffering(false)}
-        onSeeked={sync}
-        onEnded={() => {
-          setPlaying(false);
-          if (audio.current) audio.current.currentTime = 0;
-          sync();
-        }}
-        onError={() => {
-          setFailed(true);
-          setPlaying(false);
-        }}
-      />
+      {src ? (
+        <audio
+          ref={audio}
+          src={src}
+          preload="metadata"
+          onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
+          onDurationChange={(e) => setDuration(e.currentTarget.duration)}
+          onPlaying={() => {
+            setPlaying(true);
+            setBuffering(false);
+          }}
+          onPause={() => {
+            setPlaying(false);
+            sync();
+          }}
+          onWaiting={() => setBuffering(true)}
+          onCanPlay={() => setBuffering(false)}
+          onSeeked={sync}
+          onEnded={() => {
+            setPlaying(false);
+            if (audio.current) audio.current.currentTime = 0;
+            sync();
+          }}
+          onError={() => {
+            setFailed(true);
+            setPlaying(false);
+          }}
+        />
+      ) : null}
 
-      <div className="mt-5 border-t border-[var(--vx-hair)] px-5 pt-4">
-        <div className="flex items-center justify-between gap-3 font-vmono text-[10px] uppercase tracking-[0.12em] text-[var(--vx-muted)]">
-          <span>{synced ? "Transcript" : "Sample script"}</span>
-          {speaking ? (
-            <span className="flex items-center gap-2 text-[var(--vx-ink)]">
-              <span
-                aria-hidden="true"
-                className={cn(
-                  "size-1.5 rounded-full",
-                  speaking.speaker === "agent" ? "bg-[var(--vx-accent)]" : "bg-[var(--vx-ink)]",
-                )}
-              />
-              {speaking.speaker === "agent" ? "AI Receptionist speaking" : "Caller speaking"}
-            </span>
-          ) : null}
-        </div>
-        {!synced ? (
-          <p className="mt-2 font-vmono text-[11px] leading-[1.6] text-[var(--vx-muted)]">
-            The audio is placeholder tones while the recorded call is prepared. This script is not
-            synced to it.
-          </p>
-        ) : null}
-        <ol ref={list} className="relative mt-3 max-h-[188px] space-y-1 overflow-y-auto pr-1">
+      <div className="border-t border-[var(--vx-hair)] px-4 py-3">
+        <ol
+          ref={list}
+          aria-label={pending ? "Sample script" : "Transcript"}
+          onWheel={() => (lastManualScroll.current = Date.now())}
+          onTouchMove={() => (lastManualScroll.current = Date.now())}
+          className="relative max-h-[132px] space-y-0.5 overflow-y-auto overscroll-contain pr-1"
+        >
           {segments.map((s, i) => {
-            const on = synced && i === active;
+            const on = i === active;
+            const seekable = !pending && s.start !== undefined;
             const body = (
               <>
-                <span className="block font-vmono text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--vx-muted)]">
-                  <span
-                    aria-hidden="true"
-                    className={cn(
-                      "mr-2 inline-block size-1.5 align-middle",
-                      s.speaker === "agent" ? "bg-[var(--vx-accent)]" : "bg-[var(--vx-faint)]",
-                    )}
-                  />
-                  {s.speaker === "agent" ? "AI Receptionist" : "Caller"}
+                <span
+                  className={cn(
+                    "mr-2 font-vmono text-[11px] lowercase",
+                    s.speaker === "agent"
+                      ? "text-[var(--vx-accent-hot)]"
+                      : "text-[var(--vx-muted)]",
+                  )}
+                >
+                  {s.speaker === "agent" ? "agent" : "customer"} ›
                 </span>
-                <span className="mt-1 block font-display text-[15px] leading-[1.4]">{s.text}</span>
+                <span className="font-display text-[15px] leading-[1.45]">{s.text}</span>
+                <span className="sr-only"> ({nameOf(s.speaker)})</span>
               </>
             );
             const base = cn(
-              "block w-full border-l-2 py-2 pl-3 text-left transition-colors",
-              on ? "border-[var(--vx-accent)]" : "border-transparent",
-              !synced || on ? "text-[var(--vx-ink)]" : "text-[var(--vx-muted)]",
+              "block w-full border-l-2 py-1.5 pl-3 text-left transition-colors motion-reduce:transition-none",
+              on ? "border-[var(--vx-accent)] text-[var(--vx-ink)]" : "border-transparent",
+              pending || on ? "" : "text-[var(--vx-muted)]",
+              pending ? "text-[var(--vx-ink)]" : "",
             );
             return (
               <li key={s.id} aria-current={on ? "true" : undefined}>
-                {synced ? (
+                {seekable ? (
                   <button
                     type="button"
-                    onClick={() => seekTo(s.start, true)}
+                    onClick={() => seekTo(s.start!, true)}
                     className={cn(
                       base,
                       "hover:text-[var(--vx-ink)] focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--vx-accent)]",
@@ -372,37 +367,30 @@ export function VoicePlayer({ call = DEMO_CALL }: { call?: RecordedCall }) {
         </ol>
       </div>
 
-      <div className="mt-4 border-t border-[var(--vx-hair)] px-5 py-4">
-        <p className="font-vmono text-[10px] uppercase tracking-[0.12em] text-[var(--vx-muted)]">
-          {synced ? "What the AI did on this call" : "What the AI handles in this scenario"}
-        </p>
-        <ul className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2">
-          {actions.map((a) => {
-            const done = synced && sec >= a.at && (playing || sec > 0);
-            return (
-              <li
-                key={a.label}
-                className={cn(
-                  "flex items-center gap-2 font-vmono text-[12px]",
-                  done ? "text-[var(--vx-ink)]" : "text-[var(--vx-muted)]",
-                )}
-              >
-                <span
-                  className={cn(
-                    "grid size-4 shrink-0 place-items-center border",
-                    done
-                      ? "border-[var(--vx-accent)] bg-[var(--vx-accent)] text-white"
-                      : "border-[var(--vx-hair)]",
-                  )}
-                >
-                  {done ? <Check className="size-3" aria-hidden="true" /> : null}
-                </span>
-                {a.label}
-                {done ? <span className="sr-only"> (done)</span> : null}
-              </li>
-            );
-          })}
-        </ul>
+      <div className="flex items-center justify-between gap-3 border-t border-[var(--vx-hair)] px-4 py-2 font-vmono text-[11px] tabular-nums text-[var(--vx-muted)]">
+        <span role="status" aria-live="polite">
+          {state}
+          {failed ? (
+            <button
+              type="button"
+              onClick={() => {
+                setFailed(false);
+                audio.current?.load();
+              }}
+              className="ml-2 inline-flex items-center gap-1 underline underline-offset-2"
+            >
+              <RotateCcw className="size-3" aria-hidden="true" /> Retry
+            </button>
+          ) : null}
+        </span>
+        <span className="flex items-center gap-3">
+          {speaking ? (
+            <span className="text-[var(--vx-ink)]">{nameOf(speaking.speaker)} speaking</span>
+          ) : null}
+          <span>
+            {pending ? "sample script · not a recording" : `${fmt(sec)} / ${fmt(duration)}`}
+          </span>
+        </span>
       </div>
     </div>
   );

@@ -1,82 +1,50 @@
 /**
- * The recorded call shown in the hero player. To ship the real recording:
- *   1. put the file in /public/audio and set `src`,
- *   2. replace `segments` with the real transcript and its timestamps (seconds),
- *   3. set `synced: true`.
- * Until then `synced` stays false and the player shows the script as a preview
- * only: no highlighting, auto-scroll, click-to-seek or action ticks, because the
- * placeholder tones contain no speech to follow.
+ * The call shown in the hero player. It is data, not code.
+ *
+ * To ship the real recording:
+ *   1. put the file in /public/audio and set `src` to its URL,
+ *   2. give every segment its real `start` and `end` (seconds into the file),
+ *   3. replace the sample text with the real transcript.
+ * That is all: with a `src` the player plays it, draws its real waveform, follows
+ * the segment timestamps and lets visitors click a line to jump there.
+ *
+ * While `src` is null the player shows a recording-pending state and the sample
+ * script below. Sample segments have no timestamps, so nothing can pretend to be
+ * in sync with audio that does not exist.
  */
 
-export type Speaker = "caller" | "agent";
+export type Speaker = "customer" | "agent";
 
 export type CallSegment = {
   id: string;
   speaker: Speaker;
   text: string;
-  /** Seconds into the recording. Ignored while `synced` is false. */
-  start: number;
-  end: number;
-};
-
-export type CallAction = {
-  label: string;
-  /** Seconds at which this step is complete in the recording. Ignored while `synced` is false. */
-  at: number;
+  /** Seconds into the recording. Leave both out until the real timestamps are known. */
+  start?: number;
+  end?: number;
 };
 
 export type RecordedCall = {
-  src: string;
+  /** URL of the real recording, or null while it is still being prepared. */
+  src: string | null;
   title: string;
   callType: string;
-  /** true only when `segments` and `actions` carry real timestamps from the recording. */
-  synced: boolean;
   segments: CallSegment[];
-  actions: CallAction[];
 };
 
 export const DEMO_CALL: RecordedCall = {
-  src: "/audio/ai-receptionist-demo.mp3",
+  src: null,
   title: "AI Receptionist",
   callType: "Appointment booking",
-  synced: false,
   segments: [
-    {
-      id: "s1",
-      speaker: "caller",
-      text: "Hi, I'd like to book an appointment for tomorrow.",
-      start: 0,
-      end: 4,
-    },
-    {
-      id: "s2",
-      speaker: "agent",
-      text: "Of course. What time works best for you?",
-      start: 4,
-      end: 8,
-    },
-    { id: "s3", speaker: "caller", text: "Around 4 PM, if that's possible.", start: 8, end: 11 },
-    {
-      id: "s4",
-      speaker: "agent",
-      text: "Let me check the calendar. Yes, 4 PM is free.",
-      start: 11,
-      end: 14,
-    },
+    { id: "s1", speaker: "customer", text: "Hi, I'd like to book an appointment for tomorrow." },
+    { id: "s2", speaker: "agent", text: "Of course. What time works best for you?" },
+    { id: "s3", speaker: "customer", text: "Around 4 PM, if that's possible." },
+    { id: "s4", speaker: "agent", text: "Let me check the calendar. Yes, 4 PM is free." },
     {
       id: "s5",
       speaker: "agent",
       text: "I've booked it for you, and a confirmation will be sent.",
-      start: 14,
-      end: 16.5,
     },
-  ],
-  actions: [
-    { label: "Call answered", at: 0 },
-    { label: "Request understood", at: 4 },
-    { label: "Calendar checked", at: 12 },
-    { label: "Free time found", at: 13 },
-    { label: "Appointment booked", at: 15 },
-    { label: "Confirmation sent", at: 16 },
   ],
 };

@@ -70,7 +70,7 @@ export function Hero() {
             className="animate-rise mt-6 max-w-[480px] font-vmono text-[14px] leading-[1.7] text-[var(--vx-muted)] sm:text-[15px]"
           >
             ClickAI answers your calls and WhatsApp messages, books appointments and handles routine
-            tasks for you. Press play to hear a sample call.
+            tasks for you.
           </p>
           <div
             style={rise(3)}
