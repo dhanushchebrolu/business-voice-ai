@@ -215,9 +215,7 @@ export function Pricing() {
               </p>
               <p className="mt-6 flex items-baseline gap-2 font-display text-[48px] tracking-[-0.04em]">
                 ₹<RollNumber value={plan.price.toLocaleString("en-IN")} />
-                <span className="font-vmono text-[13px] tracking-normal text-[var(--vx-muted)]">
-                  / month
-                </span>
+                <span className={`font-vmono text-[13px] tracking-normal ${muted}`}>/ month</span>
               </p>
               <p className={`mt-3 font-vmono text-[13px] leading-[1.7] ${muted}`}>{plan.blurb}</p>
               <ul className="mt-8 flex-1 space-y-3 border-t border-current/15 pt-6 font-vmono text-[12px]">

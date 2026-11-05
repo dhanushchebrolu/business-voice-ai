@@ -47,6 +47,9 @@ export function VoicePlayer() {
 
   useEffect(() => {
     paint(REST);
+    // The metadata event can fire before React hydrates; read it if it already has.
+    const a = audio.current;
+    if (a && a.readyState > 0) setDuration(a.duration);
     return () => {
       cancelAnimationFrame(raf.current);
       void ctx.current?.close().catch(() => {});
@@ -184,6 +187,7 @@ export function VoicePlayer() {
         src={SRC}
         preload="metadata"
         onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
+        onDurationChange={(e) => setDuration(e.currentTarget.duration)}
         onPlay={() => setPlaying(true)}
         onPause={() => setPlaying(false)}
         onEnded={() => {
