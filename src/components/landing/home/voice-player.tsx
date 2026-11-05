@@ -1,236 +1,409 @@
-import { Pause, Phone, Play } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Check, Pause, Play, RotateCcw } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Logo } from "@/components/app/primitives";
+import { cn } from "@/lib/utils";
 import { prefersReducedMotion } from "./primitives";
+import { DEMO_CALL, type RecordedCall } from "./voice-demo-data";
 
 /**
- * Hero voice demo. A real <audio> element plays /audio/ai-receptionist-demo.mp3;
- * the waveform is driven by a Web Audio analyser on that same element, so it moves
- * only while sound is actually playing and falls back to a resting shape when
- * paused. Never autoplays. The bundled file is a PLACEHOLDER tone sequence, not a
- * voice recording, and the card says so; swap the file at SRC (and TRANSCRIPT cue
- * times) when the real recording exists.
+ * Recorded-call player: header, real waveform, transcript and action steps.
+ * The waveform is the decoded audio itself (peak per bar), not decoration. When
+ * `call.synced` is true the transcript follows the audio (active line, speaker,
+ * auto-scroll, click-to-seek) and action steps tick off as playback passes their
+ * timestamps. When false (placeholder audio) the transcript is a labelled preview
+ * with no sync. Never autoplays; pauses and releases the audio on unmount.
  */
 
-const SRC = "/audio/ai-receptionist-demo.mp3";
-const BARS = 40;
-const REST = Array.from(
-  { length: BARS },
-  (_, i) => Math.round((0.18 + 0.32 * Math.abs(Math.sin(i * 0.55))) * 100) / 100,
-);
-
-const TRANSCRIPT = [
-  ["Caller", "Hi, I'd like to book an appointment for tomorrow.", 0],
-  ["ClickAI", "Of course. What time works best for you?", 4.2],
-  ["Caller", "Around 4 PM.", 8.5],
-  ["ClickAI", "4 PM is free. I've booked it for you.", 12.8],
-] as const;
+const BARS = 72;
+const SEEK_STEP = 5;
 
 const fmt = (s: number) =>
   Number.isFinite(s) && s > 0
     ? `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`
     : "0:00";
 
-export function VoicePlayer() {
+/** Peak amplitude per bar, 0..1, from the decoded audio file. Stays null while loading or if it can't be decoded. */
+function usePeaks(src: string): number[] | null {
+  const [peaks, setPeaks] = useState<number[] | null>(null);
+  useEffect(() => {
+    let dead = false;
+    setPeaks(null);
+    fetch(src)
+      .then((r) => (r.ok ? r.arrayBuffer() : Promise.reject(new Error(String(r.status)))))
+      .then((buf) => new OfflineAudioContext(1, 1, 44100).decodeAudioData(buf))
+      .then((decoded) => {
+        const ch = decoded.getChannelData(0);
+        const size = Math.max(1, Math.floor(ch.length / BARS));
+        const raw = Array.from({ length: BARS }, (_, i) => {
+          let max = 0;
+          for (let j = i * size; j < Math.min(ch.length, (i + 1) * size); j += 8) {
+            max = Math.max(max, Math.abs(ch[j] ?? 0));
+          }
+          return max;
+        });
+        const top = Math.max(...raw, 0.0001);
+        if (!dead) setPeaks(raw.map((v) => Math.max(0.06, v / top)));
+      })
+      .catch(() => {});
+    return () => {
+      dead = true;
+    };
+  }, [src]);
+  return peaks;
+}
+
+export function VoicePlayer({ call = DEMO_CALL }: { call?: RecordedCall }) {
   const audio = useRef<HTMLAudioElement>(null);
-  const bars = useRef<(HTMLSpanElement | null)[]>([]);
-  const ctx = useRef<AudioContext | null>(null);
-  const analyser = useRef<AnalyserNode | null>(null);
+  const wave = useRef<HTMLDivElement>(null);
+  const list = useRef<HTMLOListElement>(null);
   const raf = useRef(0);
   const [playing, setPlaying] = useState(false);
-  const [time, setTime] = useState(0);
+  const [buffering, setBuffering] = useState(false);
+  const [failed, setFailed] = useState(false);
   const [duration, setDuration] = useState(0);
-  const [state, setState] = useState<"idle" | "loading" | "error">("idle");
+  const [sec, setSec] = useState(0);
+  const [active, setActive] = useState(-1);
+  const peaks = usePeaks(call.src);
+  const { synced, segments, actions } = call;
 
-  const paint = (levels: ArrayLike<number>) =>
-    bars.current.forEach((b, i) => b && (b.style.transform = `scaleY(${levels[i] ?? 0.1})`));
-
-  useEffect(() => {
-    paint(REST);
-    // The metadata event can fire before React hydrates; read it if it already has.
+  const sync = useCallback(() => {
     const a = audio.current;
-    if (a && a.readyState > 0) setDuration(a.duration);
-    return () => {
-      cancelAnimationFrame(raf.current);
-      void ctx.current?.close().catch(() => {});
-    };
-  }, []);
+    if (!a) return;
+    const t = a.currentTime;
+    wave.current?.style.setProperty("--p", `${a.duration ? (t / a.duration) * 100 : 0}%`);
+    setSec(Math.floor(t));
+    if (synced) {
+      let idx = -1;
+      segments.forEach((s, i) => {
+        if (t >= s.start) idx = i;
+      });
+      setActive(idx);
+    }
+  }, [synced, segments]);
 
   useEffect(() => {
-    if (!playing) {
-      cancelAnimationFrame(raf.current);
-      paint(REST);
-      return;
-    }
-    const data = new Uint8Array(analyser.current?.frequencyBinCount ?? 0);
+    if (!playing) return;
     const tick = () => {
-      const a = audio.current;
-      if (a) setTime(a.currentTime);
-      if (analyser.current && !prefersReducedMotion()) {
-        analyser.current.getByteFrequencyData(data);
-        const live = Array.from(
-          { length: BARS },
-          (_, i) => (data[Math.floor((i / BARS) * data.length * 0.7)] ?? 0) / 255,
-        );
-        // No signal (analyser blocked or silent): keep the resting shape instead of a flat line.
-        paint(live.some((v) => v > 0) ? live.map((v) => Math.max(0.1, v)) : REST);
-      }
+      sync();
       raf.current = requestAnimationFrame(tick);
     };
     tick();
     return () => cancelAnimationFrame(raf.current);
-  }, [playing]);
+  }, [playing, sync]);
+
+  // Metadata can arrive before hydration, so read it once on mount; release the audio on unmount.
+  useEffect(() => {
+    const a = audio.current;
+    if (a && a.readyState > 0) setDuration(a.duration);
+    return () => {
+      if (!a) return;
+      a.pause();
+      a.removeAttribute("src");
+      a.load();
+    };
+  }, []);
+
+  // Keep the active line centred inside the transcript box only (never scrolls the page).
+  useEffect(() => {
+    const box = list.current;
+    const el = box?.children[active] as HTMLElement | undefined;
+    if (!synced || !box || !el) return;
+    const top = el.offsetTop - box.clientHeight / 2 + el.clientHeight / 2;
+    box.scrollTo({ top, behavior: prefersReducedMotion() ? "auto" : "smooth" });
+  }, [active, synced]);
 
   async function toggle() {
     const a = audio.current;
     if (!a) return;
     if (!a.paused) return a.pause();
+    setFailed(false);
     try {
-      if (!analyser.current) {
-        const AC = window.AudioContext;
-        if (AC) {
-          ctx.current = new AC();
-          const node = ctx.current.createAnalyser();
-          node.fftSize = 128;
-          ctx.current.createMediaElementSource(a).connect(node);
-          node.connect(ctx.current.destination);
-          analyser.current = node;
-        }
-      }
-      await ctx.current?.resume();
-      setState("loading");
       await a.play();
-      setState("idle");
-    } catch {
-      setState("error");
+    } catch (e) {
+      if ((e as DOMException).name !== "AbortError") setFailed(true);
     }
   }
 
-  const active = TRANSCRIPT.reduce((n, [, , at], i) => (time >= at ? i : n), 0);
-  const pct = duration ? (time / duration) * 100 : 0;
+  function seekTo(t: number, thenPlay = false) {
+    const a = audio.current;
+    if (!a || !duration) return;
+    a.currentTime = Math.min(Math.max(0, t), duration);
+    sync();
+    if (thenPlay && a.paused) void toggle();
+  }
+
+  function seekFromPointer(e: React.PointerEvent<HTMLDivElement>) {
+    const r = e.currentTarget.getBoundingClientRect();
+    seekTo(((e.clientX - r.left) / r.width) * duration);
+  }
+
+  function onWaveKey(e: React.KeyboardEvent) {
+    const a = audio.current;
+    if (!a) return;
+    const to: Record<string, number> = {
+      ArrowRight: a.currentTime + SEEK_STEP,
+      ArrowUp: a.currentTime + SEEK_STEP,
+      ArrowLeft: a.currentTime - SEEK_STEP,
+      ArrowDown: a.currentTime - SEEK_STEP,
+      Home: 0,
+      End: duration,
+    };
+    if (e.key in to) {
+      e.preventDefault();
+      seekTo(to[e.key]!);
+    }
+  }
+
+  const bars = useMemo(() => {
+    const total = duration || segments.at(-1)?.end || 1;
+    return (peaks ?? Array.from({ length: BARS }, () => 0.08)).map((h, i) => {
+      const t = ((i + 0.5) / BARS) * total;
+      const seg = synced ? segments.find((s) => t >= s.start && t < s.end) : undefined;
+      return { h, agent: !synced || seg?.speaker === "agent" };
+    });
+  }, [peaks, duration, synced, segments]);
+
+  const state = failed
+    ? "Couldn't load the recording"
+    : buffering
+      ? "Buffering…"
+      : playing
+        ? "Playing"
+        : !duration
+          ? "Loading…"
+          : sec > 0
+            ? "Paused"
+            : "Ready";
+  const speaking = synced && playing && active >= 0 ? segments[active] : undefined;
 
   return (
-    <div className="border border-[var(--vx-hair)] bg-[var(--vx-card)] p-5 sm:p-6">
-      <div className="flex items-center justify-between gap-3">
-        <Logo className="[&_img]:h-7" />
-        <span className="flex items-center gap-2 font-vmono text-[11px] uppercase tracking-[0.1em] text-[var(--vx-muted)]">
-          <span
-            aria-hidden="true"
-            className={`size-1.5 rounded-full ${playing ? "bg-emerald-500" : "bg-[var(--vx-faint)]"}`}
-          />
-          {playing ? "Playing" : "Ready"}
-        </span>
-      </div>
-
-      <div className="mt-5 flex items-center gap-3">
-        <span className="grid size-10 shrink-0 place-items-center bg-[var(--vx-alt)] text-[var(--vx-accent)]">
-          <Phone className="size-5" aria-hidden="true" />
-        </span>
+    <div className="border border-[var(--vx-hair)] bg-[var(--vx-card)]">
+      <div className="flex items-start justify-between gap-4 border-b border-[var(--vx-hair)] px-5 py-4">
         <div>
-          <p className="font-display text-[18px] leading-tight text-[var(--vx-ink)]">
-            AI Receptionist
+          <Logo className="[&_img]:h-6" />
+          <p className="mt-3 font-display text-[18px] leading-tight text-[var(--vx-ink)]">
+            {call.title}
           </p>
-          <p className="font-vmono text-[11px] text-[var(--vx-muted)]">Answering a booking call</p>
+          <p className="mt-0.5 font-vmono text-[11px] uppercase tracking-[0.1em] text-[var(--vx-muted)]">
+            {call.callType} · {duration ? fmt(duration) : "--:--"}
+          </p>
         </div>
+        <span className="mt-1 shrink-0 border border-[var(--vx-hair)] px-2 py-1 font-vmono text-[10px] font-medium uppercase tracking-[0.1em] text-[var(--vx-muted)]">
+          {synced ? "Recorded call" : "Placeholder audio"}
+        </span>
       </div>
 
-      <div className="mt-5 flex items-center gap-4">
-        <button
-          type="button"
-          onClick={toggle}
-          aria-label={playing ? "Pause sample call" : "Play sample call"}
-          className="grid size-12 shrink-0 place-items-center bg-[var(--vx-btn)] text-white transition-colors hover:bg-[var(--vx-accent-hot)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--vx-accent)]"
-        >
-          {playing ? (
-            <Pause className="size-5" aria-hidden="true" />
-          ) : (
-            <Play className="size-5" aria-hidden="true" />
-          )}
-        </button>
-        <div aria-hidden="true" className="flex h-12 flex-1 items-center gap-[3px]">
-          {Array.from({ length: BARS }, (_, i) => (
+      <div className="px-5 pt-5">
+        <div className="flex items-center gap-4">
+          <button
+            type="button"
+            onClick={toggle}
+            disabled={failed}
+            aria-label={playing ? "Pause call recording" : "Play call recording"}
+            className="grid size-14 shrink-0 place-items-center rounded-full bg-[var(--vx-btn)] text-white transition-colors hover:bg-[var(--vx-accent-hot)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--vx-accent)] disabled:opacity-50"
+          >
+            {playing ? (
+              <Pause className="size-5" aria-hidden="true" />
+            ) : (
+              <Play className="ml-0.5 size-5" aria-hidden="true" />
+            )}
+          </button>
+          <div
+            ref={wave}
+            role="slider"
+            tabIndex={0}
+            aria-label="Recording position"
+            aria-valuemin={0}
+            aria-valuemax={Math.round(duration)}
+            aria-valuenow={sec}
+            aria-valuetext={`${fmt(sec)} of ${fmt(duration)}`}
+            aria-disabled={!duration}
+            onKeyDown={onWaveKey}
+            onPointerDown={(e) => {
+              e.currentTarget.setPointerCapture(e.pointerId);
+              seekFromPointer(e);
+            }}
+            onPointerMove={(e) => e.buttons === 1 && seekFromPointer(e)}
+            className="relative h-16 min-w-0 flex-1 cursor-pointer touch-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[var(--vx-accent)]"
+            style={{ "--p": "0%" } as React.CSSProperties}
+          >
+            <div aria-hidden="true" className="absolute inset-0 flex items-center gap-[2px]">
+              {bars.map((b, i) => (
+                <span
+                  key={i}
+                  className="flex-1 bg-[var(--vx-faint)]"
+                  style={{ height: `${Math.round(b.h * 100)}%` }}
+                />
+              ))}
+            </div>
+            <div
+              aria-hidden="true"
+              className="absolute inset-0 flex items-center gap-[2px]"
+              style={{ clipPath: "inset(0 calc(100% - var(--p)) 0 0)" }}
+            >
+              {bars.map((b, i) => (
+                <span
+                  key={i}
+                  className={cn("flex-1", b.agent ? "bg-[var(--vx-accent)]" : "bg-[var(--vx-ink)]")}
+                  style={{ height: `${Math.round(b.h * 100)}%` }}
+                />
+              ))}
+            </div>
             <span
-              key={i}
-              ref={(el) => {
-                bars.current[i] = el;
-              }}
-              className={`h-full flex-1 origin-center bg-[var(--vx-ink)] ${(i / BARS) * 100 < pct ? "opacity-100" : "opacity-35"}`}
-              style={{ transform: `scaleY(${REST[i]})` }}
+              aria-hidden="true"
+              className="absolute inset-y-0 w-px bg-[var(--vx-ink)]"
+              style={{ left: "var(--p)" }}
             />
-          ))}
+          </div>
         </div>
-      </div>
-
-      <div className="mt-3 flex items-center gap-3 font-vmono text-[11px] tabular-nums text-[var(--vx-muted)]">
-        <span>{fmt(time)}</span>
-        <input
-          type="range"
-          min={0}
-          max={duration || 0}
-          step={0.1}
-          value={Math.min(time, duration || 0)}
-          disabled={!duration}
-          aria-label="Seek"
-          aria-valuetext={`${fmt(time)} of ${fmt(duration)}`}
-          onChange={(e) => {
-            const a = audio.current;
-            if (a) a.currentTime = Number(e.target.value);
-            setTime(Number(e.target.value));
-          }}
-          className="h-6 flex-1 cursor-pointer accent-[var(--vx-accent)] disabled:cursor-not-allowed"
-        />
-        <span>{fmt(duration)}</span>
+        <div className="mt-2 flex items-center justify-between pl-[72px] font-vmono text-[11px] tabular-nums text-[var(--vx-muted)]">
+          <span>{fmt(sec)}</span>
+          <span role="status" aria-live="polite">
+            {state}
+            {failed ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setFailed(false);
+                  audio.current?.load();
+                }}
+                className="ml-2 inline-flex items-center gap-1 underline underline-offset-2"
+              >
+                <RotateCcw className="size-3" aria-hidden="true" /> Retry
+              </button>
+            ) : null}
+          </span>
+          <span>{fmt(duration)}</span>
+        </div>
       </div>
 
       <audio
         ref={audio}
-        src={SRC}
+        src={call.src}
         preload="metadata"
         onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
         onDurationChange={(e) => setDuration(e.currentTarget.duration)}
-        onPlay={() => setPlaying(true)}
-        onPause={() => setPlaying(false)}
+        onPlaying={() => {
+          setPlaying(true);
+          setBuffering(false);
+        }}
+        onPause={() => {
+          setPlaying(false);
+          sync();
+        }}
+        onWaiting={() => setBuffering(true)}
+        onCanPlay={() => setBuffering(false)}
+        onSeeked={sync}
         onEnded={() => {
           setPlaying(false);
-          setTime(0);
+          if (audio.current) audio.current.currentTime = 0;
+          sync();
         }}
-        onError={() => setState("error")}
+        onError={() => {
+          setFailed(true);
+          setPlaying(false);
+        }}
       />
 
-      <p
-        role="status"
-        aria-live="polite"
-        className="mt-3 min-h-4 font-vmono text-[11px] text-[var(--vx-muted)]"
-      >
-        {state === "error"
-          ? "The sample audio could not be played. Please try again."
-          : state === "loading"
-            ? "Loading…"
-            : ""}
-      </p>
+      <div className="mt-5 border-t border-[var(--vx-hair)] px-5 pt-4">
+        <div className="flex items-center justify-between gap-3 font-vmono text-[10px] uppercase tracking-[0.12em] text-[var(--vx-muted)]">
+          <span>{synced ? "Transcript" : "Sample script"}</span>
+          {speaking ? (
+            <span className="flex items-center gap-2 text-[var(--vx-ink)]">
+              <span
+                aria-hidden="true"
+                className={cn(
+                  "size-1.5 rounded-full",
+                  speaking.speaker === "agent" ? "bg-[var(--vx-accent)]" : "bg-[var(--vx-ink)]",
+                )}
+              />
+              {speaking.speaker === "agent" ? "AI Receptionist speaking" : "Caller speaking"}
+            </span>
+          ) : null}
+        </div>
+        {!synced ? (
+          <p className="mt-2 font-vmono text-[11px] leading-[1.6] text-[var(--vx-muted)]">
+            The audio is placeholder tones while the recorded call is prepared. This script is not
+            synced to it.
+          </p>
+        ) : null}
+        <ol ref={list} className="relative mt-3 max-h-[188px] space-y-1 overflow-y-auto pr-1">
+          {segments.map((s, i) => {
+            const on = synced && i === active;
+            const body = (
+              <>
+                <span className="block font-vmono text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--vx-muted)]">
+                  <span
+                    aria-hidden="true"
+                    className={cn(
+                      "mr-2 inline-block size-1.5 align-middle",
+                      s.speaker === "agent" ? "bg-[var(--vx-accent)]" : "bg-[var(--vx-faint)]",
+                    )}
+                  />
+                  {s.speaker === "agent" ? "AI Receptionist" : "Caller"}
+                </span>
+                <span className="mt-1 block font-display text-[15px] leading-[1.4]">{s.text}</span>
+              </>
+            );
+            const base = cn(
+              "block w-full border-l-2 py-2 pl-3 text-left transition-colors",
+              on ? "border-[var(--vx-accent)]" : "border-transparent",
+              !synced || on ? "text-[var(--vx-ink)]" : "text-[var(--vx-muted)]",
+            );
+            return (
+              <li key={s.id} aria-current={on ? "true" : undefined}>
+                {synced ? (
+                  <button
+                    type="button"
+                    onClick={() => seekTo(s.start, true)}
+                    className={cn(
+                      base,
+                      "hover:text-[var(--vx-ink)] focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--vx-accent)]",
+                    )}
+                  >
+                    {body}
+                  </button>
+                ) : (
+                  <div className={base}>{body}</div>
+                )}
+              </li>
+            );
+          })}
+        </ol>
+      </div>
 
-      <ol
-        className="mt-3 space-y-2 border-t border-[var(--vx-hair)] pt-4"
-        aria-label="Sample conversation"
-      >
-        {TRANSCRIPT.map(([who, line], i) => (
-          <li
-            key={line}
-            aria-current={playing && i === active ? "true" : undefined}
-            className={`flex gap-3 font-vmono text-[12px] leading-[1.5] transition-opacity ${
-              playing && i !== active ? "opacity-45" : ""
-            } ${who === "ClickAI" ? "text-[var(--vx-ink)]" : "text-[var(--vx-muted)]"}`}
-          >
-            <span className="w-14 shrink-0 text-[10px] uppercase tracking-[0.1em]">{who}</span>
-            <span>{line}</span>
-          </li>
-        ))}
-      </ol>
-
-      <p className="mt-4 border border-dashed border-[var(--vx-hair)] px-3 py-2 font-vmono text-[10px] uppercase leading-[1.5] tracking-[0.08em] text-[var(--vx-muted)]">
-        Placeholder audio (tones). A recorded AI voice sample is still to be added. Script is
-        illustrative.
-      </p>
+      <div className="mt-4 border-t border-[var(--vx-hair)] px-5 py-4">
+        <p className="font-vmono text-[10px] uppercase tracking-[0.12em] text-[var(--vx-muted)]">
+          {synced ? "What the AI did on this call" : "What the AI handles in this scenario"}
+        </p>
+        <ul className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2">
+          {actions.map((a) => {
+            const done = synced && sec >= a.at && (playing || sec > 0);
+            return (
+              <li
+                key={a.label}
+                className={cn(
+                  "flex items-center gap-2 font-vmono text-[12px]",
+                  done ? "text-[var(--vx-ink)]" : "text-[var(--vx-muted)]",
+                )}
+              >
+                <span
+                  className={cn(
+                    "grid size-4 shrink-0 place-items-center border",
+                    done
+                      ? "border-[var(--vx-accent)] bg-[var(--vx-accent)] text-white"
+                      : "border-[var(--vx-hair)]",
+                  )}
+                >
+                  {done ? <Check className="size-3" aria-hidden="true" /> : null}
+                </span>
+                {a.label}
+                {done ? <span className="sr-only"> (done)</span> : null}
+              </li>
+            );
+          })}
+        </ul>
+      </div>
     </div>
   );
 }
