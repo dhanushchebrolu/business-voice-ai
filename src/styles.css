@@ -25,6 +25,9 @@
   --color-ink-800: #121c40;
   --color-paper: #faf8f4;
   --color-signal: #7c5cff;
+  /* Homepage ("vx") type: Space Grotesk display + JetBrains Mono UI, loaded by the / route only. */
+  --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-vmono: "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
 
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
@@ -365,4 +368,106 @@ html {
   .animate-rise {
     animation: none;
   }
+}
+
+/*
+ * Homepage design tokens (reference design spec). Colour roles follow the
+ * reference; the accent is ClickAI brand blue/violet (logo gradient) instead of the
+ * reference's red. Zero radius and no shadows throughout.
+ */
+.vx {
+  --vx-page: #f7f8f9;
+  --vx-alt: #eef0f2;
+  --vx-tile: #e2e5e8;
+  --vx-ink: #16181b;
+  --vx-muted: #666c73;
+  --vx-faint: #c9cdd2;
+  --vx-dark: #0b0c0d;
+  --vx-hair: rgba(22, 24, 27, 0.14);
+  --vx-hair-dark: rgba(255, 255, 255, 0.14);
+  --vx-accent: #2563eb;
+  --vx-accent-hot: #3b82f6;
+  --vx-accent-deep: #1d4ed8;
+  --vx-violet: #5b2cff;
+  --vx-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  font-family: var(--font-vmono);
+  background: var(--vx-page);
+  color: var(--vx-ink);
+}
+.vx h1,
+.vx h2,
+.vx h3 {
+  font-family: var(--font-display);
+  font-weight: 500;
+}
+/* Dot field overlay used behind every section. */
+.vx-dots {
+  background-image: radial-gradient(circle, rgba(22, 24, 27, 0.16) 1px, transparent 1.4px);
+  background-size: 24px 24px;
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 12%, #000 88%, transparent);
+  mask-image: linear-gradient(to bottom, transparent, #000 12%, #000 88%, transparent);
+}
+.vx-dots-dark {
+  background-image: radial-gradient(circle, rgba(255, 255, 255, 0.18) 1px, transparent 1.4px);
+}
+@keyframes vx-marquee {
+  to {
+    transform: translateX(-50%);
+  }
+}
+.vx-marquee-track {
+  animation: vx-marquee var(--vx-dur, 40s) linear infinite;
+  will-change: transform;
+}
+@media (prefers-reduced-motion: reduce) {
+  .vx-marquee-track {
+    animation: none;
+  }
+}
+
+/* Homepage dark theme: same tokens, dark values. Set by theme.ts on <html>. */
+html[data-vx-theme="dark"] {
+  color-scheme: dark;
+  background: #0b0d10;
+}
+html[data-vx-theme="dark"] .vx {
+  --vx-page: #0b0d10;
+  --vx-alt: #11141a;
+  --vx-tile: #1b2028;
+  --vx-card: #14181e;
+  --vx-ink: #eceff3;
+  --vx-muted: #9ba3ad;
+  --vx-faint: #3a414a;
+  --vx-dark: #05070a;
+  --vx-hair: rgba(255, 255, 255, 0.13);
+  --vx-accent: #3b7bf5;
+  --vx-accent-hot: #7aa7ff;
+  --vx-accent-deep: #8db3ff;
+  --vx-btn: #2f6bea;
+}
+html[data-vx-theme="dark"] .vx-dots {
+  background-image: radial-gradient(circle, rgba(255, 255, 255, 0.12) 1px, transparent 1.4px);
+}
+.vx {
+  --vx-card: #ffffff;
+  --vx-btn: #2563eb;
+}
+/* Circular theme reveal: the browser's default cross-fade is turned off; theme.ts animates clip-path. */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+html[data-vx-vt="shrink"]::view-transition-old(root) {
+  z-index: 2;
+}
+html[data-vx-vt="shrink"]::view-transition-new(root) {
+  z-index: 1;
+}
+html[data-vx-theme="dark"] .vx img[alt="ClickAI"] {
+  background: #fff;
+  padding: 4px 8px;
+}
+html[data-vx-theme="dark"] .vx .text-emerald-700 {
+  color: #34d399;
 }

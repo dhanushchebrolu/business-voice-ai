@@ -1,109 +1,139 @@
-import { Link } from "@tanstack/react-router";
-import { Button } from "@/components/ui/button";
-import { HeroOrb } from "./hero-orb";
+import { Check } from "lucide-react";
+import { useEffect, useState } from "react";
+import { VoicePlayer } from "./home/voice-player";
+import { VxLink } from "./home/primitives";
 
-/** Staggered entrance: 40 ms steps (UI/UX Pro Max `stagger-sequence`). */
+/** Staggered entrance: 40 ms steps (matches the reference's staggered fade-up). */
 const rise = (i: number) => ({ "--i": i }) as React.CSSProperties;
 
 function scrollToSection(id: string) {
   document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
-/** Only integrations that can be connected from the dashboard today (see /integrations). */
-const WORKS_WITH = [
-  "WhatsApp Business Platform",
-  "Voice telephony",
-  "Google Calendar",
-  "Instagram",
-  "Razorpay",
-];
+/** The reference shows a small live UTC clock under the header; this one is the visitor's real UTC time. */
+function UtcClock() {
+  const [now, setNow] = useState<string | null>(null);
+  useEffect(() => {
+    const tick = () => setNow(new Date().toISOString().slice(11, 19));
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, []);
+  return (
+    <p
+      aria-hidden="true"
+      className="absolute right-5 top-[84px] hidden font-vmono text-[11px] tracking-[0.06em] text-[var(--vx-muted)] sm:right-10 sm:block lg:right-[39px]"
+    >
+      <span className="mr-2 inline-block size-1.5 rounded-full bg-[var(--vx-accent)] align-middle" />
+      {now ?? "--:--:--"} UTC
+    </p>
+  );
+}
+
+/** Cells of the illustrative console strip under the hero (a labelled example, not live data). */
+const STRIP = [
+  ["Received", "Call answered"],
+  ["Understood", "Wants a slot tomorrow"],
+  ["Action", "Availability checked"],
+  ["Confirmed", "Customer said yes"],
+  ["Logged", "Saved in call history"],
+] as const;
 
 /**
- * Dark hero: positioning and CTAs on the left, the live website assistant on
- * the right, set directly on the dark surface (no card) with concentric rings
- * and a single glow behind the orb. "Book a Demo" links to the real /contact
- * route; "Explore Products" scrolls to the #products showcase below.
+ * Homepage hero (layout follows the reference design): eyebrow, 64px display
+ * headline, mono paragraph, solid + text buttons on the left; on the right the
+ * ClickAI assistant, whose stage is a rotating dot-cube (the reference's
+ * point-cloud slot) around the orb. Below, a console strip. "Book a Demo" links
+ * to the real /contact route; "Explore Products" scrolls to #capabilities.
  */
 export function Hero() {
   return (
-    <section className="relative isolate overflow-hidden bg-ink-950 text-white">
-      {/* Fine grid, faded out toward the edges; decorative only. */}
-      <div
-        aria-hidden="true"
-        className="absolute inset-0 -z-10 opacity-[0.07] [background-image:linear-gradient(white_1px,transparent_1px),linear-gradient(90deg,white_1px,transparent_1px)] [background-size:56px_56px] [mask-image:radial-gradient(ellipse_70%_60%_at_65%_40%,black,transparent)]"
-      />
-      {/* The one glow: sits behind the assistant to anchor it. */}
-      <div
-        aria-hidden="true"
-        className="absolute right-[-10%] top-[8%] -z-10 h-[560px] w-[560px] rounded-full bg-[radial-gradient(closest-side,rgba(37,99,235,0.35),rgba(124,92,255,0.12)_60%,transparent)]"
-      />
-
-      <div className="mx-auto grid max-w-[1200px] gap-14 px-5 pb-14 pt-14 sm:px-8 sm:pt-20 lg:grid-cols-[1fr_1fr] lg:items-center lg:gap-16 lg:pb-20 lg:pt-24">
+    <section id="top" className="relative isolate overflow-clip bg-[var(--vx-page)] pt-[81px]">
+      <div aria-hidden="true" className="vx-dots absolute inset-0 -z-10" />
+      <UtcClock />
+      <div className="mx-auto grid max-w-[1305px] gap-14 px-5 pb-12 pt-14 sm:px-10 lg:grid-cols-[1fr_516px] lg:items-center lg:gap-10 lg:px-[39px] lg:pb-12 lg:pt-12">
         <div>
           <p
             style={rise(0)}
-            className="animate-rise font-mono text-xs uppercase tracking-[0.18em] text-sky-300"
+            className="animate-rise font-vmono text-[11px] font-medium uppercase tracking-[0.14em] text-[var(--vx-muted)]"
           >
-            Voice · WhatsApp · Appointments · Workflows
+            AI employee platform
           </p>
           <h1
             style={rise(1)}
-            className="animate-rise mt-5 font-serif text-[clamp(2.75rem,7vw,4.75rem)] leading-[1.02] tracking-tight"
+            className="animate-rise mt-6 max-w-[700px] text-[40px] leading-[1.2] tracking-[-0.03em] text-[var(--vx-ink)] sm:text-[56px] lg:text-[64px]"
           >
-            AI Employees for Your Business,{" "}
-            <span className="bg-linear-to-r from-sky-300 to-violet-300 bg-clip-text text-transparent">
-              24/7
-            </span>
+            AI Employees for Your Business, 24/7
           </h1>
           <p
             style={rise(2)}
-            className="animate-rise mt-6 max-w-lg text-base leading-relaxed text-slate-300 sm:text-lg"
+            className="animate-rise mt-6 max-w-[480px] font-vmono text-[14px] leading-[1.7] text-[var(--vx-muted)] sm:text-[15px]"
           >
-            Automate customer conversations, answer business calls, manage appointments and
-            streamline everyday workflows with AI employees built around your business.
+            ClickAI answers your calls and WhatsApp messages, books appointments and handles routine
+            tasks for you. Press play to hear a sample call.
           </p>
-
-          <div style={rise(3)} className="animate-rise mt-9 flex flex-wrap items-center gap-3">
-            <Link to="/contact">
-              <Button
-                size="lg"
-                className="h-12 rounded-full bg-violet-600 px-7 text-white shadow-[0_8px_30px_-8px_rgba(37,99,235,0.7)] transition-[transform,background-color] hover:bg-violet-500 active:scale-[0.98]"
-              >
-                Book a Demo
-              </Button>
-            </Link>
-            <Button
-              size="lg"
-              variant="outline"
-              onClick={() => scrollToSection("products")}
-              className="h-12 rounded-full border-white/25 bg-transparent px-7 text-white transition-[transform,background-color] hover:bg-white/10 hover:text-white active:scale-[0.98]"
+          <div
+            style={rise(3)}
+            className="animate-rise mt-9 flex flex-wrap items-center gap-x-6 gap-y-3"
+          >
+            <VxLink to="/contact">Book a Demo</VxLink>
+            <button
+              type="button"
+              onClick={() => scrollToSection("capabilities")}
+              className="group inline-flex h-11 items-center gap-2 font-vmono text-[13px] font-medium uppercase tracking-[0.08em] text-[var(--vx-ink)] transition-colors hover:text-[var(--vx-accent-hot)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--vx-accent)]"
             >
               Explore Products
-            </Button>
+              <span
+                aria-hidden="true"
+                className="transition-transform duration-200 group-hover:translate-x-1 motion-reduce:transition-none"
+              >
+                →
+              </span>
+            </button>
           </div>
+          <p
+            style={rise(4)}
+            className="animate-rise mt-8 font-vmono text-[11px] uppercase tracking-[0.1em] text-[var(--vx-muted)]"
+          >
+            Set up with you · You decide when it goes live
+          </p>
         </div>
 
         <div style={rise(2)} className="animate-rise">
-          <HeroOrb />
+          <VoicePlayer />
         </div>
       </div>
 
-      <dl className="mx-auto max-w-[1200px] border-t border-white/10 px-5 sm:px-8">
-        <dt className="sr-only">Connects with</dt>
-        <dd className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5">
-          {WORKS_WITH.map((w, i) => (
-            <span
-              key={w}
-              className={`border-white/10 py-4 text-sm text-slate-300 lg:border-l lg:px-5 ${i === 0 ? "lg:border-l-0 lg:pl-0" : ""}`}
-            >
-              <span className="block font-mono text-xs uppercase tracking-[0.12em] text-slate-500">
-                0{i + 1}
-              </span>
-              {w}
+      {/* Console strip: illustrative call flow */}
+      <div className="mx-auto max-w-[1305px] px-5 pb-12 sm:px-10 lg:px-[39px]">
+        <div className="border border-[var(--vx-hair)] bg-[var(--vx-card)]">
+          <div className="flex items-center justify-between gap-4 border-b border-[var(--vx-hair)] px-5 py-3 font-vmono text-[12px] text-[var(--vx-ink)]">
+            <span>call_9f2c1a · front-desk-agent</span>
+            <span className="border border-[var(--vx-hair)] px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.1em] text-[var(--vx-muted)]">
+              Illustrative example
             </span>
-          ))}
-        </dd>
-      </dl>
+          </div>
+          <ol className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5">
+            {STRIP.map(([label, detail], i) => (
+              <li
+                key={label}
+                className="border-b border-r border-[var(--vx-hair)] px-5 py-4 last:border-r-0 lg:border-b-0"
+              >
+                <span className="flex items-center gap-2 font-vmono text-[10px] font-medium uppercase tracking-[0.1em] text-[var(--vx-muted)]">
+                  <Check
+                    className={`size-3.5 ${i === 3 ? "text-[var(--vx-accent)]" : "text-[var(--vx-ink)]"}`}
+                    aria-hidden="true"
+                  />
+                  {label}
+                </span>
+                <span className="mt-2 block font-vmono text-[12px] text-[var(--vx-ink)]">
+                  {detail}
+                </span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      </div>
     </section>
   );
 }

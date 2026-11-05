@@ -25,7 +25,10 @@ const routeDir = dirname(fileURLToPath(import.meta.url));
 const routeSrc = readFileSync(join(routeDir, "index.tsx"), "utf8");
 
 const landingDir = join(routeDir, "..", "components", "landing");
-const landingFiles = readdirSync(landingDir).filter((name) => name.endsWith(".tsx"));
+// Recurses into subfolders (e.g. landing/home) so the homepage's own sections are scanned too.
+const landingFiles = (readdirSync(landingDir, { recursive: true }) as string[]).filter((name) =>
+  name.endsWith(".tsx"),
+);
 const landingSources = landingFiles.map((name) => ({
   name,
   src: readFileSync(join(landingDir, name), "utf8"),

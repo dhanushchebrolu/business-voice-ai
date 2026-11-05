@@ -26,16 +26,15 @@ describe("Hero has real, working CTAs and the animated flow diagram", () => {
     assert.match(src, />\s*Book a Demo\s*</);
   });
 
-  test('"Explore Products" scrolls to the real #products section (not a href="#" placeholder)', () => {
-    assert.match(src, /scrollToSection\("products"\)/);
+  test('"Explore Products" scrolls to the real #capabilities section (not a href="#" placeholder)', () => {
+    assert.match(src, /scrollToSection\("capabilities"\)/);
     assert.match(src, />\s*Explore Products\s*</);
     assert.doesNotMatch(src, /href="#"/);
   });
 
-  test("the hero assistant orb is imported and rendered, not the removed particle orb", () => {
-    assert.match(src, /import \{ HeroOrb \} from "\.\/hero-orb"/);
-    assert.match(src, /<HeroOrb \/>/);
-    assert.doesNotMatch(src, /HeroVoiceDemo|particles-orb/);
+  test("the hero plays a real audio sample and the 3D orb is gone", () => {
+    assert.match(src, /<VoicePlayer \/>/);
+    assert.doesNotMatch(src, /HeroOrb|orb-bloop|PointCube/);
   });
 
   test("no fabricated customer/rating/stat claims in the headline or copy", () => {
