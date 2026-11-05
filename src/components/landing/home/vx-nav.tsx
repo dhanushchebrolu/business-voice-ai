@@ -43,11 +43,22 @@ function ThemeToggle() {
         FOCUS,
       )}
     >
-      {dark ? (
-        <Sun className="size-[18px]" aria-hidden="true" />
-      ) : (
-        <Moon className="size-[18px]" aria-hidden="true" />
-      )}
+      <span className="relative grid size-[18px] place-items-center">
+        <Sun
+          className={cn(
+            "absolute size-[18px] transition-[transform,opacity] duration-300 motion-reduce:transition-none",
+            dark ? "rotate-0 scale-100 opacity-100" : "-rotate-90 scale-50 opacity-0",
+          )}
+          aria-hidden="true"
+        />
+        <Moon
+          className={cn(
+            "absolute size-[18px] transition-[transform,opacity] duration-300 motion-reduce:transition-none",
+            dark ? "rotate-90 scale-50 opacity-0" : "rotate-0 scale-100 opacity-100",
+          )}
+          aria-hidden="true"
+        />
+      </span>
     </button>
   );
 }
