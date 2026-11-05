@@ -425,7 +425,7 @@ export function ProductVisuals() {
         </Tabs.List>
         {TABS.map((t) => (
           <Tabs.Content key={t.id} value={t.id} className="mt-8 outline-none">
-            <div className="grid gap-10 lg:grid-cols-[minmax(0,340px)_1fr] lg:gap-14">
+            <div className="grid items-start gap-10 lg:grid-cols-[minmax(0,340px)_1fr] lg:gap-14">
               <div>
                 <h3 className="text-[24px] leading-[1.25] tracking-[-0.02em] text-[var(--vx-ink)]">
                   {t.title}

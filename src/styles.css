@@ -426,7 +426,7 @@ html {
 }
 
 /* Homepage dark theme: same tokens, dark values. Set by theme.ts on <html>. */
-html[data-vx-theme="dark"] {
+html[data-vx-theme="dark"]:has(.vx) {
   color-scheme: dark;
   background: #0b0d10;
 }
