@@ -471,3 +471,21 @@ html[data-vx-theme="dark"] .vx img[alt="ClickAI"] {
 html[data-vx-theme="dark"] .vx .text-emerald-700 {
   color: #34d399;
 }
+/* While the circular reveal runs, Tailwind colour/all transitions (about 340 elements, some lasting 700ms) would restyle and repaint every frame on top of it. The theme icon keeps its own. */
+html[data-vx-vt] .vx *:not(.vx-theme-icon),
+html[data-vx-vt] .vx *:not(.vx-theme-icon)::before,
+html[data-vx-vt] .vx *:not(.vx-theme-icon)::after {
+  transition: none !important;
+}
+/* Off-screen homepage sections skip style/layout/paint work, which is what makes the theme switch's opening frame cheap. "auto" remembers each section's real height once seen. */
+.vx main > section:not(#top),
+.vx > footer {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 900px;
+}
+@media (max-width: 639px) {
+  .vx main > section:not(#top),
+  .vx > footer {
+    contain-intrinsic-size: auto 1300px;
+  }
+}

@@ -93,7 +93,6 @@ export function toggleTheme(origin: HTMLElement) {
   const grow = target === "dark";
   const mine = ++generation;
   busy = true;
-  root.dataset["vxVt"] = grow ? "grow" : "shrink";
 
   const finish = () => {
     if (generation !== mine || !busy) return;
@@ -104,7 +103,11 @@ export function toggleTheme(origin: HTMLElement) {
     desired = null;
   };
 
-  const t = doc.startViewTransition(() => write(target, true));
+  // The attribute goes on in the same style recalculation as the theme change (one pass, not two).
+  const t = doc.startViewTransition(() => {
+    root.dataset["vxVt"] = grow ? "grow" : "shrink";
+    write(target, true);
+  });
   t.ready
     .then(() => {
       const circle = [`circle(0px at ${x}px ${y}px)`, `circle(${radius}px at ${x}px ${y}px)`];
