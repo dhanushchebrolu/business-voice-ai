@@ -1,19 +1,14 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect } from "react";
 import { CLICKAI_BRAND, CLICKAI_LEGAL_NAME, CLICKAI_ADDRESS_JSON_LD } from "@/lib/company-info";
-import { LandingNav } from "@/components/landing/landing-nav";
 import { Hero } from "@/components/landing/hero";
-import {
-  ProductShowcase,
-  HowItWorks,
-  IndustriesDark,
-  IntegrationsLedger,
-  WhyClickAI,
-  HomeDemo,
-  HomeFaq,
-} from "@/components/landing/home-sections";
-import { FinalCta } from "@/components/landing/final-cta";
-import { LandingFooter } from "@/components/landing/landing-footer";
+import { VxNav } from "@/components/landing/home/vx-nav";
+import { ProductVisuals } from "@/components/landing/home/product-visuals";
+import { THEME_INIT } from "@/components/landing/home/theme";
+import { VxFooter } from "@/components/landing/home/vx-footer";
+import { ConnectsWith, Gap, Loop } from "@/components/landing/home/sections-a";
+import { Capabilities, Console, Integrations } from "@/components/landing/home/sections-b";
+import { Controls, Cta, Faq, Pricing, Status, Today } from "@/components/landing/home/sections-c";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -34,13 +29,14 @@ export const Route = createFileRoute("/")({
           "AI-powered business solutions: AI Sales Executive, AI Receptionist, AI Booking & Order Agent and AI Customer Care, all on one white-label platform.",
       },
     ],
+    scripts: [{ children: THEME_INIT }],
     links: [
       { rel: "canonical", href: "https://clickai.in/" },
       { rel: "preconnect", href: "https://fonts.googleapis.com" },
       { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" },
       {
         rel: "stylesheet",
-        href: "https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&display=swap",
+        href: "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap",
       },
     ],
   }),
@@ -92,7 +88,7 @@ function useScrollToHashOnMount() {
 function Landing() {
   useScrollToHashOnMount();
   return (
-    <div className="theme-light min-h-screen bg-white">
+    <div className="vx theme-light min-h-screen">
       {/* Static, hardcoded JSON (ORGANIZATION_JSON_LD above) — never user input. */}
       <script
         type="application/ld+json"
@@ -100,23 +96,28 @@ function Landing() {
       />
       <a
         href="#main"
-        className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[60] focus:rounded-md focus:bg-white focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-slate-900 focus:shadow-lg"
+        className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[60] focus:bg-white focus:px-4 focus:py-2 focus:font-vmono focus:text-sm focus:text-[var(--vx-ink)]"
       >
         Skip to main content
       </a>
-      <LandingNav />
+      <VxNav />
       <main id="main" tabIndex={-1} className="outline-none">
         <Hero />
-        <ProductShowcase />
-        <HowItWorks />
-        <IndustriesDark />
-        <IntegrationsLedger />
-        <WhyClickAI />
-        <HomeDemo />
-        <HomeFaq />
-        <FinalCta />
+        <ProductVisuals />
+        <ConnectsWith />
+        <Gap />
+        <Loop />
+        <Capabilities />
+        <Console />
+        <Integrations />
+        <Controls />
+        <Today />
+        <Status />
+        <Pricing />
+        <Faq />
+        <Cta />
       </main>
-      <LandingFooter />
+      <VxFooter />
     </div>
   );
 }
