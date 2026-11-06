@@ -1,17 +1,32 @@
 /**
  * HTTP layer of klyro's internal voice-agent API: body limits, request
  * signing (internal-auth.ts), replay protection, schema validation, and
- * the handlers that call sessions.server.ts. Route files under
- * src/routes/api/internal/voice-agent/ and the LiveKit webhook route are
- * thin wrappers around these functions so they can be tested directly.
+ * rate limits (rate-limits.ts), and the handlers that call
+ * sessions.server.ts. Route files under src/routes/api/internal/voice-agent/
+ * and the LiveKit webhook route are thin wrappers around these functions so
+ * they can be tested directly.
+ *
+ * Outbound calls are NOT started here: the agent's signing key cannot
+ * authorise a dial. They start only from an authenticated user's
+ * organization-scoped server function (outbound.functions.ts). The agent can
+ * only CLAIM a row an owner/admin already created (handleOutboundClaim),
+ * which is where it learns the destination and caller ID.
  */
 import { z } from "zod";
 import { MAX_BODY_BYTES, verifySignedRequest, type KeyId } from "./internal-auth.ts";
 import { SIP_ATTR, participantSeconds, verifyLiveKitWebhook } from "./livekit-webhook.ts";
 import {
+  COUNTED_INTERNAL_FAILURES,
+  COUNTED_WEBHOOK_FAILURES,
+  clientIp,
+  tooManyRequests,
+  type SharedScope,
+  type VoiceAgentLimiter,
+} from "./rate-limits.ts";
+import {
+  claimOutboundCall,
   completeSipCallFromLiveKit,
   endSipSession,
-  prepareOutboundSipCall,
   runSessionTool,
   startSipSession,
   type SessionDeps,
@@ -24,6 +39,7 @@ export interface HttpDeps {
   claimOnce: (provider: string, id: string, payload: Record<string, unknown>) => Promise<boolean>;
   /** Undoes a claim when processing failed, so the sender's retry is processed. */
   releaseClaim: (provider: string, id: string) => Promise<void>;
+  limiter: VoiceAgentLimiter;
   nowSeconds?: () => number;
 }
 
@@ -37,13 +53,53 @@ async function readLimited(request: Request): Promise<string | null> {
   return new TextEncoder().encode(text).length > MAX_BODY_BYTES ? null : text;
 }
 
+/**
+ * Response for a request that failed verification. The signature was
+ * checked first, so only invalid requests ever reach the failure budget:
+ * a counted failure is recorded unless the source is already over budget,
+ * and an over-budget source gets 429 instead of the normal rejection.
+ */
+function rejectAuth(
+  deps: HttpDeps,
+  scope: "internal" | "webhook",
+  ip: string,
+  reason: string,
+  normal: Response,
+): Response {
+  const counted = (scope === "internal" ? COUNTED_INTERNAL_FAILURES : COUNTED_WEBHOOK_FAILURES).has(
+    reason,
+  );
+  const budget = deps.limiter.authFailureBudget(scope, ip);
+  if (!budget.allowed) {
+    console.warn(
+      scope === "internal" ? "voice_agent:rate_limited" : "livekit_webhook:rate_limited",
+      {
+        scope: `${scope}_auth_failures`,
+      },
+    );
+    return tooManyRequests(budget);
+  }
+  if (counted) deps.limiter.recordAuthFailure(scope, ip);
+  return normal;
+}
+
 /** Signature + replay check. Returns the raw body, or a response to send back. */
 async function authenticate(
   request: Request,
   deps: HttpDeps,
 ): Promise<{ body: string } | { response: Response }> {
+  const ip = clientIp(request);
   const body = await readLimited(request);
-  if (body === null) return { response: json(413, { error: "body_too_large" }) };
+  if (body === null)
+    return {
+      response: rejectAuth(
+        deps,
+        "internal",
+        ip,
+        "body_too_large",
+        json(413, { error: "body_too_large" }),
+      ),
+    };
   const url = new URL(request.url);
   const result = await verifySignedRequest({
     secrets: {
@@ -62,9 +118,29 @@ async function authenticate(
     console.warn("voice_agent:auth_rejected", { reason: result.reason, path: url.pathname });
     const status =
       result.reason === "not_configured" ? 503 : result.reason === "body_too_large" ? 413 : 401;
-    return { response: json(status, { error: "unauthorized" }) };
+    return {
+      response: rejectAuth(
+        deps,
+        "internal",
+        ip,
+        result.reason,
+        json(status, { error: "unauthorized" }),
+      ),
+    };
   }
   return { body };
+}
+
+/** Shared (cross-isolate) limit after authentication; null when allowed. */
+async function sharedLimit(
+  deps: HttpDeps,
+  scope: SharedScope,
+  key: string,
+): Promise<Response | null> {
+  const d = await deps.limiter.shared(scope, key);
+  if (d.allowed) return null;
+  console.warn("voice_agent:rate_limited", { scope });
+  return tooManyRequests(d);
 }
 
 function parse<T>(
@@ -83,7 +159,6 @@ function parse<T>(
 }
 
 const id = z.string().min(1).max(128);
-const e164 = z.string().regex(/^\+[1-9]\d{6,14}$/);
 
 const StartSchema = z.object({
   sipCallId: id,
@@ -92,23 +167,29 @@ const StartSchema = z.object({
   callerNumber: z.string().max(32).nullable(),
   direction: z.enum(["inbound", "outbound"]),
   outboundCallLogId: z.string().uuid().optional(),
+  /** The agent's own MAX_CALL_SECONDS (Phase 2.11+ agents). */
+  maxCallSeconds: z.number().int().min(60).max(7200).optional(),
 });
 const ToolSchema = z.object({
   callId: z.string().uuid(),
   tool: z.string().min(1).max(64),
   input: z.record(z.unknown()),
 });
+const ClaimSchema = z.object({
+  callId: z.string().uuid(),
+  roomName: id,
+  jobId: id,
+});
 const EndSchema = z.object({
   callId: z.string().uuid(),
+  jobId: id.optional(),
   reason: z.string().max(200),
   summary: z.string().max(2000).optional(),
   language: z.string().max(16).optional(),
   outcome: z.string().max(64).optional(),
-});
-const OutboundSchema = z.object({
-  organizationId: z.string().uuid(),
-  phoneNumberId: z.string().uuid(),
-  toNumber: e164,
+  /** F1: the reporting agent's room and SIP call id; must match the call. */
+  roomName: id.optional(),
+  sipCallId: id.optional(),
 });
 
 export async function handleSessionStart(request: Request, deps: HttpDeps): Promise<Response> {
@@ -116,9 +197,13 @@ export async function handleSessionStart(request: Request, deps: HttpDeps): Prom
   if ("response" in a) return a.response;
   const p = parse(StartSchema, a.body);
   if (!p.ok) return p.response;
+  const limited = await sharedLimit(deps, "session_start", p.data.calledNumber);
+  if (limited) return limited;
+  const { maxCallSeconds, ...start } = p.data;
   const r = await startSipSession(deps.session, {
-    ...p.data,
+    ...start,
     outboundCallLogId: p.data.outboundCallLogId,
+    agentMaxCallSeconds: maxCallSeconds,
   });
   return json(200, r);
 }
@@ -128,6 +213,8 @@ export async function handleTool(request: Request, deps: HttpDeps): Promise<Resp
   if ("response" in a) return a.response;
   const p = parse(ToolSchema, a.body);
   if (!p.ok) return p.response;
+  const limited = await sharedLimit(deps, "tool", p.data.callId);
+  if (limited) return limited;
   const r = await runSessionTool(deps.session, p.data.callId, p.data.tool, p.data.input);
   if (!r.ok) return json(r.reason === "unknown_call" ? 404 : 403, { error: r.reason });
   return json(200, r);
@@ -138,23 +225,32 @@ export async function handleSessionEnd(request: Request, deps: HttpDeps): Promis
   if ("response" in a) return a.response;
   const p = parse(EndSchema, a.body);
   if (!p.ok) return p.response;
-  return json(200, await endSipSession(deps.session, p.data));
+  const limited = await sharedLimit(deps, "session_end", p.data.callId);
+  if (limited) return limited;
+  const r = await endSipSession(deps.session, p.data);
+  // A report whose room / SIP call id does not match the call is refused
+  // (409) and changes nothing (F1).
+  return json(r.reason === "binding_mismatch" ? 409 : 200, r);
 }
 
 /**
- * Outbound authorisation is OFF unless VOICE_AGENT_OUTBOUND_ENABLED=true.
- * This endpoint trusts the agent's signing key to name any organisation's
- * number (still entitlement-gated and billed); outbound calls should be
- * started from klyro's own authenticated UI before this is enabled.
+ * The agent's claim on an outbound call row, made BEFORE it dials. Returns
+ * the destination and caller ID from the row (never from dispatch
+ * metadata). One job only; the same job may retry (idempotent).
  */
-export async function handleOutboundPrepare(request: Request, deps: HttpDeps): Promise<Response> {
-  if (deps.env("VOICE_AGENT_OUTBOUND_ENABLED") !== "true") return json(404, { error: "not_found" });
+export async function handleOutboundClaim(request: Request, deps: HttpDeps): Promise<Response> {
   const a = await authenticate(request, deps);
   if ("response" in a) return a.response;
-  const p = parse(OutboundSchema, a.body);
+  const p = parse(ClaimSchema, a.body);
   if (!p.ok) return p.response;
-  const r = await prepareOutboundSipCall(deps.session, p.data);
-  return json(r.ok ? 200 : 403, r);
+  const limited = await sharedLimit(deps, "outbound_claim", p.data.callId);
+  if (limited) return limited;
+  const r = await claimOutboundCall(deps.session, p.data);
+  if (!r.ok) {
+    console.warn("voice_agent:outbound_claim_refused", { reason: r.reason });
+    return json(r.reason === "not_found" ? 404 : 409, { error: r.reason });
+  }
+  return json(200, r);
 }
 
 /**
@@ -163,8 +259,20 @@ export async function handleOutboundPrepare(request: Request, deps: HttpDeps): P
  * and bills the call; everything else is acknowledged and ignored.
  */
 export async function handleLiveKitWebhook(request: Request, deps: HttpDeps): Promise<Response> {
+  // The signature is verified FIRST: a correctly signed LiveKit event is
+  // never rate-limited, whatever its source IP has done (LiveKit's egress
+  // may be shared with other LiveKit customers). Only unverifiable requests
+  // count against, and are limited by, their source's failure budget.
+  const ip = clientIp(request);
   const body = await readLimited(request);
-  if (body === null) return json(413, { error: "body_too_large" });
+  if (body === null)
+    return rejectAuth(
+      deps,
+      "webhook",
+      ip,
+      "body_too_large",
+      json(413, { error: "body_too_large" }),
+    );
   const v = await verifyLiveKitWebhook({
     apiKey: deps.env("LIVEKIT_API_KEY"),
     apiSecret: deps.env("LIVEKIT_API_SECRET"),
@@ -174,7 +282,13 @@ export async function handleLiveKitWebhook(request: Request, deps: HttpDeps): Pr
   });
   if (!v.ok) {
     console.warn("livekit_webhook:rejected", { reason: v.reason });
-    return json(v.reason === "not_configured" ? 503 : 401, { error: "unauthorized" });
+    return rejectAuth(
+      deps,
+      "webhook",
+      ip,
+      v.reason,
+      json(v.reason === "not_configured" ? 503 : 401, { error: "unauthorized" }),
+    );
   }
   const ev = v.event;
   const eventId = ev.id ?? `${ev.event}:${ev.room?.sid ?? ""}:${ev.participant?.sid ?? ""}`;
@@ -184,14 +298,18 @@ export async function handleLiveKitWebhook(request: Request, deps: HttpDeps): Pr
   const sipCallId = attrs[SIP_ATTR.callId];
   if (ev.event === "participant_left" && sipCallId) {
     try {
+      const endedAt = Number(ev.createdAt);
       const r = await completeSipCallFromLiveKit(deps.session, {
         sipCallId,
         seconds: participantSeconds(ev),
+        ...(Number.isFinite(endedAt) ? { endedAtSeconds: endedAt } : {}),
       });
       return json(200, { ok: true, handled: r.handled });
     } catch (err) {
-      // Release the claim so LiveKit's retry completes and bills the call
-      // (billing is idempotent per call, so a retry can never double-charge).
+      // Release the claim so LiveKit's retry completes and bills the call.
+      // Billing happens once: the completion is a conditional transition and
+      // a row left "billing: pending" is billed with its stored duration,
+      // by this retry or by the reconcile sweep (sessions.server.ts).
       console.error("livekit_webhook:processing_failed", (err as Error).message);
       await deps.releaseClaim("livekit", eventId).catch(() => undefined);
       return json(500, { error: "processing_failed" });
@@ -203,9 +321,11 @@ export async function handleLiveKitWebhook(request: Request, deps: HttpDeps): Pr
 /** Production HttpDeps (lazy, server-only). */
 export async function defaultHttpDeps(): Promise<HttpDeps> {
   const { defaultSessionDeps } = await import("./sessions.server.ts");
-  const session = await defaultSessionDeps();
+  const { defaultVoiceAgentLimiter } = await import("./rate-limits.ts");
+  const [session, limiter] = await Promise.all([defaultSessionDeps(), defaultVoiceAgentLimiter()]);
   return {
     session,
+    limiter,
     env: (n) => process.env[n],
     claimOnce: async (provider, eventId, payload) => {
       const { error } = await session.db.from("webhook_events").insert({

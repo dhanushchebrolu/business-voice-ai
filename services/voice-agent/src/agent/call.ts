@@ -17,6 +17,7 @@ import {
   KlyroBookingBackend,
   endSession,
   startSession,
+  type OutboundClaim,
   type StartSessionResponse,
 } from "../backend/klyro-backend.ts";
 import type { KlyroClient } from "../backend/klyro-client.ts";
@@ -42,8 +43,31 @@ export interface SipCallInfo {
 export interface CallIO {
   /** Speak a fixed line without the LLM (denials, apologies). */
   say(text: string): Promise<void>;
+  /** Normal end of the call: close the agent session (the room is removed by disconnect()). */
   hangup(reason: string): Promise<void>;
+  /**
+   * After an abnormal session close: speak a short apology on a separate,
+   * TTS-only path (the conversation session is already closed). Bounded by
+   * the caller with a timeout; may reject.
+   */
+  apologize(language: LanguageCode): Promise<void>;
+  /**
+   * Disconnect the SIP caller: delete the room, falling back to removing the
+   * caller. Must be safe to call more than once (idempotent on LiveKit).
+   */
+  disconnect(): Promise<void>;
 }
+
+/** Timings for ending a call; overridable in tests. */
+export interface CallCleanupOptions {
+  /** Upper bound for the apology (TTS may be the thing that failed). */
+  apologyTimeoutMs?: number;
+  /** Waits before each disconnect attempt; the length is the number of attempts. */
+  disconnectBackoffMs?: number[];
+  sleep?: (ms: number) => Promise<void>;
+}
+export const APOLOGY_TIMEOUT_MS = 6_000;
+export const DISCONNECT_BACKOFF_MS = [0, 1_000, 3_000, 8_000];
 
 const DENIED: Record<LanguageCode, string> = {
   "en-IN": "Sorry, this number cannot take calls right now. Please try again later.",
@@ -72,7 +96,21 @@ export type CallDecision =
       instructions: string;
       voiceId: string;
       speakingPace: number;
+      /** klyro's maximum call duration for this call, when it sent a valid one. */
+      maxCallSeconds: number | null;
     };
+
+/**
+ * The call's duration limit: the smaller of the agent's MAX_CALL_SECONDS
+ * and klyro's limit. klyro's room sweep deletes the room of an inbound call
+ * that is still up 5 min after klyro's limit, so the agent must never run a
+ * call longer than klyro allows. An invalid klyro value is ignored.
+ */
+export function effectiveMaxCallSeconds(agentMax: number, klyroMax: number | null): number {
+  return klyroMax !== null && Number.isInteger(klyroMax) && klyroMax >= 60
+    ? Math.min(agentMax, klyroMax)
+    : agentMax;
+}
 
 /** Step 1: ask klyro whether and how to take this call. */
 export async function decideCall(
@@ -80,6 +118,7 @@ export async function decideCall(
   info: SipCallInfo,
   telemetry: CallTelemetry,
   now: () => Date = () => new Date(),
+  agentMaxCallSeconds?: number,
 ): Promise<CallDecision> {
   let r: StartSessionResponse;
   try {
@@ -90,6 +129,7 @@ export async function decideCall(
       callerNumber: info.callerNumber,
       direction: info.direction,
       ...(info.outboundCallLogId ? { outboundCallLogId: info.outboundCallLogId } : {}),
+      ...(agentMaxCallSeconds !== undefined ? { maxCallSeconds: agentMaxCallSeconds } : {}),
     });
   } catch (e) {
     telemetry.emit("provider.error", {
@@ -136,6 +176,7 @@ export async function decideCall(
     instructions: b.instructions,
     voiceId: b.voiceId,
     speakingPace: b.speakingPace,
+    maxCallSeconds: typeof r.maxCallSeconds === "number" ? r.maxCallSeconds : null,
   };
 }
 
@@ -164,10 +205,26 @@ export function developmentDecision(
     instructions: "",
     voiceId: "priya",
     speakingPace: 1,
+    maxCallSeconds: null,
   };
 }
 
-/** Steps 2–4 for an accepted call, around an AgentSession the worker built. */
+/**
+ * Steps 2–4 for an accepted call, around an AgentSession the worker built.
+ *
+ * How a call ends:
+ *  - normal end we initiate (silence, maximum length): close the session,
+ *    disconnect the caller;
+ *  - the caller hangs up (CloseReason participant_disconnected): nothing to
+ *    clean up, not an error;
+ *  - any other session close (CloseReason error after repeated STT/LLM/TTS
+ *    failures, job_shutdown, unknown): the caller is still on the line ->
+ *    a short apology in their language (skipped when TTS is what failed,
+ *    bounded by APOLOGY_TIMEOUT_MS), then disconnect.
+ * Disconnect is retried with backoff; if every attempt fails,
+ * "call.cleanup_failed" is emitted (alert) and the call still finishes, so
+ * the job never hangs on cleanup. Duplicate close events are ignored.
+ */
 export function attachCallGuards(p: {
   session: voice.AgentSession;
   agent: ReceptionistAgent;
@@ -175,16 +232,68 @@ export function attachCallGuards(p: {
   io: CallIO;
   maxCallSeconds: number;
   events: typeof voice.AgentSessionEventTypes;
+  cleanup?: CallCleanupOptions;
 }): { finished: Promise<{ reason: string }> } {
   const { session, agent, telemetry, io, events } = p;
+  const apologyTimeoutMs = p.cleanup?.apologyTimeoutMs ?? APOLOGY_TIMEOUT_MS;
+  const backoff = p.cleanup?.disconnectBackoffMs ?? DISCONNECT_BACKOFF_MS;
+  const sleep = p.cleanup?.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   let away = 0;
+  let settled = false; // `finished` resolved
+  let closing = false; // we started ending the call (normal or abnormal)
   let resolveDone!: (v: { reason: string }) => void;
   const finished = new Promise<{ reason: string }>((r) => (resolveDone = r));
+  const settle = (reason: string) => {
+    if (settled) return;
+    settled = true;
+    resolveDone({ reason });
+  };
+  const disconnect = async (reason: string) => {
+    for (let attempt = 0; attempt < backoff.length; attempt++) {
+      if (backoff[attempt]! > 0) await sleep(backoff[attempt]!);
+      try {
+        await io.disconnect();
+        return;
+      } catch (e) {
+        telemetry.emit("room.disconnect_failed", {
+          reason,
+          attempt: attempt + 1,
+          error: (e as Error).message,
+        });
+      }
+    }
+    telemetry.emit("call.cleanup_failed", { reason, attempts: backoff.length });
+  };
   const end = async (reason: string) => {
+    if (closing || settled) return;
+    closing = true;
     clearTimeout(maxTimer);
     telemetry.emit("call.ending", { reason });
     await io.hangup(reason).catch(() => undefined);
-    resolveDone({ reason });
+    await disconnect(reason);
+    settle(reason);
+  };
+  const abort = async (reason: string, errorType: string | null) => {
+    closing = true;
+    clearTimeout(maxTimer);
+    telemetry.emit("call.aborted", { reason, error_type: errorType });
+    if (!errorType || !/tts/i.test(errorType)) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          io.apologize(agent.deps.state.language.current),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error("apology_timeout")), apologyTimeoutMs);
+          }),
+        ]);
+      } catch (e) {
+        telemetry.emit("call.apology_failed", { reason, error: (e as Error).message });
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+    await disconnect(reason);
+    settle(reason);
   };
   // Not unref'd: it is always cleared when the call ends (end() / Close).
   const maxTimer = setTimeout(() => void end("max_duration"), p.maxCallSeconds * 1000);
@@ -240,8 +349,23 @@ export function attachCallGuards(p: {
     });
   });
   session.on(events.Close, (ev) => {
+    const reason = String(ev.reason);
+    // Our own end() (closes with user_initiated), or a duplicate event.
+    if (closing || settled) return;
     clearTimeout(maxTimer);
-    resolveDone({ reason: String(ev.reason) });
+    if (reason === "participant_disconnected") {
+      settle(reason); // the caller hung up: normal, nothing to clean up
+      return;
+    }
+    if (reason === "user_initiated") {
+      // Our own code closed the session outside end(): not an error, no
+      // apology, but make sure the caller is not left on the line.
+      closing = true;
+      void disconnect(reason).then(() => settle(reason));
+      return;
+    }
+    const err = (ev as { error?: { type?: string } | null }).error;
+    void abort(reason, err?.type ?? null);
   });
   return { finished };
 }
@@ -266,6 +390,8 @@ export async function reportEnd(
   reason: string,
   state: ConversationState,
   telemetry: CallTelemetry,
+  /** The call's room and sip.callID: klyro binds the report to the call (F1). */
+  binding?: { roomName: string; sipCallId: string },
 ): Promise<void> {
   const outcome =
     state.booking.status === "confirmed"
@@ -288,6 +414,7 @@ export async function reportEnd(
     summary,
     language: state.language.current,
     outcome,
+    ...(binding ? { roomName: binding.roomName, sipCallId: binding.sipCallId } : {}),
   }).catch((e) =>
     telemetry.emit("provider.error", {
       provider: "klyro",
@@ -295,6 +422,120 @@ export async function reportEnd(
       error: (e as Error).message,
     }),
   );
+}
+
+/**
+ * Explicit dispatch metadata klyro sets for an outbound call
+ * (outbound.server.ts): only the call row id. Destination, caller ID and
+ * trunk are deliberately NOT taken from metadata; the destination and
+ * caller ID come from klyro's claim, the trunk from this agent's config.
+ */
+export interface OutboundDispatch {
+  outboundCallLogId: string;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const E164_RE = /^\+[1-9]\d{6,14}$/;
+
+/**
+ * Parses job metadata. Anything malformed is "not outbound" (null): the job
+ * is then handled as an inbound SIP call, which klyro still has to
+ * authorise at session start. Any other field (toNumber, fromNumber,
+ * outboundTrunkId, ...) is ignored.
+ */
+export function parseOutboundDispatch(raw: string | undefined): OutboundDispatch | null {
+  let m: unknown;
+  try {
+    m = JSON.parse(raw || "{}");
+  } catch {
+    return null;
+  }
+  if (!m || typeof m !== "object" || Array.isArray(m)) return null;
+  const id = (m as Record<string, unknown>)["outboundCallLogId"];
+  if (typeof id !== "string" || !UUID_RE.test(id)) return null;
+  return { outboundCallLogId: id };
+}
+
+export interface DialOptions {
+  fromNumber: string;
+  participantIdentity: string;
+  waitUntilAnswered: boolean;
+  ringingTimeout: number;
+  maxCallDuration: number;
+  participantAttributes: Record<string, string>;
+}
+
+export type DialResult =
+  | { ok: true; toNumber: string; fromNumber: string }
+  /** owned=false: another job owns (or may own) this call; touch nothing. */
+  | { ok: false; reason: string; owned: boolean };
+
+/**
+ * Claim, then dial. Order matters:
+ *  1. Claim the row from klyro (signed; idempotent for this job). Refused or
+ *     unreachable -> do NOT dial and do NOT touch the room: a duplicate
+ *     dispatch shares the room with the job that owns the call.
+ *  2. Dial the destination klyro returned, with the caller ID klyro
+ *     returned, through this agent's own configured trunk.
+ *  3. Dial failed (busy, no answer, rejected) or no trunk configured: tell
+ *     klyro (the row is closed as failed, never billed) and delete the room
+ *     so no stray SIP leg is left in it.
+ */
+export async function dialOutbound(p: {
+  dispatch: OutboundDispatch;
+  jobId: string;
+  trunkId: string | undefined;
+  roomName: string;
+  maxCallSeconds: number;
+  ringingTimeoutSeconds?: number;
+  claim: (p: { callId: string; roomName: string; jobId: string }) => Promise<OutboundClaim>;
+  dial: (trunkId: string, to: string, room: string, opts: DialOptions) => Promise<unknown>;
+  deleteRoom: () => Promise<void>;
+  client: KlyroClient;
+  telemetry: CallTelemetry;
+}): Promise<DialResult> {
+  const callId = p.dispatch.outboundCallLogId;
+  let claimed: OutboundClaim;
+  try {
+    claimed = await p.claim({ callId, roomName: p.roomName, jobId: p.jobId });
+    if (!E164_RE.test(claimed.toNumber) || !E164_RE.test(claimed.fromNumber))
+      throw new Error("claim_returned_invalid_numbers");
+  } catch (err) {
+    const reason = `claim_refused:${String((err as { code?: unknown }).code ?? "error")
+      .toLowerCase()
+      .replace(/[^a-z0-9_]/g, "_")
+      .slice(0, 40)}`;
+    p.telemetry.emit("call.claim_refused", { reason });
+    return { ok: false, reason, owned: false };
+  }
+  let reason: string;
+  if (!p.trunkId) {
+    reason = "dial_failed:no_outbound_trunk";
+  } else {
+    try {
+      await p.dial(p.trunkId, claimed.toNumber, p.roomName, {
+        fromNumber: claimed.fromNumber,
+        participantIdentity: "callee",
+        waitUntilAnswered: true,
+        ringingTimeout: p.ringingTimeoutSeconds ?? 30,
+        maxCallDuration: p.maxCallSeconds,
+        participantAttributes: { "clickai.callLogId": callId },
+      });
+      return { ok: true, toNumber: claimed.toNumber, fromNumber: claimed.fromNumber };
+    } catch (err) {
+      const code = String((err as { code?: unknown }).code ?? "error")
+        .toLowerCase()
+        .replace(/[^a-z0-9_]/g, "_")
+        .slice(0, 40);
+      reason = `dial_failed:${code}`;
+    }
+  }
+  p.telemetry.emit("call.dial_failed", { reason });
+  await endSession(p.client, { callId, reason, jobId: p.jobId }).catch(() =>
+    p.telemetry.emit("klyro.end_failed", { reason }),
+  );
+  await p.deleteRoom().catch(() => p.telemetry.emit("room.delete_failed", { reason }));
+  return { ok: false, reason, owned: true };
 }
 
 export { DENIED, UNAVAILABLE };

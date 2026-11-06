@@ -18,9 +18,15 @@ spec:
     metadata:
       labels: { app: voice-agent }
     spec:
-      # SIGTERM -> the worker drains (stops taking calls, lets active calls finish
-      # up to DRAIN_TIMEOUT_MS = 15 min). Grace period must exceed the drain timeout.
-      terminationGracePeriodSeconds: 960
+      # SIGTERM -> tini (PID 1) -> the worker drains (stops taking calls, lets
+      # active calls finish). DRAIN_TIMEOUT_MS (default 31 min) covers the
+      # longest call (MAX_CALL_SECONDS, default 30 min) + 60 s; the worker
+      # refuses to start otherwise. The shutdown watchdog
+      # (src/runtime/shutdown.ts) exits within ~5 s when no call is active and
+      # at the latest at DRAIN_TIMEOUT_MS + 30 s = 1890 s, so this grace period
+      # (1920 s) is never what ends a draining pod. If you raise
+      # DRAIN_TIMEOUT_MS, raise this too (tests/runtime.spec.ts checks it).
+      terminationGracePeriodSeconds: 1920
       securityContext: { runAsNonRoot: true, runAsUser: 1000 }
       containers:
         - name: voice-agent

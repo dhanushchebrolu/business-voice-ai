@@ -99,6 +99,12 @@ function stats(xs: number[]) {
   const SECRET = "b".repeat(40);
   const deps: HttpDeps = {
     env: (n) => (n === "VOICE_AGENT_HMAC_SECRET" ? SECRET : undefined),
+    // Allow-all here; the real limiter adds one Postgres round trip per call (not measured).
+    limiter: {
+      preAuth: () => ({ allowed: true, retryAfterSeconds: 0 }),
+      shared: async () => ({ allowed: true, retryAfterSeconds: 0 }),
+    },
+    releaseClaim: async () => undefined,
     claimOnce: (() => {
       const seen = new Set<string>();
       return async (_p: string, id: string) => (seen.has(id) ? false : (seen.add(id), true));

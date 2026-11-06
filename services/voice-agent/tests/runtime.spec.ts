@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { describe, test } from "node:test";
-import { attachCallGuards, decideCall } from "../src/agent/call.ts";
+import { attachCallGuards, decideCall, reportEnd } from "../src/agent/call.ts";
 import { ReceptionistAgent } from "../src/agent/receptionist.ts";
 import { InMemoryBookingBackend } from "../src/backend/in-memory.ts";
 import { KlyroClient } from "../src/backend/klyro-client.ts";
@@ -144,6 +144,35 @@ describe("call lifecycle", () => {
     assert.equal(d.state.language.current, "te-IN");
     assert.equal(d.state.phone?.provenance, "inferred");
     assert.equal(d.business.services[0]!.priceInr, 800);
+    assert.equal(d.maxCallSeconds, null, "older klyro: no limit sent");
+  });
+  test("klyro's maximum call duration is passed through to the call guards' limit", async () => {
+    const d = await decideCall(
+      client({
+        allowed: true,
+        callId: "c3",
+        callerNumber: null,
+        tools: [],
+        maxCallSeconds: 900,
+        business: {
+          name: "B",
+          timezone: "Asia/Kolkata",
+          country: "IN",
+          currency: "INR",
+          services: [],
+          agentName: "A",
+          primaryLanguage: "en-IN",
+          extraLanguages: [],
+          greetings: {},
+          voiceId: "priya",
+          speakingPace: 1,
+          instructions: "",
+        },
+      }),
+      info,
+      telemetry(),
+    );
+    assert.equal(d.kind === "accept" && d.maxCallSeconds, 900);
   });
 
   function fakeSession() {
@@ -186,7 +215,12 @@ describe("call lifecycle", () => {
       telemetry: telemetry(),
       events: EVENTS as never,
       maxCallSeconds: 600,
-      io: { say: async () => undefined, hangup: async (r) => void hung.push(r) },
+      io: {
+        say: async () => undefined,
+        hangup: async (r) => void hung.push(r),
+        apologize: async () => undefined,
+        disconnect: async () => undefined,
+      },
     });
     f.em.emit("usc", { newState: "away" });
     assert.equal(hung.length, 0);
@@ -204,7 +238,12 @@ describe("call lifecycle", () => {
       telemetry: telemetry(),
       events: EVENTS as never,
       maxCallSeconds: 0.05,
-      io: { say: async () => undefined, hangup: async (r) => void hung.push(r) },
+      io: {
+        say: async () => undefined,
+        hangup: async (r) => void hung.push(r),
+        apologize: async () => undefined,
+        disconnect: async () => undefined,
+      },
     });
     assert.deepEqual(await g.finished, { reason: "max_duration" });
   });
@@ -217,7 +256,12 @@ describe("call lifecycle", () => {
       telemetry: t,
       events: EVENTS as never,
       maxCallSeconds: 600,
-      io: { say: async () => undefined, hangup: async () => undefined },
+      io: {
+        say: async () => undefined,
+        hangup: async () => undefined,
+        apologize: async () => undefined,
+        disconnect: async () => undefined,
+      },
     });
     f.em.emit("cia", { item: { type: "message", role: "assistant", interrupted: true } });
     f.em.emit("err", {
@@ -282,5 +326,299 @@ describe("dates and intents (timezone-aware)", () => {
     assert.equal(i("can I reschedule my appointment"), "reschedule");
     assert.equal(i("कल कोई स्लॉट खाली है?"), "availability");
     assert.equal(i("mujhe appointment book karna hai"), "book");
+  });
+});
+
+describe("F5: drain timeout covers the longest call", () => {
+  test("defaults are consistent; a drain shorter than a call (+60 s) is refused at start-up", () => {
+    const c = loadConfig(BASE);
+    assert.ok(c.DRAIN_TIMEOUT_MS >= c.MAX_CALL_SECONDS * 1000 + 60_000);
+    assert.throws(
+      () => loadConfig({ ...BASE, DRAIN_TIMEOUT_MS: "900000", MAX_CALL_SECONDS: "1800" }),
+      /DRAIN_TIMEOUT_MS must be at least MAX_CALL_SECONDS \+ 60 s/,
+    );
+    assert.doesNotThrow(() =>
+      loadConfig({ ...BASE, DRAIN_TIMEOUT_MS: "900000", MAX_CALL_SECONDS: "780" }),
+    );
+  });
+  test("the k8s grace period exceeds the default drain + the watchdog's 30 s margin", async () => {
+    const { readFileSync } = await import("node:fs");
+    const yaml = readFileSync(new URL("../deploy/k8s/voice-agent.yaml", import.meta.url), "utf8");
+    const grace = Number(yaml.match(/terminationGracePeriodSeconds:\s*(\d+)/)?.[1]);
+    const drain = loadConfig(BASE).DRAIN_TIMEOUT_MS / 1000;
+    assert.ok(grace > drain + 30, `grace ${grace}s must exceed drain ${drain}s + 30s`);
+    assert.doesNotMatch(
+      yaml,
+      /DRAIN_TIMEOUT_MS[^\n]*value/,
+      "no manifest override that could break the check",
+    );
+  });
+});
+
+describe("H-B: provider failure ends the call cleanly (apology, disconnect, no silent line)", () => {
+  const EV = {
+    UserInputTranscribed: "uit",
+    ConversationItemAdded: "cia",
+    MetricsCollected: "mc",
+    UserStateChanged: "usc",
+    Error: "err",
+    Close: "close",
+  };
+  function harness(
+    o: {
+      apologize?: () => Promise<void>;
+      disconnect?: () => Promise<void>;
+      language?: "en-IN" | "hi-IN" | "te-IN";
+      apologyTimeoutMs?: number;
+      backoff?: number[];
+    } = {},
+  ) {
+    const em = new EventEmitter();
+    const calls: string[] = [];
+    const lines: string[] = [];
+    const telemetry = new CallTelemetry({ callId: "c1", sipCallId: "SCL_1", room: "r" }, (l) =>
+      lines.push(l),
+    );
+    const ag = new ReceptionistAgent({
+      business: {
+        businessName: "x",
+        timeZone: "Asia/Kolkata",
+        services: [],
+        now: () => new Date(),
+      },
+      backend: new InMemoryBookingBackend({ timeZoneOffset: "+05:30", openHours: [] }),
+      state: newConversation({
+        callId: "c1",
+        callerId: null,
+        primaryLanguage: o.language ?? "hi-IN",
+      }),
+    });
+    const g = attachCallGuards({
+      session: Object.assign(em, {
+        say: () => ({ waitForPlayout: async () => undefined }),
+      }) as never,
+      agent: ag,
+      telemetry,
+      events: EV as never,
+      maxCallSeconds: 600,
+      io: {
+        say: async () => undefined,
+        hangup: async (r) => void calls.push(`hangup:${r}`),
+        apologize: async (lang) => {
+          calls.push(`apologize:${lang}`);
+          await (o.apologize ?? (async () => undefined))();
+        },
+        disconnect: async () => {
+          calls.push("disconnect");
+          await (o.disconnect ?? (async () => undefined))();
+        },
+      },
+      cleanup: {
+        apologyTimeoutMs: o.apologyTimeoutMs ?? 50,
+        disconnectBackoffMs: o.backoff ?? [0, 0, 0],
+        sleep: async () => undefined,
+      },
+    });
+    const events = () => lines.map((l) => JSON.parse(l).event as string);
+    return { em, calls, events, g };
+  }
+
+  test("CloseReason.ERROR: apology in the caller's language, then disconnect; finished = error", async () => {
+    const h = harness({ language: "te-IN" });
+    h.em.emit("close", { reason: "error", error: { type: "stt_error" } });
+    assert.deepEqual(await h.g.finished, { reason: "error" });
+    assert.deepEqual(h.calls, ["apologize:te-IN", "disconnect"]);
+    assert.ok(h.events().includes("call.aborted"));
+  });
+  test("repeated STT failures (recoverable errors, then the framework closes): one apology, one disconnect", async () => {
+    const h = harness();
+    for (let i = 0; i < 3; i++)
+      h.em.emit("err", {
+        error: { type: "stt_error", recoverable: false, error: new Error("sarvam ws closed") },
+      });
+    assert.deepEqual(h.calls, [], "errors alone do not end the call; the framework decides");
+    h.em.emit("close", { reason: "error", error: { type: "stt_error" } });
+    await h.g.finished;
+    assert.deepEqual(h.calls, ["apologize:hi-IN", "disconnect"]);
+    assert.equal(h.events().filter((e) => e === "provider.error").length, 3);
+  });
+  test("LLM failure: apology (TTS still works), then disconnect", async () => {
+    const h = harness();
+    h.em.emit("close", { reason: "error", error: { type: "llm_error" } });
+    await h.g.finished;
+    assert.deepEqual(h.calls, ["apologize:hi-IN", "disconnect"]);
+  });
+  test("TTS failure: no apology attempt (TTS is what failed), straight to disconnect", async () => {
+    const h = harness();
+    h.em.emit("close", { reason: "error", error: { type: "tts_error" } });
+    await h.g.finished;
+    assert.deepEqual(h.calls, ["disconnect"]);
+  });
+  test("the apology never blocks cleanup: a hanging apology times out, the caller is still disconnected", async () => {
+    const h = harness({
+      apologize: () => new Promise<void>(() => undefined),
+      apologyTimeoutMs: 20,
+    });
+    const t0 = Date.now();
+    h.em.emit("close", { reason: "error", error: { type: "llm_error" } });
+    await h.g.finished;
+    assert.ok(Date.now() - t0 < 1000);
+    assert.deepEqual(h.calls, ["apologize:hi-IN", "disconnect"]);
+    assert.ok(h.events().includes("call.apology_failed"));
+  });
+  test("caller hangs up during cleanup: apology fails, disconnect still runs (idempotent), no duplicate cleanup", async () => {
+    const h = harness({
+      apologize: async () => {
+        throw new Error("participant disconnected");
+      },
+    });
+    h.em.emit("close", { reason: "error", error: { type: "stt_error" } });
+    h.em.emit("close", { reason: "participant_disconnected" }); // the caller left meanwhile
+    await h.g.finished;
+    assert.deepEqual(h.calls, ["apologize:hi-IN", "disconnect"]);
+  });
+  test("room deletion failure: retried; succeeds on a later attempt", async () => {
+    let n = 0;
+    const h = harness({
+      disconnect: async () => {
+        if (++n < 3) throw new Error("twirp unavailable");
+      },
+    });
+    h.em.emit("close", { reason: "error", error: { type: "llm_error" } });
+    await h.g.finished;
+    assert.equal(h.calls.filter((c) => c === "disconnect").length, 3);
+    assert.equal(h.events().filter((e) => e === "room.disconnect_failed").length, 2);
+    assert.ok(!h.events().includes("call.cleanup_failed"));
+  });
+  test("room deletion keeps failing: bounded attempts, cleanup_failed alert, and the call still finishes", async () => {
+    const h = harness({
+      disconnect: async () => {
+        throw new Error("livekit down");
+      },
+      backoff: [0, 0, 0, 0],
+    });
+    h.em.emit("close", { reason: "job_shutdown" });
+    assert.deepEqual(await h.g.finished, { reason: "job_shutdown" });
+    assert.equal(h.calls.filter((c) => c === "disconnect").length, 4);
+    assert.ok(h.events().includes("call.cleanup_failed"));
+  });
+  test("duplicate close events: cleanup runs once", async () => {
+    const h = harness();
+    h.em.emit("close", { reason: "error", error: { type: "stt_error" } });
+    h.em.emit("close", { reason: "error", error: { type: "stt_error" } });
+    h.em.emit("close", { reason: "job_shutdown" });
+    await h.g.finished;
+    await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(h.calls, ["apologize:hi-IN", "disconnect"]);
+  });
+  test("normal caller hang-up is not an error: no apology, no cleanup", async () => {
+    const h = harness();
+    h.em.emit("close", { reason: "participant_disconnected" });
+    assert.deepEqual(await h.g.finished, { reason: "participant_disconnected" });
+    assert.deepEqual(h.calls, []);
+    assert.ok(!h.events().includes("call.aborted"));
+  });
+  test("our own hang-up (silence) closes with user_initiated: not treated as an error; the room is still removed", async () => {
+    const h = harness();
+    h.em.emit("usc", { newState: "away" });
+    h.em.emit("usc", { newState: "away" });
+    await new Promise((r) => setImmediate(r)); // goodbye played; end("silence") running
+    h.em.emit("close", { reason: "user_initiated" }); // emitted by session.close() inside end()
+    assert.deepEqual(await h.g.finished, { reason: "silence" });
+    assert.deepEqual(h.calls, ["hangup:silence", "disconnect"]);
+    assert.ok(!h.events().includes("call.aborted"));
+  });
+  test("a user_initiated close from any other path: no apology, but the caller is disconnected", async () => {
+    const h = harness();
+    h.em.emit("close", { reason: "user_initiated" });
+    assert.deepEqual(await h.g.finished, { reason: "user_initiated" });
+    assert.deepEqual(h.calls, ["disconnect"]);
+    assert.ok(!h.events().includes("call.aborted"));
+  });
+});
+
+describe("Phase 2.11: the agent binds its reports and states its own limit", () => {
+  const capture = () => {
+    const posts: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const client = new KlyroClient({
+      baseUrl: "https://k",
+      secret: "s".repeat(32),
+      retries: 0,
+      fetchImpl: (async (url: string, init: RequestInit) => {
+        posts.push({ url, body: JSON.parse(String(init.body)) as Record<string, unknown> });
+        return new Response(
+          JSON.stringify({ allowed: false, reason: "x", callId: null, ok: true }),
+          {
+            status: 200,
+          },
+        );
+      }) as unknown as typeof fetch,
+    });
+    return { posts, client };
+  };
+  const tel = () =>
+    new CallTelemetry({ callId: "c", sipCallId: "SCL_1", room: "call-_r" }, () => undefined);
+
+  test("session start sends the agent's MAX_CALL_SECONDS (klyro records min(klyro, agent) per call)", async () => {
+    const { posts, client } = capture();
+    await decideCall(
+      client,
+      {
+        roomName: "call-_r",
+        sipCallId: "SCL_1",
+        calledNumber: "+918000000001",
+        callerNumber: null,
+        direction: "inbound",
+      },
+      tel(),
+      undefined,
+      2400,
+    );
+    assert.equal(posts[0]!.body["maxCallSeconds"], 2400);
+  });
+  test("the end report carries the call's room and sip.callID (klyro refuses a mismatch)", async () => {
+    const { posts, client } = capture();
+    await reportEnd(
+      client,
+      "11111111-1111-4111-8111-111111111111",
+      "goodbye",
+      newConversation({ callId: "c", callerId: null, primaryLanguage: "en-IN" }),
+      tel(),
+      { roomName: "call-_r", sipCallId: "SCL_1" },
+    );
+    assert.equal(posts[0]!.url, "https://k/api/internal/voice-agent/session-end");
+    assert.equal(posts[0]!.body["roomName"], "call-_r");
+    assert.equal(posts[0]!.body["sipCallId"], "SCL_1");
+  });
+});
+
+describe("F13: the agent refuses unexpected LiveKit hosts outside development", () => {
+  const prod = { ...BASE, APP_ENV: "production" };
+  test("foreign, look-alike, credential-carrying and path URLs are refused; *.livekit.cloud and allow-listed hosts pass", () => {
+    for (const url of [
+      "wss://evil.example",
+      "wss://proj.livekit.cloud.evil.example",
+      "wss://livekit.cloud",
+      "wss://user:pw@proj.livekit.cloud",
+      "wss://proj.livekit.cloud/x",
+    ])
+      assert.throws(() => loadConfig({ ...prod, LIVEKIT_URL: url }), /LIVEKIT_URL/, url);
+    assert.equal(
+      loadConfig({ ...prod, LIVEKIT_URL: "wss://proj.livekit.cloud" }).LIVEKIT_URL,
+      "wss://proj.livekit.cloud",
+    );
+    assert.equal(
+      loadConfig({
+        ...prod,
+        LIVEKIT_URL: "wss://lk.internal.example",
+        LIVEKIT_ALLOWED_HOSTS: "lk.internal.example",
+      }).LIVEKIT_URL,
+      "wss://lk.internal.example",
+    );
+    // development keeps the local server usable
+    assert.equal(
+      loadConfig({ ...BASE, APP_ENV: "development", LIVEKIT_URL: "ws://localhost:7880" }).APP_ENV,
+      "development",
+    );
   });
 });

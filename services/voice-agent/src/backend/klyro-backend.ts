@@ -30,6 +30,8 @@ export type StartSessionResponse =
       business: SessionBusiness;
       tools: string[];
       callerNumber: string | null;
+      /** klyro's maximum call duration (seconds); absent from older klyro versions. */
+      maxCallSeconds?: number;
     }
   | { allowed: false; reason: string; callId: string | null };
 
@@ -37,7 +39,29 @@ export const PATHS = {
   session: "/api/internal/voice-agent/session",
   tool: "/api/internal/voice-agent/tool",
   sessionEnd: "/api/internal/voice-agent/session-end",
+  outboundClaim: "/api/internal/voice-agent/outbound-claim",
 } as const;
+
+export interface OutboundClaim {
+  ok: true;
+  callId: string;
+  /** Authoritative, from klyro's call row. */
+  toNumber: string;
+  /** The organization's own number (caller ID), from klyro's call row. */
+  fromNumber: string;
+}
+
+/**
+ * Claims an outbound call row before dialling. Idempotent per LiveKit job
+ * id, so retries are safe; klyro refuses (409/404) any other job, an expired
+ * row, or a call that already ended. Throws KlyroError on refusal.
+ */
+export async function claimOutbound(
+  client: KlyroClient,
+  p: { callId: string; roomName: string; jobId: string },
+): Promise<OutboundClaim> {
+  return client.post<OutboundClaim>(PATHS.outboundClaim, p, { idempotent: true });
+}
 
 export async function startSession(
   client: KlyroClient,
@@ -48,6 +72,8 @@ export async function startSession(
     callerNumber: string | null;
     direction: "inbound" | "outbound";
     outboundCallLogId?: string;
+    /** This agent's own MAX_CALL_SECONDS: klyro records min(klyro's, this) per call. */
+    maxCallSeconds?: number;
   },
 ): Promise<StartSessionResponse> {
   return client.post<StartSessionResponse>(PATHS.session, p, { idempotent: true });
@@ -55,7 +81,18 @@ export async function startSession(
 
 export async function endSession(
   client: KlyroClient,
-  p: { callId: string; reason: string; summary?: string; language?: string; outcome?: string },
+  p: {
+    callId: string;
+    reason: string;
+    /** Required by klyro to close a call this job is dialling. */
+    jobId?: string;
+    summary?: string;
+    language?: string;
+    outcome?: string;
+    /** The call's LiveKit room and sip.callID: klyro refuses a report that does not match. */
+    roomName?: string;
+    sipCallId?: string;
+  },
 ): Promise<void> {
   await client.post(PATHS.sessionEnd, p, { idempotent: true });
 }

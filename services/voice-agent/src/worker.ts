@@ -14,6 +14,7 @@
  */
 import { fileURLToPath } from "node:url";
 import {
+  AgentServer,
   cli,
   defineAgent,
   llm,
@@ -26,11 +27,23 @@ import * as anthropic from "@livekit/agents-plugin-anthropic";
 import * as openai from "@livekit/agents-plugin-openai";
 import * as sarvam from "@livekit/agents-plugin-sarvam";
 import * as silero from "@livekit/agents-plugin-silero";
-import { SipClient } from "livekit-server-sdk";
-import { attachCallGuards, decideCall, reportEnd, type SipCallInfo } from "./agent/call.ts";
+import { RoomServiceClient, SipClient } from "livekit-server-sdk";
+import { createSarvamLlm } from "./agent/sarvam-llm.ts";
+import {
+  UNAVAILABLE,
+  attachCallGuards,
+  decideCall,
+  effectiveMaxCallSeconds,
+  dialOutbound,
+  parseOutboundDispatch,
+  reportEnd,
+  type SipCallInfo,
+} from "./agent/call.ts";
 import { ReceptionistAgent } from "./agent/receptionist.ts";
+import { claimOutbound } from "./backend/klyro-backend.ts";
 import { KlyroClient } from "./backend/klyro-client.ts";
 import { loadConfig, type Config } from "./runtime/config.ts";
+import { activeJobsOf, captureAgentServer, installShutdownWatchdog } from "./runtime/shutdown.ts";
 import { CallTelemetry, maskPhone } from "./runtime/telemetry.ts";
 
 /**
@@ -96,6 +109,15 @@ const V3_SPEAKERS = new Set([
 ]);
 
 export function buildLlm(c: Config): llm.LLM {
+  if (c.LLM_PROVIDER === "sarvam") {
+    // Sarvam only: no Anthropic, no FallbackAdapter (Phase 2.18).
+    return createSarvamLlm({
+      apiKey: c.SARVAM_API_KEY,
+      model: c.SARVAM_LLM_MODEL,
+      baseURL: c.SARVAM_LLM_BASE_URL,
+      ...(c.SARVAM_LLM_REASONING_EFFORT ? { reasoningEffort: c.SARVAM_LLM_REASONING_EFFORT } : {}),
+    });
+  }
   const llms: llm.LLM[] = [];
   if (c.ANTHROPIC_API_KEY) {
     llms.push(
@@ -122,28 +144,22 @@ export function buildLlm(c: Config): llm.LLM {
   return llms.length === 1 ? llms[0]! : new llm.FallbackAdapter({ llms, attemptTimeout: 6 });
 }
 
-function callInfo(ctx: JobContext, attrs: Record<string, string>): SipCallInfo | null {
-  const meta = (() => {
-    try {
-      return JSON.parse(ctx.job.metadata || "{}") as {
-        outboundCallLogId?: string;
-        toNumber?: string;
-        fromNumber?: string;
-      };
-    } catch {
-      return {};
-    }
-  })();
+function callInfo(
+  ctx: JobContext,
+  attrs: Record<string, string>,
+  outbound: { callId: string; toNumber: string } | null,
+): SipCallInfo | null {
   const sipCallId = attrs[SIP.callId];
   if (!sipCallId) return null;
-  if (meta.outboundCallLogId) {
+  if (outbound) {
+    // Destination from klyro's claim, not from dispatch metadata.
     return {
       roomName: ctx.room.name ?? "",
       sipCallId,
-      calledNumber: meta.toNumber ?? attrs[SIP.caller] ?? "",
-      callerNumber: meta.toNumber ?? null,
+      calledNumber: outbound.toNumber,
+      callerNumber: outbound.toNumber,
       direction: "outbound",
-      outboundCallLogId: meta.outboundCallLogId,
+      outboundCallLogId: outbound.callId,
     };
   }
   return {
@@ -164,30 +180,54 @@ export default defineAgent({
     const joinedAt = Date.now();
     await ctx.connect();
 
-    // Outbound: klyro authorised the dial (prepareOutboundSipCall) and the
-    // dispatch metadata carries its call row; dial through the outbound trunk.
-    let meta: { outboundCallLogId?: string; toNumber?: string; outboundTrunkId?: string } = {};
-    try {
-      meta = JSON.parse(ctx.job.metadata || "{}");
-    } catch {
-      meta = {}; // malformed dispatch metadata: treat as an inbound call
-    }
-    if (meta.outboundCallLogId && meta.toNumber && meta.outboundTrunkId) {
+    const client = new KlyroClient({
+      baseUrl: c.KLYRO_BASE_URL,
+      secret: c.VOICE_AGENT_HMAC_SECRET,
+      keyId: c.VOICE_AGENT_HMAC_KEY_ID,
+      timeoutMs: c.KLYRO_TIMEOUT_MS,
+    });
+
+    // Outbound: an owner/admin created the call row (outbound.functions.ts);
+    // the dispatch metadata names only that row. Claim it from klyro (one
+    // job only), then dial the destination and caller ID klyro returns,
+    // through this agent's own configured trunk.
+    let outbound: { callId: string; toNumber: string } | null = null;
+    const dispatch = parseOutboundDispatch(ctx.job.metadata);
+    if (dispatch) {
       const sip = new SipClient(
         c.LIVEKIT_URL.replace(/^wss?:/, "https:"),
         c.LIVEKIT_API_KEY,
         c.LIVEKIT_API_SECRET,
       );
-      await sip.createSipParticipant(meta.outboundTrunkId, meta.toNumber, ctx.room.name ?? "", {
-        participantIdentity: "callee",
-        waitUntilAnswered: true,
-        participantAttributes: { "clickai.callLogId": meta.outboundCallLogId },
-      } as never);
+      const dialed = await dialOutbound({
+        dispatch,
+        jobId: ctx.job.id,
+        trunkId: c.SIP_OUTBOUND_TRUNK_ID,
+        roomName: ctx.room.name ?? "",
+        maxCallSeconds: c.MAX_CALL_SECONDS,
+        claim: (q) => claimOutbound(client, q),
+        dial: (trunk, to, room, opts) => sip.createSipParticipant(trunk, to, room, opts),
+        deleteRoom: () => ctx.deleteRoom(),
+        client,
+        telemetry: new CallTelemetry({
+          callId: dispatch.outboundCallLogId,
+          sipCallId: null,
+          room: ctx.room.name ?? "",
+        }),
+      });
+      if (!dialed.ok) {
+        ctx.shutdown(dialed.reason);
+        return;
+      }
+      outbound = { callId: dispatch.outboundCallLogId, toNumber: dialed.toNumber };
     }
 
-    const participant = await ctx.waitForParticipant();
+    // Outbound: wait for the participant this job dialled ("callee"), never
+    // anyone else who joins the room. (Agent participants are excluded by
+    // the framework in both cases.)
+    const participant = await ctx.waitForParticipant(outbound ? "callee" : undefined);
     const attrs = (participant.attributes ?? {}) as Record<string, string>;
-    const info = callInfo(ctx, attrs);
+    const info = callInfo(ctx, attrs, outbound);
     const telemetry = new CallTelemetry({
       callId: null,
       sipCallId: info?.sipCallId ?? null,
@@ -203,13 +243,8 @@ export default defineAgent({
       caller: maskPhone(info.callerNumber),
     });
 
-    const client = new KlyroClient({
-      baseUrl: c.KLYRO_BASE_URL,
-      secret: c.VOICE_AGENT_HMAC_SECRET,
-      keyId: c.VOICE_AGENT_HMAC_KEY_ID,
-      timeoutMs: c.KLYRO_TIMEOUT_MS,
-    });
-    const decision = await decideCall(client, info, telemetry);
+    const decision = await decideCall(client, info, telemetry, undefined, c.MAX_CALL_SECONDS);
+    const binding = { roomName: info.roomName, sipCallId: info.sipCallId };
 
     const tts = new sarvam.TTS({
       model: "bulbul:v3",
@@ -265,29 +300,76 @@ export default defineAgent({
       agent,
       telemetry,
       events: voice.AgentSessionEventTypes,
-      maxCallSeconds: c.MAX_CALL_SECONDS,
+      maxCallSeconds: effectiveMaxCallSeconds(c.MAX_CALL_SECONDS, decision.maxCallSeconds),
       io: {
         say: async (t) => void (await session.say(t).waitForPlayout()),
         hangup: async () => {
           await session.close().catch(() => undefined);
-          await ctx.deleteRoom().catch(() => undefined);
+        },
+        // The conversation session is closed when this runs: speak through a
+        // separate TTS-only session (bounded by attachCallGuards' timeout).
+        apologize: async (language) => {
+          const s = new voice.AgentSession({
+            tts: new sarvam.TTS({
+              model: "bulbul:v3",
+              speaker: "priya",
+              targetLanguageCode: language,
+            }),
+          });
+          try {
+            await s.start({ agent: new voice.Agent({ instructions: "" }), room: ctx.room });
+            await s.say(UNAVAILABLE[language], { allowInterruptions: false }).waitForPlayout();
+          } finally {
+            await s.close().catch(() => undefined);
+          }
+        },
+        // Delete the room (ends the SIP leg); if that fails, remove the caller.
+        disconnect: async () => {
+          try {
+            await ctx.deleteRoom();
+          } catch (err) {
+            await new RoomServiceClient(
+              c.LIVEKIT_URL.replace(/^wss?:/, "https:"),
+              c.LIVEKIT_API_KEY,
+              c.LIVEKIT_API_SECRET,
+            )
+              .removeParticipant(ctx.room.name ?? "", participant.identity)
+              .catch(() => {
+                throw err;
+              });
+          }
         },
       },
     });
     ctx.addShutdownCallback(async () => {
-      await reportEnd(client, decision.callId, "shutdown", decision.state, telemetry);
+      await reportEnd(client, decision.callId, "shutdown", decision.state, telemetry, binding);
     });
 
     await session.start({ agent, room: ctx.room });
     telemetry.emit("call.connected", { ms: Date.now() - joinedAt });
     session.say(decision.greeting, { allowInterruptions: true });
     const { reason } = await guards.finished;
-    await reportEnd(client, decision.callId, reason, decision.state, telemetry);
+    await reportEnd(client, decision.callId, reason, decision.state, telemetry, binding);
   },
 });
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const c = loadConfig();
+  // Bounded shutdown (runtime/shutdown.ts): installed before the framework
+  // starts, so a SIGTERM before AgentServer.run() or during process-pool
+  // warm-up still ends the process. Active calls are never cut short except
+  // at the hard cap, which stays below the pod's termination grace period.
+  // The active-call count is read in-process from the AgentServer that
+  // cli.runApp() creates (captured when its run() starts), not over HTTP.
+  const server = captureAgentServer(AgentServer);
+  installShutdownWatchdog({
+    activeJobs: () => activeJobsOf(server),
+    exit: (code) => process.exit(code),
+    idleGraceMs: 5_000,
+    hardCapMs: c.DRAIN_TIMEOUT_MS + 30_000,
+    pollMs: 1_000,
+    log: (event, data) => console.log(JSON.stringify({ event, ...data })),
+  });
   cli.runApp(
     new ServerOptions({
       agent: fileURLToPath(import.meta.url),
