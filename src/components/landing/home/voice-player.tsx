@@ -4,7 +4,7 @@ import { cn } from "@/lib/utils";
 import { CallScope, PEAKS_PER_SECOND, type ScopeHandle } from "./call-scope";
 import { prefersReducedMotion } from "./primitives";
 import { useVxTheme } from "./theme";
-import { DEMO_CALL, type RecordedCall } from "./voice-demo-data";
+import { DEMO_CALLS, type RecordedCall } from "./voice-demo-data";
 
 /**
  * Recorded-call player in the style of a call scope: a scrolling waveform under a
@@ -56,7 +56,9 @@ function usePeaks(src: string | null): number[] | null {
   return peaks;
 }
 
-export function VoicePlayer({ call = DEMO_CALL }: { call?: RecordedCall }) {
+export function VoicePlayer({ calls = DEMO_CALLS }: { calls?: RecordedCall[] }) {
+  const [langId, setLangId] = useState(calls[0]!.id);
+  const call = calls.find((c) => c.id === langId) ?? calls[0]!;
   const { src, segments } = call;
   const pending = src === null;
   const theme = useVxTheme();
@@ -121,6 +123,24 @@ export function VoicePlayer({ call = DEMO_CALL }: { call?: RecordedCall }) {
     const top = el.offsetTop - box.clientHeight / 2 + el.clientHeight / 2;
     box.scrollTo({ top, behavior: prefersReducedMotion() ? "auto" : "smooth" });
   }, [active]);
+
+  // One shared audio element: stop it, rewind it and clear every per-recording state before the new source loads.
+  function selectLanguage(id: string) {
+    if (id === call.id) return;
+    const a = audio.current;
+    if (a) {
+      a.pause();
+      a.currentTime = 0;
+    }
+    setPlaying(false);
+    setBuffering(false);
+    setFailed(false);
+    setDuration(0);
+    setSec(0);
+    setActive(-1);
+    if (list.current) list.current.scrollTop = 0;
+    setLangId(id);
+  }
 
   async function toggle() {
     const a = audio.current;
@@ -214,6 +234,33 @@ export function VoicePlayer({ call = DEMO_CALL }: { call?: RecordedCall }) {
           [{pending ? "recording pending" : "recorded call"}]
         </span>
       </div>
+
+      {calls.length > 1 ? (
+        <div
+          role="group"
+          aria-label="Call language"
+          className="flex flex-wrap items-center gap-1.5 border-b border-[var(--vx-hair)] px-4 py-2"
+        >
+          {calls.map((c) => (
+            <button
+              key={c.id}
+              type="button"
+              lang={c.lang}
+              aria-label={c.name}
+              aria-pressed={c.id === call.id}
+              onClick={() => selectLanguage(c.id)}
+              className={cn(
+                "h-7 rounded-full border px-3 font-vmono text-[12px] transition-colors motion-reduce:transition-none focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--vx-accent)]",
+                c.id === call.id
+                  ? "border-[var(--vx-accent)] bg-[var(--vx-btn)] text-white"
+                  : "border-[var(--vx-hair)] text-[var(--vx-muted)] hover:border-[var(--vx-accent)] hover:text-[var(--vx-ink)]",
+              )}
+            >
+              {c.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       <div
         role="slider"
@@ -313,11 +360,17 @@ export function VoicePlayer({ call = DEMO_CALL }: { call?: RecordedCall }) {
       ) : null}
 
       <div className="border-t border-[var(--vx-hair)] px-4 py-3">
+        {segments.length === 0 ? (
+          <p className="py-2 font-vmono text-[12px] leading-[1.6] text-[var(--vx-muted)]">
+            Transcript for this recording is coming soon.
+          </p>
+        ) : null}
         <ol
           ref={list}
-          aria-label={pending ? "Sample script" : "Transcript"}
+          aria-label="Transcript"
           onWheel={() => (lastManualScroll.current = Date.now())}
           onTouchMove={() => (lastManualScroll.current = Date.now())}
+          hidden={segments.length === 0}
           className="relative max-h-[132px] space-y-0.5 overflow-y-auto overscroll-contain pr-1"
         >
           {segments.map((s, i) => {
@@ -387,9 +440,7 @@ export function VoicePlayer({ call = DEMO_CALL }: { call?: RecordedCall }) {
           {speaking ? (
             <span className="text-[var(--vx-ink)]">{nameOf(speaking.speaker)} speaking</span>
           ) : null}
-          <span>
-            {pending ? "sample script · not a recording" : `${fmt(sec)} / ${fmt(duration)}`}
-          </span>
+          <span>{pending ? "no recording" : `${fmt(sec)} / ${fmt(duration)}`}</span>
         </span>
       </div>
     </div>
