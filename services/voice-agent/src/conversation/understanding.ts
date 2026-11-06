@@ -6,18 +6,23 @@
  *
  * Reused from the production runtime (src/lib/voice-intent-lexicon.ts, a
  * pure module): name introductions, relative dates, correction markers,
- * spoken digits. Time-of-day parsing is new here because the production
- * lexicon (a) only parses non-English times and (b) reads "मध्यरात्रि 12
- * बजे" (midnight) as 12:00 (noon) — see test/understanding.test.ts.
+ * spoken digits. Dates and clock times are read by datetime.ts, because the
+ * production lexicon (a) only parses non-English times and (b) reads
+ * "मध्यरात्रि 12 बजे" (midnight) as 12:00 (noon) — see tests/understanding.spec.ts.
  */
 import {
   asciiDigits,
   isCorrection as lexiconIsCorrection,
-  negatedRelativeDates,
   parseNameIntroduction,
-  relativeDateAnyLanguage,
   spokenDigitsToNumerals,
 } from "../../../../src/lib/voice-intent-lexicon.ts";
+import {
+  calendarSpans,
+  canonicalTimeText,
+  FLEXIBLE,
+  readDateDetailed,
+  readTimeDetailed,
+} from "./datetime.ts";
 
 export type LanguageCode = "en-IN" | "hi-IN" | "te-IN";
 export type Certainty = "explicit" | "inferred" | "uncertain";
@@ -52,13 +57,20 @@ export type Intent =
  *  - relative: today / tomorrow / day after tomorrow;
  *  - weekday: with "next"/"this" when the caller said so ("next Monday",
  *    "agle somvar", "vacche somavaram"; "this Monday", "is somvar", "ee somavaram");
- *  - either: the caller named two days in one breath ("today or tomorrow")
- *    and neither was taken back: a choice for the caller, never for us.
+ *  - calendar: a day of the month ("15 November", "पंद्रह नवंबर", "నవంబర్ పదిహేనో తేదీన");
+ *  - either: the caller named two days in one breath ("today or tomorrow",
+ *    "Monday or Tuesday") and neither was taken back: a choice for the
+ *    caller, never for us.
  */
-export type DateExpr =
+export type SimpleDateExpr =
   | { kind: "relative"; days: 0 | 1 | 2 }
   | { kind: "weekday"; weekday: number; qualifier?: "next" | "this" | null }
-  | { kind: "either"; options: Array<{ kind: "relative"; days: 0 | 1 | 2 }> };
+  /**
+   * A day of the month: "15 November" (month 11), "the 15th" / "15 तारीख"
+   * (month null: the next 15th), with the year only when the caller said it.
+   */
+  | { kind: "calendar"; day: number; month: number | null; year: number | null };
+export type DateExpr = SimpleDateExpr | { kind: "either"; options: SimpleDateExpr[] };
 
 export interface ServiceRow {
   id: string;
@@ -79,7 +91,21 @@ export interface Reading {
   correction: boolean;
   intent: Intent | null;
   time: TimeReading | null;
-  date: { value: DateExpr; certainty: Certainty; evidence: string } | null;
+  date: {
+    value: DateExpr;
+    certainty: Certainty;
+    evidence: string;
+    /**
+     * Other day words said with it ("Friday" in "Friday 15 November",
+     * "tomorrow" in "tomorrow, the 4th"): the state checks they name the
+     * same day and asks when they do not.
+     */
+    crossCheck?: SimpleDateExpr[];
+  } | null;
+  /** The caller tried to give a time that cannot be trusted ("16:30 AM", "4:75"); why. */
+  timeUnclear: string | null;
+  /** The caller tried to give a date that cannot be used ("31 February", "last Monday"); why. */
+  dateUnclear: string | null;
   services: ServiceRow[];
   name: string | null;
   phoneDigits: string | null;
@@ -172,18 +198,6 @@ export const NUMBER_WORDS: Record<string, number> = {
   pannendu: 12,
 };
 
-const AM_WORDS = /\b(?:am|a\.m\.?)(?=$|[\s,.!?])/i;
-const PM_WORDS = /\b(?:pm|p\.m\.?)(?=$|[\s,.!?])/i;
-const MIDNIGHT = /\bmidnight\b|मध्यरात्रि|आधी\s*रात|अर्धरात्रि|అర్ధరాత్రి|ardharatri|aadhi\s*raat/i;
-const NOON = /\bnoon\b|\bmidday\b/i;
-const MORNING = /\bmorning\b|सुबह|सवेरे|ఉదయం|పొద్దున|subah|udayam|poddhuna|poddun/i;
-const AFTERNOON = /\bafternoon\b|दोपहर|మధ్యాహ్నం|dopahar|madhyahnam/i;
-const EVENING = /\bevening\b|शाम|సాయంత్రం|shaam|sham\b|sayantram/i;
-const NIGHT = /\bnight\b|रात|రాత్రి|raat\b|ratri/i;
-const AFTER =
-  /\bafter\b|\bpost\b|\bfrom\b|\bonwards\b|के\s*बाद|बाद\s*में|తర్వాత|తరువాత|నుండి|ke\s*baad|tarvata|taruvata/i;
-const BEFORE = /\bbefore\b|\bby\b|से\s*पहले|ముందు|se\s*pehle|mundu/i;
-
 const AFFIRM =
   /^(?:yes|yeah|yep|yup|ok|okay|sure|correct|right|fine|done|confirm(?:ed)?|go ahead|haan?|ha|han|ji|haan\s*ji|theek\s*hai|thik\s*hai|हाँ|हां|हा|जी|हाँ\s*जी|ठीक\s*है|ठीक|బాగుంది|సరే|అవును|ఆ|హా|ఓకే|అలాగే|sare|avunu|alage)(?:\s+(?:yes|ji|जी|please|sir|madam|అండి|andi|haan|हाँ|sure))*[\s.!,।]*$/i;
 /** "yes, this number" / "हाँ जी, इसी नंबर पर": a yes that opens a longer answer. */
@@ -212,10 +226,6 @@ const INTENTS: Array<[Intent, RegExp]> = [
   ["availability", /\bavailable\b|\bfree slots?\b|\bslots?\b|खाली|स्लॉट|ఖాళీ|స్లాట్/i],
   ["book", /\bbook\b|\bappointment\b|\bschedule\b|बुक|अपॉइंटमेंट|అపాయింట్మెంట్|బుక్/i],
 ];
-
-/** "X or Y, whichever/either/any": the caller accepts any of them (not an ambiguity). */
-const FLEXIBLE =
-  /\beither\b|\bany\b|\bwhichever\b|\bwhatever\b|ఏదైనా|ఏది\s*అయినా|\bedaina+\b|\bedi\s*ayina\b|कोई\s*भी|जो\s*भी|\bkoi\s*bhi\b|\bjo\s*bhi\b|\bkuch\s*bhi\b/i;
 
 /** The caller leaves the choice to us / the calendar ("either", "you tell me", "मीరే చెప్పండి"). */
 const DEFERS = new RegExp(
@@ -257,214 +267,37 @@ const NOISE =
   /^(?:\[[^\]]*\]|\(?(?:noise|inaudible|music|static|background)\)?|h+m+|u+h+m*|a+h+|e+r+m*|\.+|…+|अं+|हम्म+|ఆఁ+)[\s.!?,]*$/i;
 
 /* ------------------------------------------------------------------ */
-/* Time                                                                */
+/* Time and date (datetime.ts)                                         */
 /* ------------------------------------------------------------------ */
 
-function pad(n: number): string {
-  return String(n).padStart(2, "0");
-}
-
-function hhmm(h: number, m = 0): string {
-  return `${pad(h)}:${pad(m)}`;
-}
-
-/** Hour (1..12) and minutes read from text: digits, or a number word. */
-function readClock(
-  text: string,
-): Array<{ hour: number; minute: number; index: number; raw: string }> {
-  const out: Array<{ hour: number; minute: number; index: number; raw: string }> = [];
-  const digitRe = /(?<!\d)(\d{1,2})(?:[:.](\d{2}))?(?!\d)/g;
-  for (let m: RegExpExecArray | null; (m = digitRe.exec(text));) {
-    const hour = Number(m[1]);
-    const minute = m[2] ? Number(m[2]) : 0;
-    if (hour >= 0 && hour <= 23 && minute < 60)
-      out.push({ hour, minute, index: m.index, raw: m[0] });
-  }
-  // A number word is a time only with a time marker ("four o'clock", "चार बजे",
-  // "at four", "शाम चार"): "yes that one" and "ek minute" are not 1 o'clock.
-  const timeContext =
-    /o'?clock|\b(?:at|by|around|after|before)\s|\b(?:am|pm)\b|बजे|baje|గంటల|gantala|morning|afternoon|evening|night|सुबह|दोपहर|शाम|रात|ఉదయం|మధ్యాహ్నం|సాయంత్రం|రాత్రి|shaam|subah|dopahar/i.test(
-      text,
-    );
-  if (!timeContext) return out.sort((a, b) => a.index - b.index);
-  const wordRe = new RegExp(
-    `(?:^|[\\s,])(${Object.keys(NUMBER_WORDS)
-      .sort((a, b) => b.length - a.length)
-      .join("|")})(?=$|[\\s,.?!।]|\\s*(?:बजे|baje|గంటల|gantala|o'?clock|pm|am))`,
-    "giu",
-  );
-  for (let m: RegExpExecArray | null; (m = wordRe.exec(text));) {
-    const word = m[1]!.toLowerCase();
-    const hour = NUMBER_WORDS[word] ?? NUMBER_WORDS[m[1]!];
-    if (hour) out.push({ hour, minute: 0, index: m.index + m[0].indexOf(m[1]!), raw: m[1]! });
-  }
-  return out.sort((a, b) => a.index - b.index);
-}
-
-/** A bare hour with no AM/PM or period word: business-hours reading. */
-function businessHoursReading(hour: number): { primary: number; alt: number | null } {
-  if (hour >= 13) return { primary: hour, alt: null };
-  if (hour === 12) return { primary: 12, alt: 0 }; // noon is the business reading, midnight the other
-  if (hour >= 1 && hour <= 6) return { primary: hour + 12, alt: hour }; // "4" on a clinic call = 4 PM
-  if (hour >= 7 && hour <= 11) return { primary: hour, alt: hour + 12 };
-  return { primary: hour, alt: null };
-}
-
+/** The time the caller asked for, or null (also null when it was unclear: see readTimeDetailed). */
 export function readTime(text: string): TimeReading | null {
-  const lower = text.toLowerCase();
-  const clocks = readClock(text);
-  const constraint: "after" | "before" | null = AFTER.test(text)
-    ? "after"
-    : BEFORE.test(text)
-      ? "before"
-      : null;
+  return readTimeDetailed(text).reading;
+}
 
-  if (clocks.length === 0) {
-    if (MIDNIGHT.test(text))
-      return {
-        spec: { kind: "exact", hhmm: "00:00" },
-        certainty: "explicit",
-        alternatives: [],
-        evidence: "midnight",
-      };
-    if (NOON.test(lower))
-      return {
-        spec: { kind: "exact", hhmm: "12:00" },
-        certainty: "explicit",
-        alternatives: [],
-        evidence: "noon",
-      };
-    const period = MORNING.test(text)
-      ? "morning"
-      : AFTERNOON.test(text)
-        ? "afternoon"
-        : EVENING.test(text)
-          ? "evening"
-          : null;
-    return period
-      ? {
-          spec: { kind: "period", period },
-          certainty: "explicit",
-          alternatives: [],
-          evidence: period,
-        }
-      : null;
-  }
-
-  // "2 or 3 PM", "2 PM or 3 PM": two candidate times — never pick one.
-  const orJoined =
-    clocks.length >= 2 &&
-    /\bor\b|या|లేదా|leda|ya\b/i.test(text.slice(clocks[0]!.index, clocks[1]!.index + 1));
-  const isPm = PM_WORDS.test(text);
-  const isAm = AM_WORDS.test(text);
-  const periodHint = MIDNIGHT.test(text)
-    ? "midnight"
-    : NIGHT.test(text)
-      ? "night"
-      : EVENING.test(text)
-        ? "evening"
-        : AFTERNOON.test(text)
-          ? "afternoon"
-          : MORNING.test(text)
-            ? "morning"
-            : null;
-
-  const resolve = (
-    hour: number,
-    minute: number,
-  ): { hhmm: string; certainty: Certainty; alt: string | null } => {
-    if (hour > 12) return { hhmm: hhmm(hour, minute), certainty: "explicit", alt: null };
-    if (isPm)
-      return { hhmm: hhmm(hour === 12 ? 12 : hour + 12, minute), certainty: "explicit", alt: null };
-    if (isAm)
-      return { hhmm: hhmm(hour === 12 ? 0 : hour, minute), certainty: "explicit", alt: null };
-    if (periodHint === "midnight")
-      return { hhmm: hhmm(hour === 12 ? 0 : hour, minute), certainty: "explicit", alt: null };
-    if (periodHint === "morning")
-      return { hhmm: hhmm(hour === 12 ? 12 : hour, minute), certainty: "explicit", alt: null };
-    if (periodHint === "afternoon")
-      return {
-        hhmm: hhmm(hour === 12 ? 12 : hour < 6 ? hour + 12 : hour, minute),
-        certainty: "explicit",
-        alt: null,
-      };
-    if (periodHint === "evening")
-      return { hhmm: hhmm(hour === 12 ? 12 : hour + 12, minute), certainty: "explicit", alt: null };
-    if (periodHint === "night") {
-      if (hour === 12) return { hhmm: "00:00", certainty: "explicit", alt: null };
-      return { hhmm: hhmm(hour + 12, minute), certainty: "explicit", alt: null };
-    }
-    const r = businessHoursReading(hour);
-    // 12 with nothing else is genuinely ambiguous: ask, don't infer.
-    if (hour === 12)
-      return { hhmm: hhmm(12, minute), certainty: "uncertain", alt: hhmm(0, minute) };
-    return {
-      hhmm: hhmm(r.primary, minute),
-      certainty: "inferred",
-      alt: r.alt === null ? null : hhmm(r.alt, minute),
-    };
-  };
-
-  if (orJoined) {
-    const a = resolve(clocks[0]!.hour, clocks[0]!.minute);
-    const b = resolve(clocks[1]!.hour, clocks[1]!.minute);
-    // "4 or 5, whichever is free" / "4 or 5 lo edaina": either is acceptable to
-    // the caller. The calendar is checked for both; the caller still picks.
-    // A doubtful hour inside (a bare "12") keeps the whole thing uncertain.
-    if (FLEXIBLE.test(text) && a.hhmm !== b.hhmm) {
-      const doubtful = a.certainty === "uncertain" || b.certainty === "uncertain";
-      return {
-        spec: { kind: "anyOf", hhmms: [a.hhmm, b.hhmm].sort() },
-        certainty: doubtful
-          ? "uncertain"
-          : a.certainty === "explicit" && b.certainty === "explicit"
-            ? "explicit"
-            : "inferred",
-        alternatives: [],
-        evidence: `${clocks[0]!.raw} or ${clocks[1]!.raw}, either`,
-      };
-    }
-    // "2 or 3 PM": the PM written once applies to both.
-    return {
-      spec: { kind: "exact", hhmm: a.hhmm },
-      certainty: "uncertain",
-      alternatives: [{ kind: "exact", hhmm: b.hhmm }],
-      evidence: `${clocks[0]!.raw} or ${clocks[1]!.raw}`,
-    };
-  }
-
-  // A negated time is the one the caller is taking back. English negation
-  // precedes it ("3 PM, not 2"; "not 2 but 3"); Hindi and Telugu negation
-  // follows it ("3 बजे नहीं, 4 बजे"; "3 కాదు 4"). A negation word that opens
-  // the utterance ("नहीं, 4 बजे") negates the agent's proposal, not a time here.
-  const negated = new Set<number>();
-  for (const m of text.matchAll(/\bnot\b/gi)) {
-    const next = clocks.find((c) => c.index > m.index!);
-    if (next) negated.add(next.index);
-  }
-  for (const m of text.matchAll(/नहीं|नही|కాదు|వద్దు/g)) {
-    if (m.index! === 0) continue;
-    const prev = [...clocks].reverse().find((c) => c.index < m.index!);
-    if (prev) negated.add(prev.index);
-  }
-  const kept = clocks.filter((c) => !negated.has(c.index));
-  const chosen = (kept.length ? kept[kept.length - 1] : clocks[clocks.length - 1])!;
-  const r = resolve(chosen.hour, chosen.minute);
-  const spec: TimeSpec = constraint
-    ? { kind: constraint, hhmm: r.hhmm }
-    : { kind: "exact", hhmm: r.hhmm };
-  const alternatives: TimeSpec[] = r.alt
-    ? [constraint ? { kind: constraint, hhmm: r.alt } : { kind: "exact", hhmm: r.alt }]
-    : [];
-  return { spec, certainty: r.certainty, alternatives, evidence: chosen.raw };
+/** The day the caller named, or null (also null when it was unclear: see readDateDetailed). */
+export function readDate(text: string): Reading["date"] {
+  return readDateDetailed(text).date;
 }
 
 /* ------------------------------------------------------------------ */
 /* The whole utterance                                                 */
 /* ------------------------------------------------------------------ */
 
+/** Stands in for the ":" of a clock while digit runs are joined (never in a transcript). */
+const CLOCK_COLON = "\uE000";
+
+/**
+ * Native digits as ASCII and numbers read out digit by digit joined, but a
+ * clock keeps its shape: the lexicon's digit-run joiner splits on ":" and
+ * ".", which turned "11:00 AM" into "11 00 AM" and "4:30" into "4 30".
+ */
 function normalize(text: string): string {
-  return spokenDigitsToNumerals(asciiDigits(text)).replace(/\s+/g, " ").trim();
+  const shielded = asciiDigits(text).replace(
+    /(?<![\d:.])(\d{1,2})[:.](\d{2})(?![\d:.]\d)/g,
+    `$1${CLOCK_COLON}$2`,
+  );
+  return spokenDigitsToNumerals(shielded).replaceAll(CLOCK_COLON, ":").replace(/\s+/g, " ").trim();
 }
 
 export function matchServices(text: string, catalog: ServiceRow[]): ServiceRow[] {
@@ -505,102 +338,6 @@ export function detectLanguage(text: string, sttLanguage: string | null): Langua
   return null;
 }
 
-const WEEKDAYS: Array<[number, RegExp]> = [
-  [0, /\bsunday\b|रविवार|इतवार|ఆదివారం|ravivar|itwar|aadivaram/i],
-  [1, /\bmonday\b|सोमवार|సోమవారం|somvar|somavaram/i],
-  [2, /\btuesday\b|मंगलवार|మంగళవారం|mangalvar|mangalavaram/i],
-  [3, /\bwednesday\b|बुधवार|బుధవారం|budhvar|budhavaram/i],
-  [4, /\bthursday\b|गुरुवार|बृहस्पतिवार|గురువారం|guruvar|guruvaram/i],
-  [5, /\bfriday\b|शुक्रवार|శుక్రవారం|shukravar|sukravaram/i],
-  [6, /\bsaturday\b|शनिवार|శనివారం|shanivar|sanivaram/i],
-];
-
-const TODAY_WORDS =
-  /\btoday\b|\btonight\b|आज|ఈరోజు|ఈ\s+రోజు|ఇవాళ|ఇవ్వాళ|\baaj\b|\biv+ala\b|\bee\s*roju\b/i;
-/** Hindi "kal" is bounded by spaces/punctuation: "कल" inside another word is not a day. */
-const KAL = /(?:^|[\s,.?!।])(?:कल|kal)(?=$|[\s,.?!।])/i;
-const TOMORROW_WORDS = /\btomorrow\b|రేపు|రేపటి|\brepu\b/i;
-/**
- * "कल ... था/किया/आया" — Hindi "kal" in the past tense is yesterday ("मैंने कल
- * फोन किया था"): not a day for the appointment.
- */
-const KAL_PAST =
-  /(?:कल|\bkal\b)[^,.?!।]{0,40}?(?:था|थी|थे|गया|गई|किया|की\s*थी|आया|आई|\btha\b|\bthi\b|\bgaya\b|\bgayi\b|\bkiya\b|\baaya\b|\baayi\b)/i;
-const NEXT_WEEKDAY =
-  /\b(?:next|coming)\s+\w*day\b|अगले\s*\S*वार|\bagle\s+\w*va?ar\b|వచ్చే\s*\S*వారం|\bvac+h?e\s+\w*vaa?ram\b/i;
-const THIS_WEEKDAY =
-  /\bthis\s+\w*day\b|इस\s*\S*वार|\bis\s+\w*va?ar\b|ఈ\s*\S*వారం|\bee\s+\w*vaa?ram\b/i;
-
-/**
- * The day the caller named, without deciding anything the words don't say.
- * Hindi "kal"/"परसों" each name two days (past and future): inferred, and a
- * past-tense "kal" is not a booking day at all. Two days named together
- * ("today or tomorrow", "aaj ya kal") are left for the caller to choose.
- */
-export function readDate(text: string): Reading["date"] {
-  if (/\bday after tomorrow\b|ఎల్లుండి|ellundi/i.test(text)) {
-    return {
-      value: { kind: "relative", days: 2 },
-      certainty: "explicit",
-      evidence: "day after tomorrow",
-    };
-  }
-  if (/परसों|parson/i.test(text)) {
-    return { value: { kind: "relative", days: 2 }, certainty: "inferred", evidence: "parson" };
-  }
-  const negated = negatedRelativeDates(text);
-  const kalSaid = KAL.test(text);
-  const kalIsYesterday = kalSaid && KAL_PAST.test(text);
-  const todaySaid = TODAY_WORDS.test(text) && !negated.has("today");
-  const tomorrowSaid =
-    !negated.has("tomorrow") && (TOMORROW_WORDS.test(text) || (kalSaid && !kalIsYesterday));
-  if (todaySaid && tomorrowSaid) {
-    return {
-      value: {
-        kind: "either",
-        options: [
-          { kind: "relative", days: 0 },
-          { kind: "relative", days: 1 },
-        ],
-      },
-      certainty: "uncertain",
-      evidence: "today or tomorrow",
-    };
-  }
-  if (kalIsYesterday && !TOMORROW_WORDS.test(text) && !todaySaid) return null;
-
-  // English is not in the shared lexicon: honour the same negations here
-  // ("not tomorrow, today" is today).
-  const english =
-    /\btomorrow\b/i.test(text) && !negated.has("tomorrow")
-      ? "tomorrow"
-      : /\btoday\b|\btonight\b/i.test(text) && !negated.has("today")
-        ? "today"
-        : null;
-  let rel = relativeDateAnyLanguage(text) ?? english;
-  // "मैंने कल फोन किया था, आज चाहिए": the shared lexicon checks "kal" first.
-  if (rel === "tomorrow" && kalIsYesterday && !TOMORROW_WORDS.test(text))
-    rel = todaySaid ? "today" : null;
-  if (rel) {
-    const onlyKal = rel === "tomorrow" && kalSaid && !TOMORROW_WORDS.test(text);
-    return {
-      value: { kind: "relative", days: rel === "tomorrow" ? 1 : 0 },
-      certainty: onlyKal ? "inferred" : "explicit",
-      evidence: rel,
-    };
-  }
-  const wd = WEEKDAYS.find(([, re]) => re.test(text));
-  if (wd) {
-    const qualifier = NEXT_WEEKDAY.test(text) ? "next" : THIS_WEEKDAY.test(text) ? "this" : null;
-    return {
-      value: { kind: "weekday", weekday: wd[0], qualifier },
-      certainty: "explicit",
-      evidence: `${qualifier ? `${qualifier} ` : ""}weekday ${wd[0]}`,
-    };
-  }
-  return null;
-}
-
 export function readUtterance(
   rawText: string,
   opts: { catalog: ServiceRow[]; sttLanguage?: string | null },
@@ -619,6 +356,8 @@ export function readUtterance(
       intent: null,
       time: null,
       date: null,
+      timeUnclear: null,
+      dateUnclear: null,
       services: [],
       name: null,
       phoneDigits: null,
@@ -640,9 +379,14 @@ export function readUtterance(
   const correction =
     CORRECTION.test(text) || lexiconIsCorrection(text) || (deny && text.split(/\s+/).length > 1);
   const intent = INTENTS.find(([, re]) => re.test(text))?.[0] ?? null;
-  // A spoken phone number is digits, not a clock time.
-  const time = /\d{7,}/.test(text.replace(/[\s-]/g, "")) ? null : readTime(text);
-  const date = readDate(text);
+  // A spoken phone number is digits, not a clock time. A day of the month
+  // ("15 November") is a date, never a clock.
+  const dateRead = readDateDetailed(text);
+  const timeRead = /\d{7,}/.test(text.replace(/[\s-]/g, ""))
+    ? { reading: null, unclear: null }
+    : readTimeDetailed(text, calendarSpans(canonicalTimeText(text)));
+  const time = timeRead.reading;
+  const date = dateRead.date;
   const intro = parseNameIntroduction(text);
   const digits = text.replace(/[^\d]/g, "");
   const phoneDigits = digits.length >= 10 ? digits.slice(-10) : null;
@@ -656,6 +400,8 @@ export function readUtterance(
     intent,
     time,
     date,
+    timeUnclear: time ? null : timeRead.unclear,
+    dateUnclear: date ? null : dateRead.unclear,
     services: matchServices(text, opts.catalog),
     name: intro && !intro.rejected ? intro.name : null,
     phoneDigits,

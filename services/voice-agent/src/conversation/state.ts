@@ -16,12 +16,14 @@
  * and the business clock (resolveDateCandidates); never from a date the
  * model produced. A day with two real readings is `uncertain` and clarified.
  */
+import { daysInMonth } from "./numbers.ts";
 import type {
   DateExpr,
   Intent,
   LanguageCode,
   Reading,
   ServiceRow,
+  SimpleDateExpr,
   TimeSpec,
 } from "./understanding.ts";
 
@@ -235,27 +237,60 @@ export interface DateCandidates {
   primary: string;
   /** Other real readings; non-empty means the date must be clarified. */
   alternatives: string[];
+  /** An explicit date (with its year) that has already passed: never usable. */
+  passed?: boolean;
+  /** No year was said and this year's date has passed: next year's is assumed, and asked. */
+  nextYear?: boolean;
+  /** Two day words that name different days ("Friday 15 November" when the 15th is a Sunday). */
+  conflict?: boolean;
+  /** Another day word named exactly this day ("Tuesday the 10th"): as good as said outright. */
+  corroborated?: boolean;
 }
 
-/**
- * The only place a spoken day becomes a calendar date: the caller's words,
- * the business time zone and the business clock. Deterministic.
- */
-export function resolveDateCandidates(value: DateExpr, ctx: BusinessContext): DateCandidates {
+const ymd = (y: number, m: number, d: number) =>
+  `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+const weekdayOf = (iso: string) => new Date(`${iso}T12:00:00Z`).getUTCDay();
+
+function resolveSimple(value: SimpleDateExpr, ctx: BusinessContext): DateCandidates {
   const now = ctx.now();
   const today = isoDateIn(ctx.timeZone, now);
-  if (value.kind === "either") {
-    const all = value.options.map((o) => addDays(today, o.days));
-    return {
-      primary: all[0]!,
-      alternatives: [...new Set(all.slice(1))].filter((d) => d !== all[0]),
-    };
-  }
   if (value.kind === "relative") {
     const primary = addDays(today, value.days);
     const afterMidnight =
       value.days === 1 && localHourIn(ctx.timeZone, now) < AFTER_MIDNIGHT_UNTIL_HOUR;
     return { primary, alternatives: afterMidnight ? [today] : [] };
+  }
+  if (value.kind === "calendar") {
+    const [ty, tm] = today.split("-").map(Number) as [number, number];
+    if (value.month === null) {
+      // "the 15th" / "15 तारीख": the next 15th (this month's if still ahead).
+      for (let i = 0; i < 13; i++) {
+        const y = ty + Math.floor((tm - 1 + i) / 12);
+        const mo = ((tm - 1 + i) % 12) + 1;
+        if (value.day > daysInMonth(mo, y)) continue;
+        const iso = ymd(y, mo, value.day);
+        if (iso >= today) return { primary: iso, alternatives: [] };
+      }
+    }
+    const month = value.month ?? tm;
+    if (value.year !== null) {
+      const iso = ymd(value.year, month, value.day);
+      return iso < today
+        ? { primary: iso, alternatives: [], passed: true }
+        : { primary: iso, alternatives: [] };
+    }
+    // No year: this year's date, or (once it has passed) the next one that exists.
+    for (let y = ty; y <= ty + 8; y++) {
+      if (value.day > daysInMonth(month, y)) continue;
+      const iso = ymd(y, month, value.day);
+      if (iso >= today)
+        return { primary: iso, alternatives: [], ...(y !== ty ? { nextYear: true } : {}) };
+    }
+    return {
+      primary: ymd(ty, month, Math.min(value.day, daysInMonth(month, ty))),
+      alternatives: [],
+      passed: true,
+    };
   }
   const todayWd = new Date(`${today}T12:00:00Z`).getUTCDay();
   const ahead = (value.weekday - todayWd + 7) % 7;
@@ -267,6 +302,65 @@ export function resolveDateCandidates(value: DateExpr, ctx: BusinessContext): Da
     return { primary: today, alternatives: [addDays(today, 7)] };
   }
   return { primary: addDays(today, ahead), alternatives: [] };
+}
+
+/**
+ * The only place a spoken day becomes a calendar date: the caller's words,
+ * the business time zone and the business clock. Deterministic.
+ */
+export function resolveDateCandidates(value: DateExpr, ctx: BusinessContext): DateCandidates {
+  if (value.kind === "either") {
+    const all = value.options.map((o) => resolveSimple(o, ctx).primary);
+    return {
+      primary: all[0]!,
+      alternatives: [...new Set(all.slice(1))].filter((d) => d !== all[0]),
+    };
+  }
+  return resolveSimple(value, ctx);
+}
+
+/**
+ * Other day words said with the date must name the same day. One that
+ * picks a single reading settles it ("this Monday, the 9th"); one that
+ * contradicts it ("Friday 15 November" when the 15th is a Sunday) makes the
+ * date a question for the caller, with the day the other word names.
+ */
+export function crossCheckDate(
+  c: DateCandidates,
+  checks: SimpleDateExpr[],
+  ctx: BusinessContext,
+): DateCandidates {
+  const today = isoDateIn(ctx.timeZone, ctx.now());
+  let cur = c;
+  for (const chk of checks) {
+    const cands = [cur.primary, ...cur.alternatives];
+    let fits: string[];
+    let other: string;
+    if (chk.kind === "weekday") {
+      fits = cands.filter((d) => weekdayOf(d) === chk.weekday);
+      // The same weekday nearest the date said (not earlier than today).
+      const offsets = [0, -1, 1, -2, 2, -3, 3, -4, 4, -5, 5, -6, 6];
+      other =
+        offsets
+          .map((o) => addDays(cur.primary, o))
+          .find((d) => weekdayOf(d) === chk.weekday && d >= today) ??
+        resolveSimple(chk, ctx).primary;
+    } else {
+      const r = resolveSimple(chk, ctx);
+      const theirs = [r.primary, ...r.alternatives];
+      fits = cands.filter((d) => theirs.includes(d));
+      other = r.primary;
+    }
+    if (fits.length === 1)
+      cur = { ...cur, primary: fits[0]!, alternatives: [], corroborated: !cur.conflict };
+    else if (fits.length === 0)
+      cur = {
+        ...cur,
+        alternatives: [...new Set([...cur.alternatives, other])].filter((d) => d !== cur.primary),
+        conflict: true,
+      };
+  }
+  return cur;
 }
 
 /** Resolves a spoken day to YYYY-MM-DD in the business's own time zone (first reading). */
@@ -358,6 +452,33 @@ function setFact<T>(
     s.booking.unavailable = [];
     if (s.pendingReadBack === "booking") s.pendingReadBack = null;
   }
+}
+
+/**
+ * Forget a date or time the caller has just made untrustworthy ("make it
+ * 16:30 AM", "31 February"): asking again is safer than keeping the old
+ * value or guessing a new one. Any slot offered or chosen for it goes too.
+ */
+function clearFact(s: ConversationState, key: "date" | "time", reason: string): void {
+  const prev = s[key];
+  if (!prev || bookingExists(s)) return;
+  s[key] = null;
+  s.changes.push({ turn: s.turn, slot: key, from: show(prev.value), to: null, reason });
+  if (s.booking.offered.length || s.booking.selected) {
+    s.changes.push({
+      turn: s.turn,
+      slot: "booking",
+      from: s.booking.status,
+      to: "none",
+      reason: `${key} unclear`,
+    });
+  }
+  s.booking.offered = [];
+  s.booking.selected = null;
+  s.booking.status = "none";
+  s.booking.checked = null;
+  s.booking.unavailable = [];
+  if (s.pendingReadBack === "booking") s.pendingReadBack = null;
 }
 
 /** The caller said yes/no to the agent's last read-back. */
@@ -472,20 +593,54 @@ export function applyReading(
       "caller named several services",
     );
   }
+  // A clarification with a single reading ("15 November next year?", "3 PM?")
+  // answered with a plain yes: the caller has now said it.
+  for (const k of ["date", "time"] as const) {
+    const f = s[k] as Fact<unknown> | null;
+    if (
+      f?.provenance === "uncertain" &&
+      f.alternatives.length === 0 &&
+      s.lastQuestion === k &&
+      r.affirm &&
+      !r.correction &&
+      !answeredReadBack &&
+      !(k === "date" ? r.date : r.time)
+    ) {
+      f.provenance = "explicit";
+      f.turn = s.turn;
+    }
+  }
+  const dateQuestion = s.lastQuestion === "date";
   if (r.date) {
-    const c = resolveDateCandidates(r.date.value, ctx);
-    setFact(
-      s,
-      "date",
-      {
-        value: c.primary,
-        provenance: c.alternatives.length ? "uncertain" : cert(r.date.certainty),
-        evidence: r.date.evidence,
-        alternatives: c.alternatives,
-        source: "caller",
-      },
-      r.correction ? "caller corrected" : "caller stated",
-    );
+    let c = resolveDateCandidates(r.date.value, ctx);
+    if (r.date.crossCheck?.length) c = crossCheckDate(c, r.date.crossCheck, ctx);
+    if (c.passed) {
+      // A day that has already passed is never booked; ask for another.
+      if (r.correction || dateQuestion || !s.date) clearFact(s, "date", "the day named has passed");
+    } else {
+      setFact(
+        s,
+        "date",
+        {
+          value: c.primary,
+          provenance:
+            c.alternatives.length || c.nextYear || c.conflict
+              ? "uncertain"
+              : c.corroborated
+                ? "explicit"
+                : cert(r.date.certainty),
+          evidence: c.nextYear ? `${r.date.evidence} (this year's has passed)` : r.date.evidence,
+          alternatives: c.alternatives,
+          source: "caller",
+        },
+        r.correction ? "caller corrected" : "caller stated",
+      );
+    }
+  } else if (r.dateUnclear && (r.correction || dateQuestion)) {
+    clearFact(s, "date", `caller's date unclear: ${r.dateUnclear}`);
+  }
+  if (!r.time && r.timeUnclear) {
+    clearFact(s, "time", `caller's time unclear: ${r.timeUnclear}`);
   }
   // Naming one of the offered slots is a choice among them, not a new request.
   const offeredHit =
@@ -664,6 +819,34 @@ export function readyForAvailability(s: ConversationState): boolean {
   return usable(s.service) && usable(s.date) && usable(s.time);
 }
 
+const HHMM = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+
+/**
+ * Last line of defence before a calendar query: the day must be a real
+ * date that has not passed (business time zone) and every time a valid
+ * 24-hour HH:MM. Returns why not, or null when the request is usable.
+ */
+export function requestProblem(
+  date: string,
+  time: TimeSpec,
+  ctx: Pick<BusinessContext, "timeZone" | "now">,
+): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date);
+  if (
+    !m ||
+    Number(m[3]) < 1 ||
+    Number(m[2]) < 1 ||
+    Number(m[2]) > 12 ||
+    Number(m[3]) > daysInMonth(Number(m[2]), Number(m[1]))
+  )
+    return "the date is not a real date";
+  if (date < isoDateIn(ctx.timeZone, ctx.now())) return "the date has already passed";
+  const times = time.kind === "period" ? [] : time.kind === "anyOf" ? time.hhmms : [time.hhmm];
+  if (time.kind === "anyOf" && times.length === 0) return "no time was given";
+  if (times.some((t) => !HHMM.test(t))) return "the time is not a valid clock time";
+  return null;
+}
+
 export function readyToBook(s: ConversationState): { ok: true } | { ok: false; reason: string } {
   if (bookingExists(s)) return { ok: false, reason: "already_booked" };
   if (!s.booking.selected) return { ok: false, reason: "no_slot_selected" };
@@ -729,7 +912,10 @@ export function nextStep(s: ConversationState): NextStep {
       return {
         kind: "clarify",
         slot: k,
-        options: [f.value, ...f.alternatives].map((v) => describe(v)),
+        // Dates carry their year here: "15 November" may be next year's.
+        options: [f.value, ...f.alternatives].map((v) =>
+          k === "date" && typeof v === "string" ? `${describe(v)} ${v.slice(0, 4)}` : describe(v),
+        ),
       };
     }
   }

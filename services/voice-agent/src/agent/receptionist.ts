@@ -26,6 +26,7 @@ import {
   isoDateIn,
   nextStep,
   readyForAvailability,
+  requestProblem,
   readyToBook,
   spokenDate,
   spokenTime,
@@ -267,6 +268,9 @@ export function buildTools(d: ReceptionistDeps, knownPrices: Set<number>) {
       execute: async () => {
         if (!readyForAvailability(s))
           return "NOT_READY: the service, day and time are not all known yet.";
+        const problem = requestProblem(s.date!.value, s.time!.value, d.business);
+        if (problem)
+          return `NOT_READY: ${problem}. Ask the caller for the day and time again; do not guess.`;
         s.booking.status = "checking";
         s.currentTask = "checking_availability";
         s.booking.unavailable = []; // evidence is per check: never carried over
