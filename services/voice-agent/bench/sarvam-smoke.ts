@@ -5,14 +5,26 @@
  * klyro, no database: the receptionist runs in LiveKit's text-mode
  * AgentSession against the in-memory test backend, with synthetic callers.
  *
- * Refuses to run unless every gate holds:
+ * Refuses to run unless every gate holds (bench/smoke-gates.ts, tested offline):
  *   SARVAM_SMOKE_APPROVED=yes          explicit approval for this run
- *   SARVAM_API_KEY                     a dedicated staging key (never printed)
+ *   SARVAM_SMOKE_AUTH_MODE             unset/"api-key" or "proxy-injected" (explicit only)
+ *   SARVAM_API_KEY                     api-key mode: a dedicated staging key (never printed);
+ *                                      proxy-injected mode: must be UNSET (no placeholder key)
  *   SARVAM_SMOKE_BUDGET_INR            approved cap in INR (1..50, the Phase 2.19 approval), checked before every request
  *   OPENAI_LOG unset                   the SDK's debug log would print the api-subscription-key header
  *
+ * api-key mode (the key is in this process):
  *   SARVAM_SMOKE_APPROVED=yes SARVAM_SMOKE_BUDGET_INR=50 SARVAM_API_KEY=... \
  *   node --experimental-strip-types bench/sarvam-smoke.ts --out <file.json>
+ *
+ * proxy-injected mode (an egress proxy adds api-subscription-key for
+ * api.sarvam.ai; this process sends no credential header at all):
+ *   SARVAM_SMOKE_APPROVED=yes SARVAM_SMOKE_BUDGET_INR=50 \
+ *   SARVAM_SMOKE_AUTH_MODE=proxy-injected NODE_USE_ENV_PROXY=1 \
+ *   node --experimental-strip-types bench/sarvam-smoke.ts --out <file.json>
+ * (HTTPS_PROXY must be set and NO_PROXY must not cover api.sarvam.ai.)
+ * If the proxy does not inject the key, the first request gets 401/403 and
+ * the run stops there.
  *
  * Hard limits: model sarvam-105b-conversations only; 5 conversations; 60
  * chat requests in total; the budget is charged from Sarvam's reported usage
@@ -33,30 +45,35 @@
 import { writeFileSync } from "node:fs";
 import { initializeLogger, voice } from "@livekit/agents";
 import { createSarvamLlm } from "../src/agent/sarvam-llm.ts";
-import { ReceptionistAgent } from "../src/agent/receptionist.ts";
+import { ReceptionistAgent, type GuardReport } from "../src/agent/receptionist.ts";
 import { InMemoryBookingBackend } from "../src/backend/in-memory.ts";
 import { newConversation } from "../src/conversation/state.ts";
+import { resolveSmokeGates } from "./smoke-gates.ts";
+import {
+  SMOKE_HOURS,
+  SMOKE_NOW_ISO,
+  SMOKE_SERVICES,
+  SUITES,
+  evaluateScenario,
+  selectSuite,
+  stepLabel,
+  type SmokeScenario,
+} from "./smoke-scenarios.ts";
 
 initializeLogger({ pretty: false, level: "error" });
 
 /* ------------------------------------------------------------------ gates */
 
-const fail = (m: string): never => {
+function fail(m: string): never {
   console.error(`refusing to run: ${m}`);
   process.exit(2);
-};
-if (process.env.SARVAM_SMOKE_APPROVED !== "yes")
-  fail("this makes paid Sarvam calls; set SARVAM_SMOKE_APPROVED=yes once approved.");
-const KEY = process.env.SARVAM_API_KEY ?? "";
-if (!KEY) fail("SARVAM_API_KEY is not set.");
-const BUDGET = Number(process.env.SARVAM_SMOKE_BUDGET_INR);
-if (!Number.isFinite(BUDGET) || BUDGET <= 0 || BUDGET > 50)
-  fail("SARVAM_SMOKE_BUDGET_INR must be the approved cap, between 1 and 50 (Phase 2.19 approval).");
-if (process.env.OPENAI_LOG)
-  fail("unset OPENAI_LOG: the OpenAI SDK's debug log does not redact api-subscription-key.");
-const outIdx = process.argv.indexOf("--out");
-const OUT = outIdx > 0 ? process.argv[outIdx + 1] : undefined;
-if (!OUT) fail("--out <file.json> is required.");
+}
+const gates = resolveSmokeGates(process.env, process.argv);
+if (!gates.ok) fail(gates.reason);
+const { auth: AUTH, budgetInr: BUDGET, out: OUT } = gates;
+const suite = selectSuite(process.argv);
+if (!suite.ok) fail(suite.reason);
+const SUITE = suite.name;
 
 const MODEL = "sarvam-105b-conversations";
 const MAX_REQUESTS = 60;
@@ -293,94 +310,22 @@ function charge(rec: ReqRecord, bytes: number, usage: any) {
 
 /* ------------------------------------------------------------------ scenarios */
 
-const SERVICES = [
-  {
-    id: "svc-cleaning",
-    name: "Cleaning",
-    aliases: ["క్లీనింగ్", "क्लीनिंग"],
-    durationMinutes: 30,
-    priceInr: 800,
-  },
-  {
-    id: "svc-whitening",
-    name: "Whitening",
-    aliases: ["వైటెనింగ్", "व्हाइटनिंग"],
-    durationMinutes: 45,
-    priceInr: 3500,
-  },
-];
-const NOW = new Date("2026-11-02T04:30:00Z"); // Monday 10:00 IST
-const BUSINESS = {
+// Scenarios, the business clock and the calendar live in smoke-scenarios.ts
+// (tested offline); the original suite is unchanged.
+const SCENARIOS: SmokeScenario[] = [...SUITES[SUITE]];
+const businessFor = (sc: SmokeScenario) => ({
   businessName: "Test Dental (smoke)",
   timeZone: "Asia/Kolkata",
-  services: SERVICES,
-  now: () => NOW,
-};
-const HOURS = ["10:00", "11:00", "15:00", "16:00", "17:00"];
+  services: SMOKE_SERVICES,
+  now: () => new Date(sc.nowIso ?? SMOKE_NOW_ISO),
+});
 
-type Scenario = {
-  name: string;
-  turns: string[];
-  expectTools: string[];
-  expectBooked: boolean;
-  inject?: Array<"503" | "cut">;
-};
-const SCENARIOS: Scenario[] = [
-  {
-    name: "1-telugu-conversation",
-    turns: ["నమస్కారం", "మీ దగ్గర క్లీనింగ్ ఎంత అవుతుంది?", "సరే, ధన్యవాదాలు"],
-    expectTools: ["get_service_price"],
-    expectBooked: false,
-  },
-  {
-    name: "2-english-availability",
-    turns: [
-      "Hi there",
-      "Is there any time free for a cleaning tomorrow afternoon?",
-      "Okay, I'll think about it, thanks",
-    ],
-    expectTools: ["check_availability"],
-    expectBooked: false,
-  },
-  {
-    name: "3-hindi-booking",
-    turns: [
-      "नमस्ते",
-      "कल शाम चार बजे क्लीनिंग चाहिए",
-      "जी हाँ, चार बजे ठीक है",
-      "मेरा नाम टेस्ट कॉलर है",
-      "हाँ, इसी नंबर पर",
-      "हाँ, बुक कर दीजिए",
-      "एक बार फिर से बुक कर दीजिए",
-    ],
-    expectTools: ["check_availability", "book_appointment"],
-    expectBooked: true,
-  },
-  {
-    name: "4-code-mixed-ambiguity",
-    turns: [
-      "hello andi",
-      "repu evening cleaning kavali, 4 or 5 lo edaina",
-      "hmm, ఏది free gaa undi?",
-    ],
-    expectTools: [],
-    expectBooked: false,
-  },
-  {
-    name: "5-failure-recovery",
-    turns: ["Hello", "What does a whitening cost?"],
-    expectTools: ["get_service_price"],
-    expectBooked: false,
-    inject: ["503", "cut"],
-  },
-];
-
-async function runScenario(sc: Scenario) {
+async function runScenario(sc: SmokeScenario) {
   scenario = sc.name;
   inject = [...(sc.inject ?? [])];
   const backend = new InMemoryBookingBackend({
     timeZoneOffset: "+05:30",
-    openHours: HOURS,
+    openHours: sc.openHours ?? SMOKE_HOURS,
     callId: `smoke-${sc.name}`,
   });
   const state = newConversation({
@@ -391,14 +336,26 @@ async function runScenario(sc: Scenario) {
   const tools: Array<{ name: string; ok: boolean }> = []; // backend-calling tools (onTool)
   const executed: Array<{ callId: string; name: string; args: string }> = []; // every executed call
   const guards: string[] = [];
+  // Every intervention in full: rule, exact removed text, reason, original and spoken reply, languages.
+  const guardReports: Array<GuardReport & { turn: number }> = [];
+  const steps: string[] = []; // the state's step for each caller turn
   const agent = new ReceptionistAgent({
-    business: BUSINESS,
+    business: businessFor(sc),
     backend,
     state,
-    onGuard: (r) => guards.push(...r.map((x) => x.rule)),
+    onTurn: ({ step }) => steps.push(stepLabel(step as { kind: string })),
+    onGuard: (r, report) => {
+      guards.push(...r.map((x) => x.rule));
+      guardReports.push({ ...report, turn: steps.length - 1 });
+    },
     onTool: (t) => tools.push({ name: t.name, ok: t.ok }),
   });
-  const model = createSarvamLlm({ apiKey: KEY, model: MODEL, fetch: recordingFetch });
+  // The adapter's auth guard checks every request's headers before recordingFetch sees it.
+  const model = createSarvamLlm(
+    AUTH.mode === "proxy-injected"
+      ? { auth: "proxy-injected", model: MODEL, fetch: recordingFetch }
+      : { auth: "api-key", apiKey: AUTH.apiKey, model: MODEL, fetch: recordingFetch },
+  );
   const llmErrors: Array<{ name: string; status?: number; recoverable: boolean; message: string }> =
     [];
   model.on("error", (e: any) =>
@@ -447,8 +404,23 @@ async function runScenario(sc: Scenario) {
   await session.close();
   const offered = state.booking.offered.map((o) => o.hhmm);
   const toolNames = executed.map((t) => t.name);
+  const checks = evaluateScenario(sc, {
+    steps,
+    transcript,
+    date: state.date?.value ?? null,
+    offered,
+    bookingStatus: state.booking.status,
+    bookings: backend.bookings.size,
+    backendBookCalls: backend.calls.book,
+    closed: state.closing.closed,
+  });
   return {
     scenario: sc.name,
+    covers: sc.covers ?? [],
+    checksPassed: checks.filter((c) => c.pass).length,
+    checksFailed: checks.filter((c) => !c.pass),
+    checks,
+    steps,
     transcript,
     executedToolCalls: executed,
     backendToolResults: tools,
@@ -463,8 +435,11 @@ async function runScenario(sc: Scenario) {
     bookedAsExpected:
       (backend.bookings.size === 1) === sc.expectBooked && backend.bookings.size <= 1,
     offeredSlots: offered,
-    backendOpenHours: HOURS,
+    backendOpenHours: sc.openHours ?? SMOKE_HOURS,
+    businessNow: sc.nowIso ?? SMOKE_NOW_ISO,
+    finalDate: state.date?.value ?? null,
     guardInterventions: guards,
+    guardReports,
     llmErrors,
     metrics,
     language: state.language.current,
@@ -493,8 +468,16 @@ const full = chat
   .sort((a, b) => a - b);
 const q = (xs: number[], p: number) =>
   xs.length ? xs[Math.min(xs.length - 1, Math.floor(p * xs.length))] : null;
+const allChecks = conversations.flatMap((c: any) => c.checks ?? []);
 const summary = {
+  suite: SUITE,
   model: MODEL,
+  scenariosRun: conversations.length,
+  scenariosPlanned: SCENARIOS.length,
+  checksPassed: allChecks.filter((c: any) => c.pass).length,
+  checksFailed: allChecks.filter((c: any) => !c.pass).length,
+  fatalScenarios: conversations.filter((c: any) => c.fatal).map((c: any) => c.scenario),
+  authMode: AUTH.mode,
   budgetInr: BUDGET,
   spentInrEstimatedFromUsage: Number(spentInr.toFixed(4)),
   stopped,
@@ -517,5 +500,5 @@ const summary = {
     .map((r) => ({ id: r.toolResultFor, matched: r.toolResultMatched })),
   rawShapeNotes: [...new Set(records.flatMap((r) => r.rawShapeNotes))],
 };
-writeFileSync(OUT!, JSON.stringify({ summary, conversations, requests: records }, null, 2));
+writeFileSync(OUT, JSON.stringify({ summary, conversations, requests: records }, null, 2));
 console.log(JSON.stringify(summary, null, 2));

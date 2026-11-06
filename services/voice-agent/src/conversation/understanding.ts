@@ -13,6 +13,7 @@
 import {
   asciiDigits,
   isCorrection as lexiconIsCorrection,
+  negatedRelativeDates,
   parseNameIntroduction,
   relativeDateAnyLanguage,
   spokenDigitsToNumerals,
@@ -26,7 +27,13 @@ export type TimeSpec =
   | { kind: "exact"; hhmm: string }
   | { kind: "after"; hhmm: string }
   | { kind: "before"; hhmm: string }
-  | { kind: "period"; period: "morning" | "afternoon" | "evening" };
+  | { kind: "period"; period: "morning" | "afternoon" | "evening" }
+  /**
+   * Any of these times is acceptable to the caller ("4 or 5, whichever is
+   * free"; "4 or 5 lo edaina"). Not a choice the agent makes: the calendar
+   * is checked for each, and the caller picks among the free ones.
+   */
+  | { kind: "anyOf"; hhmms: string[] };
 
 export interface TimeReading {
   spec: TimeSpec;
@@ -39,8 +46,19 @@ export interface TimeReading {
 export type Intent =
   "book" | "reschedule" | "cancel" | "availability" | "price" | "services" | "question";
 
-/** A day the caller named, resolved to a date in the business's time zone by the state. */
-export type DateExpr = { kind: "relative"; days: 0 | 1 | 2 } | { kind: "weekday"; weekday: number };
+/**
+ * A day the caller named, resolved to a date in the business's time zone by
+ * the state (state.ts resolveDateCandidates), never by the model.
+ *  - relative: today / tomorrow / day after tomorrow;
+ *  - weekday: with "next"/"this" when the caller said so ("next Monday",
+ *    "agle somvar", "vacche somavaram"; "this Monday", "is somvar", "ee somavaram");
+ *  - either: the caller named two days in one breath ("today or tomorrow")
+ *    and neither was taken back: a choice for the caller, never for us.
+ */
+export type DateExpr =
+  | { kind: "relative"; days: 0 | 1 | 2 }
+  | { kind: "weekday"; weekday: number; qualifier?: "next" | "this" | null }
+  | { kind: "either"; options: Array<{ kind: "relative"; days: 0 | 1 | 2 }> };
 
 export interface ServiceRow {
   id: string;
@@ -65,13 +83,24 @@ export interface Reading {
   services: ServiceRow[];
   name: string | null;
   phoneDigits: string | null;
+  /** "which one is free?", "ఏది free gaa undi?", "कौन सा खाली है?": a question for the calendar. */
+  asksAvailability: boolean;
+  /** The caller leaves a pending choice to the calendar: "either", "you tell me", "మీ ఇష్టం". */
+  defers: boolean;
+  /**
+   * The caller is wrapping up: "okay, thanks", "that's all", "I'll think
+   * about it", "बस इतना ही", "ధన్యవాదాలు", "అంతే". Only a signal: the state
+   * decides whether the call can close (nothing pending) or must ask first.
+   */
+  closing: boolean;
 }
 
 /* ------------------------------------------------------------------ */
 /* Small vocabularies                                                  */
 /* ------------------------------------------------------------------ */
 
-const NUMBER_WORDS: Record<string, number> = {
+/** Hour words (1..12) in English, Hindi and Telugu, script and romanized. Shared with the reply guard. */
+export const NUMBER_WORDS: Record<string, number> = {
   one: 1,
   two: 2,
   three: 3,
@@ -183,6 +212,46 @@ const INTENTS: Array<[Intent, RegExp]> = [
   ["availability", /\bavailable\b|\bfree slots?\b|\bslots?\b|खाली|स्लॉट|ఖాళీ|స్లాట్/i],
   ["book", /\bbook\b|\bappointment\b|\bschedule\b|बुक|अपॉइंटमेंट|అపాయింట్మెంట్|బుక్/i],
 ];
+
+/** "X or Y, whichever/either/any": the caller accepts any of them (not an ambiguity). */
+const FLEXIBLE =
+  /\beither\b|\bany\b|\bwhichever\b|\bwhatever\b|ఏదైనా|ఏది\s*అయినా|\bedaina+\b|\bedi\s*ayina\b|कोई\s*भी|जो\s*भी|\bkoi\s*bhi\b|\bjo\s*bhi\b|\bkuch\s*bhi\b/i;
+
+/** The caller leaves the choice to us / the calendar ("either", "you tell me", "मीరే చెప్పండి"). */
+const DEFERS = new RegExp(
+  [
+    FLEXIBLE.source,
+    String.raw`\byou\s+(?:tell|choose|decide|pick)\b|\bany(?:thing)?\s+(?:works|is\s+fine)\b|\bdoesn'?t\s+matter\b|\bno\s+preference\b`,
+    String.raw`आप\s*(?:ही\s*)?(?:बता|बताइए|बताओ)|फ़?फर्क\s*नहीं|\baap\s+(?:hi\s+)?bata|\bfarak\s+nahi`,
+    String.raw`మీరే\s*చెప్పండి|మీరు\s*చెప్పండి|మీ\s*ఇష్టం|\bmeere\s+cheppandi\b|\bmee\s+ishtam\b`,
+  ].join("|"),
+  "i",
+);
+
+/** The caller asks what is free: only the calendar can answer. */
+const ASKS_AVAILABILITY =
+  /\b(?:free|available|availability|open|vacant)\b|ఖాళీ|అందుబాటు|खाली|उपलब्ध|\bkh?aa?li\b|\bkaali\b/i;
+
+/**
+ * Wrapping-up expressions (en/hi/te, script and romanized). A signal only:
+ * the state ignores it when the same utterance carries a new request.
+ */
+const CLOSING = new RegExp(
+  [
+    // English
+    String.raw`\bthank(?:s|\s*you|\s*u)\b|\bthx\b|\bthat'?s\s+(?:all|it)\b|\bthat\s+is\s+all\b`,
+    String.raw`\bnothing\s+(?:else|more)\b|\b(?:good\s*)?bye\b|\bi'?(?:ll|\s+will)\s+think\b|\blet\s+me\s+think\b`,
+    String.raw`\bi'?(?:ll|\s+will)\s+(?:call|get)\s+(?:you\s+)?back\b|\bcall\s+(?:you\s+)?later\b|\ball\s+good\b`,
+    // Hindi
+    String.raw`धन्यवाद|शुक्रिया|थैंक्स|थैंक\s*यू|बस\s*इतना|और\s*कुछ\s*नहीं|बाद\s*में\s*(?:बता|कॉल|फोन|फ़ोन)|सोच\s*(?:कर|के)\s*बता|अलविदा`,
+    String.raw`\bdhanya?vaa?d\b|\bshukriya\b|\bbas\s+itna\b|\baur\s+kuch\s+nahi?n?\b|\bbaad\s+(?:mein|me)\s+(?:bata|call|phone)|\bsoch\s+(?:kar|ke)\s+bata`,
+    // Telugu
+    String.raw`ధన్యవాదాలు|ధన్యవాదం|ధన్యవాదము|థాంక్స్|థ్యాంక్స్|థాంక్యూ|అంతే|ఇంకేమీ\s*(?:లేదు|వద్దు)|ఇంకా\s*ఏమీ\s*(?:లేదు|వద్దు)`,
+    String.raw`తర్వాత\s*(?:చెప్తా|చెబుతా|ఫోన్\s*చేస్తా|కాల్\s*చేస్తా)|ఆలోచించి\s*(?:చెప్తా|చెబుతా)`,
+    String.raw`\bdhanyavaa?daa?lu\b|\banthe\b|\binkemi\s+(?:ledu|vaddu)\b|\btarvata\s+(?:chep|call|phone)|\balochinchi\s+chep`,
+  ].join("|"),
+  "i",
+);
 
 const NOISE =
   /^(?:\[[^\]]*\]|\(?(?:noise|inaudible|music|static|background)\)?|h+m+|u+h+m*|a+h+|e+r+m*|\.+|…+|अं+|हम्म+|ఆఁ+)[\s.!?,]*$/i;
@@ -339,6 +408,22 @@ export function readTime(text: string): TimeReading | null {
   if (orJoined) {
     const a = resolve(clocks[0]!.hour, clocks[0]!.minute);
     const b = resolve(clocks[1]!.hour, clocks[1]!.minute);
+    // "4 or 5, whichever is free" / "4 or 5 lo edaina": either is acceptable to
+    // the caller. The calendar is checked for both; the caller still picks.
+    // A doubtful hour inside (a bare "12") keeps the whole thing uncertain.
+    if (FLEXIBLE.test(text) && a.hhmm !== b.hhmm) {
+      const doubtful = a.certainty === "uncertain" || b.certainty === "uncertain";
+      return {
+        spec: { kind: "anyOf", hhmms: [a.hhmm, b.hhmm].sort() },
+        certainty: doubtful
+          ? "uncertain"
+          : a.certainty === "explicit" && b.certainty === "explicit"
+            ? "explicit"
+            : "inferred",
+        alternatives: [],
+        evidence: `${clocks[0]!.raw} or ${clocks[1]!.raw}, either`,
+      };
+    }
     // "2 or 3 PM": the PM written once applies to both.
     return {
       spec: { kind: "exact", hhmm: a.hhmm },
@@ -430,7 +515,28 @@ const WEEKDAYS: Array<[number, RegExp]> = [
   [6, /\bsaturday\b|शनिवार|శనివారం|shanivar|sanivaram/i],
 ];
 
-/** The day the caller named. Hindi "kal"/"परसों" each name two days (past and future): inferred. */
+const TODAY_WORDS =
+  /\btoday\b|\btonight\b|आज|ఈరోజు|ఈ\s+రోజు|ఇవాళ|ఇవ్వాళ|\baaj\b|\biv+ala\b|\bee\s*roju\b/i;
+/** Hindi "kal" is bounded by spaces/punctuation: "कल" inside another word is not a day. */
+const KAL = /(?:^|[\s,.?!।])(?:कल|kal)(?=$|[\s,.?!।])/i;
+const TOMORROW_WORDS = /\btomorrow\b|రేపు|రేపటి|\brepu\b/i;
+/**
+ * "कल ... था/किया/आया" — Hindi "kal" in the past tense is yesterday ("मैंने कल
+ * फोन किया था"): not a day for the appointment.
+ */
+const KAL_PAST =
+  /(?:कल|\bkal\b)[^,.?!।]{0,40}?(?:था|थी|थे|गया|गई|किया|की\s*थी|आया|आई|\btha\b|\bthi\b|\bgaya\b|\bgayi\b|\bkiya\b|\baaya\b|\baayi\b)/i;
+const NEXT_WEEKDAY =
+  /\b(?:next|coming)\s+\w*day\b|अगले\s*\S*वार|\bagle\s+\w*va?ar\b|వచ్చే\s*\S*వారం|\bvac+h?e\s+\w*vaa?ram\b/i;
+const THIS_WEEKDAY =
+  /\bthis\s+\w*day\b|इस\s*\S*वार|\bis\s+\w*va?ar\b|ఈ\s*\S*వారం|\bee\s+\w*vaa?ram\b/i;
+
+/**
+ * The day the caller named, without deciding anything the words don't say.
+ * Hindi "kal"/"परसों" each name two days (past and future): inferred, and a
+ * past-tense "kal" is not a booking day at all. Two days named together
+ * ("today or tomorrow", "aaj ya kal") are left for the caller to choose.
+ */
 export function readDate(text: string): Reading["date"] {
   if (/\bday after tomorrow\b|ఎల్లుండి|ellundi/i.test(text)) {
     return {
@@ -442,27 +548,56 @@ export function readDate(text: string): Reading["date"] {
   if (/परसों|parson/i.test(text)) {
     return { value: { kind: "relative", days: 2 }, certainty: "inferred", evidence: "parson" };
   }
-  const english = /\btomorrow\b/i.test(text)
-    ? "tomorrow"
-    : /\btoday\b|\btonight\b/i.test(text)
-      ? "today"
-      : null;
-  const rel = relativeDateAnyLanguage(text) ?? english;
+  const negated = negatedRelativeDates(text);
+  const kalSaid = KAL.test(text);
+  const kalIsYesterday = kalSaid && KAL_PAST.test(text);
+  const todaySaid = TODAY_WORDS.test(text) && !negated.has("today");
+  const tomorrowSaid =
+    !negated.has("tomorrow") && (TOMORROW_WORDS.test(text) || (kalSaid && !kalIsYesterday));
+  if (todaySaid && tomorrowSaid) {
+    return {
+      value: {
+        kind: "either",
+        options: [
+          { kind: "relative", days: 0 },
+          { kind: "relative", days: 1 },
+        ],
+      },
+      certainty: "uncertain",
+      evidence: "today or tomorrow",
+    };
+  }
+  if (kalIsYesterday && !TOMORROW_WORDS.test(text) && !todaySaid) return null;
+
+  // English is not in the shared lexicon: honour the same negations here
+  // ("not tomorrow, today" is today).
+  const english =
+    /\btomorrow\b/i.test(text) && !negated.has("tomorrow")
+      ? "tomorrow"
+      : /\btoday\b|\btonight\b/i.test(text) && !negated.has("today")
+        ? "today"
+        : null;
+  let rel = relativeDateAnyLanguage(text) ?? english;
+  // "मैंने कल फोन किया था, आज चाहिए": the shared lexicon checks "kal" first.
+  if (rel === "tomorrow" && kalIsYesterday && !TOMORROW_WORDS.test(text))
+    rel = todaySaid ? "today" : null;
   if (rel) {
-    const kal = /(?:^|\s)(?:kal|कल)(?=$|\s|[,.?!।])/i.test(text);
+    const onlyKal = rel === "tomorrow" && kalSaid && !TOMORROW_WORDS.test(text);
     return {
       value: { kind: "relative", days: rel === "tomorrow" ? 1 : 0 },
-      certainty: kal && rel === "tomorrow" ? "inferred" : "explicit",
+      certainty: onlyKal ? "inferred" : "explicit",
       evidence: rel,
     };
   }
   const wd = WEEKDAYS.find(([, re]) => re.test(text));
-  if (wd)
+  if (wd) {
+    const qualifier = NEXT_WEEKDAY.test(text) ? "next" : THIS_WEEKDAY.test(text) ? "this" : null;
     return {
-      value: { kind: "weekday", weekday: wd[0] },
+      value: { kind: "weekday", weekday: wd[0], qualifier },
       certainty: "explicit",
-      evidence: `weekday ${wd[0]}`,
+      evidence: `${qualifier ? `${qualifier} ` : ""}weekday ${wd[0]}`,
     };
+  }
   return null;
 }
 
@@ -487,6 +622,9 @@ export function readUtterance(
       services: [],
       name: null,
       phoneDigits: null,
+      asksAvailability: false,
+      defers: false,
+      closing: false,
     };
   }
   const affirm =
@@ -521,5 +659,8 @@ export function readUtterance(
     services: matchServices(text, opts.catalog),
     name: intro && !intro.rejected ? intro.name : null,
     phoneDigits,
+    asksAvailability: ASKS_AVAILABILITY.test(text),
+    defers: DEFERS.test(text),
+    closing: CLOSING.test(text),
   };
 }

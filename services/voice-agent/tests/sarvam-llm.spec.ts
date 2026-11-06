@@ -160,13 +160,14 @@ async function run(
 /* ------------------------------------------------------------------ request shape */
 
 describe("Sarvam adapter: request", () => {
-  test("documented endpoint, both auth headers, model, streaming with usage, tools in OpenAI format", async () => {
+  test("documented endpoint, one auth header, model, streaming with usage, tools in OpenAI format", async () => {
     const r = await run(() => text("Sure."));
     assert.equal(r.requests.length, 1);
     const q = r.requests[0]!;
     assert.equal(q.url, "https://api.sarvam.ai/v1/chat/completions");
     assert.equal(q.headers.get("api-subscription-key"), "sk_test_not_a_real_key");
-    assert.equal(q.headers.get("authorization"), "Bearer sk_test_not_a_real_key");
+    // Phase 2.19: no duplicate Bearer copy of the key (tests/sarvam-auth.spec.ts).
+    assert.equal(q.headers.get("authorization"), null);
     assert.equal(q.body.model, "sarvam-105b-conversations");
     assert.equal(q.body.stream, true);
     assert.deepEqual(q.body.stream_options, { include_usage: true });

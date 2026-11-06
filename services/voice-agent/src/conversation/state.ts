@@ -11,6 +11,10 @@
  * Nothing becomes `confirmed` except through confirmReadBack() after a
  * caller "yes" to that exact read-back. The model cannot confirm facts:
  * it only sees this state and the backend's tool results.
+ *
+ * Dates are resolved here, from the caller's words, the business time zone
+ * and the business clock (resolveDateCandidates); never from a date the
+ * model produced. A day with two real readings is `uncertain` and clarified.
  */
 import type {
   DateExpr,
@@ -23,6 +27,8 @@ import type {
 
 export type Provenance = "explicit" | "inferred" | "uncertain" | "confirmed";
 export type SlotName = "intent" | "service" | "date" | "time" | "customerName" | "phone";
+/** A question the agent can be waiting on: a detail, the booking read-back, or "leave it for now?". */
+export type QuestionKey = SlotName | "booking" | "leave";
 
 export interface Fact<T> {
   value: T;
@@ -50,6 +56,8 @@ export type BookingStatus =
   | "held_pending_sync"
   /** The backend accepted it but has not confirmed it. */
   | "pending"
+  /** The calendar was checked and nothing is free for this service/day/time: ask for another. */
+  | "no_availability"
   | "failed";
 
 /** The booking exists in the backend (in any state): never book it again. */
@@ -86,10 +94,10 @@ export interface ConversationState {
   customerName: Fact<string> | null;
   phone: Fact<string> | null;
   /** What the agent last read back and is waiting for a yes/no on. */
-  pendingReadBack: SlotName | "booking" | null;
+  pendingReadBack: QuestionKey | null;
   /** The last question the agent actually finished saying (interrupted ones don't count). */
-  lastQuestion: SlotName | "booking" | null;
-  timesAsked: Partial<Record<SlotName | "booking", number>>;
+  lastQuestion: QuestionKey | null;
+  timesAsked: Partial<Record<QuestionKey, number>>;
   currentTask:
     | "greeting"
     | "collecting"
@@ -98,6 +106,7 @@ export interface ConversationState {
     | "confirming"
     | "booking"
     | "done"
+    | "closed"
     | "handoff";
   booking: {
     status: BookingStatus;
@@ -106,7 +115,23 @@ export interface ConversationState {
     bookingId: string | null;
     error: string | null;
     idempotencyKey: string;
+    /** The last calendar query that found nothing free (business-local date, time as described). */
+    checked: { date: string; time: string } | null;
+    /**
+     * Times ("HH:MM") the caller asked for that the calendar showed as NOT free
+     * for the current service and date. The only basis for saying a time is
+     * unavailable; cleared whenever the service, date or time changes.
+     */
+    unavailable: string[];
   };
+  /**
+   * The caller is wrapping up. `leaveConfirmed`: they chose to leave
+   * unfinished work (declined "shall I finish it now?"). `closed`: the
+   * goodbye was said.
+   */
+  closing: { requested: boolean; leaveConfirmed: boolean; closed: boolean };
+  /** The confirmed booking has been announced once: don't repeat it every turn. */
+  bookingAnnounced: boolean;
   tools: ToolRun[];
   changes: ChangeRecord[];
 }
@@ -161,7 +186,11 @@ export function newConversation(opts: {
       bookingId: null,
       error: null,
       idempotencyKey: `${opts.callId}:booking:1`,
+      checked: null,
+      unavailable: [],
     },
+    closing: { requested: false, leaveConfirmed: false, closed: false },
+    bookingAnnounced: false,
     tools: [],
     changes: [],
   };
@@ -180,15 +209,90 @@ export function isoDateIn(timeZone: string, d: Date): string {
   }).format(d);
 }
 
-/** Resolves a spoken day to YYYY-MM-DD in the business's own time zone. */
-export function resolveDate(value: DateExpr, ctx: BusinessContext): string {
-  const today = isoDateIn(ctx.timeZone, ctx.now());
-  const base = new Date(`${today}T12:00:00Z`); // noon UTC: day arithmetic never crosses a date line
-  if (value.kind === "relative") {
-    return new Date(base.getTime() + value.days * 86_400_000).toISOString().slice(0, 10);
+/** Hour of day (0..23) at the business, for date-boundary rules. */
+export function localHourIn(timeZone: string, d: Date): number {
+  return Number(
+    new Intl.DateTimeFormat("en-GB", { timeZone, hour: "2-digit", hourCycle: "h23" }).format(d),
+  );
+}
+
+/** Calendar arithmetic on YYYY-MM-DD (noon UTC: never crosses a date line). */
+export function addDays(iso: string, days: number): string {
+  return new Date(new Date(`${iso}T12:00:00Z`).getTime() + days * 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+}
+
+/**
+ * Before this hour (business time), "tomorrow" / "repu" / "kal" may mean the
+ * day that has just started ("tomorrow morning" said at 00:30 before
+ * sleeping): both readings are kept and the caller is asked.
+ */
+export const AFTER_MIDNIGHT_UNTIL_HOUR = 4;
+
+export interface DateCandidates {
+  /** YYYY-MM-DD in the business time zone: the first reading. */
+  primary: string;
+  /** Other real readings; non-empty means the date must be clarified. */
+  alternatives: string[];
+}
+
+/**
+ * The only place a spoken day becomes a calendar date: the caller's words,
+ * the business time zone and the business clock. Deterministic.
+ */
+export function resolveDateCandidates(value: DateExpr, ctx: BusinessContext): DateCandidates {
+  const now = ctx.now();
+  const today = isoDateIn(ctx.timeZone, now);
+  if (value.kind === "either") {
+    const all = value.options.map((o) => addDays(today, o.days));
+    return {
+      primary: all[0]!,
+      alternatives: [...new Set(all.slice(1))].filter((d) => d !== all[0]),
+    };
   }
-  const ahead = (value.weekday - base.getUTCDay() + 7) % 7; // "Monday" on a Monday = today
-  return new Date(base.getTime() + ahead * 86_400_000).toISOString().slice(0, 10);
+  if (value.kind === "relative") {
+    const primary = addDays(today, value.days);
+    const afterMidnight =
+      value.days === 1 && localHourIn(ctx.timeZone, now) < AFTER_MIDNIGHT_UNTIL_HOUR;
+    return { primary, alternatives: afterMidnight ? [today] : [] };
+  }
+  const todayWd = new Date(`${today}T12:00:00Z`).getUTCDay();
+  const ahead = (value.weekday - todayWd + 7) % 7;
+  if (ahead === 0) {
+    // Today's own weekday: "this Monday" is today, "next Monday" a week on;
+    // a bare "Monday" on a Monday could be either.
+    if (value.qualifier === "this") return { primary: today, alternatives: [] };
+    if (value.qualifier === "next") return { primary: addDays(today, 7), alternatives: [] };
+    return { primary: today, alternatives: [addDays(today, 7)] };
+  }
+  return { primary: addDays(today, ahead), alternatives: [] };
+}
+
+/** Resolves a spoken day to YYYY-MM-DD in the business's own time zone (first reading). */
+export function resolveDate(value: DateExpr, ctx: BusinessContext): string {
+  return resolveDateCandidates(value, ctx).primary;
+}
+
+/** "Tuesday 3 November", plus "(today)" / "(tomorrow)" when the business clock is known. */
+export function spokenDate(iso: string, ctx?: BusinessContext): string {
+  const label = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "UTC",
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+  }).format(new Date(`${iso}T12:00:00Z`));
+  if (!ctx) return label;
+  const today = isoDateIn(ctx.timeZone, ctx.now());
+  const rel =
+    iso === today
+      ? "today"
+      : iso === addDays(today, 1)
+        ? "tomorrow"
+        : iso === addDays(today, 2)
+          ? "day after tomorrow"
+          : null;
+  return rel ? `${label} (${rel})` : label;
 }
 
 /* ------------------------------------------------------------------ */
@@ -250,6 +354,8 @@ function setFact<T>(
     s.booking.offered = [];
     s.booking.selected = null;
     s.booking.status = "none";
+    s.booking.checked = null;
+    s.booking.unavailable = [];
     if (s.pendingReadBack === "booking") s.pendingReadBack = null;
   }
 }
@@ -258,6 +364,21 @@ function setFact<T>(
 function answerReadBack(s: ConversationState, r: Reading): boolean {
   const target = s.pendingReadBack;
   if (!target) return false;
+  if (target === "leave") {
+    // "Shall I finish it now, or leave it for now?"
+    if (r.affirm && !r.closing && !r.correction) {
+      s.closing.requested = false; // continue where we were
+      s.pendingReadBack = null;
+      return true;
+    }
+    if (r.deny || r.closing) {
+      s.closing.requested = true;
+      s.closing.leaveConfirmed = true;
+      s.pendingReadBack = null;
+      return true;
+    }
+    return false;
+  }
   if (r.affirm && !r.correction) {
     if (target === "booking") {
       for (const k of ["service", "date", "time", "customerName", "phone"] as const) {
@@ -272,7 +393,7 @@ function answerReadBack(s: ConversationState, r: Reading): boolean {
         s.currentTask = "booking";
       }
     } else {
-      const f = s[target] as Fact<unknown> | null;
+      const f = s[target as Key] as Fact<unknown> | null;
       if (f && f.provenance !== "uncertain") f.provenance = "confirmed";
     }
     s.pendingReadBack = null;
@@ -280,7 +401,7 @@ function answerReadBack(s: ConversationState, r: Reading): boolean {
   }
   if (r.deny) {
     if (target !== "booking") {
-      const f = s[target] as Fact<unknown> | null;
+      const f = s[target as Key] as Fact<unknown> | null;
       // "No" without a replacement: the value is now doubtful, not deleted.
       if (f) f.provenance = "uncertain";
       if (target === "phone" && f?.source === "caller_id") s.phone = null;
@@ -352,14 +473,15 @@ export function applyReading(
     );
   }
   if (r.date) {
+    const c = resolveDateCandidates(r.date.value, ctx);
     setFact(
       s,
       "date",
       {
-        value: resolveDate(r.date.value, ctx),
-        provenance: cert(r.date.certainty),
+        value: c.primary,
+        provenance: c.alternatives.length ? "uncertain" : cert(r.date.certainty),
         evidence: r.date.evidence,
-        alternatives: [],
+        alternatives: c.alternatives,
         source: "caller",
       },
       r.correction ? "caller corrected" : "caller stated",
@@ -405,6 +527,37 @@ export function applyReading(
       r.correction ? "caller corrected" : "caller stated",
     );
   }
+  // "4 or 5?" was asked and the caller answered with a question for the
+  // calendar ("which one is free?"), deferred ("either", "you tell me"), or
+  // did not resolve it: check the calendar for every candidate instead of
+  // asking the same question again. Nothing is picked for the caller; they
+  // choose among the free ones.
+  if (
+    s.time?.provenance === "uncertain" &&
+    !r.time &&
+    (r.asksAvailability || r.defers || (s.lastQuestion === "time" && (s.timesAsked.time ?? 0) >= 1))
+  ) {
+    const candidates = [s.time.value, ...s.time.alternatives];
+    if (candidates.every((c) => c.kind === "exact")) {
+      const hhmms = [...new Set(candidates.map((c) => (c as { hhmm: string }).hhmm))].sort();
+      setFact(
+        s,
+        "time",
+        {
+          value: { kind: "anyOf", hhmms } as TimeSpec,
+          provenance: "inferred",
+          evidence: r.asksAvailability
+            ? "caller asked which is free"
+            : r.defers
+              ? "caller left the choice to the calendar"
+              : "clarification not answered",
+          alternatives: [],
+          source: "caller",
+        },
+        "check every candidate instead of asking again",
+      );
+    }
+  }
   if (r.name) {
     setFact(
       s,
@@ -446,8 +599,44 @@ export function applyReading(
     s.currentTask = "confirming";
   }
 
+  // Wrapping up. A yes to a read-back is never a goodbye; a new request
+  // in the same breath ("thanks, and a whitening too") reopens the call.
+  const newRequest =
+    r.services.length > 0 ||
+    !!r.date ||
+    !!r.time ||
+    !!r.name ||
+    !!r.phoneDigits ||
+    r.intent !== null ||
+    r.asksAvailability;
+  if (answeredReadBack && r.affirm) {
+    // A yes to a read-back moves the call on ("leave" answers set closing themselves).
+  } else if (r.closing && !newRequest) {
+    s.closing.requested = true;
+    if (r.deny) s.closing.leaveConfirmed = true;
+  } else if (newRequest) {
+    s.closing = { requested: false, leaveConfirmed: false, closed: false };
+    if (s.currentTask === "closed") s.currentTask = "collecting";
+  }
+
   if (s.currentTask === "greeting") s.currentTask = "collecting";
   return s;
+}
+
+/**
+ * Work the caller would lose by hanging up now: a booking under way, an
+ * open clarification, or a booking request not finished.
+ */
+export function pendingWork(s: ConversationState): boolean {
+  if (bookingExists(s)) return false;
+  if (["slot_selected", "awaiting_final_confirmation", "booking"].includes(s.booking.status))
+    return true;
+  if ([s.service, s.date, s.time].some((f) => f?.provenance === "uncertain")) return true;
+  return (
+    s.intent?.value === "book" &&
+    s.booking.status !== "no_availability" &&
+    s.booking.status !== "failed"
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -493,16 +682,26 @@ export type NextStep =
   | { kind: "confirm_caller_id"; digits: string }
   | { kind: "check_availability" }
   | { kind: "offer_slots" }
+  /** The calendar has nothing free for what was asked: ask for another day or time. */
+  | { kind: "ask_alternative" }
   | { kind: "final_confirmation" }
   | { kind: "book" }
-  | { kind: "done" };
+  | { kind: "done" }
+  /** The caller is wrapping up with work pending: ask once whether to finish it now. */
+  | { kind: "confirm_leave" }
+  /** Say goodbye: no questions, nothing reopened. */
+  | { kind: "close"; outcome: "booked" | "not_booked" };
 
-function describe(v: unknown): string {
-  if (v && typeof v === "object" && "hhmm" in (v as object)) {
-    const t = v as { kind: string; hhmm: string };
+function describe(v: unknown, ctx?: BusinessContext): string {
+  if (v && typeof v === "object" && "kind" in (v as object)) {
+    const t = v as TimeSpec;
+    if (t.kind === "period") return `in the ${t.period}`;
+    if (t.kind === "anyOf")
+      return `${t.hhmms.map(spokenTime).join(" or ")} (either suits the caller)`;
     return `${t.kind === "exact" ? "" : t.kind + " "}${spokenTime(t.hhmm)}`;
   }
   if (v && typeof v === "object" && "name" in (v as object)) return (v as ServiceRow).name;
+  if (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v)) return spokenDate(v, ctx);
   return String(v);
 }
 
@@ -517,16 +716,27 @@ export function spokenTime(hhmm: string): string {
 
 /** Exactly one thing to do next. Uncertainty is always resolved first. */
 export function nextStep(s: ConversationState): NextStep {
-  if (bookingExists(s)) return { kind: "done" };
+  if (bookingExists(s))
+    return s.closing.requested ? { kind: "close", outcome: "booked" } : { kind: "done" };
+  if (s.closing.requested) {
+    if (!s.closing.leaveConfirmed && pendingWork(s) && !s.timesAsked.leave)
+      return { kind: "confirm_leave" };
+    return { kind: "close", outcome: "not_booked" };
+  }
   for (const k of ["service", "date", "time"] as const) {
     const f = s[k] as Fact<unknown> | null;
     if (f?.provenance === "uncertain") {
-      return { kind: "clarify", slot: k, options: [f.value, ...f.alternatives].map(describe) };
+      return {
+        kind: "clarify",
+        slot: k,
+        options: [f.value, ...f.alternatives].map((v) => describe(v)),
+      };
     }
   }
   if (!usable(s.service)) return { kind: "ask", slot: "service" };
   if (!usable(s.date)) return { kind: "ask", slot: "date" };
   if (!usable(s.time)) return { kind: "ask", slot: "time" };
+  if (s.booking.status === "no_availability") return { kind: "ask_alternative" };
   if (s.booking.status === "none" || s.booking.status === "failed")
     return { kind: "check_availability" };
   if (s.booking.status === "checking") return { kind: "check_availability" };
@@ -556,28 +766,46 @@ export function agentSaid(
   opts: { interrupted: boolean },
 ): void {
   if (opts.interrupted) return;
-  const slot: SlotName | "booking" | null =
+  if (step.kind === "close") {
+    s.closing.closed = true;
+    s.currentTask = "closed";
+    s.lastQuestion = null;
+    return;
+  }
+  if (step.kind === "done") s.bookingAnnounced = true;
+  const slot: QuestionKey | null =
     step.kind === "ask" || step.kind === "clarify"
       ? step.slot
       : step.kind === "confirm_caller_id"
         ? "phone"
         : step.kind === "final_confirmation"
           ? "booking"
-          : null;
+          : step.kind === "confirm_leave"
+            ? "leave"
+            : null;
   if (!slot) return;
   s.lastQuestion = slot;
   s.timesAsked[slot] = (s.timesAsked[slot] ?? 0) + 1;
-  if (step.kind === "confirm_caller_id" || step.kind === "final_confirmation")
+  if (
+    step.kind === "confirm_caller_id" ||
+    step.kind === "final_confirmation" ||
+    step.kind === "confirm_leave"
+  )
     s.pendingReadBack = slot;
 }
 
 /** For the model: the state as plain facts, with their standing. */
-export function stateSummary(s: ConversationState): string {
+export function stateSummary(s: ConversationState, ctx?: BusinessContext): string {
+  const d = (v: unknown) => describe(v, ctx);
   const line = (label: string, f: Fact<unknown> | null) =>
     f
-      ? `- ${label}: ${describe(f.value)} [${f.provenance}${f.alternatives.length ? `; could also be ${f.alternatives.map(describe).join(" / ")}` : ""}]`
+      ? `- ${label}: ${d(f.value)} [${f.provenance}${f.alternatives.length ? `; could also be ${f.alternatives.map(d).join(" / ")}` : ""}]`
       : `- ${label}: (unknown)`;
+  const now = ctx ? ctx.now() : null;
   return [
+    ctx && now
+      ? `Today at the business: ${spokenDate(isoDateIn(ctx.timeZone, now))}, ${new Intl.DateTimeFormat("en-GB", { timeZone: ctx.timeZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(now)} (${ctx.timeZone}). Dates below are already resolved; never compute or change a date yourself.`
+      : "",
     `Caller language now: ${s.language.current}`,
     line("intent", s.intent),
     line("service", s.service),
@@ -589,6 +817,10 @@ export function stateSummary(s: ConversationState): string {
     s.booking.offered.length
       ? `- slots the calendar offered: ${s.booking.offered.map((o) => spokenTime(o.hhmm)).join(", ")}`
       : "",
+    s.booking.status === "no_availability" && s.booking.checked
+      ? `- the calendar has nothing free for ${d(s.booking.checked.date)}, ${s.booking.checked.time}`
+      : "",
+    s.closing.requested ? "- the caller is wrapping up the call" : "",
   ]
     .filter(Boolean)
     .join("\n");

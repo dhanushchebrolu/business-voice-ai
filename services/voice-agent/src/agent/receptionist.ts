@@ -18,21 +18,63 @@ import {
 import { llm, voice } from "@livekit/agents";
 import { z } from "zod";
 import type { BookingBackend, Slot } from "../backend/types.ts";
-import { PHRASES, ReplyGuard, slotList } from "../conversation/guard.ts";
+import { PHRASES, ReplyGuard, slotList, type GuardRemoval } from "../conversation/guard.ts";
 import {
   agentSaid,
   applyReading,
   bookingExists,
+  isoDateIn,
   nextStep,
   readyForAvailability,
   readyToBook,
+  spokenDate,
   spokenTime,
   stateSummary,
   type BusinessContext,
   type ConversationState,
   type NextStep,
 } from "../conversation/state.ts";
-import { readUtterance, type LanguageCode, type TimeSpec } from "../conversation/understanding.ts";
+import {
+  detectLanguage,
+  readUtterance,
+  type LanguageCode,
+  type TimeSpec,
+} from "../conversation/understanding.ts";
+
+/**
+ * One guarded reply, for audits and tests: what the model produced, what the
+ * caller heard, and why anything was removed. Holds caller-facing text (it
+ * can contain a name or number), so production telemetry should log only
+ * rules and reasons; the full report is for test and smoke-test records.
+ */
+export interface GuardReport {
+  /** The state's step when the reply was generated. */
+  step: NextStep["kind"];
+  /** Everything the model said, unmodified. */
+  original: string;
+  /** What the caller heard: the kept sentences, plus any fallback line. */
+  modified: string;
+  removed: GuardRemoval[];
+  /** The fixed line spoken when nothing safe was left, or null. */
+  fallback: string | null;
+  languages: {
+    /** The caller's language in the call state. */
+    caller: LanguageCode;
+    /** The language the model replied in (by script), or null if it could not be told. */
+    response: LanguageCode | null;
+    /** The language of what the caller heard. */
+    spoken: LanguageCode | null;
+  };
+}
+
+/**
+ * The fallback line's language: the language the model was already speaking
+ * (so a guard intervention never silently switches language mid-reply), or
+ * the caller's when the reply carries no language signal.
+ */
+export function fallbackLanguage(original: string, caller: LanguageCode): LanguageCode {
+  return detectLanguage(original, null) ?? caller;
+}
 
 export interface ReceptionistDeps {
   business: BusinessContext;
@@ -41,7 +83,8 @@ export interface ReceptionistDeps {
   /** Extra business instructions from klyro (buildAgentInstructions); facts only. */
   businessInstructions?: string;
   onTurn?: (info: { step: NextStep; state: ConversationState; language: LanguageCode }) => void;
-  onGuard?: (removed: ReplyGuard["removed"]) => void;
+  /** Removed sentences (rule, exact text, reason) and the full report for this reply. */
+  onGuard?: (removed: ReplyGuard["removed"], report: GuardReport) => void;
   onTool?: (info: { name: string; ok: boolean; ms: number; detail?: string }) => void;
 }
 
@@ -53,22 +96,37 @@ const LANGUAGE_NAME: Record<LanguageCode, string> = {
 
 function instructionFor(step: NextStep, s: ConversationState): string {
   const p = PHRASES[s.language.current];
+  const again = (key: keyof ConversationState["timesAsked"]) =>
+    (s.timesAsked[key] ?? 0) > 0
+      ? " You asked this before and it was not answered: ask it differently (shorter, with the options spelled out), not word for word."
+      : "";
   switch (step.kind) {
     case "clarify":
-      return `The caller's ${step.slot} is ambiguous: it could be ${step.options.join(" or ")}. Ask which one they mean. Do not choose for them.`;
+      return `The caller's ${step.slot} is ambiguous: it could be ${step.options.join(" or ")}. Ask which one they mean. Do not choose for them.${again(step.slot)}`;
     case "ask":
-      return `Ask for the ${step.slot} only. Suggested wording: "${p[step.slot]}"`;
+      return `Ask for the ${step.slot} only. Suggested wording: "${p[step.slot]}"${again(step.slot)}`;
     case "confirm_caller_id":
       return `Ask whether to use the number they are calling from, ending in ${step.digits.slice(-4)}. Do not assume yes.`;
     case "check_availability":
       return "Say one short line that you are checking, then call the check_availability tool. Never guess which times are free.";
     case "offer_slots":
-      return `Offer exactly these times from the calendar and ask which one suits them: ${slotList(s)}. Offer no other time.`;
+      return `Offer exactly these times from the calendar${s.date ? ` for ${spokenDate(s.date.value)}` : ""} and ask which one suits them: ${slotList(s)}. Offer no other time.`;
+    case "ask_alternative":
+      return `The calendar has nothing free for what the caller asked${s.booking.checked ? ` (${s.booking.checked.time})` : ""}. Say so plainly, then ask for another day or time. Do not suggest any time yourself and do not say anything is free.`;
     case "final_confirmation":
       return "Read back service, day, time, name and phone number once, then ask the caller to confirm. Do not say it is booked.";
     case "book":
       return "The caller confirmed. Call the book_appointment tool now. Do not say it is booked until the tool says so.";
+    case "confirm_leave":
+      return "The caller sounds like they are finishing, but the booking is not done. Ask once, briefly: do they want to finish booking now, or leave it for now? Do not say anything is booked.";
+    case "close":
+      return step.outcome === "booked"
+        ? "The caller is finishing the call and the booking is already settled. Thank them and say goodbye in one short sentence. Ask no question, and do not repeat or reopen the booking details."
+        : "The caller is finishing the call. Thank them and say goodbye in one short sentence. Ask no question, ask for no details, and do not say anything is booked.";
     case "done":
+      if (s.bookingAnnounced) {
+        return "The booking was already announced. Answer only what the caller just said; do not repeat the booking and do not ask for any booking detail again.";
+      }
       if (s.booking.status === "confirmed") {
         return "The booking is confirmed by the system. Tell the caller it is booked and ask if there is anything else.";
       }
@@ -79,10 +137,10 @@ function instructionFor(step: NextStep, s: ConversationState): string {
   }
 }
 
-export function directive(step: NextStep, s: ConversationState): string {
+export function directive(step: NextStep, s: ConversationState, ctx?: BusinessContext): string {
   return [
     "CALL STATE (authoritative; values marked inferred/uncertain are NOT facts the caller confirmed):",
-    stateSummary(s),
+    stateSummary(s, ctx),
     "",
     `NEXT STEP: ${instructionFor(step, s)}`,
     `Reply in ${LANGUAGE_NAME[s.language.current]}, the language the caller just used. Keep it short and natural for a phone call.`,
@@ -93,6 +151,7 @@ export function directive(step: NextStep, s: ConversationState): string {
 
 function timeWindow(t: TimeSpec | undefined): { notBefore?: string; notAfter?: string } {
   if (!t) return {};
+  if (t.kind === "anyOf") return { notBefore: t.hhmms[0], notAfter: t.hhmms[t.hhmms.length - 1] };
   if (t.kind === "after") return { notBefore: t.hhmm };
   if (t.kind === "before") return { notAfter: t.hhmm };
   if (t.kind === "period") {
@@ -105,13 +164,68 @@ function timeWindow(t: TimeSpec | undefined): { notBefore?: string; notAfter?: s
   return {};
 }
 
-function hhmmOf(slot: Slot, timeZone: string): string {
+function hhmmOf(startIso: string, timeZone: string): string {
   return new Intl.DateTimeFormat("en-GB", {
     timeZone,
     hour: "2-digit",
     minute: "2-digit",
-    hour12: false,
-  }).format(new Date(slot.startIso));
+    hourCycle: "h23",
+  }).format(new Date(startIso));
+}
+
+export interface UsableSlot {
+  startIso: string;
+  endIso: string;
+  hhmm: string;
+}
+
+/**
+ * The only slots the agent may offer: well-formed, on the requested business
+ * date, within the requested window, not in the past, de-duplicated and in
+ * order. A backend answer that is not a list is malformed (never "nothing
+ * free"); individual bad entries are dropped and counted.
+ */
+export function usableSlots(
+  raw: unknown,
+  q: { date: string; notBefore?: string | undefined; notAfter?: string | undefined },
+  ctx: Pick<BusinessContext, "timeZone" | "now">,
+): { ok: true; slots: UsableSlot[]; dropped: number } | { ok: false; error: "malformed_response" } {
+  if (!Array.isArray(raw)) return { ok: false, error: "malformed_response" };
+  const now = ctx.now().getTime();
+  const seen = new Set<string>();
+  const slots: UsableSlot[] = [];
+  let dropped = 0;
+  for (const x of raw as unknown[]) {
+    const o = x as Partial<Slot> | null;
+    const start = typeof o?.startIso === "string" ? Date.parse(o.startIso) : NaN;
+    const end = typeof o?.endIso === "string" ? Date.parse(o.endIso) : NaN;
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+      dropped++;
+      continue;
+    }
+    const startIso = new Date(start).toISOString();
+    const hhmm = hhmmOf(startIso, ctx.timeZone);
+    if (
+      isoDateIn(ctx.timeZone, new Date(start)) !== q.date ||
+      start <= now ||
+      (q.notBefore && hhmm < q.notBefore) ||
+      (q.notAfter && hhmm > q.notAfter) ||
+      seen.has(startIso)
+    ) {
+      dropped++;
+      continue;
+    }
+    seen.add(startIso);
+    slots.push({ startIso: o!.startIso!, endIso: o!.endIso!, hhmm });
+  }
+  slots.sort((a, b) => Date.parse(a.startIso) - Date.parse(b.startIso));
+  return { ok: true, slots, dropped };
+}
+
+function describeWant(t: TimeSpec): string {
+  if (t.kind === "anyOf") return t.hhmms.map(spokenTime).join(" or ");
+  if (t.kind === "period") return `the ${t.period}`;
+  return `${t.kind === "exact" ? "" : `${t.kind} `}${spokenTime(t.hhmm)}`;
 }
 
 export function buildTools(d: ReceptionistDeps, knownPrices: Set<number>) {
@@ -155,44 +269,75 @@ export function buildTools(d: ReceptionistDeps, knownPrices: Set<number>) {
           return "NOT_READY: the service, day and time are not all known yet.";
         s.booking.status = "checking";
         s.currentTask = "checking_availability";
+        s.booking.unavailable = []; // evidence is per check: never carried over
         const want = s.time!.value;
+        const date = s.date!.value; // resolved from the caller's words; tools take no model arguments
+        const window = timeWindow(want);
         const res = await timed(
           "check_availability",
           () =>
             d.backend.checkAvailability({
               serviceId: s.service!.value.id,
-              date: s.date!.value,
+              date,
               durationMinutes: s.service!.value.durationMinutes || 30,
-              ...timeWindow(want),
+              ...window,
             }),
-          (r) => r.ok,
-          (r) => (r.ok ? `${r.slots.length} slots` : r.error),
+          (r) => !!r && r.ok === true && Array.isArray(r.slots),
+          (r) =>
+            r?.ok
+              ? Array.isArray(r.slots)
+                ? `${r.slots.length} slots`
+                : "malformed"
+              : String(r?.error),
         );
-        if (!res.ok) {
+        if (!res || !res.ok) {
           s.booking.status = "failed";
-          s.booking.error = res.error;
-          return `FAILED: the calendar could not be checked (${res.error}). Nothing is booked. Apologise and offer to try again.`;
+          s.booking.error = res?.error ?? "no_response";
+          return `FAILED: the calendar could not be checked (${s.booking.error}). Nothing is booked. Apologise and offer to try again.`;
         }
-        let slots = res.slots.map((x) => ({
-          startIso: x.startIso,
-          hhmm: hhmmOf(x, d.business.timeZone),
-          endIso: x.endIso,
-        }));
+        const usable = usableSlots(res.slots, { date, ...window }, d.business);
+        if (!usable.ok) {
+          // A malformed answer is not "nothing free": never claim either way.
+          s.booking.status = "failed";
+          s.booking.error = usable.error;
+          return "FAILED: the calendar could not be checked (malformed_response). Nothing is booked. Apologise and offer to try again.";
+        }
+        // The caller's own times the calendar did not return as free: the only
+        // times the agent may call unavailable (a failed check proves nothing).
+        const freeNow = new Set(usable.slots.map((x) => x.hhmm));
+        const requested =
+          want.kind === "exact" ? [want.hhmm] : want.kind === "anyOf" ? want.hhmms : [];
+        s.booking.unavailable = requested.filter((h) => !freeNow.has(h));
+        let slots = usable.slots;
         if (want.kind === "exact") {
           const exact = slots.find((x) => x.hhmm === want.hhmm);
           slots = exact ? [exact] : slots.slice(0, 3);
+        } else if (want.kind === "anyOf") {
+          // Only the caller's own candidates: "4 or 5" is never answered with 4:30.
+          slots = slots.filter((x) => want.hhmms.includes(x.hhmm));
         } else {
           slots = slots.slice(0, 3);
         }
         s.booking.offered = slots.map(({ startIso, hhmm }) => ({ startIso, hhmm }));
         slotEnds.clear();
         for (const x of slots) slotEnds.set(x.startIso, x.endIso);
-        s.booking.status = slots.length ? "slots_offered" : "none";
         s.currentTask = "choosing_slot";
-        if (!slots.length)
+        if (!slots.length) {
+          s.booking.status = "no_availability";
+          s.booking.checked = { date, time: describeWant(want) };
           return "NO_SLOTS: nothing is free for that day and time. Ask for another day or time.";
+        }
+        s.booking.status = "slots_offered";
+        s.booking.checked = null;
         if (want.kind === "exact" && slots.length === 1 && slots[0]!.hhmm === want.hhmm) {
           return `AVAILABLE: ${spokenTime(want.hhmm)} is free. Ask if they want it.`;
+        }
+        if (want.kind === "anyOf") {
+          const free = new Set(slots.map((x) => x.hhmm));
+          const taken = want.hhmms.filter((h) => !free.has(h));
+          return `OFFER: ${taken.length ? `${taken.map(spokenTime).join(", ")} ${taken.length > 1 ? "are" : "is"} not free. ` : ""}Free times: ${slots
+            .map((x) => spokenTime(x.hhmm))
+            .join(", ")}. Ask which one.`;
         }
         return `OFFER: ${want.kind === "exact" ? `${spokenTime(want.hhmm)} is not free. ` : ""}Free times: ${slots
           .map((x) => spokenTime(x.hhmm))
@@ -245,6 +390,8 @@ export function buildTools(d: ReceptionistDeps, knownPrices: Set<number>) {
           s.booking.status = "none";
           s.booking.offered = [];
           s.booking.selected = null;
+          // The backend just proved this time is taken: the agent may say so.
+          s.booking.unavailable = [sel.hhmm];
           return `SLOT_TAKEN: ${res.message} Nothing is booked. Apologise and check availability again.`;
         }
         if (res.retryable) {
@@ -343,7 +490,10 @@ export class ReceptionistAgent extends voice.Agent {
     ctx.items.splice(
       Math.max(0, ctx.items.length - 1),
       0,
-      llm.ChatMessage.create({ role: "system", content: directive(this.lastStep, s) }),
+      llm.ChatMessage.create({
+        role: "system",
+        content: directive(this.lastStep, s, this.deps.business),
+      }),
     );
     return ctx;
   }
@@ -365,29 +515,35 @@ export class ReceptionistAgent extends voice.Agent {
       NonNullable<Awaited<ReturnType<voice.Agent["llmNode"]>>> extends ReadableStream<infer T>
         ? T
         : never;
-    const guard = new ReplyGuard(this.deps.state, { knownPrices: [...this.knownPrices] });
+    const guard = new ReplyGuard(this.deps.state, {
+      knownPrices: [...this.knownPrices],
+      // A goodbye asks nothing: no "anything else?", no booking questions.
+      noQuestions: this.lastStep.kind === "close",
+    });
     const state = this.deps.state;
     const onGuard = this.deps.onGuard;
+    const stepKind = this.lastStep.kind;
     let buffer = "";
+    let original = "";
+    let heard = "";
     let spoke = false;
     let calledTool = false;
+    const say = (controller: TransformStreamDefaultController<Out>, text: string) => {
+      controller.enqueue(text);
+      heard += text;
+      spoke = true;
+    };
     const flushSentences = (controller: TransformStreamDefaultController<Out>, final: boolean) => {
       let consumed = 0;
       for (const m of buffer.matchAll(/[^.!?।\n]+[.!?।\n]+/g)) {
         const ok = guard.check(m[0]);
-        if (ok) {
-          controller.enqueue(ok);
-          spoke = true;
-        }
+        if (ok) say(controller, ok);
         consumed = m.index! + m[0].length;
       }
       buffer = buffer.slice(consumed);
       if (final && buffer.trim()) {
         const ok = guard.check(buffer);
-        if (ok) {
-          controller.enqueue(ok);
-          spoke = true;
-        }
+        if (ok) say(controller, ok);
         buffer = "";
       }
     };
@@ -401,6 +557,7 @@ export class ReceptionistAgent extends voice.Agent {
           }
           if (typeof chunk === "string") {
             buffer += chunk;
+            original += chunk;
             flushSentences(controller, false);
             return;
           }
@@ -408,6 +565,7 @@ export class ReceptionistAgent extends voice.Agent {
           const content = chunk.delta?.content;
           if (content) {
             buffer += content;
+            original += content;
             flushSentences(controller, false);
             const { content: _drop, ...rest } = chunk.delta!;
             if (rest.toolCalls?.length)
@@ -418,18 +576,35 @@ export class ReceptionistAgent extends voice.Agent {
         },
         flush(controller) {
           flushSentences(controller, true);
-          if (guard.removed.length) onGuard?.(guard.removed);
-          if (!spoke && !calledTool && guard.removed.length) {
-            const p = PHRASES[state.language.current];
+          if (!guard.removed.length) return;
+          let fallback: string | null = null;
+          if (!spoke && !calledTool) {
+            const p = PHRASES[fallbackLanguage(original, state.language.current)];
             const step = nextStep(state);
-            controller.enqueue(
+            fallback =
               step.kind === "ask"
                 ? p[step.slot]
                 : step.kind === "check_availability"
                   ? p.checking
-                  : p.notYetBooked,
-            );
+                  : step.kind === "close"
+                    ? p.goodbye
+                    : step.kind === "ask_alternative"
+                      ? p.noneFree
+                      : p.notYetBooked;
+            say(controller, fallback);
           }
+          onGuard?.(guard.removed, {
+            step: stepKind,
+            original,
+            modified: heard,
+            removed: [...guard.removed],
+            fallback,
+            languages: {
+              caller: state.language.current,
+              response: detectLanguage(original, null),
+              spoken: detectLanguage(heard, null),
+            },
+          });
         },
       }),
     );
