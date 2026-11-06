@@ -1,16 +1,13 @@
 /**
- * The call shown in the hero player. It is data, not code.
+ * The recordings shown in the hero player. It is data, not code.
  *
- * To ship the real recording:
- *   1. put the file in /public/audio and set `src` to its URL,
- *   2. give every segment its real `start` and `end` (seconds into the file),
- *   3. replace the sample text with the real transcript.
- * That is all: with a `src` the player plays it, draws its real waveform, follows
- * the segment timestamps and lets visitors click a line to jump there.
- *
- * While `src` is null the player shows a recording-pending state and the sample
- * script below. Sample segments have no timestamps, so nothing can pretend to be
- * in sync with audio that does not exist.
+ * Each entry is one real recorded call in one language. To add or replace one:
+ *   1. put the file in /public/audio and set `src`,
+ *   2. add its transcript to `segments`, each with the real `start` and `end`
+ *      (seconds into that file); an empty `segments` shows a transcript-pending
+ *      state for that language and nothing is ever shown in its place,
+ *   3. nothing else: the player draws that file's own waveform, follows the
+ *      timestamps and lets visitors click a line to jump there.
  */
 
 export type Speaker = "customer" | "agent";
@@ -25,26 +22,46 @@ export type CallSegment = {
 };
 
 export type RecordedCall = {
-  /** URL of the real recording, or null while it is still being prepared. */
+  id: string;
+  /** Text on the language button, in the language itself. */
+  label: string;
+  /** BCP 47 tag of the call's language, for the button's `lang` attribute. */
+  lang: string;
+  /** English name, used for the accessible name of the button. */
+  name: string;
+  /** URL of the recording, or null while it is still being prepared. */
   src: string | null;
   title: string;
-  callType: string;
   segments: CallSegment[];
 };
 
-export const DEMO_CALL: RecordedCall = {
-  src: null,
-  title: "AI Receptionist",
-  callType: "Appointment booking",
-  segments: [
-    { id: "s1", speaker: "customer", text: "Hi, I'd like to book an appointment for tomorrow." },
-    { id: "s2", speaker: "agent", text: "Of course. What time works best for you?" },
-    { id: "s3", speaker: "customer", text: "Around 4 PM, if that's possible." },
-    { id: "s4", speaker: "agent", text: "Let me check the calendar. Yes, 4 PM is free." },
-    {
-      id: "s5",
-      speaker: "agent",
-      text: "I've booked it for you, and a confirmation will be sent.",
-    },
-  ],
-};
+// Transcripts are pending: none of these recordings has a verified transcript or timestamps yet.
+export const DEMO_CALLS: RecordedCall[] = [
+  {
+    id: "en",
+    label: "English",
+    lang: "en",
+    name: "English",
+    src: "/audio/click-ai-english-call-fresh.mp3",
+    title: "AI Receptionist",
+    segments: [],
+  },
+  {
+    id: "te",
+    label: "తెలుగు",
+    lang: "te",
+    name: "Telugu",
+    src: "/audio/click-ai-telugu-call.mp3",
+    title: "AI Receptionist",
+    segments: [],
+  },
+  {
+    id: "hi",
+    label: "हिन्दी",
+    lang: "hi",
+    name: "Hindi",
+    src: "/audio/click-ai-hindi-call.mp3",
+    title: "AI Receptionist",
+    segments: [],
+  },
+];
