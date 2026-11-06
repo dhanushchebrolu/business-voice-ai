@@ -1,5 +1,4 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect } from "react";
 import { CLICKAI_BRAND, CLICKAI_LEGAL_NAME, CLICKAI_ADDRESS_JSON_LD } from "@/lib/company-info";
 import { Hero } from "@/components/landing/hero";
 import { VxNav } from "@/components/landing/home/vx-nav";
@@ -8,7 +7,10 @@ import { THEME_INIT } from "@/components/landing/home/theme";
 import { VxFooter } from "@/components/landing/home/vx-footer";
 import { ConnectsWith, Gap, Loop } from "@/components/landing/home/sections-a";
 import { Capabilities, Console, Integrations } from "@/components/landing/home/sections-b";
-import { Controls, Cta, Faq, Pricing, Status, Today } from "@/components/landing/home/sections-c";
+import { Controls, Faq, Pricing, Status, Today } from "@/components/landing/home/sections-c";
+import { Contact, Solutions } from "@/components/landing/home/sections-d";
+import { useAnchorScroll } from "@/components/landing/home/anchor-scroll";
+import { ClickSpark } from "@/components/landing/home/click-spark";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -29,7 +31,11 @@ export const Route = createFileRoute("/")({
           "AI-powered business solutions: AI Sales Executive, AI Receptionist, AI Booking & Order Agent and AI Customer Care, all on one white-label platform.",
       },
     ],
-    scripts: [{ children: THEME_INIT }],
+    scripts: [
+      { children: THEME_INIT },
+      // With a #section in the URL, the section wins over the browser's restored scroll position (reload).
+      { children: 'try{if(location.hash)history.scrollRestoration="manual"}catch(e){}' },
+    ],
     links: [
       { rel: "canonical", href: "https://clickai.in/" },
       { rel: "preconnect", href: "https://fonts.googleapis.com" },
@@ -71,22 +77,8 @@ const ORGANIZATION_JSON_LD = {
   ],
 };
 
-/**
- * Lets a visitor arrive at e.g. /#industries from anywhere on the site
- * (LandingFooter's cross-page section links use `Link to="/" hash={id}`)
- * and land scrolled to that real section, the same way clicking the
- * equivalent in-page footer/nav link already does on the homepage itself.
- */
-function useScrollToHashOnMount() {
-  useEffect(() => {
-    const hash = window.location.hash.replace(/^#/, "");
-    if (!hash) return;
-    document.getElementById(hash)?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, []);
-}
-
 function Landing() {
-  useScrollToHashOnMount();
+  useAnchorScroll();
   return (
     <div className="vx theme-light min-h-screen">
       {/* Static, hardcoded JSON (ORGANIZATION_JSON_LD above) — never user input. */}
@@ -100,24 +92,27 @@ function Landing() {
       >
         Skip to main content
       </a>
-      <VxNav />
-      <main id="main" tabIndex={-1} className="outline-none">
-        <Hero />
-        <ProductVisuals />
-        <ConnectsWith />
-        <Gap />
-        <Loop />
-        <Capabilities />
-        <Console />
-        <Integrations />
-        <Controls />
-        <Today />
-        <Status />
-        <Pricing />
-        <Faq />
-        <Cta />
-      </main>
-      <VxFooter />
+      <ClickSpark>
+        <VxNav />
+        <main id="main" tabIndex={-1} className="outline-none">
+          <Hero />
+          <ProductVisuals />
+          <ConnectsWith />
+          <Gap />
+          <Loop />
+          <Capabilities />
+          <Solutions />
+          <Console />
+          <Integrations />
+          <Controls />
+          <Today />
+          <Status />
+          <Pricing />
+          <Faq />
+          <Contact />
+        </main>
+        <VxFooter />
+      </ClickSpark>
     </div>
   );
 }

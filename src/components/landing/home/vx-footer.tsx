@@ -11,7 +11,7 @@ import { VxLink } from "./primitives";
 
 const SECTIONS = [
   ["02", "How it works", "loop"],
-  ["03", "Capabilities", "capabilities"],
+  ["03", "Products", "products"],
   ["04", "Activity", "console"],
   ["05", "Integrations", "integrations"],
   ["09", "Pricing", "pricing"],
@@ -57,7 +57,7 @@ export function VxFooter() {
               Tell us about your business and we will show you how it would answer.
             </p>
             <div className="mt-5 flex flex-wrap gap-3">
-              <VxLink to="/contact">Book a Demo</VxLink>
+              <VxLink href="#contact">Book a Demo</VxLink>
               <VxLink to="/pricing" variant="outline-dark">
                 Pricing
               </VxLink>

@@ -21,13 +21,13 @@ describe("Hero has real, working CTAs and the animated flow diagram", () => {
     // Get Started now lives in the nav; the hero's primary CTA is Book a Demo.
   });
 
-  test('"Book a Demo" links to the real /contact route', () => {
-    assert.match(src, /to="\/contact"/);
+  test('"Book a Demo" links to the on-page #contact section', () => {
+    assert.match(src, /href="#contact"/);
     assert.match(src, />\s*Book a Demo\s*</);
   });
 
-  test('"Explore Products" scrolls to the real #capabilities section (not a href="#" placeholder)', () => {
-    assert.match(src, /scrollToSection\("capabilities"\)/);
+  test('"Explore Products" scrolls to the real #products section (not a href="#" placeholder)', () => {
+    assert.match(src, /scrollToSection\("products"\)/);
     assert.match(src, />\s*Explore Products\s*</);
     assert.doesNotMatch(src, /href="#"/);
   });

@@ -22,14 +22,14 @@ export const Route = createFileRoute("/solutions")({
   component: Solutions,
 });
 
-const PRODUCTS = {
+export const PRODUCTS = {
   voice: { label: "AI Voice Agents", to: "/ai-voice-agents" },
   whatsapp: { label: "WhatsApp AI Agents", to: "/whatsapp-ai-agents" },
   appointments: { label: "Appointment Automation", to: "/appointment-automation" },
   automation: { label: "Business Automation", to: "/business-automation" },
 } as const;
 
-const INDUSTRIES: {
+export const INDUSTRIES: {
   id: string;
   name: string;
   problem: string;
