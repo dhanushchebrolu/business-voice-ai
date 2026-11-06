@@ -360,6 +360,9 @@ export function VoicePlayer({ calls = DEMO_CALLS }: { calls?: RecordedCall[] }) 
       ) : null}
 
       <div className="border-t border-[var(--vx-hair)] px-4 py-3">
+        {call.note && segments.length > 0 ? (
+          <p className="pb-1 font-vmono text-[11px] text-[var(--vx-muted)]">{call.note}</p>
+        ) : null}
         {segments.length === 0 ? (
           <p className="py-2 font-vmono text-[12px] leading-[1.6] text-[var(--vx-muted)]">
             Transcript for this recording is coming soon.
@@ -371,7 +374,7 @@ export function VoicePlayer({ calls = DEMO_CALLS }: { calls?: RecordedCall[] }) 
           onWheel={() => (lastManualScroll.current = Date.now())}
           onTouchMove={() => (lastManualScroll.current = Date.now())}
           hidden={segments.length === 0}
-          className="relative max-h-[132px] space-y-0.5 overflow-y-auto overscroll-contain pr-1"
+          className="relative max-h-[156px] space-y-0.5 overflow-y-auto overscroll-contain pr-1"
         >
           {segments.map((s, i) => {
             const on = i === active;
@@ -388,7 +391,9 @@ export function VoicePlayer({ calls = DEMO_CALLS }: { calls?: RecordedCall[] }) 
                 >
                   {s.speaker === "agent" ? "agent" : "customer"} ›
                 </span>
-                <span className="font-display text-[15px] leading-[1.45]">{s.text}</span>
+                <span lang={call.lang} className="font-display text-[15px] leading-[1.45]">
+                  {s.text}
+                </span>
                 <span className="sr-only"> ({nameOf(s.speaker)})</span>
               </>
             );

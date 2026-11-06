@@ -464,9 +464,10 @@ html[data-vx-vt="shrink"]::view-transition-old(root) {
 html[data-vx-vt="shrink"]::view-transition-new(root) {
   z-index: 1;
 }
+/* The logo's dark wordmark needs a light plate in dark mode. Drawn with an outline so the logo's box (and everything laid out around it) is identical in both themes. */
 html[data-vx-theme="dark"] .vx img[alt="ClickAI"] {
   background: #fff;
-  padding: 4px 8px;
+  outline: 4px solid #fff;
 }
 html[data-vx-theme="dark"] .vx .text-emerald-700 {
   color: #34d399;
@@ -488,4 +489,13 @@ html[data-vx-vt] .vx *:not(.vx-theme-icon)::after {
   .vx > footer {
     contain-intrinsic-size: auto 1300px;
   }
+}
+/* Telugu and Hindi text: Space Grotesk has no glyphs for these scripts, so name real script fonts (system ones ship on every OS) and give the taller scripts room so nothing clips. */
+.vx [lang="te"] {
+  font-family: "Noto Sans Telugu", "Nirmala UI", "Gautami", "Telugu MN", "Telugu Sangam MN", sans-serif;
+  line-height: 1.75;
+}
+.vx [lang="hi"] {
+  font-family: "Noto Sans Devanagari", "Nirmala UI", "Mangal", "Devanagari Sangam MN", sans-serif;
+  line-height: 1.7;
 }
