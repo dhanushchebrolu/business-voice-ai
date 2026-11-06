@@ -31,7 +31,7 @@
  * RUNBOOK.md; this script never touches Vobiz.
  */
 import { SipClient } from "livekit-server-sdk";
-import { ProvisionError, provisionSip, type DesiredSip } from "./sip-provisioning.ts";
+import { ProvisionError, provisionSip, sipApiUrl, type DesiredSip } from "./sip-provisioning.ts";
 
 const env = (n: string) => process.env[n]?.trim() || undefined;
 const list = (n: string) =>
@@ -73,7 +73,7 @@ async function main() {
   };
   if (withOutbound && !domain)
     throw new ProvisionError("--with-outbound needs VOBIZ_OUTBOUND_SIP_DOMAIN");
-  const sip = new SipClient(url.replace(/^wss?:/, "https:"), key, secret);
+  const sip = new SipClient(sipApiUrl(url), key, secret);
   const { plan, applied } = await provisionSip(sip, desired, { apply, appEnv });
   // Never prints credentials: only names, counts, numbers and the plan.
   console.log(

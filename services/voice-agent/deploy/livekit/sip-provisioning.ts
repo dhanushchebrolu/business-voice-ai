@@ -86,6 +86,27 @@ const E164 = /^\+[1-9]\d{6,14}$/;
 const IPV4_CIDR =
   /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}(\/([0-9]|[12]\d|3[0-2]))?$/;
 
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * The HTTP(S) base of the LiveKit SIP API for LIVEKIT_URL. TLS (wss/https)
+ * for every host; plain ws/http only to a loopback host (a local
+ * self-hosted server from deploy/docker-compose.dev.yml), never elsewhere,
+ * because the request carries an API-key-signed token.
+ */
+export function sipApiUrl(livekitUrl: string): string {
+  let u: URL;
+  try {
+    u = new URL(livekitUrl);
+  } catch {
+    throw new ProvisionError("LIVEKIT_URL is not a valid URL");
+  }
+  if (u.protocol === "wss:" || u.protocol === "https:") return `https://${u.host}`;
+  if ((u.protocol === "ws:" || u.protocol === "http:") && LOOPBACK_HOSTS.has(u.hostname))
+    return `http://${u.host}`;
+  throw new ProvisionError("LIVEKIT_URL must be wss:// (ws:// only for localhost)");
+}
+
 /** Validates the requested configuration before anything is read or written. */
 export function validateDesired(d: DesiredSip, appEnv: string): void {
   if (d.inboundNumbers.length === 0)

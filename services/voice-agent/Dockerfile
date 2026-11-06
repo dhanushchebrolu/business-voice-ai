@@ -36,7 +36,15 @@ RUN npm ci --omit=dev --no-audit --no-fund
 # makes the tokenizer loadable OFFLINE (see that file: @huggingface/transformers
 # 4.2.0 looks up tokenizer_config.json under the "main" cache key).
 COPY services/voice-agent/deploy/prepare-model-cache.mjs deploy/
-RUN npx livekit-agents download-files && node deploy/prepare-model-cache.mjs
+# DOWNLOAD_TURN_DETECTOR=0 builds an image WITHOUT the turn-detector model
+# (no huggingface.co needed). Such an image only runs with
+# TURN_DETECTION=vad and must also be built with VERIFY_TURN_DETECTOR=0.
+# Local development only (deploy/docker-compose.dev.yml); never for staging
+# or production.
+ARG DOWNLOAD_TURN_DETECTOR=1
+RUN mkdir -p /root/.cache && if [ "$DOWNLOAD_TURN_DETECTOR" = "1" ]; then \
+      npx livekit-agents download-files && node deploy/prepare-model-cache.mjs; \
+    fi
 
 FROM ${BASE_REGISTRY}/${NODE_IMAGE}
 ENV NODE_ENV=production

@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit -p .",
     "test": "node --experimental-strip-types --test --test-reporter=spec \"tests/*.spec.ts\"",
     "provision:sip": "node --experimental-strip-types deploy/livekit/provision-sip.ts",
+    "local:smoke": "node --experimental-strip-types deploy/local/smoke.ts",
     "bench": "node --experimental-strip-types bench/latency.ts"
   },
   "dependencies": {
