@@ -2,7 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { toast } from "sonner";
 import { Loader2, CheckCircle2, Mail, Phone } from "lucide-react";
-import { supabase } from "@/integrations/supabase/client";
+import { INDUSTRIES, INTERESTS, submitDemoRequest } from "@/lib/demo-request";
 import { CLICKAI_LEGAL_NAME, CLICKAI_ADDRESS_LINES } from "@/lib/company-info";
 import { LandingNav } from "@/components/landing/landing-nav";
 import { LandingFooter } from "@/components/landing/landing-footer";
@@ -33,23 +33,6 @@ export const Route = createFileRoute("/contact")({
   component: Contact,
 });
 
-const INDUSTRIES = [
-  "Healthcare / clinics",
-  "Restaurants / hospitality",
-  "Real estate",
-  "Education",
-  "Retail / local business",
-  "Professional services",
-  "Other",
-];
-const INTERESTS = [
-  "AI Voice Agents",
-  "WhatsApp AI Agents",
-  "Appointment Automation",
-  "Business Automation",
-  "Custom integration",
-];
-
 function Contact() {
   const [form, setForm] = useState({
     name: "",
@@ -69,45 +52,12 @@ function Contact() {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!consent) {
-      toast.error("Please agree to be contacted before submitting.");
-      return;
-    }
-    const email = form.email.trim();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
-      toast.error("Please enter a valid email address.");
-      return;
-    }
     if (busy) return; // duplicate-submission guard
     setBusy(true);
-    try {
-      const { error } = await supabase.from("demo_requests").insert({
-        name: form.name.trim(),
-        email,
-        phone: form.phone.trim() || null,
-        business_name: form.businessName.trim() || null,
-        // No dedicated columns exist yet for these two fields (adding them needs a migration),
-        // so they are prefixed to the message the team already reads.
-        message:
-          [
-            form.industry && `Industry: ${form.industry}`,
-            form.interest && `Product interest: ${form.interest}`,
-            form.message.trim(),
-          ]
-            .filter(Boolean)
-            .join("\n")
-            .slice(0, 2000) || null,
-        marketing_consent: consent,
-      });
-      if (error) throw error;
-      setSent(true);
-    } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Could not send your request. Please try again.",
-      );
-    } finally {
-      setBusy(false);
-    }
+    const error = await submitDemoRequest(form, consent);
+    setBusy(false);
+    if (error) toast.error(error);
+    else setSent(true);
   }
 
   return (

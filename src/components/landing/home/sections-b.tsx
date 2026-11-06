@@ -50,9 +50,20 @@ const CAPS: [string, string, ReactNode][] = [
   ],
 ];
 
+/** Product pages for the tiles that have one (the others are features, not separate products). */
+const PRODUCT_PAGE: Record<
+  string,
+  "/ai-voice-agents" | "/whatsapp-ai-agents" | "/appointment-automation" | "/business-automation"
+> = {
+  "AI voice receptionist": "/ai-voice-agents",
+  "WhatsApp agent": "/whatsapp-ai-agents",
+  "Appointment booking": "/appointment-automation",
+  "Workflow automation": "/business-automation",
+};
+
 export function Capabilities() {
   return (
-    <VxSection id="capabilities" index="03" label="Capabilities">
+    <VxSection id="products" index="03" label="Products">
       <ScrollFill
         text="Everything a front desk handles, from day one."
         className="max-w-[760px] text-[28px] leading-[1.2] sm:text-[40px]"
@@ -73,6 +84,14 @@ export function Capabilities() {
                   {title}
                 </h3>
                 <p className={`${MONO_P} mt-3 text-[13px]`}>{text}</p>
+                {PRODUCT_PAGE[title] ? (
+                  <Link
+                    to={PRODUCT_PAGE[title]}
+                    className="mt-auto inline-flex min-h-11 items-center pt-4 font-vmono text-[11px] uppercase tracking-[0.1em] text-[var(--vx-accent)] hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--vx-accent)]"
+                  >
+                    Learn more →
+                  </Link>
+                ) : null}
               </div>
             </Enter>
           </li>

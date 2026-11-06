@@ -51,8 +51,8 @@ describe("homepage sections", () => {
     assert.doesNotMatch(footer, /type="email"|Subscribe/i);
   });
 
-  test("the primary CTAs are real: Book a Demo goes to /contact, plans go to signup", () => {
-    assert.match(src[join(here, "..", "hero.tsx")]!, /VxLink to="\/contact">Book a Demo/);
+  test("the primary CTAs are real: Book a Demo goes to #contact, plans go to signup", () => {
+    assert.match(src[join(here, "..", "hero.tsx")]!, /VxLink href="#contact">Book a Demo/);
     assert.match(all, /to="\/auth"[\s\S]{0,80}mode: "signup"/);
   });
 
@@ -65,5 +65,33 @@ describe("homepage sections", () => {
   test("illustrative content is labelled", () => {
     assert.match(all, /Illustrative example/);
     assert.match(all, /Example configuration/);
+  });
+});
+
+describe("single-page navigation and click sparks", () => {
+  const nav = readFileSync(join(here, "vx-nav.tsx"), "utf8");
+  const hero = readFileSync(join(here, "..", "hero.tsx"), "utf8");
+  const every = all + hero;
+
+  test("every header link is an on-page anchor whose section id exists", () => {
+    const hrefs = [...nav.matchAll(/\["[^"]+", "(#[a-z-]+)"\]/g)].map((m) => m[1]!.slice(1));
+    assert.deepEqual(hrefs, [
+      "home",
+      "products",
+      "solutions",
+      "how-it-works",
+      "pricing",
+      "contact",
+    ]);
+    for (const id of hrefs) assert.match(every, new RegExp(`id="${id}"`), `no section id="${id}"`);
+  });
+  test("Sign in still opens the real auth route", () => {
+    assert.match(nav, /to="\/auth"/);
+  });
+  test("ClickSpark ignores non-interactive targets, honours reduced motion and never takes pointer events", () => {
+    const cs = readFileSync(join(here, "click-spark.tsx"), "utf8");
+    assert.match(cs, /closest\(INTERACTIVE\)/);
+    assert.match(cs, /prefers-reduced-motion: reduce/);
+    assert.match(cs, /pointerEvents: "none"/);
   });
 });

@@ -236,7 +236,7 @@ export function Pricing() {
                 >
                   Get started
                 </VxLink>
-                <VxLink to="/contact" variant="text" className={hl ? "text-white" : ""}>
+                <VxLink href="#contact" variant="text" className={hl ? "text-white" : ""}>
                   Book a Demo
                 </VxLink>
               </div>
@@ -315,30 +315,6 @@ export function Faq() {
           </AccordionPrimitive.Item>
         ))}
       </AccordionPrimitive.Root>
-    </VxSection>
-  );
-}
-
-/* ───── closing CTA ───── */
-
-export function Cta() {
-  return (
-    <VxSection id="cta" bg="dark">
-      <div className="max-w-[760px] py-6">
-        <h2 className="text-[40px] leading-[1.1] tracking-[-0.03em] sm:text-[64px]">
-          Give Your Business an AI Employee.
-        </h2>
-        <p className="mt-6 max-w-[520px] font-vmono text-[14px] leading-[1.7] text-slate-400">
-          See how ClickAI would answer your calls and messages, configured from your own business
-          details.
-        </p>
-        <div className="mt-9 flex flex-wrap gap-3">
-          <VxLink to="/contact">Book a Demo</VxLink>
-          <VxLink to="/pricing" variant="outline-dark">
-            See pricing
-          </VxLink>
-        </div>
-      </div>
     </VxSection>
   );
 }

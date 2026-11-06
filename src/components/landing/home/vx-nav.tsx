@@ -1,6 +1,6 @@
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, Menu, Moon, Sun, X } from "lucide-react";
+import { Menu, Moon, Sun, X } from "lucide-react";
 import { Logo } from "@/components/app/primitives";
 import { useDashboardAccess } from "@/components/app/PublicNav";
 import { useAuth } from "@/hooks/useAuth";
@@ -15,11 +15,14 @@ import { toggleTheme, useVxTheme } from "./theme";
  * full-screen panel. Auth-awareness uses the same hooks as the shared nav.
  */
 
-export const PRODUCTS = [
-  ["AI Voice Agent", "Answers your business calls", "/ai-voice-agents"],
-  ["WhatsApp AI Agent", "Replies to customers on WhatsApp", "/whatsapp-ai-agents"],
-  ["Appointment Booking", "Books slots in your calendar", "/appointment-automation"],
-  ["Business Automation", "Turns conversations into tasks", "/business-automation"],
+/** Marketing links: every one scrolls to a section of this page. Sign in is the only route change. */
+const SECTION_LINKS = [
+  ["Home", "#home"],
+  ["Products", "#products"],
+  ["Solutions", "#solutions"],
+  ["How It Works", "#how-it-works"],
+  ["Pricing", "#pricing"],
+  ["Contact", "#contact"],
 ] as const;
 
 const FOCUS =
@@ -63,63 +66,6 @@ function ThemeToggle() {
   );
 }
 
-function ProductsMenu() {
-  const [open, setOpen] = useState(false);
-  const wrap = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (!wrap.current?.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-  return (
-    <div
-      ref={wrap}
-      className="relative"
-      onBlur={(e) => {
-        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOpen(false);
-      }}
-    >
-      <button
-        type="button"
-        aria-expanded={open}
-        aria-controls="vx-products"
-        onClick={() => setOpen((o) => !o)}
-        className={cn(LINK, "gap-1.5")}
-      >
-        Products
-        <ChevronDown className="size-3.5" aria-hidden="true" />
-      </button>
-      {open ? (
-        <ul
-          id="vx-products"
-          className="absolute left-1/2 top-full z-50 w-[300px] -translate-x-1/2 border border-[var(--vx-hair)] bg-[var(--vx-card)] p-1"
-        >
-          {PRODUCTS.map(([label, blurb, to]) => (
-            <li key={to}>
-              <Link
-                to={to}
-                onClick={() => setOpen(false)}
-                className="block px-3 py-2.5 hover:bg-[var(--vx-alt)] focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--vx-accent)]"
-              >
-                <span className="block font-display text-[15px] text-[var(--vx-ink)]">{label}</span>
-                <span className="block font-vmono text-[11px] text-[var(--vx-muted)]">{blurb}</span>
-              </Link>
-            </li>
-          ))}
-        </ul>
-      ) : null}
-    </div>
-  );
-}
-
 export function VxNav() {
   const { session, signOut } = useAuth();
   const { loading, hasDashboard } = useDashboardAccess();
@@ -160,31 +106,20 @@ export function VxNav() {
     <>
       <header className="fixed inset-x-0 top-0 z-40 border-b border-[var(--vx-hair)] bg-[var(--vx-page)]">
         <div className="mx-auto flex h-16 max-w-[1305px] items-center justify-between gap-4 px-5 sm:px-10 lg:px-[39px]">
-          <Link to="/" aria-label="ClickAI home" className={FOCUS}>
+          <a href="#home" aria-label="ClickAI home" className={FOCUS}>
             <Logo />
-          </Link>
+          </a>
           <nav aria-label="Primary" className="hidden items-center gap-7 lg:flex">
-            <Link to="/" className={LINK}>
-              Home
-            </Link>
-            <ProductsMenu />
-            <Link to="/solutions" className={LINK}>
-              Solutions
-            </Link>
-            <a href="#how-it-works" className={LINK}>
-              How It Works
-            </a>
-            <Link to="/pricing" className={LINK}>
-              Pricing
-            </Link>
-            <Link to="/contact" className={LINK}>
-              Contact
-            </Link>
+            {SECTION_LINKS.map(([label, href]) => (
+              <a key={href} href={href} className={LINK}>
+                {label}
+              </a>
+            ))}
           </nav>
           <div className="flex items-center gap-1 sm:gap-3">
             <ThemeToggle />
             <span className="hidden lg:block">{authLink}</span>
-            <VxLink to="/contact" className="hidden sm:inline-flex">
+            <VxLink href="#contact" className="hidden sm:inline-flex">
               Book a Demo
             </VxLink>
             <button
@@ -226,52 +161,20 @@ export function VxNav() {
           </div>
           <nav aria-label="Mobile" className="mx-auto max-w-[1305px] px-5 pb-10 sm:px-10">
             <ul>
-              {[
-                ["Home", "/"],
-                ["Solutions", "/solutions"],
-                ["Pricing", "/pricing"],
-                ["Contact", "/contact"],
-              ].map(([label, to]) => (
-                <li key={to} className="border-t border-[var(--vx-hair)]">
-                  <Link
-                    to={to as "/"}
+              {SECTION_LINKS.map(([label, href]) => (
+                <li key={href} className="border-t border-[var(--vx-hair)]">
+                  <a
+                    href={href}
                     onClick={() => setOpen(false)}
                     className="flex min-h-14 items-center font-display text-2xl tracking-[-0.02em]"
                   >
                     {label}
-                  </Link>
+                  </a>
                 </li>
               ))}
-              <li className="border-t border-[var(--vx-hair)]">
-                <a
-                  href="#how-it-works"
-                  onClick={() => setOpen(false)}
-                  className="flex min-h-14 items-center font-display text-2xl tracking-[-0.02em]"
-                >
-                  How It Works
-                </a>
-              </li>
-              <li className="border-t border-[var(--vx-hair)] py-3">
-                <p className="font-vmono text-[11px] uppercase tracking-[0.14em] text-[var(--vx-muted)]">
-                  Products
-                </p>
-                <ul className="mt-1">
-                  {PRODUCTS.map(([label, , to]) => (
-                    <li key={to}>
-                      <Link
-                        to={to}
-                        onClick={() => setOpen(false)}
-                        className="flex min-h-12 items-center font-display text-lg"
-                      >
-                        {label}
-                      </Link>
-                    </li>
-                  ))}
-                </ul>
-              </li>
             </ul>
             <div className="mt-6 flex flex-wrap gap-3 border-t border-[var(--vx-hair)] pt-6">
-              <VxLink to="/contact">Book a Demo</VxLink>
+              <VxLink href="#contact">Book a Demo</VxLink>
               {signedIn ? (
                 <>
                   {hasDashboard ? (

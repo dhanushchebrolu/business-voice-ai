@@ -243,13 +243,17 @@ const BTN =
 
 export function VxLink({
   to,
+  href,
   hash,
   search,
   variant = "solid",
   children,
   className,
 }: {
-  to: string;
+  /** A route of this app. */
+  to?: string;
+  /** Or an on-page anchor such as "#contact" (plain link, no router navigation). */
+  href?: string;
   hash?: string;
   search?: Record<string, string>;
   variant?: "solid" | "outline" | "text" | "outline-dark";
@@ -263,10 +267,17 @@ export function VxLink({
     "outline-dark": "border border-white/40 text-white hover:bg-white hover:text-[var(--vx-dark)]",
     text: "px-0 text-[var(--vx-ink)] hover:text-[var(--vx-accent-hot)]",
   }[variant];
+  if (href !== undefined) {
+    return (
+      <a href={href} className={cn(BTN, styles, className)}>
+        {children}
+      </a>
+    );
+  }
   return (
     // `to` is always one of this app's real routes (checked by the route tree at the call sites).
     <Link
-      to={to as "/"}
+      to={(to ?? "/") as "/"}
       {...(hash ? { hash } : {})}
       {...(search ? { search: search as never } : {})}
       className={cn(BTN, styles, className)}

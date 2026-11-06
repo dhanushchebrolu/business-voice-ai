@@ -44,11 +44,11 @@ const STRIP = [
  * headline, mono paragraph, solid + text buttons on the left; on the right the
  * ClickAI assistant, whose stage is a rotating dot-cube (the reference's
  * point-cloud slot) around the orb. Below, a console strip. "Book a Demo" links
- * to the real /contact route; "Explore Products" scrolls to #capabilities.
+ * to the real /contact route; "Explore Products" scrolls to #products.
  */
 export function Hero() {
   return (
-    <section id="top" className="relative isolate overflow-clip bg-[var(--vx-page)] pt-[81px]">
+    <section id="home" className="relative isolate overflow-clip bg-[var(--vx-page)] pt-[81px]">
       <div aria-hidden="true" className="vx-dots absolute inset-0 -z-10" />
       <UtcClock />
       <div className="mx-auto grid max-w-[1305px] gap-14 px-5 pb-12 pt-14 sm:px-10 lg:grid-cols-[1fr_516px] lg:items-center lg:gap-10 lg:px-[39px] lg:pb-12 lg:pt-12">
@@ -76,10 +76,10 @@ export function Hero() {
             style={rise(3)}
             className="animate-rise mt-9 flex flex-wrap items-center gap-x-6 gap-y-3"
           >
-            <VxLink to="/contact">Book a Demo</VxLink>
+            <VxLink href="#contact">Book a Demo</VxLink>
             <button
               type="button"
-              onClick={() => scrollToSection("capabilities")}
+              onClick={() => scrollToSection("products")}
               className="group inline-flex h-11 items-center gap-2 font-vmono text-[13px] font-medium uppercase tracking-[0.08em] text-[var(--vx-ink)] transition-colors hover:text-[var(--vx-accent-hot)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--vx-accent)]"
             >
               Explore Products
