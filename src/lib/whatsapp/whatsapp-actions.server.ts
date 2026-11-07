@@ -30,6 +30,7 @@
  *
  * Cancellations are not automated on WhatsApp: the AI hands those to staff.
  */
+import { bookingNeedsPayment, paymentAmountMinorUnits } from "../payments/payment-policy.ts";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/integrations/supabase/types";
 import type { ChannelTool } from "../shared-agent-reply.server.ts";
@@ -266,17 +267,13 @@ export function buildWhatsAppActionTools(
             return refuse("INVALID_SERVICE", "That service isn't offered.");
           service = data;
         }
-        const needsPayment =
-          service !== null &&
-          (service.price ?? 0) > 0 &&
-          caps["booking_payment_required"] === true &&
-          caps["payment_request"] === true;
+        const needsPayment = bookingNeedsPayment(service, caps);
         if (!needsPayment && caps["calendar_book"] !== true) {
           return refuse("TOOL_NOT_PERMITTED", "This business doesn't take bookings over WhatsApp.");
         }
         const customerName = str(input, "customerName") ?? ctx.customerDisplayName ?? undefined;
         const when = formatWhen(range.startIso, ctx.timezone);
-        const amountMinorUnits = needsPayment ? Math.round(service!.price! * 100) : null;
+        const amountMinorUnits = needsPayment ? paymentAmountMinorUnits(service!.price!) : null;
         const summary = needsPayment
           ? `${service!.name} on ${when}, held until you pay ${service!.currency} ${(amountMinorUnits! / 100).toFixed(2)} by the payment link`
           : `${service ? `${service.name} on ` : "An appointment on "}${when}`;

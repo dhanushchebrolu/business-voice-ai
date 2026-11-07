@@ -43,6 +43,15 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Install voice agent dependencies
+        # src/lib/voice-agent/voice-agent-api.test.ts drives the LiveKit
+        # agent's real client and tools against klyro's handlers, so the root
+        # typecheck and test suite load services/voice-agent code, which needs
+        # @livekit/agents. That package is its own npm project with its own
+        # lockfile (as in voice-agent.yml); install it exactly from that.
+        working-directory: services/voice-agent
+        run: npm ci --no-audit --no-fund
+
       - name: Install PostgreSQL server
         # The disposable-cluster regression tests (supabase/migrations/*.pg.test.ts)
         # run their own initdb/pg_ctl-managed cluster — they need the server
@@ -79,6 +88,7 @@ jobs:
             supabase/migrations/business_hours_interval_validation.pg.test.ts \
             supabase/migrations/business_hours_interval_validation.harness-selftest.pg.test.ts \
             supabase/migrations/booking_concurrency.pg.test.ts \
+            supabase/migrations/voice_agent_transcript_segments.pg.test.ts \
             2>&1 | tee pg-test-output.log
           skipped=$(grep -oP '(?<=^# skipped )\d+' pg-test-output.log | tail -1)
           todo=$(grep -oP '(?<=^# todo )\d+' pg-test-output.log | tail -1)

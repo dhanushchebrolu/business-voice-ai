@@ -69,14 +69,21 @@ import { Route as AdminCustomersIndexRouteImport } from './routes/admin.customer
 import { Route as AdminCustomersOrgIdRouteImport } from './routes/admin.customers.$orgId'
 import { Route as AppCampaignsCampaignIdRouteImport } from './routes/app.campaigns.$campaignId'
 import { Route as AppCampaignsNewRouteImport } from './routes/app.campaigns.new'
+import { Route as ApiInternalVoiceAgentOutboundClaimRouteImport } from './routes/api/internal/voice-agent/outbound-claim'
+import { Route as ApiInternalVoiceAgentSessionRouteImport } from './routes/api/internal/voice-agent/session'
+import { Route as ApiInternalVoiceAgentSessionEndRouteImport } from './routes/api/internal/voice-agent/session-end'
+import { Route as ApiInternalVoiceAgentToolRouteImport } from './routes/api/internal/voice-agent/tool'
 import { Route as ApiPublicCronDispatchCampaignsRouteImport } from './routes/api/public/cron/dispatch-campaigns'
 import { Route as ApiPublicCronExpirePaymentsRouteImport } from './routes/api/public/cron/expire-payments'
+import { Route as ApiPublicCronReconcileSipCallsRouteImport } from './routes/api/public/cron/reconcile-sip-calls'
+import { Route as ApiPublicCronSweepSipRoomsRouteImport } from './routes/api/public/cron/sweep-sip-rooms'
 import { Route as ApiPublicCronSyncGoogleCalendarsRouteImport } from './routes/api/public/cron/sync-google-calendars'
 import { Route as ApiPublicCronWhatsappDispatchRouteImport } from './routes/api/public/cron/whatsapp-dispatch'
 import { Route as ApiPublicCronWhatsappRepliesRouteImport } from './routes/api/public/cron/whatsapp-replies'
 import { Route as ApiPublicSarvamClientContextRouteImport } from './routes/api/public/sarvam/client-context'
 import { Route as ApiPublicWebhooksGoogleCalendarRouteImport } from './routes/api/public/webhooks/google-calendar'
 import { Route as ApiPublicWebhooksInstagramRouteImport } from './routes/api/public/webhooks/instagram'
+import { Route as ApiPublicWebhooksLivekitRouteImport } from './routes/api/public/webhooks/livekit'
 import { Route as ApiPublicWebhooksRazorpayRouteImport } from './routes/api/public/webhooks/razorpay'
 import { Route as ApiPublicWebhooksRazorpayPaymentsRouteImport } from './routes/api/public/webhooks/razorpay-payments'
 import { Route as ApiPublicWebhooksTelephonyRouteImport } from './routes/api/public/webhooks/telephony'
@@ -388,6 +395,30 @@ const AppCampaignsNewRoute = AppCampaignsNewRouteImport.update({
   path: '/new',
   getParentRoute: () => AppCampaignsRoute,
 } as any)
+const ApiInternalVoiceAgentOutboundClaimRoute =
+  ApiInternalVoiceAgentOutboundClaimRouteImport.update({
+    id: '/api/internal/voice-agent/outbound-claim',
+    path: '/api/internal/voice-agent/outbound-claim',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiInternalVoiceAgentSessionRoute =
+  ApiInternalVoiceAgentSessionRouteImport.update({
+    id: '/api/internal/voice-agent/session',
+    path: '/api/internal/voice-agent/session',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiInternalVoiceAgentSessionEndRoute =
+  ApiInternalVoiceAgentSessionEndRouteImport.update({
+    id: '/api/internal/voice-agent/session-end',
+    path: '/api/internal/voice-agent/session-end',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiInternalVoiceAgentToolRoute =
+  ApiInternalVoiceAgentToolRouteImport.update({
+    id: '/api/internal/voice-agent/tool',
+    path: '/api/internal/voice-agent/tool',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicCronDispatchCampaignsRoute =
   ApiPublicCronDispatchCampaignsRouteImport.update({
     id: '/api/public/cron/dispatch-campaigns',
@@ -398,6 +429,18 @@ const ApiPublicCronExpirePaymentsRoute =
   ApiPublicCronExpirePaymentsRouteImport.update({
     id: '/api/public/cron/expire-payments',
     path: '/api/public/cron/expire-payments',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicCronReconcileSipCallsRoute =
+  ApiPublicCronReconcileSipCallsRouteImport.update({
+    id: '/api/public/cron/reconcile-sip-calls',
+    path: '/api/public/cron/reconcile-sip-calls',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicCronSweepSipRoomsRoute =
+  ApiPublicCronSweepSipRoomsRouteImport.update({
+    id: '/api/public/cron/sweep-sip-rooms',
+    path: '/api/public/cron/sweep-sip-rooms',
     getParentRoute: () => rootRouteImport,
   } as any)
 const ApiPublicCronSyncGoogleCalendarsRoute =
@@ -434,6 +477,12 @@ const ApiPublicWebhooksInstagramRoute =
   ApiPublicWebhooksInstagramRouteImport.update({
     id: '/api/public/webhooks/instagram',
     path: '/api/public/webhooks/instagram',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicWebhooksLivekitRoute =
+  ApiPublicWebhooksLivekitRouteImport.update({
+    id: '/api/public/webhooks/livekit',
+    path: '/api/public/webhooks/livekit',
     getParentRoute: () => rootRouteImport,
   } as any)
 const ApiPublicWebhooksRazorpayRoute =
@@ -552,14 +601,21 @@ export interface FileRoutesByFullPath {
   '/app/campaigns/$campaignId': typeof AppCampaignsCampaignIdRoute
   '/app/campaigns/new': typeof AppCampaignsNewRoute
   '/admin/customers/': typeof AdminCustomersIndexRoute
+  '/api/internal/voice-agent/outbound-claim': typeof ApiInternalVoiceAgentOutboundClaimRoute
+  '/api/internal/voice-agent/session': typeof ApiInternalVoiceAgentSessionRoute
+  '/api/internal/voice-agent/session-end': typeof ApiInternalVoiceAgentSessionEndRoute
+  '/api/internal/voice-agent/tool': typeof ApiInternalVoiceAgentToolRoute
   '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
   '/api/public/cron/expire-payments': typeof ApiPublicCronExpirePaymentsRoute
+  '/api/public/cron/reconcile-sip-calls': typeof ApiPublicCronReconcileSipCallsRoute
+  '/api/public/cron/sweep-sip-rooms': typeof ApiPublicCronSweepSipRoomsRoute
   '/api/public/cron/sync-google-calendars': typeof ApiPublicCronSyncGoogleCalendarsRoute
   '/api/public/cron/whatsapp-dispatch': typeof ApiPublicCronWhatsappDispatchRoute
   '/api/public/cron/whatsapp-replies': typeof ApiPublicCronWhatsappRepliesRoute
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
   '/api/public/webhooks/google-calendar': typeof ApiPublicWebhooksGoogleCalendarRoute
   '/api/public/webhooks/instagram': typeof ApiPublicWebhooksInstagramRoute
+  '/api/public/webhooks/livekit': typeof ApiPublicWebhooksLivekitRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/razorpay-payments': typeof ApiPublicWebhooksRazorpayPaymentsRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
@@ -627,14 +683,21 @@ export interface FileRoutesByTo {
   '/app/campaigns/$campaignId': typeof AppCampaignsCampaignIdRoute
   '/app/campaigns/new': typeof AppCampaignsNewRoute
   '/admin/customers': typeof AdminCustomersIndexRoute
+  '/api/internal/voice-agent/outbound-claim': typeof ApiInternalVoiceAgentOutboundClaimRoute
+  '/api/internal/voice-agent/session': typeof ApiInternalVoiceAgentSessionRoute
+  '/api/internal/voice-agent/session-end': typeof ApiInternalVoiceAgentSessionEndRoute
+  '/api/internal/voice-agent/tool': typeof ApiInternalVoiceAgentToolRoute
   '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
   '/api/public/cron/expire-payments': typeof ApiPublicCronExpirePaymentsRoute
+  '/api/public/cron/reconcile-sip-calls': typeof ApiPublicCronReconcileSipCallsRoute
+  '/api/public/cron/sweep-sip-rooms': typeof ApiPublicCronSweepSipRoomsRoute
   '/api/public/cron/sync-google-calendars': typeof ApiPublicCronSyncGoogleCalendarsRoute
   '/api/public/cron/whatsapp-dispatch': typeof ApiPublicCronWhatsappDispatchRoute
   '/api/public/cron/whatsapp-replies': typeof ApiPublicCronWhatsappRepliesRoute
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
   '/api/public/webhooks/google-calendar': typeof ApiPublicWebhooksGoogleCalendarRoute
   '/api/public/webhooks/instagram': typeof ApiPublicWebhooksInstagramRoute
+  '/api/public/webhooks/livekit': typeof ApiPublicWebhooksLivekitRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/razorpay-payments': typeof ApiPublicWebhooksRazorpayPaymentsRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
@@ -707,14 +770,21 @@ export interface FileRoutesById {
   '/app/campaigns/$campaignId': typeof AppCampaignsCampaignIdRoute
   '/app/campaigns/new': typeof AppCampaignsNewRoute
   '/admin/customers/': typeof AdminCustomersIndexRoute
+  '/api/internal/voice-agent/outbound-claim': typeof ApiInternalVoiceAgentOutboundClaimRoute
+  '/api/internal/voice-agent/session': typeof ApiInternalVoiceAgentSessionRoute
+  '/api/internal/voice-agent/session-end': typeof ApiInternalVoiceAgentSessionEndRoute
+  '/api/internal/voice-agent/tool': typeof ApiInternalVoiceAgentToolRoute
   '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
   '/api/public/cron/expire-payments': typeof ApiPublicCronExpirePaymentsRoute
+  '/api/public/cron/reconcile-sip-calls': typeof ApiPublicCronReconcileSipCallsRoute
+  '/api/public/cron/sweep-sip-rooms': typeof ApiPublicCronSweepSipRoomsRoute
   '/api/public/cron/sync-google-calendars': typeof ApiPublicCronSyncGoogleCalendarsRoute
   '/api/public/cron/whatsapp-dispatch': typeof ApiPublicCronWhatsappDispatchRoute
   '/api/public/cron/whatsapp-replies': typeof ApiPublicCronWhatsappRepliesRoute
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
   '/api/public/webhooks/google-calendar': typeof ApiPublicWebhooksGoogleCalendarRoute
   '/api/public/webhooks/instagram': typeof ApiPublicWebhooksInstagramRoute
+  '/api/public/webhooks/livekit': typeof ApiPublicWebhooksLivekitRoute
   '/api/public/webhooks/razorpay': typeof ApiPublicWebhooksRazorpayRoute
   '/api/public/webhooks/razorpay-payments': typeof ApiPublicWebhooksRazorpayPaymentsRoute
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
@@ -788,14 +858,21 @@ export interface FileRouteTypes {
     | '/app/campaigns/$campaignId'
     | '/app/campaigns/new'
     | '/admin/customers/'
+    | '/api/internal/voice-agent/outbound-claim'
+    | '/api/internal/voice-agent/session'
+    | '/api/internal/voice-agent/session-end'
+    | '/api/internal/voice-agent/tool'
     | '/api/public/cron/dispatch-campaigns'
     | '/api/public/cron/expire-payments'
+    | '/api/public/cron/reconcile-sip-calls'
+    | '/api/public/cron/sweep-sip-rooms'
     | '/api/public/cron/sync-google-calendars'
     | '/api/public/cron/whatsapp-dispatch'
     | '/api/public/cron/whatsapp-replies'
     | '/api/public/sarvam/client-context'
     | '/api/public/webhooks/google-calendar'
     | '/api/public/webhooks/instagram'
+    | '/api/public/webhooks/livekit'
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/razorpay-payments'
     | '/api/public/webhooks/telephony'
@@ -863,14 +940,21 @@ export interface FileRouteTypes {
     | '/app/campaigns/$campaignId'
     | '/app/campaigns/new'
     | '/admin/customers'
+    | '/api/internal/voice-agent/outbound-claim'
+    | '/api/internal/voice-agent/session'
+    | '/api/internal/voice-agent/session-end'
+    | '/api/internal/voice-agent/tool'
     | '/api/public/cron/dispatch-campaigns'
     | '/api/public/cron/expire-payments'
+    | '/api/public/cron/reconcile-sip-calls'
+    | '/api/public/cron/sweep-sip-rooms'
     | '/api/public/cron/sync-google-calendars'
     | '/api/public/cron/whatsapp-dispatch'
     | '/api/public/cron/whatsapp-replies'
     | '/api/public/sarvam/client-context'
     | '/api/public/webhooks/google-calendar'
     | '/api/public/webhooks/instagram'
+    | '/api/public/webhooks/livekit'
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/razorpay-payments'
     | '/api/public/webhooks/telephony'
@@ -942,14 +1026,21 @@ export interface FileRouteTypes {
     | '/app/campaigns/$campaignId'
     | '/app/campaigns/new'
     | '/admin/customers/'
+    | '/api/internal/voice-agent/outbound-claim'
+    | '/api/internal/voice-agent/session'
+    | '/api/internal/voice-agent/session-end'
+    | '/api/internal/voice-agent/tool'
     | '/api/public/cron/dispatch-campaigns'
     | '/api/public/cron/expire-payments'
+    | '/api/public/cron/reconcile-sip-calls'
+    | '/api/public/cron/sweep-sip-rooms'
     | '/api/public/cron/sync-google-calendars'
     | '/api/public/cron/whatsapp-dispatch'
     | '/api/public/cron/whatsapp-replies'
     | '/api/public/sarvam/client-context'
     | '/api/public/webhooks/google-calendar'
     | '/api/public/webhooks/instagram'
+    | '/api/public/webhooks/livekit'
     | '/api/public/webhooks/razorpay'
     | '/api/public/webhooks/razorpay-payments'
     | '/api/public/webhooks/telephony'
@@ -984,14 +1075,21 @@ export interface RootRouteChildren {
   SolutionsRoute: typeof SolutionsRoute
   TermsRoute: typeof TermsRoute
   WhatsappAiAgentsRoute: typeof WhatsappAiAgentsRoute
+  ApiInternalVoiceAgentOutboundClaimRoute: typeof ApiInternalVoiceAgentOutboundClaimRoute
+  ApiInternalVoiceAgentSessionRoute: typeof ApiInternalVoiceAgentSessionRoute
+  ApiInternalVoiceAgentSessionEndRoute: typeof ApiInternalVoiceAgentSessionEndRoute
+  ApiInternalVoiceAgentToolRoute: typeof ApiInternalVoiceAgentToolRoute
   ApiPublicCronDispatchCampaignsRoute: typeof ApiPublicCronDispatchCampaignsRoute
   ApiPublicCronExpirePaymentsRoute: typeof ApiPublicCronExpirePaymentsRoute
+  ApiPublicCronReconcileSipCallsRoute: typeof ApiPublicCronReconcileSipCallsRoute
+  ApiPublicCronSweepSipRoomsRoute: typeof ApiPublicCronSweepSipRoomsRoute
   ApiPublicCronSyncGoogleCalendarsRoute: typeof ApiPublicCronSyncGoogleCalendarsRoute
   ApiPublicCronWhatsappDispatchRoute: typeof ApiPublicCronWhatsappDispatchRoute
   ApiPublicCronWhatsappRepliesRoute: typeof ApiPublicCronWhatsappRepliesRoute
   ApiPublicSarvamClientContextRoute: typeof ApiPublicSarvamClientContextRoute
   ApiPublicWebhooksGoogleCalendarRoute: typeof ApiPublicWebhooksGoogleCalendarRoute
   ApiPublicWebhooksInstagramRoute: typeof ApiPublicWebhooksInstagramRoute
+  ApiPublicWebhooksLivekitRoute: typeof ApiPublicWebhooksLivekitRoute
   ApiPublicWebhooksRazorpayRoute: typeof ApiPublicWebhooksRazorpayRoute
   ApiPublicWebhooksRazorpayPaymentsRoute: typeof ApiPublicWebhooksRazorpayPaymentsRoute
   ApiPublicWebhooksTelephonyRoute: typeof ApiPublicWebhooksTelephonyRoute
@@ -1425,6 +1523,34 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppCampaignsNewRouteImport
       parentRoute: typeof AppCampaignsRoute
     }
+    '/api/internal/voice-agent/outbound-claim': {
+      id: '/api/internal/voice-agent/outbound-claim'
+      path: '/api/internal/voice-agent/outbound-claim'
+      fullPath: '/api/internal/voice-agent/outbound-claim'
+      preLoaderRoute: typeof ApiInternalVoiceAgentOutboundClaimRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/internal/voice-agent/session': {
+      id: '/api/internal/voice-agent/session'
+      path: '/api/internal/voice-agent/session'
+      fullPath: '/api/internal/voice-agent/session'
+      preLoaderRoute: typeof ApiInternalVoiceAgentSessionRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/internal/voice-agent/session-end': {
+      id: '/api/internal/voice-agent/session-end'
+      path: '/api/internal/voice-agent/session-end'
+      fullPath: '/api/internal/voice-agent/session-end'
+      preLoaderRoute: typeof ApiInternalVoiceAgentSessionEndRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/internal/voice-agent/tool': {
+      id: '/api/internal/voice-agent/tool'
+      path: '/api/internal/voice-agent/tool'
+      fullPath: '/api/internal/voice-agent/tool'
+      preLoaderRoute: typeof ApiInternalVoiceAgentToolRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/cron/dispatch-campaigns': {
       id: '/api/public/cron/dispatch-campaigns'
       path: '/api/public/cron/dispatch-campaigns'
@@ -1437,6 +1563,20 @@ declare module '@tanstack/react-router' {
       path: '/api/public/cron/expire-payments'
       fullPath: '/api/public/cron/expire-payments'
       preLoaderRoute: typeof ApiPublicCronExpirePaymentsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/cron/reconcile-sip-calls': {
+      id: '/api/public/cron/reconcile-sip-calls'
+      path: '/api/public/cron/reconcile-sip-calls'
+      fullPath: '/api/public/cron/reconcile-sip-calls'
+      preLoaderRoute: typeof ApiPublicCronReconcileSipCallsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/cron/sweep-sip-rooms': {
+      id: '/api/public/cron/sweep-sip-rooms'
+      path: '/api/public/cron/sweep-sip-rooms'
+      fullPath: '/api/public/cron/sweep-sip-rooms'
+      preLoaderRoute: typeof ApiPublicCronSweepSipRoomsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/public/cron/sync-google-calendars': {
@@ -1479,6 +1619,13 @@ declare module '@tanstack/react-router' {
       path: '/api/public/webhooks/instagram'
       fullPath: '/api/public/webhooks/instagram'
       preLoaderRoute: typeof ApiPublicWebhooksInstagramRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/webhooks/livekit': {
+      id: '/api/public/webhooks/livekit'
+      path: '/api/public/webhooks/livekit'
+      fullPath: '/api/public/webhooks/livekit'
+      preLoaderRoute: typeof ApiPublicWebhooksLivekitRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/public/webhooks/razorpay': {
@@ -1699,14 +1846,22 @@ const rootRouteChildren: RootRouteChildren = {
   SolutionsRoute: SolutionsRoute,
   TermsRoute: TermsRoute,
   WhatsappAiAgentsRoute: WhatsappAiAgentsRoute,
+  ApiInternalVoiceAgentOutboundClaimRoute:
+    ApiInternalVoiceAgentOutboundClaimRoute,
+  ApiInternalVoiceAgentSessionRoute: ApiInternalVoiceAgentSessionRoute,
+  ApiInternalVoiceAgentSessionEndRoute: ApiInternalVoiceAgentSessionEndRoute,
+  ApiInternalVoiceAgentToolRoute: ApiInternalVoiceAgentToolRoute,
   ApiPublicCronDispatchCampaignsRoute: ApiPublicCronDispatchCampaignsRoute,
   ApiPublicCronExpirePaymentsRoute: ApiPublicCronExpirePaymentsRoute,
+  ApiPublicCronReconcileSipCallsRoute: ApiPublicCronReconcileSipCallsRoute,
+  ApiPublicCronSweepSipRoomsRoute: ApiPublicCronSweepSipRoomsRoute,
   ApiPublicCronSyncGoogleCalendarsRoute: ApiPublicCronSyncGoogleCalendarsRoute,
   ApiPublicCronWhatsappDispatchRoute: ApiPublicCronWhatsappDispatchRoute,
   ApiPublicCronWhatsappRepliesRoute: ApiPublicCronWhatsappRepliesRoute,
   ApiPublicSarvamClientContextRoute: ApiPublicSarvamClientContextRoute,
   ApiPublicWebhooksGoogleCalendarRoute: ApiPublicWebhooksGoogleCalendarRoute,
   ApiPublicWebhooksInstagramRoute: ApiPublicWebhooksInstagramRoute,
+  ApiPublicWebhooksLivekitRoute: ApiPublicWebhooksLivekitRoute,
   ApiPublicWebhooksRazorpayRoute: ApiPublicWebhooksRazorpayRoute,
   ApiPublicWebhooksRazorpayPaymentsRoute:
     ApiPublicWebhooksRazorpayPaymentsRoute,

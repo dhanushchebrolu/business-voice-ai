@@ -1,0 +1,200 @@
+# ClickAI local voice stack: self-hosted LiveKit Server + LiveKit SIP + Redis
+# + the Node.js voice agent. LOCAL DEVELOPMENT ONLY (services/voice-agent/LOCAL_LIVEKIT.md).
+#
+#   1. bash services/voice-agent/deploy/local/init-env.sh      # once: writes deploy/local/.env (secrets, git-ignored)
+#   2. docker compose --env-file services/voice-agent/deploy/local/.env \
+#        -f services/voice-agent/deploy/docker-compose.dev.yml up -d --build
+#   3. cd services/voice-agent && npm run local:smoke
+#
+# Secrets never appear in this file: every credential is ${VARIABLE} from the
+# --env-file. Redis is reachable only on the internal "backend" network.
+# Images are pinned by digest; the digest fixes the exact bytes, so
+# DOCKERHUB_MIRROR (e.g. mirror.gcr.io) only changes where they come from
+# (Docker Hub rate limits, HTTP 429). Bump tag and digest together.
+#   livekit/livekit-server v1.13.11  protocol 1.53.1  psrpc 0.8.2
+#   livekit/sip            v1.23.0   protocol 1.53.2  psrpc 0.8.2
+#   agent SDKs             livekit-server-sdk 2.19.2 / @livekit/protocol 1.53.1, @livekit/agents 1.9.5
+name: clickai-voice-local
+
+x-restart: &restart unless-stopped
+
+services:
+  redis:
+    image: ${DOCKERHUB_MIRROR:-docker.io}/library/redis:7.4.7-alpine@sha256:02f2cc4882f8bf87c79a220ac958f58c700bdec0dfb9b9ea61b62fb0e8f1bfcf
+    # No persistence (local development only). Redis holds LiveKit's room and
+    # node state AND the SIP configuration (inbound/outbound trunks, dispatch
+    # rules): any Redis restart, recreation or "down" erases the trunks and
+    # dispatch rules, and every SIP INVITE is then rejected while all
+    # services stay healthy. Re-run provisioning after a Redis restart
+    # (LOCAL_LIVEKIT.md section 4a). Production needs persistent Redis.
+    command:
+      [
+        "redis-server",
+        "--requirepass",
+        "${REDIS_PASSWORD:?run deploy/local/init-env.sh}",
+        "--save",
+        "",
+        "--appendonly",
+        "no",
+      ]
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    networks: [backend]
+    # No "ports:": never published to the host or the internet.
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: *restart
+
+  livekit:
+    image: ${DOCKERHUB_MIRROR:-docker.io}/livekit/livekit-server:v1.13.11@sha256:25cd902de7cacbd5f1f779f6a6ac1eae20ba8f56b0935934ce6b0ab80d1e3d20
+    environment:
+      # "key: secret" (YAML); the key id is public, the secret is not.
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:?run deploy/local/init-env.sh}: ${LIVEKIT_API_SECRET:?run deploy/local/init-env.sh}"
+      # Optional: the IP LiveKit advertises for WebRTC media. Empty = detected
+      # (the container IP: reachable by the agent and SIP containers).
+      NODE_IP: ${LIVEKIT_NODE_IP:-}
+      LIVEKIT_CONFIG: |
+        port: 7880
+        log_level: ${LIVEKIT_LOG_LEVEL:-info}
+        rtc:
+          tcp_port: 7881
+          port_range_start: 50000
+          port_range_end: 50100
+          use_external_ip: false
+        redis:
+          address: redis:6379
+          password: ${REDIS_PASSWORD}
+        # Webhooks are signed with this key (JWT, issuer = key id, sha256 of
+        # the body): klyro verifies them with the same LIVEKIT_API_KEY/SECRET.
+        webhook:
+          api_key: ${LIVEKIT_API_KEY}
+          urls:
+            - ${LIVEKIT_WEBHOOK_URL:-http://host.docker.internal:8790/api/public/webhooks/livekit}
+    # Plain HTTP/WS, no TLS: keep LOCAL_BIND_IP on 127.0.0.1 (never 0.0.0.0
+    # or a public IP); the API key is the only protection on these ports.
+    ports:
+      - "${LOCAL_BIND_IP:-127.0.0.1}:7880:7880" # HTTP API + WebSocket signalling
+      - "${LOCAL_BIND_IP:-127.0.0.1}:7881:7881" # WebRTC over TCP
+      - "${LOCAL_BIND_IP:-127.0.0.1}:50000-50100:50000-50100/udp" # WebRTC media
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    networks: [backend, edge]
+    depends_on:
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:7880/ | grep -q OK"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: *restart
+
+  sip:
+    image: ${DOCKERHUB_MIRROR:-docker.io}/livekit/sip:v1.23.0@sha256:ba32686d718e24f21ebb771cec09330d5a174037d56ff9e69f98cec1509c1e0c
+    environment:
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      LIVEKIT_WS_URL: ws://livekit:7880
+      # Overrides the image's --config file (livekit-sip reads the body first).
+      SIP_CONFIG_BODY: |
+        log_level: ${LIVEKIT_LOG_LEVEL:-info}
+        redis:
+          address: redis:6379
+          password: ${REDIS_PASSWORD}
+        sip_port: 5060
+        # Must match the published UDP range below.
+        rtp_port: 10000-10099
+        health_port: 8080
+        use_external_ip: false
+        # Public IP to put in SIP/SDP when the stack sits behind NAT (a public
+        # endpoint for real Vobiz tests). Empty for local tests.
+        nat_1_to_1_ip: "${SIP_NAT_1_TO_1_IP:-}"
+    ports:
+      - "${SIP_BIND_IP:-127.0.0.1}:5060:5060/udp"
+      - "${SIP_BIND_IP:-127.0.0.1}:5060:5060/tcp"
+      - "${SIP_BIND_IP:-127.0.0.1}:10000-10099:10000-10099/udp"
+    networks: [backend, edge]
+    depends_on:
+      redis: { condition: service_healthy }
+      livekit: { condition: service_healthy }
+    healthcheck:
+      # The image has no curl/wget: plain HTTP over bash's /dev/tcp.
+      test:
+        [
+          "CMD",
+          "bash",
+          "-c",
+          "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET / HTTP/1.0\\r\\n\\r\\n' >&3 && head -n1 <&3 | grep -q ' 200 '",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: *restart
+
+  voice-agent:
+    build:
+      context: ../../..
+      dockerfile: services/voice-agent/Dockerfile
+      args:
+        BASE_REGISTRY: ${NODE_BASE_REGISTRY:-docker.io/library}
+        # 1 = bake the turn-detector model (needs huggingface.co at build time).
+        # 0 = no model: only with VOICE_AGENT_TURN_DETECTION=vad.
+        DOWNLOAD_TURN_DETECTOR: ${VOICE_AGENT_DOWNLOAD_TURN_DETECTOR:-1}
+        VERIFY_TURN_DETECTOR: ${VOICE_AGENT_DOWNLOAD_TURN_DETECTOR:-1}
+    image: clickai-voice-agent:local
+    # Only the variables listed here reach the agent (no env_file): nothing
+    # can switch the LLM to Anthropic or enable outbound by accident.
+    environment:
+      APP_ENV: development
+      LIVEKIT_URL: ws://livekit:7880
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      # Self-hosted hosts besides *.livekit.cloud (enforced outside development).
+      LIVEKIT_ALLOWED_HOSTS: ${LIVEKIT_ALLOWED_HOSTS:-}
+      AGENT_NAME: ${AGENT_NAME:-clickai-receptionist}
+      # Sarvam for LLM, STT (saaras:v3) and TTS (bulbul:v3). Fixed here, not
+      # read from the env file: with "sarvam" the agent builds no Anthropic
+      # LLM and refuses to start if FALLBACK_LLM_BASE_URL is set.
+      LLM_PROVIDER: sarvam
+      SARVAM_LLM_MODEL: ${SARVAM_LLM_MODEL:-sarvam-105b-conversations}
+      SARVAM_LLM_BASE_URL: https://api.sarvam.ai/v1
+      SARVAM_API_KEY: ${SARVAM_API_KEY:?set SARVAM_API_KEY in deploy/local/.env}
+      KLYRO_BASE_URL: ${KLYRO_BASE_URL:-http://host.docker.internal:8790}
+      VOICE_AGENT_HMAC_SECRET: ${VOICE_AGENT_HMAC_SECRET:?run deploy/local/init-env.sh}
+      TURN_DETECTION: ${VOICE_AGENT_TURN_DETECTION:-multilingual}
+      MAX_CONCURRENT_SESSIONS: ${VOICE_AGENT_MAX_CONCURRENT_SESSIONS:-2}
+      MAX_CALL_SECONDS: "600"
+      DRAIN_TIMEOUT_MS: "660000"
+      HEALTH_PORT: "8081"
+    ports:
+      - "${LOCAL_BIND_IP:-127.0.0.1}:8081:8081" # agent health: / and /worker
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    # backend: LiveKit advertises ONE media IP (NODE_IP), detected on its first
+    # interface, which is the backend network; the agent's WebRTC media must
+    # reach it. The agent has no Redis password. edge: egress (Sarvam, klyro).
+    networks: [backend, edge]
+    depends_on:
+      livekit: { condition: service_healthy }
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8081/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      start_period: 60s
+      retries: 6
+    # Covers DRAIN_TIMEOUT_MS + 30 s; an idle agent exits within seconds.
+    stop_grace_period: 11m30s
+    restart: *restart
+
+networks:
+  # Redis + LiveKit + SIP. "internal": no route in or out of the host.
+  backend:
+    internal: true
+  # Published ports, agent egress (Sarvam, klyro), webhooks.
+  edge: {}
