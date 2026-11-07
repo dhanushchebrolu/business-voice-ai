@@ -2,7 +2,6 @@ import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import { sendWhatsAppPaymentMessage, paymentLinkMessageText } from "./whatsapp-payments.server.ts";
-import { encryptCredential } from "./whatsapp-token-crypto.server.ts";
 import { createFakeDb } from "./whatsapp-test-db.ts";
 
 /**
@@ -12,11 +11,8 @@ import { createFakeDb } from "./whatsapp-test-db.ts";
  */
 
 const ENV_KEYS = [
-  "WHATSAPP_CREDENTIAL_ENCRYPTION_KEY",
-  "META_APP_ID",
-  "META_APP_SECRET",
-  "META_WHATSAPP_CONFIG_ID",
-  "META_GRAPH_API_VERSION",
+  "VOBIZ_AUTH_ID",
+  "VOBIZ_AUTH_TOKEN",
   "WHATSAPP_TEMPLATE_PAYMENT_LINK_NAME",
   "WHATSAPP_TEMPLATE_PAYMENT_LINK_LANGUAGE",
   "WHATSAPP_TEMPLATE_PAYMENT_CONFIRMATION_NAME",
@@ -28,11 +24,8 @@ beforeEach(() => {
     saved[key] = process.env[key];
     delete process.env[key];
   }
-  process.env["WHATSAPP_CREDENTIAL_ENCRYPTION_KEY"] = randomBytes(32).toString("base64");
-  process.env["META_APP_ID"] = "test-app";
-  process.env["META_APP_SECRET"] = "test-secret";
-  process.env["META_WHATSAPP_CONFIG_ID"] = "test-config";
-  process.env["META_GRAPH_API_VERSION"] = "v23.0";
+  process.env["VOBIZ_AUTH_ID"] = "MA_TEST";
+  process.env["VOBIZ_AUTH_TOKEN"] = "vobiz-test-token";
 });
 afterEach(() => {
   for (const key of ENV_KEYS) {
@@ -61,7 +54,9 @@ function seed(over: { inboundMinutesAgo?: number; connectionBusiness?: string } 
         business_id: over.connectionBusiness ?? "biz-1",
         phone_number_id: "pnid-1",
         status: "connected",
-        access_token_ciphertext: encryptCredential("test-access-token"),
+        waba_id: "waba-1",
+        provider: "vobiz",
+        vobiz_channel_id: "ch-test-access-token",
         notifications_enabled: true,
         transactional_consent_basis: "Customers agree to WhatsApp updates when they book.",
       },
@@ -101,7 +96,15 @@ function fakeMeta(status = 200) {
   const fetchImpl = (async (_url: string, init: RequestInit) => {
     sent.push(JSON.parse(String(init.body)));
     return new Response(
-      JSON.stringify(status === 200 ? { messages: [{ id: `wamid.T${sent.length}` }] } : {}),
+      JSON.stringify(
+        status === 200
+          ? {
+              id: `vmsg.T${sent.length}`,
+              status: "pending",
+              meta_message_id: `wamid.T${sent.length}`,
+            }
+          : {},
+      ),
       { status },
     );
   }) as unknown as typeof fetch;
@@ -191,7 +194,7 @@ describe("sendWhatsAppPaymentMessage — 24h window / template requirement", () 
     assert.equal(result.outcome, "sent");
     const body = meta.sent[0] as { to: string; type: string; template: Record<string, unknown> };
     assert.equal(body.type, "template");
-    assert.equal(body.to, "919876543210");
+    assert.equal(body.to, "+919876543210");
     assert.deepEqual(body.template, {
       name: "payment_link_notify",
       language: { code: "en_US" },
@@ -205,6 +208,7 @@ describe("sendWhatsAppPaymentMessage — 24h window / template requirement", () 
       payment_request_id: "pr-1",
       purpose: "payment_link",
       idempotency_key: "payment_link:pr-1",
+      vobiz_message_id: "vmsg.T1",
     });
   });
 
@@ -246,8 +250,9 @@ describe("sendWhatsAppPaymentMessage — 24h window / template requirement", () 
     const result = await sendWhatsAppPaymentMessage(db.client, BASE_INPUT, meta.fetchImpl);
     assert.equal(result.outcome, "sent");
     assert.deepEqual(meta.sent[0], {
-      messaging_product: "whatsapp",
-      to: "919876543210",
+      channel_id: "ch-test-access-token",
+      waba_id: "waba-1",
+      to: "+919876543210",
       type: "text",
       text: { body: BASE_INPUT.bodyText },
     });
@@ -304,7 +309,7 @@ describe("sendWhatsAppPaymentMessage — consent", () => {
       ).outcome,
       "sent",
     );
-    assert.equal((meta.sent[0] as { to: string }).to, "919876543210");
+    assert.equal((meta.sent[0] as { to: string }).to, "+919876543210");
     const bad = await sendWhatsAppPaymentMessage(
       db.client,
       { ...BASE_INPUT, paymentRequestId: "pr-2", customerPhone: "12345" },

@@ -18,16 +18,18 @@
  *   - One message per (campaign, number): the recipient row is unique, it
  *     is claimed before sending, and the message carries the idempotency
  *     key campaign:<id>:<wa_id>.
- *   - Failures retried only when Meta didn't accept the message (429/5xx),
+ *   - Failures retried only when Vobiz didn't accept the message (429/5xx),
  *     at most MAX_RECIPIENT_ATTEMPTS times; a tick with a high failure rate
  *     pauses the campaign for a person to look at.
  *   - Every launch, pause, resume and cancel is written to the audit log.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
-import { MetaWhatsAppClient } from "./meta-client.server.ts";
-import { resolveMetaWhatsAppConfig } from "./meta-config.server.ts";
-import { decryptCredential } from "./whatsapp-token-crypto.server.ts";
+import {
+  VobizWhatsAppClient,
+  VobizApiError,
+  resolveVobizWhatsAppConfig,
+} from "./vobiz-whatsapp-client.server.ts";
 import type { DeliveryDeps } from "./whatsapp-outbound.server.ts";
 import {
   countBodyParams,
@@ -79,31 +81,47 @@ export async function syncTemplates(
   supabaseAdmin: Client,
   input: { organizationId: string; connectionId: string },
   deps: { fetchImpl?: typeof fetch | undefined } = {},
-): Promise<{ synced: number; missing: number }> {
+): Promise<{ synced: number; missing: number; skipped: number }> {
   const { data: connection, error } = await supabaseAdmin
     .from("whatsapp_connections")
-    .select("id, organization_id, waba_id, status, access_token_ciphertext")
+    .select("id, organization_id, waba_id, status, provider, vobiz_channel_id")
     .eq("id", input.connectionId)
     .eq("organization_id", input.organizationId)
     .maybeSingle();
   if (error) throw error;
-  if (!connection || connection.status !== "connected" || !connection.access_token_ciphertext) {
+  if (!connection || connection.status !== "connected") {
     throw new CampaignError("This WhatsApp number isn't connected.", "NOT_CONNECTED");
   }
-  const config = resolveMetaWhatsAppConfig();
+  if (connection.provider !== "vobiz" || !connection.vobiz_channel_id) {
+    throw new CampaignError(
+      "This WhatsApp number must be connected again through Vobiz.",
+      "NOT_CONNECTED",
+    );
+  }
+  const config = resolveVobizWhatsAppConfig();
   if (!config)
     throw new CampaignError("WhatsApp is not configured on this deployment.", "NOT_CONFIGURED");
-  const client = new MetaWhatsAppClient({
-    appId: config.appId,
-    appSecret: config.appSecret,
-    graphApiVersion: config.graphApiVersion,
-    fetchImpl: deps.fetchImpl,
-  });
-  const templates = await client.listMessageTemplates(
-    connection.waba_id,
-    decryptCredential(connection.access_token_ciphertext),
-  );
+  const client = new VobizWhatsAppClient({ ...config, fetchImpl: deps.fetchImpl });
+  let templates: Awaited<ReturnType<VobizWhatsAppClient["listTemplates"]>>["templates"];
+  let skipped: number;
+  try {
+    // Ask Vobiz to pull the latest statuses from Meta first, then read them.
+    await client.syncTemplates(connection.vobiz_channel_id);
+    ({ templates, skipped } = await client.listTemplates(connection.vobiz_channel_id));
+  } catch (err) {
+    throw new CampaignError(
+      err instanceof VobizApiError ? err.message : "Couldn't load templates from Vobiz.",
+      "PROVIDER_ERROR",
+    );
+  }
 
+  if (templates.length === 0 && skipped > 0) {
+    // Nothing usable came back: never treat that as "every template was deleted".
+    throw new CampaignError(
+      "Vobiz returned templates in an unexpected format; nothing was changed.",
+      "PROVIDER_ERROR",
+    );
+  }
   const now = new Date().toISOString();
   const seen = new Set<string>();
   for (const t of templates) {
@@ -133,7 +151,8 @@ export async function syncTemplates(
     .eq("whatsapp_connection_id", connection.id);
   if (existingError) throw existingError;
   let missing = 0;
-  for (const row of existing ?? []) {
+  // Only a complete read can prove a template is gone.
+  for (const row of skipped > 0 ? [] : (existing ?? [])) {
     if (seen.has(`${row.name}|${row.language}`)) continue;
     missing++;
     await supabaseAdmin
@@ -141,7 +160,7 @@ export async function syncTemplates(
       .update({ status: "NOT_FOUND_AT_META", synced_at: now })
       .eq("id", row.id);
   }
-  return { synced: templates.length, missing };
+  return { synced: templates.length, missing, skipped };
 }
 
 /** How many body parameters each notification purpose sends (see bookingNotificationText / payment messages). */

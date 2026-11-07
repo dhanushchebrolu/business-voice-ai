@@ -219,6 +219,10 @@ describe("buildSarvamClientContext — shapes the documented response, never inv
     assert.equal(context!.knowledge.length, 1);
     assert.equal(context!.knowledge[0]!.title, "Cancellation policy");
     assert.equal(context!.agent?.name, "Aria");
+    // Stored multilingual=false / extra_languages=[] never restrict the agent:
+    // every agent answers in all 11 supported languages.
+    assert.equal(context!.agent?.multilingual, true);
+    assert.equal(context!.agent?.extraLanguages.length, 10);
 
     // Every follow-up query is scoped to the resolved business's own id —
     // never the raw organization_id or any other business's id.

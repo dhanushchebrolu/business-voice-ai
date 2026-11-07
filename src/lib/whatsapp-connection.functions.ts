@@ -5,10 +5,10 @@ import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 /**
  * Customer-facing WhatsApp connection management (Phase 3): listing the
  * org's own connections, assigning which bot handles one, and
- * disconnecting. Deliberately does NOT touch Meta or re-implement any
- * part of onboarding — that stays exclusively in whatsapp-onboarding.
- * functions.ts's completeWhatsAppOnboarding (Phase 2). This file is pure
- * data access + tenant validation over rows Phase 2 already wrote.
+ * disconnecting. Deliberately does NOT call Vobiz or re-implement any
+ * part of onboarding — that stays in whatsapp-onboarding.functions.ts (the
+ * three Vobiz connection options). This file is pure data access + tenant
+ * validation over rows onboarding already wrote.
  */
 
 /**
@@ -102,57 +102,24 @@ const assignInputSchema = z.object({
 });
 
 /**
- * Assigns (or clears) which bot handles a connection. Uses the RLS-scoped
- * client for the actual UPDATE — Phase 1's whatsapp_connections policy
- * already grants customers UPDATE on exactly the agent_config_id column,
- * scoped to rows in their own organization (is_org_member). That row-level
- * check alone isn't enough on its own, though: RLS validates which ROW is
- * being touched, not that the NEW agent_config_id value being written
- * belongs to the same organization as that row — a caller could otherwise
- * name a real agent_config_id from a DIFFERENT tenant and have it accepted.
- * This function closes that gap with an explicit ownership check before
- * the update, exactly like completeWhatsAppOnboarding's businessId check
- * in Phase 2.
+ * Assigns (or clears) which bot handles a connection. Owners/admins of the
+ * connection's own organization only, and the bot must belong to that
+ * organization (whatsapp-access.server.ts). The write uses the service role
+ * with an explicit organization filter; the RLS policy on
+ * whatsapp_connections additionally limits direct browser updates of
+ * agent_config_id to owners/admins
+ * (20261026090000_whatsapp_connection_manager_policy.sql).
  */
 export const assignWhatsAppBot = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: AssignWhatsAppBotInput) => assignInputSchema.parse(input))
   .handler(async ({ data, context }) => {
-    const { data: membership } = await context.supabase
-      .from("organization_members")
-      .select("organization_id")
-      .eq("user_id", context.userId)
-      .limit(1)
-      .maybeSingle();
-    if (!membership) throw new Error("No workspace found for your account.");
-    const organizationId = membership.organization_id;
-
-    if (data.agentConfigId) {
-      const { data: agentConfig } = await context.supabase
-        .from("agent_configs")
-        .select("id, organization_id")
-        .eq("id", data.agentConfigId)
-        .maybeSingle();
-      if (!agentConfig || agentConfig.organization_id !== organizationId) {
-        throw new Error("That bot does not belong to your workspace.");
-      }
-    }
-
-    // The RLS policy's own USING/WITH CHECK (is_org_member(organization_id))
-    // additionally guarantees this .eq("id", ...) can only ever match a row
-    // already in the caller's organization — a connectionId belonging to
-    // another tenant simply matches zero rows here, never silently updates
-    // someone else's connection.
-    const { data: updated, error } = await context.supabase
-      .from("whatsapp_connections")
-      .update({ agent_config_id: data.agentConfigId })
-      .eq("id", data.connectionId)
-      .select("id")
-      .maybeSingle();
-    if (error) throw error;
-    if (!updated) throw new Error("WhatsApp connection not found.");
-
-    return { ok: true as const };
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { assignWhatsAppBotForUser } = await import("@/lib/whatsapp/whatsapp-access.server");
+    return assignWhatsAppBotForUser(supabaseAdmin, context.userId, {
+      connectionId: data.connectionId,
+      agentConfigId: data.agentConfigId,
+    });
   });
 
 interface DisconnectWhatsAppConnectionInput {
@@ -162,52 +129,33 @@ interface DisconnectWhatsAppConnectionInput {
 const disconnectInputSchema = z.object({ connectionId: z.string().uuid() });
 
 /**
- * Marks a connection disconnected — never deletes the row (or its
- * historical whatsapp_conversations/whatsapp_messages, once those exist
- * in a later phase). status isn't in Phase 1's customer-grantable column
- * list (only agent_config_id is), so this goes through supabaseAdmin like
- * Phase 2's onboarding does, with the same explicit tenant-derivation and
- * ownership check pattern — organizationId is never trusted from input,
- * and the connection's own organization_id is checked before any write.
+ * Marks a connection disconnected — never deletes the row or its
+ * conversations/messages. Owners/admins of the connection's own
+ * organization only (whatsapp-access.server.ts); organizationId is never
+ * trusted from input. A repeat call on an already-disconnected connection
+ * changes nothing and records no second timeline event.
  */
 export const disconnectWhatsAppConnection = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: DisconnectWhatsAppConnectionInput) => disconnectInputSchema.parse(input))
   .handler(async ({ data, context }) => {
-    const { data: membership } = await context.supabase
-      .from("organization_members")
-      .select("organization_id")
-      .eq("user_id", context.userId)
-      .limit(1)
-      .maybeSingle();
-    if (!membership) throw new Error("No workspace found for your account.");
-    const organizationId = membership.organization_id;
-
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-
-    const { data: connection } = await supabaseAdmin
-      .from("whatsapp_connections")
-      .select("id, organization_id")
-      .eq("id", data.connectionId)
-      .maybeSingle();
-    if (!connection || connection.organization_id !== organizationId) {
-      throw new Error("WhatsApp connection not found.");
-    }
-
-    const { error } = await supabaseAdmin
-      .from("whatsapp_connections")
-      .update({ status: "disconnected", disconnected_at: new Date().toISOString() })
-      .eq("id", data.connectionId);
-    if (error) throw error;
-
-    await supabaseAdmin.from("customer_events").insert({
-      organization_id: organizationId,
-      kind: "whatsapp_disconnected",
-      title: "WhatsApp disconnected",
-      detail: connection.id,
-      actor_email: (context.claims["email"] as string | undefined) ?? null,
-      metadata: { connection_id: connection.id },
+    const { disconnectWhatsAppConnectionForUser } =
+      await import("@/lib/whatsapp/whatsapp-access.server");
+    const result = await disconnectWhatsAppConnectionForUser(supabaseAdmin, context.userId, {
+      connectionId: data.connectionId,
     });
+
+    if (result.changed) {
+      await supabaseAdmin.from("customer_events").insert({
+        organization_id: result.organizationId,
+        kind: "whatsapp_disconnected",
+        title: "WhatsApp disconnected",
+        detail: result.connectionId,
+        actor_email: (context.claims["email"] as string | undefined) ?? null,
+        metadata: { connection_id: result.connectionId },
+      });
+    }
 
     return { ok: true as const };
   });

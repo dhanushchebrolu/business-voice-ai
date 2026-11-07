@@ -151,7 +151,7 @@ export type FailureCode =
   | "delivery_failed";
 
 export type BusinessMessageResult =
-  | { outcome: "sent"; messageRowId: string; waMessageId: string }
+  | { outcome: "sent"; messageRowId: string; waMessageId: string | null }
   | { outcome: "skipped_duplicate"; existingStatus: string | null }
   | { outcome: "skipped"; reason: SkipReason }
   | {
@@ -336,7 +336,7 @@ export async function sendBusinessWhatsAppMessage(
   let connectionQuery = supabaseAdmin
     .from("whatsapp_connections")
     .select(
-      "id, organization_id, business_id, phone_number_id, access_token_ciphertext, status, notifications_enabled, transactional_consent_basis",
+      "id, organization_id, business_id, phone_number_id, waba_id, status, provider, vobiz_channel_id, notifications_enabled, transactional_consent_basis",
     )
     .eq("organization_id", input.organizationId)
     .eq("business_id", input.businessId)

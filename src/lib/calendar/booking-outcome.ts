@@ -33,6 +33,20 @@ export function classifyBookingStatus(status: string | null | undefined): Bookin
   }
 }
 
+/**
+ * The idempotency key of a booking made on a call: the same call asking for
+ * the same slot again gets the row already created, never a second one. The
+ * voice runtime uses the same key to look a booking up when its request
+ * timed out (see attemptBooking's reconciliation).
+ */
+export function voiceBookingIdempotencyKey(
+  callId: string,
+  startIso: string,
+  endIso: string,
+): string {
+  return `voice:${callId}:${startIso}:${endIso}`;
+}
+
 /** An outcome where the slot is really held for this caller (confirmed, or saved pending calendar sync). */
 export function bookingIsHeld(outcome: BookingOutcome): boolean {
   return outcome === "confirmed" || outcome === "saved_calendar_sync_failed";

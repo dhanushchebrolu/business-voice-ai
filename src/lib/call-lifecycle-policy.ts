@@ -25,10 +25,23 @@ export type CallLifecyclePhase =
   | "FAILED";
 
 export interface CallLifecyclePolicy {
-  /** Caller silence before the one "are you still there?" prompt. */
+  /** Caller silence before the one "are you still there?" check-in. */
   silencePromptMs: number;
-  /** Further silence after that prompt before a goodbye and hang-up. */
+  /**
+   * Further silence after the check-in before one final notice ("I'll end
+   * the call shortly if I don't hear from you"). 0 skips the final notice:
+   * the goodbye then follows the check-in directly.
+   */
+  silenceFinalNoticeMs: number;
+  /** Further silence after the last prompt (final notice, or check-in) before a goodbye and hang-up. */
   silenceHangupMs: number;
+  /**
+   * How long a caller's turn may go without anything said back (the model
+   * or a calendar call being slow) before one short "One moment, please."
+   * Never said when the turn already got an immediate acknowledgement. 0
+   * turns it off.
+   */
+  holdingResponseMs: number;
   /** The same agent reply this many times in a row ends the loop (offer an alternative). */
   repeatedReplyLimit: number;
   /** Consecutive failed turns (LLM/TTS/tool errors) before the call is ended safely. */
@@ -55,13 +68,15 @@ export interface CallLifecyclePolicy {
 }
 
 /**
- * Conservative defaults: the silence timings match the runtime's existing
- * behaviour (12 s prompt, then 10 s), nothing hangs up mid-operation, and a
- * long call is only closed after 30 minutes.
+ * Conservative defaults: a check-in after 12 s of silence, a final notice
+ * 8 s later, the goodbye 10 s after that (30 s in all); nothing hangs up
+ * mid-operation, and a long call is only closed after 30 minutes.
  */
 export const DEFAULT_CALL_LIFECYCLE_POLICY: CallLifecyclePolicy = {
   silencePromptMs: 12_000,
+  silenceFinalNoticeMs: 8_000,
   silenceHangupMs: 10_000,
+  holdingResponseMs: 3_000,
   repeatedReplyLimit: 3,
   consecutiveErrorLimit: 2,
   closingAudioMaxWaitMs: 15_000,
@@ -97,6 +112,16 @@ export function resolveCallLifecyclePolicy(
       continue;
     }
     if (typeof value !== "number" || !Number.isFinite(value)) continue;
+    if (key === "silenceFinalNoticeMs") {
+      // 0 skips the final notice; otherwise never below three seconds.
+      policy.silenceFinalNoticeMs = value <= 0 ? 0 : Math.max(Math.round(value), 3_000);
+      continue;
+    }
+    if (key === "holdingResponseMs") {
+      // 0 turns it off; otherwise never so soon it talks over a normal reply.
+      policy.holdingResponseMs = value <= 0 ? 0 : Math.max(Math.round(value), 1_500);
+      continue;
+    }
     if (key === "maxCallDurationMs") {
       // 0 disables the limit; otherwise never below five minutes.
       policy.maxCallDurationMs = value <= 0 ? 0 : Math.max(value, 5 * 60_000);
@@ -134,6 +159,14 @@ const NOTHING_ELSE_PATTERN =
   /^\W*(?:no|nope|nah|no[\s,]+thanks?|no[\s,]+thank\s+you|thanks?|thank\s+you(?:\s+(?:so|very)\s+much)?|ok(?:ay)?[\s,]+thanks?|all\s+good|not\s+right\s+now|i'?m\s+(?:good|fine|all\s+set|ok(?:ay)?)(?:[\s,]+(?:thanks?|thank\s+you))?)\W*$/i;
 const HUMAN_REQUEST_PATTERN =
   /\b(?:speak|talk|connect|transfer)\b[^.?!]*\b(?:human|person|someone|somebody|representative|receptionist|staff|agent|operator|manager|doctor)\b|\b(?:real|actual|live)\s+(?:person|human)\b/i;
+/**
+ * The same request in Telugu, Hindi and romanized speech — a person to talk
+ * to, and a verb of speaking: "మనిషితో మాట్లాడాలి", "डॉक्टर से बात कराइए",
+ * "kisi se baat karni hai". Both are required, so "किसी बात की चिंता नहीं"
+ * ("no worries about anything") is never one.
+ */
+const NATIVE_HUMAN_REQUEST_PATTERN =
+  /(?:మనిషి|వ్యక్తి|ఎవరితో|డాక్టర్|స్టాఫ్|రిసెప్షనిస్ట్|మేనేజర్|సిబ్బంది)[^.?!।]*మాట్లాడ|(?:इंसान|व्यक्ति|आदमी|डॉक्टर|डाक्टर|स्टाफ|मैनेजर|रिसेप्शनिस्ट|किसी\s+से)[^.?!।]*(?:बात|बोल)|\b(?:insaan|insan|vyakti|aadmi|doctor|staff|manager|manishi|evaritho|kisi\s+se)\b[^.?!]*\b(?:baat|bolna|matlad\w*)\b/iu;
 // "Thanks — can I also ask about prices?" is a new request, not a goodbye.
 const CONTINUATION_PATTERN =
   /\?|\b(?:also|another|one\s+more|but|what|how|when|where|why|which|can\s+(?:i|you)|could\s+(?:i|you)|i\s+(?:want|need|would\s+like)|book|reschedule|cancel|change|price|cost|open|available)\b/i;
@@ -155,7 +188,9 @@ export function classifyCallerClosingIntent(
 ): CallerClosingIntent | null {
   const trimmed = text.trim();
   if (!trimmed) return null;
-  if (HUMAN_REQUEST_PATTERN.test(trimmed)) return "human_requested";
+  if (HUMAN_REQUEST_PATTERN.test(trimmed) || NATIVE_HUMAN_REQUEST_PATTERN.test(trimmed)) {
+    return "human_requested";
+  }
   if (ctx.hasNewRequest) return null;
   const continues = CONTINUATION_PATTERN.test(trimmed);
   if (HANGUP_REQUEST_PATTERN.test(trimmed) && !continues && !NEGATED_HANGUP_PATTERN.test(trimmed)) {
@@ -180,11 +215,16 @@ export function agentSaidGoodbye(reply: string): boolean {
   );
 }
 
-/** Normalised form of a reply for "said the same thing again" detection. */
+/**
+ * Normalised form of a reply for "said the same thing again" detection.
+ * Letters, digits and combining marks of every script are kept (Indic vowel
+ * signs are marks): with only a-z0-9 kept, any non-English reply normalised
+ * to "", so a Hindi or Telugu agent could repeat itself indefinitely.
+ */
 export function normalizeReplyForRepeat(reply: string): string {
   return reply
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/[^\p{L}\p{N}\p{M}]+/gu, " ")
     .trim();
 }
 

@@ -402,6 +402,42 @@ describe("5. no, not yet, or a different time never books", () => {
   });
 });
 
+describe("6. a correction after the booking question needs a fresh yes", () => {
+  for (const said of ["Actually, change it to 8 PM", "kaadu, 8 PM ki maarchandi"]) {
+    test(`"${said}" with the model still repeating 7 PM: 8 PM is checked and asked about, nothing booked`, async () => {
+      const { callId, turn, bookings, checks } = await openCall();
+      await upToBookingQuestion(turn);
+      // The model's state block lags behind the caller's correction.
+      const reply = await turn(said, `Okay.\n${marker(KNOWN)}`);
+      assert.equal(bookings().length, 0, "the earlier yes-question doesn't cover 8 PM");
+      assert.equal(checks().length, 2, "8 PM is checked");
+      assert.match(reply, /8 PM is available\. Would you like me to book it\?/, reply);
+      await turn("Yes", `Okay.\n${marker({ ...KNOWN, preferred_time: "20:00" })}`);
+      assert.equal(bookings().length, 1);
+      assert.equal(bookings()[0]!.input["startIso"], SLOT_8PM.start);
+      assert.equal(bookings()[0]!.input["customerName"], "Dhanush", "the name is kept");
+      await terminateRuntimeSession(callId, "test cleanup");
+    });
+  }
+
+  test("a new phone number after the booking question: read back, nothing booked until confirmed", async () => {
+    const { callId, turn, bookings } = await openCall();
+    await upToBookingQuestion(turn);
+    const reply = await turn("Actually, use my other number 9848012345", `Okay.\n${marker(KNOWN)}`);
+    assert.equal(bookings().length, 0, reply);
+    assert.doesNotMatch(reply, /\bbooked\b/i, reply);
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+
+  test("a reference alone ('the second one') never books", async () => {
+    const { callId, turn, bookings } = await openCall();
+    await upToBookingQuestion(turn);
+    await turn("the second one", EAGER());
+    assert.equal(bookings().length, 0);
+    await terminateRuntimeSession(callId, "test cleanup");
+  });
+});
+
 describe("callerAuthorizesBooking", () => {
   const ASKED = "Good news — 7 PM is available. Would you like me to book it?";
   test("a clear yes answers the booking question; an explicit 'book it' stands alone", () => {

@@ -121,6 +121,10 @@ export interface StartRuntimeRpcInput {
   callerNumber?: string | null;
   /** businesses.country, read live at call start — see StartRuntimeSessionInput.businessCountry. */
   businessCountry?: string | null;
+  /** The live price list could not be read at call start, so no amount may be quoted as current — see StartRuntimeSessionInput.pricesUnverified. */
+  pricesUnverified?: boolean;
+  /** businesses.timezone, read live at call start — see StartRuntimeSessionInput.businessTimezone. */
+  businessTimezone?: string | null;
   /** When telephony routing for this call began (ms since epoch) — greeting-latency instrumentation only. Optional so an older in-flight RPC body still parses. */
   routingStartedAt?: number;
   timeoutMs?: number;
@@ -480,6 +484,8 @@ export class CallSessionDurableObject {
         ? { routingStartedAt: body.routingStartedAt }
         : {}),
       businessCountry: body.businessCountry ?? null,
+      pricesUnverified: body.pricesUnverified === true,
+      businessTimezone: body.businessTimezone ?? null,
     });
 
     console.info("call_session_do:start_runtime_completed", {

@@ -248,15 +248,63 @@ describe("normal completion ends the call after the final audio, with one hang-u
     assert.equal(call.spokenSince(before), "", "nothing more is said");
     assert.deepEqual(call.hangups, ["before_close"]);
   });
+
+  for (const [noise, how] of [
+    ["", "a cough (no words)"],
+    ["hmm", "a 'hmm'"],
+  ] as const) {
+    test(`${how} over the goodbye: the goodbye isn't said twice, and the call still ends`, async (t) => {
+      const call = await openCall(t);
+      await call.turn(
+        "What are your opening hours?",
+        "We're open from 9 AM to 6 PM. Is there anything else I can help you with?",
+      );
+      const before = call.h.tts.sentTexts.length;
+      await call.turn("No thanks");
+      assert.match(call.spokenSince(before), /thank you for calling smile dental/i);
+      // The goodbye is still playing when a sound interrupts it.
+      call.h.stt.emit({ type: "speech_start" });
+      call.h.stt.emit({ type: "speech_end" });
+      call.h.stt.emit({ type: "final_transcript", text: noise, language: "en-IN" });
+      await drain(200);
+      t.mock.timers.tick(2_000);
+      await drain(200);
+      await finishAudio(call, t);
+      const goodbyes = call.h.tts.sentTexts
+        .slice(before)
+        .filter((s) => /thank you for calling smile dental/i.test(s));
+      assert.equal(goodbyes.length, 1, call.spokenSince(before));
+      assert.deepEqual(call.hangups, ["before_close"]);
+      assert.equal(call.handle.state, "ended");
+    });
+  }
+
+  test("real words over the goodbye still keep the call open (unchanged)", async (t) => {
+    const call = await openCall(t);
+    await call.turn(
+      "What are your opening hours?",
+      "We're open from 9 AM to 6 PM. Is there anything else I can help you with?",
+    );
+    await call.turn("No thanks");
+    call.h.llm.setNextReply("Yes, there's parking right outside.");
+    const before = call.h.tts.sentTexts.length;
+    call.h.stt.speakUtterance("oh wait, do you have parking?");
+    await drain(200);
+    await finishAudio(call, t);
+    assert.match(call.spokenSince(before), /parking right outside/);
+    assert.deepEqual(call.hangups, []);
+  });
 });
 
 /* ------------------------------------------------------------------ */
 /* C. Silence                                                           */
 /* ------------------------------------------------------------------ */
 
-describe("silence: one prompt, then a goodbye and one hang-up", () => {
-  test("prompts once, then ends within the configured limits — never a second prompt", async (t) => {
-    const call = await openCall(t, { policy: { silencePromptMs: 20_000, silenceHangupMs: 8_000 } });
+describe("silence: a check-in, a final notice, then a goodbye and one hang-up", () => {
+  test("each stage after its own configured silence — never a second check-in", async (t) => {
+    const call = await openCall(t, {
+      policy: { silencePromptMs: 20_000, silenceFinalNoticeMs: 6_000, silenceHangupMs: 8_000 },
+    });
     const before = call.h.tts.sentTexts.length;
     t.mock.timers.tick(19_000);
     await drain();
@@ -265,10 +313,18 @@ describe("silence: one prompt, then a goodbye and one hang-up", () => {
     await drain();
     assert.match(call.spokenSince(before), /still there/i);
     call.flush();
+    t.mock.timers.tick(5_000);
+    await drain();
+    assert.doesNotMatch(call.spokenSince(before), /end the call/i, "no notice before its interval");
+    t.mock.timers.tick(1_000);
+    await drain();
+    assert.match(call.spokenSince(before), /end the call shortly/i, "the final notice");
+    assert.deepEqual(call.hangups, [], "a notice is not a hang-up");
+    call.flush();
     t.mock.timers.tick(8_000);
     await drain(200);
     const spoken = call.spokenSince(before);
-    assert.equal(spoken.match(/still there/gi)?.length, 1, "exactly one prompt");
+    assert.equal(spoken.match(/still there/gi)?.length, 1, "exactly one check-in");
     assert.match(spoken, /end the call here/i);
     await finishAudio(call, t);
     assert.deepEqual(call.hangups, ["before_close"]);

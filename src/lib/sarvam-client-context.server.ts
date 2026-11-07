@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
+import { VOICE_LANGUAGES, resolvePrimaryLanguage } from "./voice-languages.ts";
 
 /**
  * The Sarvam client-context endpoint (Task #94): what lets a Sarvam agent
@@ -248,8 +249,14 @@ export async function buildSarvamClientContext(
           customPersonality: agent.custom_personality,
           objectives: agent.objectives,
           primaryLanguage: agent.primary_language,
-          extraLanguages: agent.extra_languages,
-          multilingual: agent.multilingual,
+          // Every agent is multilingual (voice-languages.ts
+          // nextCallLanguage): the stored multilingual / extra_languages
+          // columns are legacy and never restrict a call, so the context
+          // reports what the agent can actually do rather than those values.
+          extraLanguages: VOICE_LANGUAGES.map((l) => l.code).filter(
+            (code) => code !== resolvePrimaryLanguage(agent.primary_language),
+          ),
+          multilingual: true,
           voiceId: agent.voice_id,
           speakingPace: agent.speaking_pace,
           greetings: agent.greetings,

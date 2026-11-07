@@ -1,9 +1,17 @@
 # WhatsApp integration
 
-This builds on the existing WhatsApp Business connection (Embedded Signup,
-`20260923090000_whatsapp_business_integration.sql`) and the existing voice
-agents, bookings and Razorpay payment flow. It adds:
+WhatsApp runs through **Vobiz**, ClickAI's WhatsApp BSP (Meta-approved Business
+Solution Provider): Vobiz holds every number's Meta credentials, and ClickAI
+talks only to Vobiz's API (`https://api.vobiz.ai/api/v1/messaging`, the same
+`VOBIZ_AUTH_ID`/`VOBIZ_AUTH_TOKEN` account as voice). The earlier direct-Meta
+integration (ClickAI's own Meta app exchanging codes, registering numbers,
+subscribing webhooks and sending through the Graph API) has been removed.
+Connections live in `whatsapp_connections`
+(`20260923090000_whatsapp_business_integration.sql`, plus the Vobiz columns of
+`20261027090000_whatsapp_vobiz_channels.sql`), next to the existing voice
+agents, bookings and Razorpay payment flow. The features:
 
+- **Connecting a number.** Three ways, below.
 - **Webhooks.** Authenticated, idempotent, with monotonic delivery statuses.
 - **AI replies.** From the business's own agent, with human handoff.
 - **Bookings and payments in chat.** Bookings, reschedules and payment holds from a WhatsApp chat: the AI proposes, the customer confirms with YES, and the server acts.
@@ -11,6 +19,44 @@ agents, bookings and Razorpay payment flow. It adds:
 - **Consent.** A consent ledger (STOP/START, staff-attested opt-ins, Meta's opt-out signal) and a suppression list.
 - **Templates and campaigns.** A Message Template registry synced from Meta, and consent-only marketing campaigns with rate limits, scheduling, delivery analytics and an audit log.
 - **Dashboard.** All of it on `/app/whatsapp`.
+
+## Connecting a number (three options)
+
+All three run server-side (`whatsapp-onboarding.functions.ts` →
+`whatsapp-vobiz-onboarding.server.ts`), only for an owner or admin of the
+chosen business's organization, behind the existing WhatsApp feature gate.
+Each ends in a Vobiz channel recorded as a `whatsapp_connections` row
+(`provider = 'vobiz'`, `vobiz_channel_id`, `number_onboarding_mode`). A number
+live for another organization is refused before Vobiz is called; a repeat
+request for an already connected number returns it without calling Vobiz
+again; a channel Vobiz created during a request whose response was lost is
+found with `GET /channels/whatsapp` and adopted.
+
+1. **Bring your own number** (`bring_your_own`): Vobiz sends an OTP by SMS or
+   voice call (`POST /numbers/whatsapp/bring-your-own/verify`, at most 5 per
+   organization per hour); the business enters it with its WABA ID, phone
+   number ID and Meta system-user token (`.../confirm`, then
+   `POST /channels/whatsapp` with `number_provider: "meta_direct"`). The
+   token goes to Vobiz in that one request; ClickAI never stores or logs it.
+2. **Buy a number through Vobiz** (`buy_from_vobiz`): search
+   (`GET /numbers/whatsapp/availability`), confirm, order
+   (`POST /numbers/whatsapp/orders`). A `whatsapp_number_orders` row is
+   written **before** Vobiz is asked to buy and is unique per organization and
+   number while live, so a double click or retry never buys twice; a request
+   whose outcome is unknown is marked `unknown` and never retried
+   automatically. Once Vobiz completes the order, connect it with a WABA ID
+   (`POST /channels/whatsapp` with `number_order_id`); before then Vobiz
+   refuses and the UI says the order isn't ready.
+3. **Embedded Signup through Vobiz** (`embedded_signup`): Meta's own popup runs
+   in the browser with the Meta app and Embedded Signup configuration that
+   Vobiz exchanges codes for (`VITE_VOBIZ_WHATSAPP_ES_*`); the resulting code,
+   WABA ID and phone number ID go to `POST /channels/whatsapp/embedded-signup`.
+   Closing the popup is not an error. Without the three build variables only
+   this option is unavailable.
+
+**Disconnect** stops ClickAI using the number (row kept, `status =
+'disconnected'`; the Vobiz channel is not deleted). **Reconnect** restores it
+if the channel still exists at Vobiz and the number isn't live elsewhere.
 
 ## Sources of truth (nothing is duplicated)
 
@@ -25,16 +71,16 @@ agents, bookings and Razorpay payment flow. It adds:
 
 ## Inbound messages and AI replies
 
-1. Meta POSTs to `/api/public/webhooks/whatsapp`.
-2. **Signature.** `X-Hub-Signature-256` must be the HMAC-SHA256 of the raw body with `META_APP_SECRET`, or the route answers `403` before reading anything.
+1. Vobiz POSTs to `/api/public/webhooks/whatsapp` (ClickAI's one account-level subscription, `POST /api/v1/messaging/webhooks`). Events: `message.inbound`, `message.status` (sent/delivered/read/failed); `call.*` is acknowledged and ignored.
+2. **Signature.** `X-Webhook-Signature` must be the hex HMAC-SHA256 of the raw body with `VOBIZ_WHATSAPP_WEBHOOK_SECRET` (no prefix), or the route answers `401` before reading anything (`whatsapp-webhook-handler.server.ts`).
 3. **Store** (`whatsapp-inbound.server.ts`):
-   - the body hash is claimed in `webhook_events`;
+   - Vobiz's `event_id` is claimed in `webhook_events` (`provider = 'vobiz_whatsapp'`); the payload is the WhatsApp Cloud API change value;
    - messages are unique per `(connection, wa_message_id)`;
    - statuses only move forward, within the connection the payload names;
    - the tenant comes only from `phone_number_id`;
-   - if anything fails, the claim is released and the route answers `500`, so Meta retries.
+   - if anything fails, the claim is released and the route answers `500`, so Vobiz retries.
 4. Meta's error `131050` ("user stopped marketing messages") on a delivery status is recorded as a marketing opt-out.
-5. Meta gets its `200` at once. Replies run in the background (`whatsapp-ai-reply.server.ts`), one per inbound message (a claimed row, unique `reply_to_message_id`):
+5. Vobiz gets its `200` at once. Replies run in the background (`whatsapp-ai-reply.server.ts`), one per inbound message (a claimed row, unique `reply_to_message_id`):
    1. **STOP / START.** STOP is recorded as an opt-out for both scopes; START only opts back in to booking and payment messages (marketing needs its own explicit opt-in). Recorded even when AI is off, no agent is assigned, the number isn't connected or the 24-hour window has closed; acknowledged only when the number is connected and the window is open.
    2. **Guards.** AI is on for the conversation, an agent from the same organization is assigned, the message is inside the 24-hour window, and the conversation has had at most 5 AI replies in 10 minutes. A message skipped because AI was off, no agent was assigned or the rate limit was hit is marked (`metadata.ai_reply_skipped`) and never answered later, by the recovery sweep or a retry. A message whose own reply is already claimed is never marked: the claim is answered once, or taken over if its worker crashed.
    3. **YES / NO.** A clear YES or NO to an open proposal is handled by the server (`whatsapp-actions.server.ts`, below).
@@ -98,7 +144,7 @@ The worker (`whatsapp-notifications.server.ts`, run by the dispatch cron):
 
   Database errors in any of these checks throw (fail closed): nothing is sent.
 
-- **Retries** with exponential backoff, up to 5 attempts, only when safe (Meta answered 429/5xx, or a transient DB error). A rejection is never repeated.
+- **Retries** with exponential backoff, up to 5 attempts, only when safe (Vobiz answered 429/5xx, or a transient DB error). A rejection is never repeated.
 - **Unknown outcomes** (a timeout after the request left, or a 2xx without a message id): the message row **stays `queued`**, with "Delivery outcome unknown" in `error_message`. It therefore keeps blocking every later attempt with the same idempotency key (inline sender, outbox, campaign), so it is never sent twice. It needs a person to check. A staff reply in this state is shown as "Delivery unknown" (not "Not sent"), and sending the same draft again reuses its request id, so it can't go out twice. A campaign recipient stuck this way is marked failed ("Delivery unknown") after its attempts run out, so the campaign can complete.
 - **Skips stale rows:** anything older than 48 h is skipped, never sent late.
 
@@ -133,11 +179,11 @@ Payment truth is never touched: the worker only reads `payment_requests` and `bo
 
 ## Dashboard (`/app/whatsapp`)
 
-- **Connection:** connect a number, assign a bot.
+- **Connection:** the three connection options, assign a bot, disconnect, reconnect (owner/admin only; `whatsapp-access.server.ts`).
 - **Conversations:** the inbox, AI switch and staff replies.
 - **Booking & payment notifications:** on/off per number with the consent basis (owner/admin), plus recent notification outcomes.
 - **Message templates:**
-  - sync from Meta (owner/admin/manager);
+  - sync through Vobiz (`POST /channels/{id}/templates/sync`, then `GET /channels/{id}/templates`; owner/admin/manager). A list Vobiz returns in an unexpected shape changes nothing;
   - map an APPROVED **UTILITY** template to each notification purpose (owner/admin; parameter count checked).
 - **Customer consent:** record a staff-attested opt-in/opt-out with evidence (any role but viewer).
 - **Campaigns:** create a draft, launch, pause, resume and cancel (owner/admin/manager), with analytics.
@@ -159,17 +205,22 @@ All server functions (`whatsapp-messaging.functions.ts`, `whatsapp-conversations
 
 Server-side (Cloudflare Worker secrets; names already in `.env.example` unless marked new):
 
-| Variable                                                                                  | Purpose                                                                                                                                                                                             |
-| ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `META_APP_ID`, `META_APP_SECRET`, `META_WHATSAPP_CONFIG_ID`, `META_GRAPH_API_VERSION`     | Meta app. `META_APP_SECRET` also verifies webhook signatures.                                                                                                                                       |
-| `WHATSAPP_CREDENTIAL_ENCRYPTION_KEY`                                                      | AES-256-GCM key for stored WhatsApp tokens (the key they were encrypted with).                                                                                                                      |
-| `WHATSAPP_WEBHOOK_VERIFY_TOKEN`                                                           | Your random string, also entered in Meta's webhook settings.                                                                                                                                        |
-| `ANTHROPIC_API_KEY` (optional `CLAUDE_MODEL`)                                             | AI replies.                                                                                                                                                                                         |
-| `LOVABLE_CRON_SECRET`                                                                     | Bearer secret for the cron routes.                                                                                                                                                                  |
-| `RAZORPAY_CUSTOMER_PAYMENTS_WEBHOOK_SECRET`, `RAZORPAY_*` OAuth / credential key          | Existing Razorpay customer payments.                                                                                                                                                                |
-| `WHATSAPP_TEMPLATE_PAYMENT_*_NAME` / `_LANGUAGE`                                          | Optional: **selects** a synced registry template by name + language (default `en_US`) when none is mapped to the purpose. The template must still be in this number's registry as APPROVED UTILITY. |
-| `WHATSAPP_TEMPLATE_BOOKING_{CONFIRMED,RESCHEDULED,CANCELLED,REMINDER}_NAME` / `_LANGUAGE` | Optional, same rule. Prefer mapping synced templates in the dashboard (per number; Tech Provider customers each have their own WABA).                                                               |
-| `VITE_META_APP_ID`, `VITE_META_WHATSAPP_CONFIG_ID`, `VITE_META_GRAPH_API_VERSION`         | Browser mirrors for Embedded Signup.                                                                                                                                                                |
+| Variable                                                                                                                      | Purpose                                                                                                                                                                                             |
+| ----------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VOBIZ_AUTH_ID`, `VOBIZ_AUTH_TOKEN` (optional `VOBIZ_BASE_URL`)                                                               | ClickAI's Vobiz account (shared with voice): onboarding, sending, templates.                                                                                                                        |
+| `VOBIZ_WHATSAPP_WEBHOOK_SECRET` (new)                                                                                         | Secret of the Vobiz webhook subscription; verifies `X-Webhook-Signature`. Without it every delivery is refused.                                                                                     |
+| `ANTHROPIC_API_KEY` (optional `CLAUDE_MODEL`)                                                                                 | AI replies.                                                                                                                                                                                         |
+| `LOVABLE_CRON_SECRET`                                                                                                         | Bearer secret for the cron routes.                                                                                                                                                                  |
+| `RAZORPAY_CUSTOMER_PAYMENTS_WEBHOOK_SECRET`, `RAZORPAY_*` OAuth / credential key                                              | Existing Razorpay customer payments.                                                                                                                                                                |
+| `WHATSAPP_TEMPLATE_PAYMENT_*_NAME` / `_LANGUAGE`                                                                              | Optional: **selects** a synced registry template by name + language (default `en_US`) when none is mapped to the purpose. The template must still be in this number's registry as APPROVED UTILITY. |
+| `WHATSAPP_TEMPLATE_BOOKING_{CONFIRMED,RESCHEDULED,CANCELLED,REMINDER}_NAME` / `_LANGUAGE`                                     | Optional, same rule. Prefer mapping synced templates in the dashboard (per number; Tech Provider customers each have their own WABA).                                                               |
+| `VITE_VOBIZ_WHATSAPP_ES_APP_ID`, `VITE_VOBIZ_WHATSAPP_ES_CONFIG_ID`, `VITE_VOBIZ_WHATSAPP_ES_GRAPH_VERSION` (new, build-time) | Embedded Signup popup: the Meta app/config Vobiz exchanges codes for (values from Vobiz). Optional: only that option needs them.                                                                    |
+
+No longer used by WhatsApp: `META_WHATSAPP_CONFIG_ID`, `WHATSAPP_CREDENTIAL_ENCRYPTION_KEY`, `WHATSAPP_WEBHOOK_VERIFY_TOKEN`, `VITE_META_*`. `META_APP_ID`, `META_APP_SECRET` and `META_GRAPH_API_VERSION` stay: Instagram uses them.
+
+**"WhatsApp is not configured on this deployment yet."** A connection step shows this when `VOBIZ_AUTH_ID` or `VOBIZ_AUTH_TOKEN` is missing on the Worker; the Worker log `whatsapp_onboarding:not_configured` lists the missing names (never values). Missing `VITE_VOBIZ_WHATSAPP_ES_*` only disables Embedded Signup (the build log line `[build-env-diagnostic] WhatsApp Embedded Signup (Vobiz) build vars:` names them).
+
+**One-time Vobiz setup:** create the webhook subscription (`POST /api/v1/messaging/webhooks` with `url = https://app.clickai.in/api/public/webhooks/whatsapp` and a strong random `secret`, stored as `VOBIZ_WHATSAPP_WEBHOOK_SECRET`); ask Vobiz for the Embedded Signup Meta app/config ids if that option is wanted.
 
 **Cron** (external scheduler, `POST` with `Authorization: Bearer $LOVABLE_CRON_SECRET`):
 
@@ -187,7 +238,7 @@ Templates with named parameters aren't supported.
 
 ## Database migrations
 
-Four new files on this branch, all additive and idempotent: `20261013090000` (server-role grants on the integration tables), `20261019090000`, `20261020090000` and `20261022090000`. This work did not apply any of them anywhere, and production state is unverified: no production database access was used.
+Six new files, all additive and idempotent: `20261013090000` (server-role grants on the integration tables), `20261019090000`, `20261020090000`, `20261022090000`, `20261026090000` (owner/admin-only bot assignment) and `20261027090000` (Vobiz channels and number orders). This work did not apply any of them anywhere, and production state is unverified: no production database access was used.
 
 ### `20261019090000_whatsapp_ai_replies.sql`
 
@@ -238,17 +289,19 @@ Four new files on this branch, all additive and idempotent: `20261013090000` (se
      DROP TRIGGER IF EXISTS trg_whatsapp_booking_notifications ON bookings;
      DROP TRIGGER IF EXISTS trg_whatsapp_payment_link_notifications ON payment_requests;
      DROP TRIGGER IF EXISTS trg_whatsapp_payment_event_notifications ON payment_domain_events;
+     -- Tables before functions: whatsapp_campaigns' trigger depends on whatsapp_campaign_same_tenant().
+     DROP TABLE IF EXISTS whatsapp_campaign_recipients, whatsapp_campaigns, whatsapp_pending_actions,
+       whatsapp_notifications, whatsapp_templates, whatsapp_suppressions, whatsapp_consent_events, whatsapp_audit_log;
      DROP FUNCTION IF EXISTS whatsapp_booking_notification_trigger(), whatsapp_payment_link_notification_trigger(),
        whatsapp_payment_event_notification_trigger(), whatsapp_campaign_same_tenant(),
        enqueue_whatsapp_notification(uuid, uuid, uuid, uuid, text, text, jsonb, interval),
        whatsapp_notifications_enabled_for(uuid);
-     DROP TABLE IF EXISTS whatsapp_campaign_recipients, whatsapp_campaigns, whatsapp_pending_actions,
-       whatsapp_notifications, whatsapp_templates, whatsapp_suppressions, whatsapp_consent_events, whatsapp_audit_log;
      DROP INDEX IF EXISTS idx_whatsapp_messages_idempotency_live;
      ALTER TABLE whatsapp_connections DROP COLUMN IF EXISTS notifications_enabled,
        DROP COLUMN IF EXISTS transactional_consent_basis, DROP COLUMN IF EXISTS notifications_enabled_at,
        DROP COLUMN IF EXISTS notifications_enabled_by;
      ```
+     Run it in one transaction (`psql --single-transaction`): an error then changes nothing. Verified on a disposable replay of production's 47 migrations: after this rollback the schema matches the 47-migration baseline except for the 20261013 grants.
 
 ### `20261022090000_whatsapp_reschedule_notification_key.sql`
 
@@ -257,11 +310,27 @@ Four new files on this branch, all additive and idempotent: `20261013090000` (se
 - **Order:** after `20261020090000`. Safe whether or not `20261020090000` has already been applied somewhere.
 - **Rollback:** re-run the function definition from `20261020090000`. The worker's newest-only rule works with either key format.
 
+### `20261026090000_whatsapp_connection_manager_policy.sql`
+
+- **Changes:** the RLS policy that lets browsers update `whatsapp_connections.agent_config_id` now requires an owner/admin of the connection's organization (`has_org_role`), instead of any member. The column grant and every other policy are unchanged.
+- **Why:** a staff member or read-only viewer could otherwise change which bot answers customers by calling PostgREST directly, bypassing the dashboard's server function (which now also requires owner/admin: `whatsapp-access.server.ts`).
+- **Impact:** replaces one policy (brief lock on `whatsapp_connections`). Works with the code before and after this change.
+- **Order:** independent of the other WhatsApp migrations; needs only `20260923090000`. Test: `supabase/migrations/whatsapp_connection_manager_policy.pg.test.ts`.
+- **Rollback:** recreate the previous policy (`USING/WITH CHECK (public.is_org_member(organization_id))`); the exact SQL is in the migration's header.
+
+### `20261027090000_whatsapp_vobiz_channels.sql`
+
+- **Adds:** `whatsapp_connections.provider` (`meta_direct` default for existing rows, or `vobiz`), `vobiz_channel_id` (required for `vobiz`; unique among non-disconnected rows), `number_onboarding_mode`, `vobiz_number_order_id`; table `whatsapp_number_orders` (RLS: members read their own organization; only the service role writes; one live order per organization and number). Browsers can read `provider` and `number_onboarding_mode`, not the channel id.
+- **Impact:** defaulted/nullable columns (no rewrite), one partial unique index, a new table. Works with the code before and after this change.
+- **Order:** after `20260923090000`; independent of the others. **Must be applied before the Vobiz code is deployed** (the code writes these columns).
+- **Rollback:** SQL in the migration's header (drops the new table — export it first — and the columns).
+- **Test:** `supabase/migrations/whatsapp_vobiz_channels.pg.test.ts`.
+
 **Approval gate:** apply only after explicit approval. Order:
 
 1. Back up.
 2. Apply to a non-production branch/project and run the pre-checks and tests there.
-3. Apply to production in order (20261013, 20261019, 20261020, then 20261022).
+3. Apply to production in order (20261013, 20261019, 20261020, 20261022, 20261026, then 20261027).
 4. Deploy the code.
 5. Turn on notifications for one business.
 
@@ -277,12 +346,13 @@ Four new files on this branch, all additive and idempotent: `20261013090000` (se
 ## Tests
 
 ```bash
-node --test src/lib/whatsapp/*.test.ts src/lib/payments/*.test.ts src/lib/meta/*.test.ts \
+node --test src/lib/whatsapp/*.test.ts src/lib/payments/*.test.ts \
   src/lib/whatsapp-*.test.ts src/lib/shared-agent-reply.server.test.ts \
+  src/components/app/WhatsAppConnectOptions.test.ts src/routes/app.whatsapp.test.ts \
   src/routes/api/public/webhooks/whatsapp.test.ts src/routes/api/public/cron/whatsapp-*.test.ts
 # Real PostgreSQL (skips without one); POSTGREST_BIN=/path/to/postgrest also runs
 # the worker, reminders and a campaign through supabase-js against a real PostgREST.
 node --test supabase/migrations/whatsapp_*.pg.test.ts
 ```
 
-The in-memory database used by the library tests (`src/lib/whatsapp/whatsapp-test-db.ts`) mirrors the real unique constraints. The PostgreSQL suites prove the real behaviour (triggers, RLS, grants, PostgREST filters).
+The in-memory database used by the library tests (`src/lib/whatsapp/whatsapp-test-db.ts`) mirrors the real unique constraints. Vobiz itself is always a mocked stand-in in these tests (request/response shapes from Vobiz's documentation); no test calls the real Vobiz API. The PostgreSQL suites prove the real behaviour (triggers, RLS, grants, PostgREST filters).

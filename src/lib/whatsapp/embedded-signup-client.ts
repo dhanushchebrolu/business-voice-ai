@@ -20,7 +20,8 @@
  *     permissions, not inline JS parameters, matching the brief's own
  *     expected shape.
  *   - A separate `window.addEventListener("message", ...)` listener:
- *     event.origin must end with "facebook.com"; event.data arrives as a
+ *     event.origin must be https://facebook.com or an https subdomain of
+ *     it (isFacebookOrigin); event.data arrives as a
  *     JSON STRING (must be JSON.parsed, not read as an object directly),
  *     shaped `{ type: "WA_EMBEDDED_SIGNUP", event: "FINISH" |
  *     "FINISH_ONLY_WABA" | "CANCEL", data: { waba_id, phone_number_id,
@@ -39,10 +40,12 @@
  * (a WABA was created but no phone number was chosen) and "CANCEL" are
  * both treated as incomplete, never silently coerced into a completion.
  *
- * NEVER calls the Meta Graph API itself and NEVER duplicates Phase 2's
- * onboarding logic. Its only output is the minimal, non-sensitive
- * { code, wabaId, phoneNumberId } tuple the existing Phase 2
- * completeWhatsAppOnboarding server function already accepts.
+ * NEVER calls the Meta Graph API itself. Its only output is the minimal,
+ * non-sensitive { code, wabaId, phoneNumberId } tuple, which the
+ * completeWhatsAppEmbeddedSignup server function hands to Vobiz (ClickAI's
+ * WhatsApp BSP) — Vobiz, not ClickAI, exchanges the code with Meta. The
+ * popup must therefore use the Meta app and Embedded Signup configuration
+ * that Vobiz exchanges codes for (VITE_VOBIZ_WHATSAPP_ES_*).
  */
 
 export interface EmbeddedSignupConfig {
@@ -125,6 +128,22 @@ export interface ParsedEmbeddedSignupMessage {
 }
 
 /**
+ * True only for https://facebook.com or an https subdomain of it. A plain
+ * suffix check would also accept look-alike hosts such as
+ * "https://evilfacebook.com", whose page could post a forged event.
+ */
+export function isFacebookOrigin(origin: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(origin);
+  } catch {
+    return false;
+  }
+  const host = url.hostname.toLowerCase();
+  return url.protocol === "https:" && (host === "facebook.com" || host.endsWith(".facebook.com"));
+}
+
+/**
  * Parses one raw window "message" event into a WA_EMBEDDED_SIGNUP outcome,
  * or null if this event isn't one (a message from an unrelated origin, or
  * one that doesn't match the expected shape at all — never guessed at).
@@ -132,7 +151,7 @@ export interface ParsedEmbeddedSignupMessage {
 export function parseEmbeddedSignupMessage(
   event: EmbeddedSignupMessageEvent,
 ): ParsedEmbeddedSignupMessage | null {
-  if (!event.origin.endsWith("facebook.com")) return null;
+  if (!isFacebookOrigin(event.origin)) return null;
 
   let parsed: unknown = event.data;
   if (typeof parsed === "string") {

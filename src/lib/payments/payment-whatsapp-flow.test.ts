@@ -5,7 +5,6 @@ import { request_payment } from "./payment-tools.server.ts";
 import { processRazorpayPaymentWebhook } from "./payment-webhook.server.ts";
 import { handlePaymentEventForWhatsApp } from "./payment-whatsapp-consumer.server.ts";
 import { encryptCredential as encryptRazorpayCredential } from "../razorpay/razorpay-crypto.server.ts";
-import { encryptCredential as encryptWhatsAppCredential } from "../whatsapp/whatsapp-token-crypto.server.ts";
 import { createFakeDb } from "../whatsapp/whatsapp-test-db.ts";
 
 /**
@@ -24,11 +23,8 @@ const ENV_KEYS = [
   "RAZORPAY_OAUTH_AUTHORIZE_URL",
   "RAZORPAY_OAUTH_TOKEN_URL",
   "RAZORPAY_OAUTH_SCOPE",
-  "WHATSAPP_CREDENTIAL_ENCRYPTION_KEY",
-  "META_APP_ID",
-  "META_APP_SECRET",
-  "META_WHATSAPP_CONFIG_ID",
-  "META_GRAPH_API_VERSION",
+  "VOBIZ_AUTH_ID",
+  "VOBIZ_AUTH_TOKEN",
   "WHATSAPP_TEMPLATE_PAYMENT_LINK_NAME",
   "WHATSAPP_TEMPLATE_PAYMENT_CONFIRMATION_NAME",
 ];
@@ -37,11 +33,8 @@ beforeEach(() => {
   for (const k of ENV_KEYS) saved[k] = process.env[k];
   process.env["RAZORPAY_CREDENTIAL_ENCRYPTION_KEY"] = randomBytes(32).toString("base64");
   for (const k of ENV_KEYS.slice(1, 7)) process.env[k] = `test-${k.toLowerCase()}`;
-  process.env["WHATSAPP_CREDENTIAL_ENCRYPTION_KEY"] = randomBytes(32).toString("base64");
-  process.env["META_APP_ID"] = "test-app";
-  process.env["META_APP_SECRET"] = "test-secret";
-  process.env["META_WHATSAPP_CONFIG_ID"] = "test-config";
-  process.env["META_GRAPH_API_VERSION"] = "v23.0";
+  process.env["VOBIZ_AUTH_ID"] = "MA_TEST";
+  process.env["VOBIZ_AUTH_TOKEN"] = "vobiz-test-token";
   process.env["WHATSAPP_TEMPLATE_PAYMENT_LINK_NAME"] = "payment_link_v1";
   process.env["WHATSAPP_TEMPLATE_PAYMENT_CONFIRMATION_NAME"] = "payment_ok_v1";
 });
@@ -96,7 +89,8 @@ function world(over: { notificationsEnabled?: boolean } = {}) {
         business_id: "biz-1",
         phone_number_id: "PN_1",
         status: "connected",
-        access_token_ciphertext: encryptWhatsAppCredential("wa-token"),
+        provider: "vobiz",
+        vobiz_channel_id: "ch-wa-token",
         notifications_enabled: over.notificationsEnabled ?? true,
         transactional_consent_basis:
           "Callers agree to WhatsApp payment links and updates on the call.",
@@ -118,11 +112,18 @@ function world(over: { notificationsEnabled?: boolean } = {}) {
     template: { name: string; components: { parameters: { text: string }[] }[] };
   }[] = [];
   const fetchImpl = (async (url: string, init: RequestInit) => {
-    if (url.includes("graph.facebook.com")) {
+    if (url.includes("api.vobiz.ai")) {
       whatsapp.push(JSON.parse(String(init.body)));
-      return new Response(JSON.stringify({ messages: [{ id: `wamid.${whatsapp.length}` }] }), {
-        status: 200,
-      });
+      return new Response(
+        JSON.stringify({
+          id: `vmsg.${whatsapp.length}`,
+          status: "pending",
+          meta_message_id: `wamid.${whatsapp.length}`,
+        }),
+        {
+          status: 200,
+        },
+      );
     }
     razorpayCalls.push(`${init.method} ${url}`);
     return new Response(
@@ -277,7 +278,7 @@ describe("voice booking → payment link on WhatsApp → verified payment → on
       fetchImpl,
     );
     const metaDown = (async (url: string, init: RequestInit) =>
-      url.includes("graph.facebook.com")
+      url.includes("api.vobiz.ai")
         ? new Response("{}", { status: 503 })
         : fetchImpl(url, init)) as unknown as typeof fetch;
     const result = await processRazorpayPaymentWebhook(

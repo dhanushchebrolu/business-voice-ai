@@ -1,4 +1,9 @@
 import { DAYS } from "./business-types.ts";
+import {
+  VOICE_LANGUAGES,
+  normalizeVoiceLanguageCode,
+  resolvePrimaryLanguage,
+} from "./voice-languages.ts";
 
 /**
  * The common set Sarvam's realtime STT (Saaras), LLM
@@ -10,20 +15,174 @@ import { DAYS } from "./business-types.ts";
  * fully-supported intersection. See voice-runtime.server.ts's
  * resolveResponseLanguage, which falls back to the agent's own
  * primary_language whenever STT detects something outside this set.
+ * Derived from voice-languages.ts, the single registry (which also records
+ * how each stage spells each code).
  */
-export const SUPPORTED_VOICE_LANGUAGES = [
-  { code: "en-IN", name: "English" },
-  { code: "hi-IN", name: "Hindi" },
-  { code: "bn-IN", name: "Bengali" },
-  { code: "ta-IN", name: "Tamil" },
-  { code: "te-IN", name: "Telugu" },
-  { code: "gu-IN", name: "Gujarati" },
-  { code: "kn-IN", name: "Kannada" },
-  { code: "ml-IN", name: "Malayalam" },
-  { code: "mr-IN", name: "Marathi" },
-  { code: "pa-IN", name: "Punjabi" },
-  { code: "od-IN", name: "Odia" },
-] as const;
+export const SUPPORTED_VOICE_LANGUAGES = VOICE_LANGUAGES.map(({ code, name }) => ({ code, name }));
+
+/**
+ * The # LANGUAGE section — the same for every agent: callers are answered in
+ * whichever supported language they speak. There is no per-agent setting;
+ * the legacy `multilingual` / `extra_languages` columns are not read. The
+ * runtime decides each reply's language (nextCallLanguage in
+ * voice-languages.ts) and names it in a per-turn system note.
+ */
+function languageSection(a: AgentSnapshot["agent"]): string {
+  const primary = resolvePrimaryLanguage(a.primary_language);
+  return `The caller may speak any of these languages, or a natural code-mixed combination of them (e.g. Hinglish, Tanglish): ${SUPPORTED_VOICE_LANGUAGES.map((l) => `${l.name} (${l.code})`).join(", ")}. Detect the caller's language (or code-mixed style) from what they actually say, and respond naturally in that same language or style. If the caller explicitly asks you to switch language ("Can you speak Telugu?", "Hindi mein baat karo"), switch immediately and keep responding in that language for the rest of the call unless they ask to switch again. A change of language never resets the conversation: keep everything the caller already told you (their name, number, the service, date and time) and carry on from where you were. Never refuse a call or claim you can only help in English — that is never true for this line. Your default language is ${primary} — use it for your own opening greeting and whenever the caller's language is unclear or you have no other signal yet. When a system note names the language for your next reply, follow it — that is the language your reply will be spoken in.`;
+}
+
+/**
+ * Published instructions with today's # LANGUAGE section in place of the one
+ * saved at publish time — for calls, which replay agent_versions.instructions
+ * verbatim. An agent published before every call became multilingual still
+ * carries "Respond in: en-IN." there, which made it refuse Telugu and Hindi
+ * callers no matter what the runtime detected.
+ *
+ * Only that section changes: everything before its heading and from the next
+ * "# " heading on is kept byte for byte, so booking, payment, business and
+ * rules text stay exactly as published. The last "# LANGUAGE" heading is the
+ * one replaced — it is always the generated section, while an earlier one
+ * could only come from uploaded knowledge text. Instructions without the
+ * section get it appended.
+ */
+export function withCurrentLanguageSection(
+  instructions: string,
+  agent: AgentSnapshot["agent"],
+): string {
+  return replaceSection(instructions, "LANGUAGE", languageSection(agent));
+}
+
+/**
+ * The # ESCALATION section. This line has no live transfer, no callback
+ * queue and no message-taking tool, so the agent must never say it is
+ * transferring the caller, connecting them to someone, taking a message or
+ * arranging a callback — earlier versions of this section told it to
+ * ("Transfer to <number> when…", "take a message and record the caller's
+ * contact details"). What it can honestly offer is the business's own number
+ * to call, or calling back during opening hours.
+ */
+function escalationSection(a: AgentSnapshot["agent"]): string {
+  const nextStep = a.transfer_number
+    ? `tell them they can reach the team directly on ${a.transfer_number}`
+    : "suggest calling back during opening hours to speak with the team";
+  return `You cannot transfer this call, connect the caller to a person, take a message for the team, or arrange a callback — none of these exist on this line, so never say or imply that you have done, or will do, any of them. When the caller asks for a person, is upset, or asks something this document does not answer: say so briefly and kindly, then ${nextStep}. If they describe a medical emergency (severe pain, swelling, bleeding, breathing difficulty), tell them to get urgent medical care now.`;
+}
+
+/** The # SAFETY section: verified facts only, honest outcomes, no medical advice. */
+const SAFETY_SECTION = `- Only use information from this document and confirmed tool results.
+- Never invent prices, availability, timings, offers, staff or doctor details, or policies.
+- Never claim a booking, cancellation, reschedule or payment was completed unless a tool confirmed it.
+- Never say you have transferred the call, put the caller through, taken a message, or that someone will call them back.
+- Do not diagnose or give medical or treatment advice; suggest discussing it with the doctor at the appointment.
+- If you do not know something, say so briefly and offer what you can do instead.`;
+
+/**
+ * Published instructions with today's # LANGUAGE, # ESCALATION and # SAFETY
+ * sections — what every call runs with. Instructions are replayed verbatim
+ * from agent_versions, so an agent published earlier still carries the
+ * transfer and callback promises the old sections made; replacing just these
+ * sections keeps every other byte (business facts, rules, booking text)
+ * exactly as published.
+ */
+export function withCurrentCallSections(
+  instructions: string,
+  agent: AgentSnapshot["agent"],
+  /**
+   * The business's services as they are now (active ones), read at call
+   * time; null when that read failed. Prices are business facts, not agent
+   * configuration: the list published with the agent is replaced by the
+   * current one, so a price changed after publishing is never quoted as
+   * current. Undefined leaves the published section as it is.
+   */
+  liveServices?: AgentSnapshot["services"] | null,
+  /**
+   * When the call is happening, in the business's timezone: the published
+   * # CURRENT DATE is replaced with this call's day. Undefined leaves it.
+   */
+  callDate?: { now: Date; timezone: string },
+): string {
+  let out = replaceSection(
+    replaceSection(
+      withCurrentLanguageSection(instructions, agent),
+      "ESCALATION",
+      escalationSection(agent),
+    ),
+    "SAFETY",
+    SAFETY_SECTION,
+  );
+  // Versions published before this told the agent to take a message and
+  // promise a callback (or offer a transfer) after hours.
+  out = out.replace(OLD_AFTER_HOURS_LINE, AFTER_HOURS_LINE);
+  if (callDate) {
+    out = replaceSection(out, "CURRENT DATE", currentDateSection(callDate.now, callDate.timezone));
+  }
+  if (liveServices) {
+    out = replaceSection(
+      out,
+      "SERVICES AND PRICING",
+      servicesSection(liveServices.filter((x) => x.is_active)),
+    );
+  } else if (liveServices === null) {
+    // The published list can no longer claim to be current.
+    out = appendToSection(
+      out.replace(`\n${PRICE_AUTHORITY_NOTE}`, ""),
+      "SERVICES AND PRICING",
+      UNVERIFIED_PRICES_NOTE,
+    );
+  }
+  return out;
+}
+
+/**
+ * What to do when the caller reaches the line after hours. There is no
+ * message-taking, callback or transfer on this line (see escalationSection),
+ * so the agent says the business is closed and keeps helping on the call.
+ */
+const AFTER_HOURS_LINE =
+  "When the caller reaches you outside business hours, tell them the business is closed right now and when it next opens (from the hours above), and keep helping with anything you can on this call. Never offer to take a message, arrange a callback or transfer the call.";
+const OLD_AFTER_HOURS_LINE =
+  /When the caller reaches you outside business hours, (?:offer to transfer or take a message|take a message and promise a callback during business hours)\./;
+
+/** `note` added at the end of the last "# <name>" section's body (nothing when there is no such section). */
+function appendToSection(instructions: string, name: string, note: string): string {
+  const heading = [...instructions.matchAll(new RegExp(`^# ${name}[ \\t]*\\r?$`, "gm"))].at(-1);
+  if (heading?.index === undefined) return instructions;
+  const bodyStart = heading.index + heading[0].length;
+  const next = /^# /m.exec(instructions.slice(bodyStart));
+  const bodyEnd = next ? bodyStart + next.index : instructions.length;
+  const body = instructions.slice(bodyStart, bodyEnd);
+  if (body.includes(note)) return instructions;
+  const trimmed = body.replace(/\s*$/, "");
+  const trailing = body.slice(trimmed.length) || "\n";
+  return `${instructions.slice(0, bodyStart)}${trimmed}\n${note}${trailing}${instructions.slice(bodyEnd)}`;
+}
+
+/**
+ * `instructions` with the body of its last "# <name>" section replaced by
+ * `section` — or the section appended when there is none. Everything before
+ * the heading and from the next "# " heading on is kept byte for byte. The
+ * last such heading is the generated one; an earlier one could only come
+ * from uploaded knowledge text.
+ */
+function replaceSection(instructions: string, name: string, section: string): string {
+  const headings = [...instructions.matchAll(new RegExp(`^# ${name}[ \\t]*\\r?$`, "gm"))];
+  const heading = headings.at(-1);
+  if (heading?.index === undefined) {
+    const separator = instructions.endsWith("\n") ? "\n" : "\n\n";
+    return `${instructions}${separator}# ${name}\n${section}\n`;
+  }
+  const headingEnd = heading.index + heading[0].length;
+  const bodyStart = instructions.startsWith("\n", headingEnd) ? headingEnd + 1 : headingEnd;
+  const next = /^# /m.exec(instructions.slice(bodyStart));
+  const bodyEnd = next ? bodyStart + next.index : instructions.length;
+  const body = instructions.slice(bodyStart, bodyEnd);
+  // Keep the blank line(s) that separated the section from the next heading
+  // (at least one line break, so the next heading still starts a line).
+  const trailing = /\s*$/.exec(body)?.[0] ?? "";
+  const separator = next && !trailing.includes("\n") ? "\n\n" : trailing;
+  return `${instructions.slice(0, bodyStart)}${section}${separator}${instructions.slice(bodyEnd)}`;
+}
 
 export interface AgentSnapshot {
   business: {
@@ -84,6 +243,42 @@ function formatHours(hours: AgentSnapshot["hours"]): string {
     .join("\n");
 }
 
+/** The # SERVICES AND PRICING body for a business's active services. */
+export function servicesSection(services: AgentSnapshot["services"]): string {
+  return services.length
+    ? services
+        .map(
+          (x) =>
+            `- ${x.name}: ${formatMoney(x.price ?? null, x.currency)}${
+              x.duration_minutes ? `, ~${x.duration_minutes} min` : ""
+            }${x.description ? ` — ${x.description}` : ""}${
+              x.attributes && Object.keys(x.attributes).length
+                ? ` (${Object.entries(x.attributes)
+                    .filter(([, v]) => v)
+                    .map(([k, v]) => `${k}: ${v}`)
+                    .join("; ")})`
+                : ""
+            }`,
+        )
+        .join("\n") + `\n${PRICE_AUTHORITY_NOTE}`
+    : "No services configured. Do not quote any prices.";
+}
+
+/**
+ * FAQs and knowledge text are written once and can still mention an old
+ * price; the services list is the business's price list, so it wins.
+ */
+export const PRICE_AUTHORITY_NOTE =
+  "These are the current prices. If a FAQ, the additional knowledge or anything else in these instructions gives a different amount for one of these services, that amount is out of date: quote only the price listed here.";
+
+/**
+ * Said under the published services list when the live catalogue could not
+ * be read at call time: the published prices, and any amount in FAQs or
+ * knowledge text, may have changed since.
+ */
+export const UNVERIFIED_PRICES_NOTE =
+  "The prices above, and any amount in the FAQs or additional knowledge, are from the last published configuration and could not be checked against the current price list for this call. Do not quote any amount as a current price: if the caller asks what something costs, say you can't confirm the current price right now. Everything else about the services can still be described.";
+
 function formatMoney(value: number | null | undefined, currency: string): string {
   if (value == null) return "price on request";
   const symbol = currency === "INR" ? "₹" : `${currency} `;
@@ -105,6 +300,16 @@ function todayInTimezone(now: Date, timezone: string): string {
     // never take down prompt generation for an entire call.
     return now.toISOString().slice(0, 10);
   }
+}
+
+/**
+ * The # CURRENT DATE body: today in the business's timezone. Published
+ * instructions carry the day they were published, so every call replaces it
+ * (withCurrentCallSections) — otherwise "tomorrow" is resolved against a day
+ * that may be weeks old.
+ */
+export function currentDateSection(now: Date, timezone: string): string {
+  return `Today is ${todayInTimezone(now, timezone)}, in ${timezone}. Resolve any relative date the caller gives ("tomorrow", "next Friday", "this weekend") against this exact date — never guess or ask the caller to also state the absolute date themselves.`;
 }
 
 /**
@@ -133,7 +338,7 @@ You are an employee of this business. Never mention that you are an AI model, an
 The caller has already heard your opening greeting — it is the first message in this conversation, before anything the caller has said. Do not greet the caller again, welcome them again, or repeat any version of your opening line in your first reply. Respond directly and naturally to whatever the caller actually says.
 
 # CURRENT DATE
-Today is ${todayInTimezone(now, b.timezone)}, in ${b.timezone}. Resolve any relative date the caller gives ("tomorrow", "next Friday", "this weekend") against this exact date — never guess or ask the caller to also state the absolute date themselves.
+${currentDateSection(now, b.timezone)}
 
 # RESPONSE STYLE
 This is a live phone call, not a chat window. Keep every reply to 1–2 short sentences. Ask only one question at a time. Never read out a long list unless the caller specifically asks for all of it — summarize the 3–4 most relevant options instead and offer to say more. Never repeat information you already gave earlier in this same call.
@@ -149,32 +354,10 @@ Timezone: ${b.timezone}
 
 # BUSINESS HOURS
 ${formatHours(s.hours)}
-These are the ONLY hours this business is open. Never say the business is open 24 hours, open every day, or open at any time not listed above — if asked about hours, read out exactly what is listed above, nothing more. Never claim the business is open outside these hours. When the caller reaches you outside business hours, ${
-    a.after_hours_behavior === "transfer"
-      ? "offer to transfer or take a message"
-      : "take a message and promise a callback during business hours"
-  }.
+These are the ONLY hours this business is open. Never say the business is open 24 hours, open every day, or open at any time not listed above — if asked about hours, read out exactly what is listed above, nothing more. Never claim the business is open outside these hours. ${AFTER_HOURS_LINE}
 
 # SERVICES AND PRICING
-${
-  services.length
-    ? services
-        .map(
-          (x) =>
-            `- ${x.name}: ${formatMoney(x.price ?? null, x.currency)}${
-              x.duration_minutes ? `, ~${x.duration_minutes} min` : ""
-            }${x.description ? ` — ${x.description}` : ""}${
-              x.attributes && Object.keys(x.attributes).length
-                ? ` (${Object.entries(x.attributes)
-                    .filter(([, v]) => v)
-                    .map(([k, v]) => `${k}: ${v}`)
-                    .join("; ")})`
-                : ""
-            }`,
-        )
-        .join("\n")
-    : "No services configured. Do not quote any prices."
-}
+${servicesSection(services)}
 # APPOINTMENTS
 "Appointment" is not itself a service — it is the generic word for booking any of the services listed above a time slot. Booking an appointment is exactly how a caller receives ANY of the services above; it is never a separate thing the business does or does not offer.
 NEVER say, or imply in any words, that this business "does not offer appointments" or "doesn't do appointments" — that statement is never true on this line, no matter what the caller calls the thing they want. Appointments are simply how every listed service gets scheduled.
@@ -199,10 +382,10 @@ ${
 ${rules.length ? rules.map((r, i) => `${i + 1}. ${r.rule}`).join("\n") : "1. Only answer with information given above."}
 
 # ESCALATION
-${a.transfer_number ? `Transfer to ${a.transfer_number} when the caller asks for a human, is upset, describes an emergency, or asks something outside this document.` : "No transfer number configured — take a message and record the caller's contact details instead of transferring."}
+${escalationSection(a)}
 
 # LANGUAGE
-The caller may speak any of these languages, or a natural code-mixed combination of them (e.g. Hinglish, Tanglish): ${SUPPORTED_VOICE_LANGUAGES.map((l) => `${l.name} (${l.code})`).join(", ")}. Detect the caller's language (or code-mixed style) from what they actually say, and respond naturally in that same language or style. If the caller explicitly asks you to switch language ("Can you speak Telugu?", "Hindi mein baat karo"), switch immediately and keep responding in that language for the rest of the call unless they ask to switch again. Never refuse a call or claim you can only help in English — that is never true for this line. Your default language is ${a.primary_language} — use it for your own opening greeting and whenever the caller's language is unclear or you have no other signal yet.
+${languageSection(a)}
 ${
   canBook
     ? `
@@ -227,10 +410,7 @@ Only set "ready_to_book" to true once — after that, if the booking didn't actu
 }
 
 # SAFETY
-- Only use information from this document and confirmed tool results.
-- Never invent prices, availability, timings, offers or policies.
-- Never claim a booking, cancellation or message was completed unless a tool confirmed it.
-- If you do not know something, say so and offer a callback from the team.`;
+${SAFETY_SECTION}`;
 }
 
 export function validateAgentConfig(s: AgentSnapshot): { field: string; message: string }[] {
@@ -249,6 +429,11 @@ export function validateAgentConfig(s: AgentSnapshot): { field: string; message:
   if (!s.agent.voice_id) issues.push({ field: "Voice", message: "Choose a voice." });
   if (!s.agent.primary_language)
     issues.push({ field: "Language", message: "Choose a primary language." });
+  else if (!normalizeVoiceLanguageCode(s.agent.primary_language))
+    issues.push({
+      field: "Language",
+      message: "Choose one of the supported languages as the primary language.",
+    });
   if (!s.agent.greetings?.[s.agent.primary_language]?.trim())
     issues.push({ field: "Greeting", message: "Write a call greeting for your primary language." });
   if (!s.hours.length)

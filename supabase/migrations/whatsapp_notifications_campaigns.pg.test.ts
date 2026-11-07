@@ -1,6 +1,6 @@
 import { test, describe, before, after, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { createHmac, randomBytes, randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { createServer, request, type Server } from "node:http";
@@ -24,7 +24,6 @@ import {
   dispatchWhatsAppCampaigns,
   campaignAnalytics,
 } from "../../src/lib/whatsapp/whatsapp-campaigns.server.ts";
-import { encryptCredential } from "../../src/lib/whatsapp/whatsapp-token-crypto.server.ts";
 
 /**
  * 20261020090000_whatsapp_notifications_and_campaigns.sql on a real
@@ -140,12 +139,8 @@ before(async () => {
       return;
     }
   }
-  process.env["META_APP_ID"] = "test-app";
-  process.env["META_APP_SECRET"] = "test-secret";
-  process.env["META_WHATSAPP_CONFIG_ID"] = "test-config";
-  process.env["META_GRAPH_API_VERSION"] = "v23.0";
-  process.env["WHATSAPP_CREDENTIAL_ENCRYPTION_KEY"] = randomBytes(32).toString("base64");
-  const token = encryptCredential("test-access-token");
+  process.env["VOBIZ_AUTH_ID"] = "MA_TEST";
+  process.env["VOBIZ_AUTH_TOKEN"] = "vobiz-test-token";
 
   const seed = sql(`
     INSERT INTO public.organizations (id, name, owner_id) VALUES
@@ -161,13 +156,13 @@ before(async () => {
       FROM (VALUES ('${ORG}'::uuid, '${BIZ}'::uuid), ('${ORG}'::uuid, '${QUIET_BIZ}'::uuid)) t(o, b),
            generate_series(0, 6) d;
     INSERT INTO public.whatsapp_connections
-      (id, organization_id, business_id, waba_id, phone_number_id, status, access_token_ciphertext,
+      (id, organization_id, business_id, waba_id, phone_number_id, status, provider, vobiz_channel_id,
        notifications_enabled, transactional_consent_basis)
     VALUES
-      ('${CONN}', '${ORG}', '${BIZ}', 'waba-1', 'pn-${CONN}', 'connected', '${token}', true,
+      ('${CONN}', '${ORG}', '${BIZ}', 'waba-1', 'pn-${CONN}', 'connected', 'vobiz', 'ch-1', true,
        'Customers agree to WhatsApp updates when booking'),
-      ('${QUIET_CONN}', '${ORG}', '${QUIET_BIZ}', 'waba-2', 'pn-${QUIET_CONN}', 'connected', '${token}', false, NULL),
-      ('${OTHER_CONN}', '${OTHER_ORG}', '${OTHER_BIZ}', 'waba-3', 'pn-${OTHER_CONN}', 'connected', '${token}', true, 'x');
+      ('${QUIET_CONN}', '${ORG}', '${QUIET_BIZ}', 'waba-2', 'pn-${QUIET_CONN}', 'connected', 'vobiz', 'ch-2', false, NULL),
+      ('${OTHER_CONN}', '${OTHER_ORG}', '${OTHER_BIZ}', 'waba-3', 'pn-${OTHER_CONN}', 'connected', 'vobiz', 'ch-3', true, 'x');
     INSERT INTO public.razorpay_connections (id, organization_id, business_id, connection_status)
       VALUES ('${RZP}', '${ORG}', '${BIZ}', 'CONNECTED');
     INSERT INTO public.whatsapp_templates
@@ -284,11 +279,38 @@ function restTest(name: string, fn: (t: TestContext) => void | Promise<void>) {
 let phoneSeq = 0;
 const phone = () => `+9198${String(10_000_000 + ++phoneSeq).padStart(8, "0")}`;
 
-/** The voice agent's booking path: create_booking_atomic, as service_role. */
+// The seeded hours are 00:00–23:59 Asia/Kolkata, so a 30-minute slot must start by 23:29 IST.
+// Slots are pinned to local wall-clock time, not "now + N hours", so they fit at any time of day.
+const IST_OFFSET_MS = 5.5 * 3_600_000;
+const DAY_MS = 86_400_000;
+const SLOT_MS = 30 * 60_000;
+type Slot = { start: string; end: string };
+const slotAt = (startMs: number): Slot => ({
+  start: new Date(startMs).toISOString(),
+  end: new Date(startMs + SLOT_MS).toISOString(),
+});
+const nextIstMidnight = (ms: number) =>
+  (Math.floor((ms + IST_OFFSET_MS) / DAY_MS) + 1) * DAY_MS - IST_OFFSET_MS;
+
+/** A fresh slot: two days ahead at 10:00 IST + 45 min × k — unique, and outside the reminder window. */
+const SLOT_ANCHOR_MS = nextIstMidnight(Date.now()) + DAY_MS + 10 * 3_600_000;
 let slotSeq = 0;
-function voiceBooking(biz = BIZ, startHours = 30 + 2 * ++slotSeq, customerPhone = phone()): string {
-  const start = new Date(Date.now() + startHours * 3_600_000).toISOString();
-  const end = new Date(Date.now() + (startHours + 0.5) * 3_600_000).toISOString();
+const nextSlot = (): Slot => slotAt(SLOT_ANCHOR_MS + slotSeq++ * 45 * 60_000);
+
+/** A slot ~23 hours out (inside the reminder window [now + 23h, now + 24h]) that fits the hours. */
+function reminderSlot(): Slot {
+  const start = Math.ceil((Date.now() + 23 * 3_600_000 + 5 * 60_000) / 60_000) * 60_000;
+  const midnight = nextIstMidnight(start);
+  // Too late to end by 23:59 IST: midnight is at most 31 minutes later, still in the window.
+  return slotAt(midnight - start < 31 * 60_000 ? midnight : start);
+}
+
+/** The voice agent's booking path: create_booking_atomic, as service_role. */
+function voiceBooking(
+  biz = BIZ,
+  { start, end }: Slot = nextSlot(),
+  customerPhone = phone(),
+): string {
   const [id] = rows(`SET ROLE service_role;
     SELECT id FROM public.create_booking_atomic(
       '${ORG}', '${biz}', NULL, NULL, NULL, NULL, '${start}', '${end}', 'Asia/Kolkata',
@@ -319,8 +341,7 @@ describe("outbox triggers", () => {
 
   pgTest("reschedule → one row per new time; cancel → one row; repeats add nothing", () => {
     const id = voiceBooking();
-    const moved = new Date(Date.now() + 200 * 3_600_000).toISOString();
-    const movedEnd = new Date(Date.now() + 200.5 * 3_600_000).toISOString();
+    const { start: moved, end: movedEnd } = nextSlot();
     for (let i = 0; i < 2; i++) {
       assert.equal(
         sql(
@@ -346,19 +367,18 @@ describe("outbox triggers", () => {
     "a booking moved A → B → C → B gets a notification for every move, including back to B",
     () => {
       const id = voiceBooking();
-      const base = Date.now();
-      const at = (h: number) => new Date(base + h * 3_600_000).toISOString();
-      const move = (h: number) =>
+      const [b, c] = [nextSlot(), nextSlot()];
+      const move = (to: Slot) =>
         assert.equal(
           sql(
-            `UPDATE public.bookings SET start_at = '${at(h)}', end_at = '${at(h + 0.5)}', status = 'RESCHEDULED' WHERE id = '${id}';`,
+            `UPDATE public.bookings SET start_at = '${to.start}', end_at = '${to.end}', status = 'RESCHEDULED' WHERE id = '${id}';`,
           ).status,
           0,
         );
-      move(210); // A → B
-      move(220); // B → C
-      move(210); // C → B
-      move(210); // a repeat of the same move adds nothing
+      move(b); // A → B
+      move(c); // B → C
+      move(b); // C → B
+      move(b); // a repeat of the same move adds nothing
       const moves = rows(
         `SELECT (payload->>'start_at')::timestamptz::text || '|' || dedupe_key FROM public.whatsapp_notifications
        WHERE booking_id = '${id}' AND kind = 'booking_rescheduled' ORDER BY created_at, id;`,
@@ -373,8 +393,7 @@ describe("outbox triggers", () => {
   pgTest(
     "a hold confirmed by payment isn't confirmed twice (the payment notification covers it)",
     () => {
-      const start = new Date(Date.now() + 300 * 3_600_000).toISOString();
-      const end = new Date(Date.now() + 300.5 * 3_600_000).toISOString();
+      const { start, end } = nextSlot();
       const [id] =
         rows(`INSERT INTO public.bookings (organization_id, business_id, start_at, end_at, timezone, status, customer_phone, source)
       VALUES ('${ORG}', '${BIZ}', '${start}', '${end}', 'Asia/Kolkata', 'PENDING_PAYMENT', '${phone()}', 'whatsapp') RETURNING id;`).filter(
@@ -545,9 +564,16 @@ function fakeMeta() {
   const sent: { to: string; template?: { name: string } }[] = [];
   const fetchImpl = (async (_url: string, init: RequestInit) => {
     sent.push(JSON.parse(String(init.body)));
-    return new Response(JSON.stringify({ messages: [{ id: `wamid.${randomUUID()}` }] }), {
-      status: 200,
-    });
+    return new Response(
+      JSON.stringify({
+        id: `vmsg.${randomUUID()}`,
+        status: "pending",
+        meta_message_id: `wamid.${randomUUID()}`,
+      }),
+      {
+        status: 200,
+      },
+    );
   }) as unknown as typeof fetch;
   return { fetchImpl, sent };
 }
@@ -555,7 +581,7 @@ function fakeMeta() {
 describe("real PostgREST", () => {
   restTest("voice booking → outbox → the worker sends the mapped template once", async () => {
     const customer = phone();
-    const id = voiceBooking(BIZ, 90, customer);
+    const id = voiceBooking(BIZ, nextSlot(), customer);
     const meta = fakeMeta();
     const deps = { fetchImpl: meta.fetchImpl, sleep: async () => {} };
     await processDueNotifications(client, deps);
@@ -573,7 +599,7 @@ describe("real PostgREST", () => {
 
   restTest("reminders are enqueued through the RPC (interval parameter) and sent", async () => {
     const customer = phone();
-    const id = voiceBooking(BIZ, 23.5, customer);
+    const id = voiceBooking(BIZ, reminderSlot(), customer);
     // Pretend it was booked yesterday, and that its confirmation went out then.
     sql(`UPDATE public.bookings SET created_at = now() - interval '1 day' WHERE id = '${id}';
          UPDATE public.whatsapp_notifications SET status = 'sent' WHERE booking_id = '${id}';`);

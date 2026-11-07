@@ -1,6 +1,5 @@
 import { test, describe, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
 import {
   deliverWhatsAppMessage,
   sendWhatsAppConversationMessage,
@@ -8,20 +7,17 @@ import {
   WHATSAPP_SEND_MAX_ATTEMPTS,
   OUTBOUND_PER_MINUTE_PER_CONVERSATION,
 } from "./whatsapp-outbound.server.ts";
-import { encryptCredential } from "./whatsapp-token-crypto.server.ts";
 import { createFakeDb } from "./whatsapp-test-db.ts";
 
 const ORIGINAL_ENV = { ...process.env };
 const NOW = new Date("2026-10-18T12:00:00.000Z");
-const ACCESS_TOKEN = "EAAG-test-token-never-logged";
+/** ClickAI's Vobiz API token (the only credential the sender holds). */
+const ACCESS_TOKEN = "vobiz-test-token-never-logged";
 const hoursAgo = (h: number) => new Date(NOW.getTime() - h * 3_600_000).toISOString();
 
 beforeEach(() => {
-  process.env["META_APP_ID"] = "test-app";
-  process.env["META_APP_SECRET"] = "test-secret";
-  process.env["META_WHATSAPP_CONFIG_ID"] = "test-config";
-  process.env["META_GRAPH_API_VERSION"] = "v23.0";
-  process.env["WHATSAPP_CREDENTIAL_ENCRYPTION_KEY"] = randomBytes(32).toString("base64");
+  process.env["VOBIZ_AUTH_ID"] = "MA_TEST";
+  process.env["VOBIZ_AUTH_TOKEN"] = ACCESS_TOKEN;
 });
 afterEach(() => {
   for (const key of Object.keys(process.env)) if (!(key in ORIGINAL_ENV)) delete process.env[key];
@@ -45,7 +41,11 @@ function fakeMeta(responses: (number | "network" | "timeout")[]) {
     }
     const body =
       r >= 200 && r < 300
-        ? { messages: [{ id: `wamid.SENT${calls.length}` }] }
+        ? {
+            id: `vmsg.SENT${calls.length}`,
+            status: "pending",
+            meta_message_id: `wamid.SENT${calls.length}`,
+          }
         : { error: { message: `Meta error ${r}`, code: r === 429 ? 130429 : 1 } };
     return new Response(JSON.stringify(body), { status: r });
   }) as unknown as typeof fetch;
@@ -70,14 +70,17 @@ function seed(
         business_id: "biz-a",
         phone_number_id: "PN_A",
         status: over.connectionStatus ?? "connected",
-        access_token_ciphertext: encryptCredential(ACCESS_TOKEN),
+        waba_id: "WABA_A",
+        provider: "vobiz",
+        vobiz_channel_id: "ch-a",
       },
       {
         id: "conn-b",
         organization_id: "org-b",
         phone_number_id: "PN_B",
         status: "connected",
-        access_token_ciphertext: encryptCredential("other-tenant-token"),
+        provider: "vobiz",
+        vobiz_channel_id: "ch-other-tenant-token",
       },
     ],
     whatsapp_conversations: [
@@ -158,27 +161,28 @@ describe("isWithinCustomerServiceWindow", () => {
 });
 
 describe("sendWhatsAppConversationMessage", () => {
-  test("sends a text inside the window through the Graph API and records 'sent' with Meta's id", async () => {
+  test("sends a text inside the window through Vobiz and records 'sent' with the wamid and Vobiz's id", async () => {
     const db = createFakeDb(seed());
     const meta = fakeMeta([200]);
     const result = await send(db, {}, meta);
     assert.equal(result.outcome, "sent");
     assert.equal(meta.calls.length, 1);
-    assert.match(meta.calls[0]!.url, /^https:\/\/graph\.facebook\.com\/v23\.0\/PN_A\/messages$/);
-    assert.equal(
-      (meta.calls[0]!.init.headers as Record<string, string>)["Authorization"],
-      `Bearer ${ACCESS_TOKEN}`,
-    );
+    assert.equal(meta.calls[0]!.url, "https://api.vobiz.ai/api/v1/messaging/messages");
+    const headers = meta.calls[0]!.init.headers as Record<string, string>;
+    assert.equal(headers["X-Auth-ID"], "MA_TEST");
+    assert.equal(headers["X-Auth-Token"], ACCESS_TOKEN);
     const sentBody = JSON.parse(String(meta.calls[0]!.init.body));
     assert.deepEqual(sentBody, {
-      messaging_product: "whatsapp",
-      to: "919876543210",
+      channel_id: "ch-a",
+      waba_id: "WABA_A",
+      to: "+919876543210",
       type: "text",
       text: { body: "Your table is ready." },
     });
     const [row] = db.rows("whatsapp_messages");
     assert.equal(row!["status"], "sent");
     assert.equal(row!["wa_message_id"], "wamid.SENT1");
+    assert.equal((row!["metadata"] as Record<string, unknown>)["vobiz_message_id"], "vmsg.SENT1");
     assert.equal(row!["attempts"], 1);
     assert.equal(row!["organization_id"], "org-a");
   });
@@ -528,18 +532,24 @@ describe("deliverWhatsAppMessage — retries and failures", () => {
     assert.equal(calls.length, 1);
   });
 
-  test("fails without calling Meta when config or the credential is unusable", async () => {
+  test("fails without calling Vobiz when config is missing or the number isn't on Vobiz", async () => {
     const { db, connection } = queued();
     const meta = fakeMeta([200]);
-    delete process.env["META_GRAPH_API_VERSION"];
+    delete process.env["VOBIZ_AUTH_TOKEN"];
     assert.equal((await deliver(db, connection, meta)).outcome, "failed");
-    process.env["META_GRAPH_API_VERSION"] = "v23.0";
-    process.env["WHATSAPP_CREDENTIAL_ENCRYPTION_KEY"] = randomBytes(32).toString("base64"); // wrong key
-    assert.equal((await deliver(db, connection, meta)).outcome, "failed");
+    process.env["VOBIZ_AUTH_TOKEN"] = ACCESS_TOKEN;
+    const legacy = {
+      ...(connection as Record<string, unknown>),
+      provider: "meta_direct",
+      vobiz_channel_id: null,
+    };
+    const result = await deliver(db, legacy as never, meta);
+    assert.equal(result.outcome, "failed");
+    assert.match((result as { error: string }).error, /connected again through Vobiz/);
     assert.equal(meta.calls.length, 0);
   });
 
-  test("the access token never appears in logs, stored rows or results", async () => {
+  test("the Vobiz API token never appears in logs, stored rows or results", async () => {
     const { db, connection } = queued();
     const logged: string[] = [];
     const original = { warn: console.warn, error: console.error, log: console.log };

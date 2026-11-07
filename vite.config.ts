@@ -68,6 +68,21 @@ function validateSupabasePublicEnv(): Plugin {
       console.log("[build-env-diagnostic] NODE_ENV:", process.env["NODE_ENV"] ?? "(unset)");
       console.log("[build-env-diagnostic] Vite build mode:", mode);
 
+      // Optional: the browser config for WhatsApp Embedded Signup through
+      // Vobiz (the Meta app/config Vobiz exchanges codes for). Missing ones
+      // don't fail the build: only that one connection option is then
+      // unavailable (Bring your own number and Buy a number still work).
+      // Names only, never values.
+      const esMissing = [
+        "VITE_VOBIZ_WHATSAPP_ES_APP_ID",
+        "VITE_VOBIZ_WHATSAPP_ES_CONFIG_ID",
+        "VITE_VOBIZ_WHATSAPP_ES_GRAPH_VERSION",
+      ].filter((name) => !env[name]);
+      console.log(
+        "[build-env-diagnostic] WhatsApp Embedded Signup (Vobiz) build vars:",
+        esMissing.length === 0 ? "present" : `missing ${esMissing.join(", ")}`,
+      );
+
       if (missing.length === 0) return;
 
       // Names only, never a value — safe to print in a build log.
@@ -83,6 +98,28 @@ function validateSupabasePublicEnv(): Plugin {
     },
   };
 }
+
+/**
+ * Which Cloudflare Worker this build's generated wrangler config names.
+ * Unset (every existing build: Workers Builds, Lovable, CI, local) means
+ * production — wrangler.json's own "klyro", with no override at all.
+ * CLICKAI_DEPLOY_TARGET=staging names the separate "clickai-staging" Worker
+ * instead, through Nitro's `cloudflare.wrangler` option, which wins over
+ * wrangler.json in writeWranglerConfig's merge. A wrangler.json `env`
+ * block can't do this: Nitro copies it into the generated config, and
+ * Wrangler rejects environments in a generated config (production deploys
+ * included). Any other value fails the build rather than guess.
+ */
+function cloudflareWorkerOverride(): { wrangler: { name: string } } | undefined {
+  const target = process.env["CLICKAI_DEPLOY_TARGET"];
+  if (!target) return undefined;
+  if (target === "staging") return { wrangler: { name: "clickai-staging" } };
+  throw new Error(
+    `Unknown CLICKAI_DEPLOY_TARGET "${target}": use "staging", or leave it unset for production.`,
+  );
+}
+
+const workerOverride = cloudflareWorkerOverride();
 
 export default defineConfig({
   tanstackStart: {
@@ -114,5 +151,6 @@ export default defineConfig({
   // hence the cast.
   nitro: {
     compatibilityDate: "2026-09-16",
+    ...(workerOverride ? { cloudflare: workerOverride } : {}),
   } as NonNullable<LovableViteTanstackOptions["nitro"]>,
 });

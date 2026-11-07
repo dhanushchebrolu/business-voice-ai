@@ -673,6 +673,12 @@ describe("pure helpers", () => {
       "implicit",
     );
     assert.equal(detectRescheduleRequest("3 PM instead?", intent("3 PM instead?"), false), null);
+    // While a new booking is still being collected, "change it to tomorrow"
+    // corrects that request; once something was booked, it is a reschedule.
+    const change = "change it to tomorrow";
+    assert.equal(detectRescheduleRequest(change, intent(change), false, true), null);
+    assert.equal(detectRescheduleRequest(change, intent(change), true, true), "explicit");
+    assert.equal(detectRescheduleRequest(change, intent(change), false, false), "explicit");
   });
 
   test("extractRequestedDate resolves named dates in the business timezone", () => {

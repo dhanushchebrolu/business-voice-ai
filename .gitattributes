@@ -1,0 +1,22 @@
+# Text files are checked out with LF on every platform.
+#
+# The app is built and tested on Linux (GitHub Actions, Cloudflare Workers
+# Builds), and many tests read source and SQL files and match their text.
+# Without this, Git for Windows (core.autocrlf=true by default) checks files
+# out with CRLF and those tests fail locally although the code is unchanged.
+* text=auto eol=lf
+
+# Binary assets: never converted.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.mp3 binary
+*.wav binary
+*.pdf binary

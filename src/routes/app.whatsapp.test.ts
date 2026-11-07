@@ -12,40 +12,28 @@ import { dirname, join } from "node:path";
 
 const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "app.whatsapp.tsx"), "utf8");
 
-describe("reuses Phase 2's backend — no duplicated onboarding logic in the frontend", () => {
-  test("imports and calls completeWhatsAppOnboarding from the existing Phase 2 module, not a re-implementation", () => {
+describe("connecting goes through Vobiz (WhatsAppConnectOptions), not the retired direct-Meta flow", () => {
+  test("renders the three-option component for the chosen business", () => {
     assert.match(
       src,
-      /import \{ completeWhatsAppOnboarding \} from "@\/lib\/whatsapp-onboarding\.functions"/,
+      /import \{ WhatsAppConnectOptions \} from "@\/components\/app\/WhatsAppConnectOptions"/,
     );
-    assert.match(src, /useServerFn\(completeWhatsAppOnboarding\)/);
+    assert.match(src, /<WhatsAppConnectOptions[\s\S]*?businessId=\{targetBusinessId\}/);
   });
 
-  test("never calls graph.facebook.com or the Meta client directly from this route", () => {
-    assert.doesNotMatch(src, /graph\.facebook\.com/);
-    assert.doesNotMatch(src, /MetaWhatsAppClient/);
+  test("missing legacy VITE_META_* variables can no longer block the page", () => {
+    assert.doesNotMatch(src, /VITE_META_/);
+    assert.doesNotMatch(src, /WhatsApp is not configured on this deployment yet/);
+    assert.doesNotMatch(src, /completeWhatsAppOnboarding|graph\.facebook\.com|MetaWhatsAppClient/);
   });
 
-  test("never encrypts/decrypts a credential or references META_APP_SECRET in this file", () => {
-    assert.doesNotMatch(src, /encryptCredential|decryptCredential|META_APP_SECRET/);
-  });
-});
-
-describe("secure handoff: only the minimal non-sensitive result crosses into the server call", () => {
-  test("the object passed to completeOnboarding is built from outcome.result plus only businessId — never a raw token/secret field", () => {
-    const idx = src.indexOf("completeOnboarding({");
-    assert.ok(idx > -1);
-    const block = src.slice(idx, idx + 200);
-    assert.match(block, /\.\.\.outcome\.result/);
-    assert.match(block, /businessId: selectedBusinessId/);
-    assert.doesNotMatch(block, /accessToken|access_token|pin|encryptionKey/i);
+  test("never encrypts/decrypts a credential or references a secret in this file", () => {
+    assert.doesNotMatch(src, /encryptCredential|decryptCredential|META_APP_SECRET|VOBIZ_AUTH/);
   });
 
-  test("startWhatsAppEmbeddedSignup is only ever given appId/configId/graphApiVersion from VITE_ env vars — never a secret", () => {
-    assert.match(src, /import\.meta\.env\["VITE_META_APP_ID"\]/);
-    assert.match(src, /import\.meta\.env\["VITE_META_WHATSAPP_CONFIG_ID"\]/);
-    assert.match(src, /import\.meta\.env\["VITE_META_GRAPH_API_VERSION"\]/);
-    assert.doesNotMatch(src, /META_APP_SECRET|VITE_.*SECRET/);
+  test("disconnected Vobiz numbers can be reconnected through the server function", () => {
+    assert.match(src, /listDisconnectedWhatsAppNumbers/);
+    assert.match(src, /reconnect\(\{ data: \{ connectionId \} \}\)/);
   });
 });
 

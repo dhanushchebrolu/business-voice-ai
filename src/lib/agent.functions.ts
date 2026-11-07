@@ -7,6 +7,7 @@ import { sarvam, ProviderError } from "./sarvam.server";
 import { deriveBackendPermissions } from "./business-types";
 import { assertFeatureUnlocked, checkFeatureAccess } from "./feature-gate.server.ts";
 import { syncPublishedAgentToSarvam } from "./agent-sarvam-sync.server";
+import { voiceIdInput, voiceLanguageCode } from "./agent-config-input.ts";
 
 /**
  * Safe operational event log for customer-initiated agent actions, shown in
@@ -112,10 +113,15 @@ const saveAgentConfigurationInput = z.object({
   businessId: z.string().uuid(),
   agent_name: z.string().trim().min(1).max(80),
   persona: z.string().trim().min(1).max(40),
-  primary_language: z.string().trim().min(2).max(10),
-  voice_id: z.string().trim().min(1).max(40),
+  primary_language: voiceLanguageCode,
+  voice_id: voiceIdInput,
   speaking_pace: z.number().min(0.5).max(2),
-  multilingual: z.boolean(),
+  /**
+   * Accepted from a dashboard build that still sends it, and ignored: every
+   * agent switches language automatically (voice-languages.ts
+   * nextCallLanguage), so there is nothing for a customer to turn on or off.
+   */
+  multilingual: z.boolean().optional(),
   after_hours_behavior: z.enum(["take_message", "answer_normally", "transfer"]),
   transfer_number: z.string().trim().max(20).nullable(),
   custom_personality: z.string().trim().max(2000).nullable(),
@@ -157,7 +163,6 @@ export const saveAgentConfiguration = createServerFn({ method: "POST" })
         primary_language: data.primary_language,
         voice_id: data.voice_id,
         speaking_pace: data.speaking_pace,
-        multilingual: data.multilingual,
         after_hours_behavior: data.after_hours_behavior,
         transfer_number: data.transfer_number || null,
         custom_personality: data.custom_personality || null,
@@ -485,7 +490,7 @@ export const synthesizeVoicePreview = createServerFn({ method: "POST" })
     z
       .object({
         voiceId: z.string().min(1).max(40),
-        language: z.string().min(2).max(10),
+        language: voiceLanguageCode,
         pace: z.number().min(0.5).max(2),
         text: z.string().min(1).max(400),
       })

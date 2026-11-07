@@ -378,11 +378,12 @@ describe("parseCallerIntentFromText — deterministic backstop over the caller's
     });
 
     test("a phone number spoken as a single run of words is captured in full", () => {
+      // Digit words are read as numerals (spokenDigitsToNumerals): callers
+      // read numbers out, and STT transcribes them as words.
       assert.equal(
         parseCallerIntentFromText("My number is nine nine nine nine nine nine nine nine nine nine")
           .phone,
-        null,
-        "word-form digits (not numerals) are intentionally out of scope — only numeral digit runs are extracted",
+        "9999999999",
       );
     });
 
@@ -1205,10 +1206,12 @@ test("startRuntimeSession: concurrent calls for the same call_id do not start tw
  * arms the timer, every place the caller actually speaks disarms it, and
  * cleanup never leaves a timer running past the session's lifetime.
  */
+// Normalize CRLF so the "\n"-anchored patterns below match on a Windows
+// (core.autocrlf) checkout as well as on LF ones.
 const src = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "voice-runtime.server.ts"),
   "utf8",
-);
+).replace(/\r\n/g, "\n");
 
 describe("silence/timeout handling — wiring", () => {
   test("two-stage thresholds: a prompt before a hangup, not the other way round", () => {
@@ -1232,13 +1235,18 @@ describe("silence/timeout handling — wiring", () => {
     assert.match(isAwaitingCallerBody, /state === "interrupted"/);
   });
 
-  test("the timer fires the one-time prompt before it ever hangs up, gated by silencePromptSent", () => {
+  test("the timer fires the check-in, then the final notice, before it ever hangs up", () => {
     const fnStart = src.indexOf("function armSilenceTimer(session: Session) {");
     const fnBody = src.slice(fnStart, src.indexOf("\n}\n", fnStart));
     assert.match(
       fnBody,
-      /if \(session\.silencePromptSent\) void endDueToSilence\(session\);\s*\n\s*else void speakSilencePrompt\(session\);/,
+      /else if \(stage === "check_in"\) void speakSilencePrompt\(session\);\s*\n\s*else if \(stage === "final_notice"\) void speakSilenceFinalNotice\(session\);\s*\n\s*else void endDueToSilence\(session\);/,
     );
+    // The stages are gated by what has already been said.
+    const stageStart = src.indexOf("function silenceStage(session: Session)");
+    const stageBody = src.slice(stageStart, src.indexOf("\n}\n", stageStart));
+    assert.match(stageBody, /if \(!session\.silencePromptSent\) return "check_in";/);
+    assert.match(stageBody, /!session\.silenceFinalNoticeSent/);
   });
 
   test("speech_start unconditionally cancels the pending timer and resets the prompt flag, before the barge-in branch", () => {
@@ -1277,11 +1285,11 @@ describe("silence/timeout handling — wiring", () => {
   // An empty raw reply now flows into the same empty-reply exit as an
   // empty-after-marker/booking reply (which asks for the next missing
   // booking detail instead of going silent), so there are three exits.
-  test("all three handleUserUtterance exit paths (empty reply — raw or after marker/booking, reply spoken, LLM error) re-arm before returning to LISTENING", () => {
+  test("all four handleUserUtterance exit paths (empty reply — raw or after marker/booking, reply spoken, LLM error, turn deadline during a booking) re-arm before returning to LISTENING", () => {
     const fnStart = src.indexOf("async function handleUserUtterance(");
     const fnBody = src.slice(fnStart, src.indexOf("\n}\n", fnStart));
     const armOccurrences = [...fnBody.matchAll(/armSilenceTimer\(session\);/g)];
-    assert.equal(armOccurrences.length, 3);
+    assert.equal(armOccurrences.length, 4);
   });
 
   /**
@@ -1330,8 +1338,15 @@ describe("silence/timeout handling — wiring", () => {
     const fnBody = src.slice(fnStart, src.indexOf("\n}\n", fnStart));
     assert.match(fnBody, /await finishCall\(session, \{/);
     assert.match(fnBody, /reason: "caller_silence_timeout"/);
-    assert.match(fnBody, /message: CLOSING_MESSAGES\.silence/);
-    const finishStart = src.indexOf("async function finishCall(");
+    // Spoken in the call's language; CLOSING_MESSAGES.silence is the English
+    // entry of the same table (voice-fallback-messages.ts).
+    assert.match(
+      fnBody,
+      /message: localizedFallback\("silenceHangup", responseLanguageFor\(session\)\)/,
+    );
+    // finishCall records the close in progress (session.closing) and runs
+    // runFinishCall, which holds the steps.
+    const finishStart = src.indexOf("async function runFinishCall(");
     const finishBody = src.slice(finishStart, src.indexOf("\n}\n", finishStart));
     assert.match(
       finishBody,

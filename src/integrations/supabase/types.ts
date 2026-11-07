@@ -2652,13 +2652,17 @@ export type Database = {
           notifications_enabled: boolean;
           notifications_enabled_at: string | null;
           notifications_enabled_by: string | null;
+          number_onboarding_mode: string | null;
           organization_id: string;
           phone_number_id: string;
+          provider: string;
           status: string;
           transactional_consent_basis: string | null;
           two_step_pin_ciphertext: string | null;
           updated_at: string;
           verified_name: string | null;
+          vobiz_channel_id: string | null;
+          vobiz_number_order_id: string | null;
           waba_id: string;
           webhook_subscribed: boolean;
         };
@@ -2677,13 +2681,17 @@ export type Database = {
           notifications_enabled?: boolean;
           notifications_enabled_at?: string | null;
           notifications_enabled_by?: string | null;
+          number_onboarding_mode?: string | null;
           organization_id: string;
           phone_number_id: string;
+          provider?: string;
           status?: string;
           transactional_consent_basis?: string | null;
           two_step_pin_ciphertext?: string | null;
           updated_at?: string;
           verified_name?: string | null;
+          vobiz_channel_id?: string | null;
+          vobiz_number_order_id?: string | null;
           waba_id: string;
           webhook_subscribed?: boolean;
         };
@@ -2702,13 +2710,17 @@ export type Database = {
           notifications_enabled?: boolean;
           notifications_enabled_at?: string | null;
           notifications_enabled_by?: string | null;
+          number_onboarding_mode?: string | null;
           organization_id?: string;
           phone_number_id?: string;
+          provider?: string;
           status?: string;
           transactional_consent_basis?: string | null;
           two_step_pin_ciphertext?: string | null;
           updated_at?: string;
           verified_name?: string | null;
+          vobiz_channel_id?: string | null;
+          vobiz_number_order_id?: string | null;
           waba_id?: string;
           webhook_subscribed?: boolean;
         };
@@ -4084,6 +4096,70 @@ export type Database = {
             columns: ["organization_id"];
             isOneToOne: false;
             referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      whatsapp_number_orders: {
+        Row: {
+          business_id: string | null;
+          created_at: string;
+          failure_reason: string | null;
+          id: string;
+          organization_id: string;
+          phone_number: string;
+          requested_by: string | null;
+          status: string;
+          updated_at: string;
+          vobiz_order_id: string | null;
+          whatsapp_connection_id: string | null;
+        };
+        Insert: {
+          business_id?: string | null;
+          created_at?: string;
+          failure_reason?: string | null;
+          id?: string;
+          organization_id: string;
+          phone_number: string;
+          requested_by?: string | null;
+          status?: string;
+          updated_at?: string;
+          vobiz_order_id?: string | null;
+          whatsapp_connection_id?: string | null;
+        };
+        Update: {
+          business_id?: string | null;
+          created_at?: string;
+          failure_reason?: string | null;
+          id?: string;
+          organization_id?: string;
+          phone_number?: string;
+          requested_by?: string | null;
+          status?: string;
+          updated_at?: string;
+          vobiz_order_id?: string | null;
+          whatsapp_connection_id?: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "whatsapp_number_orders_business_id_fkey";
+            columns: ["business_id"];
+            isOneToOne: false;
+            referencedRelation: "businesses";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "whatsapp_number_orders_organization_id_fkey";
+            columns: ["organization_id"];
+            isOneToOne: false;
+            referencedRelation: "organizations";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "whatsapp_number_orders_whatsapp_connection_id_fkey";
+            columns: ["whatsapp_connection_id"];
+            isOneToOne: false;
+            referencedRelation: "whatsapp_connections";
             referencedColumns: ["id"];
           },
         ];

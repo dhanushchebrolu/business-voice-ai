@@ -82,11 +82,12 @@ export async function composePaymentNotification(
     case "PAYMENT_CAPTURED_AFTER_EXPIRY":
       // Money moved, but the hold is gone — never silently claim the
       // booking is confirmed here (spec: never confirm an expired/
-      // cancelled booking from a late webhook).
+      // cancelled booking from a late webhook). No follow-up is promised:
+      // nothing alerts staff to this case yet.
       return {
         purpose: "payment_confirmation",
         customerPhone: booking.customer_phone,
-        bodyText: `We received your payment of ${amountText}, but your booking hold had already expired. We'll contact you shortly to confirm a new time or arrange a refund — sorry for the inconvenience.`,
+        bodyText: `We received your payment of ${amountText}, but your booking hold had already expired, so this booking isn't confirmed. Please contact us to arrange a new time or a refund — sorry for the inconvenience.`,
       };
     case "PAYMENT_FAILED":
       return {
