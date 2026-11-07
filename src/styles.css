@@ -249,8 +249,16 @@
 
 @utility grid-noise {
   background-image:
-    linear-gradient(to right, color-mix(in oklab, var(--foreground) 4%, transparent) 1px, transparent 1px),
-    linear-gradient(to bottom, color-mix(in oklab, var(--foreground) 4%, transparent) 1px, transparent 1px);
+    linear-gradient(
+      to right,
+      color-mix(in oklab, var(--foreground) 4%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      to bottom,
+      color-mix(in oklab, var(--foreground) 4%, transparent) 1px,
+      transparent 1px
+    );
   background-size: 48px 48px;
 }
 
@@ -317,7 +325,6 @@
     animation: none !important;
   }
 }
-
 
 /* Smooth in-page anchor scrolling that clears the sticky header; off for reduced-motion users. */
 html {
@@ -487,7 +494,8 @@ html[data-vx-vt] .vx *:not(.vx-theme-icon)::after {
 }
 /* Telugu and Hindi text: Space Grotesk has no glyphs for these scripts, so name real script fonts (system ones ship on every OS) and give the taller scripts room so nothing clips. */
 .vx [lang="te"] {
-  font-family: "Noto Sans Telugu", "Nirmala UI", "Gautami", "Telugu MN", "Telugu Sangam MN", sans-serif;
+  font-family:
+    "Noto Sans Telugu", "Nirmala UI", "Gautami", "Telugu MN", "Telugu Sangam MN", sans-serif;
   line-height: 1.75;
 }
 .vx [lang="hi"] {

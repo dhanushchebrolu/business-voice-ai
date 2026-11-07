@@ -5,26 +5,26 @@ query: "AI business automation SaaS voice agents enterprise premium dark navy") 
 
 ## What the skill recommended, and what we kept
 
-| Skill output | Decision |
-| --- | --- |
-| Pattern "Product Demo + Features": hero, product mockup, per-feature breakdown, CTA | **Kept.** Home = hero with the live assistant, product showcase, process, industries, integrations, why, FAQ, CTA. |
-| Style "Minimalism & Swiss": spacious, grid-based, high contrast, sharp shadows | **Kept**, with a dark/light section rhythm to add depth. |
-| Typography "Inter, dark, cinematic, technical, precision" | **Adapted.** The repo already ships Manrope (UI) and Instrument Serif (display); both are kept so no new font loads. Serif is used for display headlines, sans for everything else. |
-| Colors: red primary (#DC2626), "recording red" | **Rejected.** Conflicts with the supplied ClickAI logo (blue→violet gradient wordmark). Brand blue is the primary. |
-| Effects: subtle 200–250 ms hover, sharp shadows, no excess decoration | **Kept.** |
-| Checklist: no emoji icons, cursor-pointer, visible focus, reduced motion, 375/768/1024/1440 | **Kept** and used as the QA list. |
+| Skill output                                                                                | Decision                                                                                                                                                                            |
+| ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Pattern "Product Demo + Features": hero, product mockup, per-feature breakdown, CTA         | **Kept.** Home = hero with the live assistant, product showcase, process, industries, integrations, why, FAQ, CTA.                                                                  |
+| Style "Minimalism & Swiss": spacious, grid-based, high contrast, sharp shadows              | **Kept**, with a dark/light section rhythm to add depth.                                                                                                                            |
+| Typography "Inter, dark, cinematic, technical, precision"                                   | **Adapted.** The repo already ships Manrope (UI) and Instrument Serif (display); both are kept so no new font loads. Serif is used for display headlines, sans for everything else. |
+| Colors: red primary (#DC2626), "recording red"                                              | **Rejected.** Conflicts with the supplied ClickAI logo (blue→violet gradient wordmark). Brand blue is the primary.                                                                  |
+| Effects: subtle 200–250 ms hover, sharp shadows, no excess decoration                       | **Kept.**                                                                                                                                                                           |
+| Checklist: no emoji icons, cursor-pointer, visible focus, reduced motion, 375/768/1024/1440 | **Kept** and used as the QA list.                                                                                                                                                   |
 
 ## Colour tokens (Tailwind v4 `@theme`, `src/styles.css`)
 
-| Token | Value | Use |
-| --- | --- | --- |
-| `ink-950` | `#060b1f` | Hero, closing CTA, footer |
-| `ink-900` | `#0b1330` | Raised surfaces on dark |
-| `ink-800` | `#121c40` | Borders/dividers on dark use `white/10` |
-| `paper` | `#faf8f4` | Warm off-white alternating sections |
-| `brand-500` / `600` | electric blue (`oklch(.62 .2 260)` / `(.55 .23 262)`) | Primary accent, CTAs |
-| `violet-*` (mapped to blue on public pages) | see `.theme-light` | Existing components keep working |
-| Secondary accent | restrained violet `#7c5cff`, used only for gradients on dark | Never as text on white |
+| Token                                       | Value                                                        | Use                                     |
+| ------------------------------------------- | ------------------------------------------------------------ | --------------------------------------- |
+| `ink-950`                                   | `#060b1f`                                                    | Hero, closing CTA, footer               |
+| `ink-900`                                   | `#0b1330`                                                    | Raised surfaces on dark                 |
+| `ink-800`                                   | `#121c40`                                                    | Borders/dividers on dark use `white/10` |
+| `paper`                                     | `#faf8f4`                                                    | Warm off-white alternating sections     |
+| `brand-500` / `600`                         | electric blue (`oklch(.62 .2 260)` / `(.55 .23 262)`)        | Primary accent, CTAs                    |
+| `violet-*` (mapped to blue on public pages) | see `.theme-light`                                           | Existing components keep working        |
+| Secondary accent                            | restrained violet `#7c5cff`, used only for gradients on dark | Never as text on white                  |
 
 Text: `slate-900` on light, `white` / `slate-300` on dark (contrast ≥ 4.5:1). `slate-500` is the lightest allowed body text on white.
 
