@@ -130,7 +130,8 @@ describe("authenticated dashboard chrome and branding say ClickAI, never Klyro",
     const src = read("../components/app/primitives.tsx");
     assert.match(src, /export function Logo/);
     const logoStart = src.indexOf("export function Logo");
-    const logoEnd = src.indexOf("\n}", logoStart);
+    // The function's closing brace is a line that is exactly "}"; a destructured parameter list ends with "}: {".
+    const logoEnd = src.indexOf("\n}\n", logoStart);
     assert.match(src.slice(logoStart, logoEnd), /alt="ClickAI"/);
   });
 
