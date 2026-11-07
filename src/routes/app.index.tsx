@@ -183,7 +183,7 @@ function Overview() {
                   >
                     {step.label}
                   </span>
-                  {!step.done ? <ArrowUpRight className="ml-auto size-4 text-primary" /> : null}
+                  {!step.done ? <ArrowUpRight className="ml-auto size-4 text-info" /> : null}
                 </Link>
               </li>
             ))}

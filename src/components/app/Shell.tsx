@@ -188,9 +188,7 @@ export function Shell({ children }: { children: ReactNode }) {
 
         <div className={cn("px-3 pb-2", collapsed && "lg:hidden")}>
           <div className="rounded-xl border border-border bg-surface px-3 py-2.5">
-            <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
-              Workspace
-            </p>
+            <p className="app-label text-[10px] font-medium text-muted-foreground">Workspace</p>
             <p className="mt-0.5 truncate text-sm font-semibold" title={businessName}>
               {businessName}
             </p>
@@ -205,7 +203,7 @@ export function Shell({ children }: { children: ReactNode }) {
             <div key={group.group} className="mb-5">
               <p
                 className={cn(
-                  "px-2.5 pb-1.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/80",
+                  "px-2.5 pb-1.5 app-label text-[10px] font-medium text-muted-foreground/80",
                   collapsed && "lg:sr-only",
                 )}
               >
@@ -236,9 +234,7 @@ export function Shell({ children }: { children: ReactNode }) {
                             className="absolute inset-y-1.5 -left-3 w-[3px] rounded-r-full bg-primary"
                           />
                         ) : null}
-                        <item.icon
-                          className={cn("size-[18px] shrink-0", active && "text-primary")}
-                        />
+                        <item.icon className={cn("size-[18px] shrink-0", active && "text-info")} />
                         <span className={cn(collapsed && "lg:sr-only")}>{item.label}</span>
                       </Link>
                     </li>
@@ -252,7 +248,7 @@ export function Shell({ children }: { children: ReactNode }) {
         <div className="border-t border-sidebar-border p-3">
           <div className={cn("flex items-center gap-2", collapsed && "lg:flex-col")}>
             <span
-              className="grid size-9 shrink-0 place-items-center rounded-full bg-primary/10 text-sm font-semibold text-primary"
+              className="grid size-9 shrink-0 place-items-center rounded-full bg-primary/10 text-sm font-semibold text-info"
               aria-hidden="true"
             >
               {(user?.email ?? "?").slice(0, 1).toUpperCase()}
@@ -262,7 +258,7 @@ export function Shell({ children }: { children: ReactNode }) {
               <Link
                 to="/app/settings"
                 onClick={() => setOpen(false)}
-                className="text-[11px] text-muted-foreground hover:text-primary"
+                className="text-[11px] text-muted-foreground hover:text-info"
               >
                 Account settings
               </Link>
@@ -339,7 +335,7 @@ export function Shell({ children }: { children: ReactNode }) {
                 type="button"
                 className="flex items-center gap-2 rounded-full border border-border bg-card py-1 pl-1 pr-2.5 text-xs transition-colors hover:bg-muted"
               >
-                <span className="grid size-7 place-items-center rounded-full bg-primary/10 text-[11px] font-semibold text-primary">
+                <span className="grid size-7 place-items-center rounded-full bg-primary/10 text-[11px] font-semibold text-info">
                   {(user?.email ?? "?").slice(0, 1).toUpperCase()}
                 </span>
                 <span className="hidden max-w-[140px] truncate sm:inline">{user?.email}</span>

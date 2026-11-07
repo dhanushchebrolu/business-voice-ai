@@ -32,7 +32,7 @@ export function ServiceCard({
         <span
           className={cn(
             "grid size-10 place-items-center rounded-xl",
-            tone === "live" ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground",
+            tone === "live" ? "bg-primary/10 text-info" : "bg-muted text-muted-foreground",
           )}
         >
           <Icon className="size-5" />
@@ -42,7 +42,7 @@ export function ServiceCard({
       <p className="mt-4 text-sm font-semibold">{label}</p>
       <p className="mt-0.5 min-h-8 text-xs leading-relaxed text-muted-foreground">{hint}</p>
       {to ? (
-        <p className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-primary transition-[gap] group-hover:gap-1.5">
+        <p className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-info transition-[gap] group-hover:gap-1.5">
           {actionLabel ?? "Manage"} <ArrowUpRight className="size-3.5" />
         </p>
       ) : null}

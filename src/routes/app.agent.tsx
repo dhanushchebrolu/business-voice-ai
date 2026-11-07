@@ -7,6 +7,7 @@ import { Loader2, Send } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { workspaceQuery, numbersQuery } from "@/lib/workspace";
 import { agentStatusLabel } from "@/lib/agent-status";
+import { normalizeSpeakingPace } from "@/lib/agent-form";
 import { LANGUAGES, VOICES, PACE_MIN, PACE_MAX } from "@/lib/voices";
 import { PERSONAS, CAPABILITIES, isCapabilityEnabled } from "@/lib/business-types";
 import {
@@ -121,7 +122,7 @@ function AgentPage() {
         persona: agent.persona,
         primary_language: agent.primary_language,
         voice_id: agent.voice_id,
-        speaking_pace: agent.speaking_pace,
+        speaking_pace: normalizeSpeakingPace(agent.speaking_pace),
         after_hours_behavior: agent.after_hours_behavior,
         transfer_number: agent.transfer_number ?? "",
         custom_personality: agent.custom_personality ?? "",
@@ -266,7 +267,7 @@ function AgentPage() {
       ) : null}
 
       <Tabs defaultValue="identity">
-        <TabsList>
+        <TabsList className="max-w-full justify-start overflow-x-auto">
           <TabsTrigger value="identity">Identity & voice</TabsTrigger>
           <TabsTrigger value="behaviour">Behaviour</TabsTrigger>
           <TabsTrigger value="instructions">Instructions</TabsTrigger>

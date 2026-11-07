@@ -198,68 +198,85 @@
 }
 
 /*
- * Customer dashboard (/app): ClickAI light product theme. The class is put on <html> by the /app
- * route (not on a wrapper) so dropdowns, dialogs and toasts, which render in portals outside
- * the app tree, get the same tokens. Every shadcn primitive and panel reads these variables, so
- * all dashboard pages follow without per-page colour edits. The admin console is not affected.
+ * Customer dashboard (/app): the homepage's dark theme (the .vx dark tokens: #0b0d10 page, #14181e
+ * cards, hairline borders, #3b7bf5 blue with a violet secondary, Space Grotesk headings and
+ * JetBrains Mono labels). The class is put on <html> by the /app route (not on a wrapper) so
+ * dropdowns, dialogs and toasts, which render in portals outside the app tree, get the same
+ * tokens. Every shadcn primitive and panel reads these variables, so all dashboard pages follow
+ * without per-page colour edits. The admin console is not affected.
  */
 html.app-ui {
-  --radius: 0.625rem;
-  --background: oklch(0.984 0.004 262);
-  --foreground: oklch(0.2 0.07 268);
-  --surface: oklch(0.972 0.007 262);
-  --surface-raised: oklch(0.955 0.012 262);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.2 0.07 268);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.2 0.07 268);
+  --radius: 0.25rem;
+  --background: #0b0d10;
+  --foreground: #eceff3;
+  --surface: #11141a;
+  --surface-raised: #1b2028;
+  --card: #14181e;
+  --card-foreground: #eceff3;
+  --popover: #14181e;
+  --popover-foreground: #eceff3;
 
-  --primary: oklch(0.55 0.23 262);
-  --primary-foreground: oklch(0.99 0 0);
-  --secondary: oklch(0.955 0.015 262);
-  --secondary-foreground: oklch(0.25 0.07 268);
-  --muted: oklch(0.962 0.009 262);
-  --muted-foreground: oklch(0.5 0.045 262);
-  --accent: oklch(0.945 0.035 285);
-  --accent-foreground: oklch(0.28 0.1 280);
+  --primary: #2f6bea;
+  --primary-foreground: #ffffff;
+  --secondary: #1b2028;
+  --secondary-foreground: #eceff3;
+  --muted: #1b2028;
+  --muted-foreground: #9ba3ad;
+  --accent: #1d2130;
+  --accent-foreground: #eceff3;
 
-  --destructive: oklch(0.57 0.23 27);
-  --destructive-foreground: oklch(0.99 0 0);
-  --success: oklch(0.56 0.15 160);
-  --success-foreground: oklch(0.99 0 0);
-  --warning: oklch(0.66 0.16 68);
-  --warning-foreground: oklch(0.2 0.04 68);
-  --info: oklch(0.54 0.22 285);
+  --destructive: oklch(0.66 0.19 24);
+  --destructive-foreground: #ffffff;
+  --success: oklch(0.76 0.15 158);
+  --success-foreground: oklch(0.18 0.03 158);
+  --warning: oklch(0.8 0.14 85);
+  --warning-foreground: oklch(0.2 0.03 85);
+  --info: #7aa7ff;
 
-  --border: oklch(0.925 0.01 262);
-  --border-strong: oklch(0.86 0.016 262);
-  --input: oklch(0.88 0.014 262);
-  --ring: oklch(0.55 0.23 262 / 45%);
+  --border: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.2);
+  --input: rgba(255, 255, 255, 0.14);
+  --ring: rgba(59, 123, 245, 0.7);
 
-  --chart-1: oklch(0.55 0.23 262);
-  --chart-2: oklch(0.55 0.25 285);
-  --chart-3: oklch(0.62 0.16 160);
-  --chart-4: oklch(0.68 0.16 68);
-  --chart-5: oklch(0.57 0.23 27);
+  --chart-1: #3b7bf5;
+  --chart-2: #8b6cff;
+  --chart-3: oklch(0.76 0.15 158);
+  --chart-4: oklch(0.8 0.14 85);
+  --chart-5: oklch(0.66 0.19 24);
 
-  --sidebar: oklch(1 0 0);
-  --sidebar-foreground: oklch(0.3 0.06 268);
-  --sidebar-primary: oklch(0.55 0.23 262);
-  --sidebar-primary-foreground: oklch(0.99 0 0);
-  --sidebar-accent: oklch(0.955 0.03 262);
-  --sidebar-accent-foreground: oklch(0.38 0.19 262);
-  --sidebar-border: oklch(0.925 0.01 262);
-  --sidebar-ring: oklch(0.55 0.23 262 / 40%);
+  --sidebar: #080a0d;
+  --sidebar-foreground: #c4cad2;
+  --sidebar-primary: #3b7bf5;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #14181e;
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: rgba(255, 255, 255, 0.08);
+  --sidebar-ring: rgba(59, 123, 245, 0.6);
 
-  --shadow-panel: 0 1px 2px oklch(0.2 0.07 268 / 5%), 0 10px 28px -16px oklch(0.2 0.07 268 / 14%);
-  color-scheme: light;
+  color-scheme: dark;
 }
+/* Homepage type: Space Grotesk headings, JetBrains Mono for small uppercase labels. */
+html.app-ui h1,
+html.app-ui h2,
+html.app-ui h3 {
+  font-family: var(--font-display);
+  font-weight: 500;
+}
+html.app-ui .app-label {
+  font-family: var(--font-vmono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+/* The logo has a white-wordmark file for dark surfaces; use it with no plate behind it. */
 html.app-ui .clickai-logo {
   background: transparent;
   box-shadow: none;
 }
-html.app-ui .panel {
-  box-shadow: var(--shadow-panel);
+html.app-ui .vx-logo-light {
+  display: none;
+}
+html.app-ui .vx-logo-dark {
+  display: block;
 }
 html.app-ui :focus-visible {
   outline: 2px solid var(--ring);

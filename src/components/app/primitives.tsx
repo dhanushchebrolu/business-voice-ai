@@ -69,11 +69,7 @@ export function PageHeader({
   return (
     <div className="flex flex-col gap-4 pb-1 sm:flex-row sm:items-end sm:justify-between">
       <div className="min-w-0 space-y-1.5">
-        {eyebrow ? (
-          <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-primary">
-            {eyebrow}
-          </p>
-        ) : null}
+        {eyebrow ? <p className="app-label text-[11px] font-medium text-info">{eyebrow}</p> : null}
         <h1 className="text-[26px] font-semibold leading-tight tracking-tight">{title}</h1>
         {description ? (
           <p className="max-w-2xl text-sm leading-relaxed text-muted-foreground">{description}</p>
@@ -90,7 +86,7 @@ const toneMap = {
   idle: "bg-muted text-muted-foreground border-border",
   error: "bg-destructive/10 text-destructive border-destructive/25",
   info: "bg-info/10 text-info border-info/25",
-  accent: "bg-primary/10 text-primary border-primary/25",
+  accent: "bg-primary/10 text-info border-primary/25",
 } as const;
 
 export function StatusPill({
@@ -107,7 +103,7 @@ export function StatusPill({
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-medium tracking-wide whitespace-nowrap",
+        "app-label inline-flex items-center gap-1.5 rounded-sm border px-2 py-0.5 text-[10px] font-medium whitespace-nowrap",
         toneMap[tone],
         className,
       )}
@@ -132,7 +128,7 @@ export function EmptyState({
   return (
     <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border-strong bg-surface/60 px-6 py-12 text-center">
       {Icon ? (
-        <span className="mb-4 grid size-11 place-items-center rounded-full bg-primary/10 text-primary">
+        <span className="mb-4 grid size-11 place-items-center rounded-full bg-primary/10 text-info">
           <Icon className="size-5" />
         </span>
       ) : null}
@@ -199,12 +195,12 @@ export function StatCard({
   return (
     <div className="panel px-5 py-4">
       <div className="flex items-start justify-between gap-3">
-        <p className="text-xs font-medium text-muted-foreground">{label}</p>
+        <p className="app-label text-[11px] font-medium text-muted-foreground">{label}</p>
         {Icon ? (
           <span
             className={cn(
               "grid size-8 shrink-0 place-items-center rounded-lg",
-              tone === "accent" ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground",
+              tone === "accent" ? "bg-primary/10 text-info" : "bg-muted text-muted-foreground",
             )}
           >
             <Icon className="size-4" />
@@ -214,7 +210,7 @@ export function StatCard({
       <p
         className={cn(
           "mt-3 text-[28px] font-semibold leading-none tabular",
-          tone === "accent" && "text-primary",
+          tone === "accent" && "text-info",
         )}
       >
         {value}
@@ -238,7 +234,7 @@ export function SectionCard({
   className?: string;
 }) {
   return (
-    <section className={cn("panel", className)}>
+    <section className={cn("panel min-w-0", className)}>
       <header className="flex flex-col gap-2 px-5 pb-0 pt-5 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h2 className="text-[15px] font-semibold">{title}</h2>

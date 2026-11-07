@@ -19,8 +19,15 @@ export const Route = createFileRoute("/app")({
       },
       { name: "robots", content: "noindex" },
     ],
-    // Light product theme from first paint on a direct load (see html.app-ui in styles.css).
+    // Dark product theme from first paint on a direct load (see html.app-ui in styles.css).
     scripts: [{ children: 'document.documentElement.classList.add("app-ui")' }],
+    // Homepage type: Space Grotesk headings and JetBrains Mono labels (see html.app-ui).
+    links: [
+      {
+        rel: "stylesheet",
+        href: "https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap",
+      },
+    ],
   }),
   component: AppLayout,
 });
