@@ -464,11 +464,6 @@ html[data-vx-vt="shrink"]::view-transition-old(root) {
 html[data-vx-vt="shrink"]::view-transition-new(root) {
   z-index: 1;
 }
-/* The logo's dark wordmark needs a light plate in dark mode. Drawn with an outline so the logo's box (and everything laid out around it) is identical in both themes. */
-html[data-vx-theme="dark"] .vx img[alt="ClickAI"] {
-  background: #fff;
-  outline: 4px solid #fff;
-}
 html[data-vx-theme="dark"] .vx .text-emerald-700 {
   color: #34d399;
 }
@@ -501,4 +496,11 @@ html[data-vx-vt] .vx *:not(.vx-theme-icon)::after {
 }
 .vx main > section:focus {
   outline: none;
+}
+/* Homepage dark theme: swap to the logo file with a white wordmark (same dimensions, so nothing moves). */
+html[data-vx-theme="dark"] .vx .vx-logo-light {
+  display: none;
+}
+html[data-vx-theme="dark"] .vx .vx-logo-dark {
+  display: block;
 }

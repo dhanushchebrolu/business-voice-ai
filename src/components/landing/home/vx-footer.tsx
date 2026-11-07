@@ -48,7 +48,7 @@ export function VxFooter() {
       <div className="mx-auto max-w-[1305px] px-5 pb-10 pt-20 sm:px-10 lg:px-[39px]">
         <div className="grid gap-14 lg:grid-cols-[1.3fr_1fr_1fr_1fr]">
           <div>
-            <Logo plate />
+            <Logo onDark />
             <p className="mt-5 max-w-[320px] font-vmono text-[13px] leading-[1.7] text-slate-400">
               AI employees for calls, WhatsApp, appointments and everyday business workflows.
             </p>

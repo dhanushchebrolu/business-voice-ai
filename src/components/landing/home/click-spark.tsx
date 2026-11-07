@@ -6,15 +6,13 @@ import { useEffect, useRef, type ReactNode } from "react";
  * One short-lived canvas per burst, removed when it ends; a single rAF loop that
  * runs only while sparks exist; the layer never takes pointer events.
  *
- * Differences from the original, on purpose: sparks fire only for presses on
- * interactive elements (not on every click on the page), do not run at all under
- * prefers-reduced-motion, and sit above the fixed header.
+ * Differences from the original, on purpose: sparks do not run at all under
+ * prefers-reduced-motion, and sit above the fixed header. They fire wherever the
+ * visitor clicks or taps on the page, not only on buttons.
  */
 
 const EASE = (t: number) => 1 - Math.pow(1 - t, 3); // ease-out
 const MAX_BURSTS = 12;
-const INTERACTIVE =
-  'a[href], button, summary, select, input, textarea, label, [role="button"], [role="tab"], [role="slider"], [role="link"]';
 
 type Spark = { angle: number; reach: number; scale: number; life: number; color: string };
 type Burst = {
@@ -160,17 +158,14 @@ export function ClickSpark({
       if (!raf) raf = requestAnimationFrame(frame);
     };
 
-    const interactive = (e: Event) => e.target instanceof Element && e.target.closest(INTERACTIVE);
-
     // Mouse sparks on press; touch and keyboard sparks on the click that follows. A click that
     // lands where a mouse press just sparked is the same gesture and is skipped.
     const onPointerDown = (e: PointerEvent) => {
-      if (e.pointerType !== "mouse" || e.button !== 0 || !interactive(e)) return;
+      if (e.pointerType !== "mouse" || e.button !== 0) return;
       lastPress = { time: performance.now(), x: e.clientX, y: e.clientY };
       spawn(e.clientX, e.clientY);
     };
     const onClick = (e: MouseEvent) => {
-      if (!interactive(e)) return;
       if (e.detail === 0) {
         const r = (e.target as Element).getBoundingClientRect();
         spawn(r.left + r.width / 2, r.top + r.height / 2);
