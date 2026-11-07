@@ -62,7 +62,7 @@ const ORGANIZATION_JSON_LD = {
   name: CLICKAI_BRAND,
   legalName: CLICKAI_LEGAL_NAME,
   url: "https://clickai.in",
-  logo: "https://clickai.in/favicon.ico",
+  logo: "https://clickai.in/icon-512.png",
   email: "hello@clickai.in",
   telephone: "+91-76600-01231",
   address: CLICKAI_ADDRESS_JSON_LD,

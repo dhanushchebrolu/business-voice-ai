@@ -88,9 +88,9 @@ describe("single-page navigation and click sparks", () => {
   test("Sign in still opens the real auth route", () => {
     assert.match(nav, /to="\/auth"/);
   });
-  test("ClickSpark ignores non-interactive targets, honours reduced motion and never takes pointer events", () => {
+  test("ClickSpark fires on any click, honours reduced motion and never takes pointer events", () => {
     const cs = readFileSync(join(here, "click-spark.tsx"), "utf8");
-    assert.match(cs, /closest\(INTERACTIVE\)/);
+    assert.doesNotMatch(cs, /INTERACTIVE|closest\(/);
     assert.match(cs, /prefers-reduced-motion: reduce/);
     assert.match(cs, /pointerEvents: "none"/);
   });

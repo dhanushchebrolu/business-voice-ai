@@ -2,20 +2,55 @@ import { cn } from "@/lib/utils";
 import type { ReactNode } from "react";
 import { Loader2 } from "lucide-react";
 
-/** `plate` keeps the white plate on dark surfaces (the logo wordmark is dark navy). */
-export function Logo({ className, plate = false }: { className?: string; plate?: boolean }) {
+/**
+ * The supplied logo has transparent margins around the artwork (it is 2172x724, the artwork
+ * is 68% x 49% of it, centred). The box below is exactly the artwork's size and the image is
+ * centred in it at a fixed scale, so the logo is never cropped, stretched or resized by
+ * theme, and takes the same space as before.
+ *
+ * The wordmark is dark navy, so on dark surfaces there is a second file with identical
+ * dimensions and a white wordmark (public/clickai-logo-transparent-dark.png): `onDark` uses it
+ * always (footer), and on the homepage dark theme CSS swaps to it (styles.css). Elsewhere
+ * `plate` keeps a white plate behind the original; the plate is a ring, so it never changes the box.
+ */
+const LOGO_IMG =
+  "pointer-events-none absolute left-1/2 top-1/2 h-[64.7px] w-auto max-w-none -translate-x-1/2 -translate-y-1/2 select-none object-contain sm:h-[72.8px]";
+
+export function Logo({
+  className,
+  plate = false,
+  onDark = false,
+}: {
+  className?: string;
+  plate?: boolean;
+  onDark?: boolean;
+}) {
   return (
     <div className={cn("flex items-center", className)}>
-      <img
-        src="/clickai-logo.png"
-        alt="ClickAI"
-        width={741}
-        height={179}
+      <span
         className={cn(
-          "h-8 w-auto rounded-md bg-white px-2 py-1 sm:h-9",
-          !plate && "[.theme-light_&]:bg-transparent [.theme-light_&]:p-0",
+          "clickai-logo relative block h-8 w-[132.4px] shrink-0 rounded-md sm:h-9 sm:w-[148.9px]",
+          !onDark &&
+            (plate
+              ? "bg-white ring-[6px] ring-white"
+              : "bg-white ring-[6px] ring-white [.theme-light_&]:bg-transparent [.theme-light_&]:ring-0"),
         )}
-      />
+      >
+        <img
+          src="/clickai-logo-transparent.png"
+          alt="ClickAI"
+          width={2172}
+          height={724}
+          className={cn(LOGO_IMG, "vx-logo-light", onDark && "hidden")}
+        />
+        <img
+          src="/clickai-logo-transparent-dark.png"
+          alt="ClickAI"
+          width={2172}
+          height={724}
+          className={cn(LOGO_IMG, "vx-logo-dark", !onDark && "hidden")}
+        />
+      </span>
     </div>
   );
 }
