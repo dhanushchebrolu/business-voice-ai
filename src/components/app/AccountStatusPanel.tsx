@@ -22,7 +22,7 @@ type ChannelTone = "live" | "idle";
  * Account, subscription and channel state. Every value comes from real
  * records — a channel is only "Active" when it is genuinely connected.
  */
-export function AccountStatusPanel() {
+export function AccountStatusPanel({ showChannels = true }: { showChannels?: boolean } = {}) {
   const { user } = useAuth();
   const { data: ws } = useQuery(workspaceQuery(user?.id));
   const { data: numbers } = useQuery(numbersQuery(ws?.organization?.id));
@@ -172,23 +172,25 @@ export function AccountStatusPanel() {
         )}
       </div>
 
-      <div className="mt-5 grid gap-2.5 sm:grid-cols-2 xl:grid-cols-4">
-        {channels.map((c) => (
-          <div
-            key={c.label}
-            className="flex items-center gap-3 rounded-md border border-border px-3 py-2.5"
-          >
-            <c.icon className={c.ok ? "size-4 text-primary" : "size-4 text-muted-foreground"} />
-            <div className="min-w-0">
-              <p className="text-sm font-medium">{c.label}</p>
-              <p className="truncate text-xs text-muted-foreground">{c.hint}</p>
+      {showChannels ? (
+        <div className="mt-5 grid gap-2.5 sm:grid-cols-2 xl:grid-cols-4">
+          {channels.map((c) => (
+            <div
+              key={c.label}
+              className="flex items-center gap-3 rounded-md border border-border px-3 py-2.5"
+            >
+              <c.icon className={c.ok ? "size-4 text-primary" : "size-4 text-muted-foreground"} />
+              <div className="min-w-0">
+                <p className="text-sm font-medium">{c.label}</p>
+                <p className="truncate text-xs text-muted-foreground">{c.hint}</p>
+              </div>
+              <StatusPill tone={c.tone} dot={false} className="ml-auto">
+                {c.ok ? "Active" : "Setup"}
+              </StatusPill>
             </div>
-            <StatusPill tone={c.tone} dot={false} className="ml-auto">
-              {c.ok ? "Active" : "Setup"}
-            </StatusPill>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      ) : null}
     </SectionCard>
   );
 }

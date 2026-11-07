@@ -197,6 +197,75 @@
   color-scheme: light;
 }
 
+/*
+ * Customer dashboard (/app): ClickAI light product theme. The class is put on <html> by the /app
+ * route (not on a wrapper) so dropdowns, dialogs and toasts, which render in portals outside
+ * the app tree, get the same tokens. Every shadcn primitive and panel reads these variables, so
+ * all dashboard pages follow without per-page colour edits. The admin console is not affected.
+ */
+html.app-ui {
+  --radius: 0.625rem;
+  --background: oklch(0.984 0.004 262);
+  --foreground: oklch(0.2 0.07 268);
+  --surface: oklch(0.972 0.007 262);
+  --surface-raised: oklch(0.955 0.012 262);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.2 0.07 268);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.2 0.07 268);
+
+  --primary: oklch(0.55 0.23 262);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.955 0.015 262);
+  --secondary-foreground: oklch(0.25 0.07 268);
+  --muted: oklch(0.962 0.009 262);
+  --muted-foreground: oklch(0.5 0.045 262);
+  --accent: oklch(0.945 0.035 285);
+  --accent-foreground: oklch(0.28 0.1 280);
+
+  --destructive: oklch(0.57 0.23 27);
+  --destructive-foreground: oklch(0.99 0 0);
+  --success: oklch(0.56 0.15 160);
+  --success-foreground: oklch(0.99 0 0);
+  --warning: oklch(0.66 0.16 68);
+  --warning-foreground: oklch(0.2 0.04 68);
+  --info: oklch(0.54 0.22 285);
+
+  --border: oklch(0.925 0.01 262);
+  --border-strong: oklch(0.86 0.016 262);
+  --input: oklch(0.88 0.014 262);
+  --ring: oklch(0.55 0.23 262 / 45%);
+
+  --chart-1: oklch(0.55 0.23 262);
+  --chart-2: oklch(0.55 0.25 285);
+  --chart-3: oklch(0.62 0.16 160);
+  --chart-4: oklch(0.68 0.16 68);
+  --chart-5: oklch(0.57 0.23 27);
+
+  --sidebar: oklch(1 0 0);
+  --sidebar-foreground: oklch(0.3 0.06 268);
+  --sidebar-primary: oklch(0.55 0.23 262);
+  --sidebar-primary-foreground: oklch(0.99 0 0);
+  --sidebar-accent: oklch(0.955 0.03 262);
+  --sidebar-accent-foreground: oklch(0.38 0.19 262);
+  --sidebar-border: oklch(0.925 0.01 262);
+  --sidebar-ring: oklch(0.55 0.23 262 / 40%);
+
+  --shadow-panel: 0 1px 2px oklch(0.2 0.07 268 / 5%), 0 10px 28px -16px oklch(0.2 0.07 268 / 14%);
+  color-scheme: light;
+}
+html.app-ui .clickai-logo {
+  background: transparent;
+  box-shadow: none;
+}
+html.app-ui .panel {
+  box-shadow: var(--shadow-panel);
+}
+html.app-ui :focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
 @layer base {
   * {
     border-color: var(--color-border);

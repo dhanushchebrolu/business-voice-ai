@@ -59,17 +59,24 @@ export function PageHeader({
   title,
   description,
   actions,
+  eyebrow,
 }: {
   title: string;
   description?: string;
   actions?: ReactNode;
+  eyebrow?: string;
 }) {
   return (
-    <div className="flex flex-col gap-3 border-b border-border pb-5 sm:flex-row sm:items-end sm:justify-between">
-      <div className="space-y-1">
-        <h1 className="text-[22px] font-semibold tracking-tight">{title}</h1>
+    <div className="flex flex-col gap-4 pb-1 sm:flex-row sm:items-end sm:justify-between">
+      <div className="min-w-0 space-y-1.5">
+        {eyebrow ? (
+          <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-primary">
+            {eyebrow}
+          </p>
+        ) : null}
+        <h1 className="text-[26px] font-semibold leading-tight tracking-tight">{title}</h1>
         {description ? (
-          <p className="max-w-2xl text-sm text-muted-foreground">{description}</p>
+          <p className="max-w-2xl text-sm leading-relaxed text-muted-foreground">{description}</p>
         ) : null}
       </div>
       {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
@@ -78,12 +85,12 @@ export function PageHeader({
 }
 
 const toneMap = {
-  live: "bg-success/12 text-success border-success/25",
-  ready: "bg-warning/12 text-warning border-warning/25",
+  live: "bg-success/10 text-success border-success/25",
+  ready: "bg-warning/12 text-warning border-warning/30",
   idle: "bg-muted text-muted-foreground border-border",
-  error: "bg-destructive/12 text-destructive border-destructive/25",
-  info: "bg-info/12 text-info border-info/25",
-  accent: "bg-primary/12 text-primary border-primary/25",
+  error: "bg-destructive/10 text-destructive border-destructive/25",
+  info: "bg-info/10 text-info border-info/25",
+  accent: "bg-primary/10 text-primary border-primary/25",
 } as const;
 
 export function StatusPill({
@@ -100,7 +107,7 @@ export function StatusPill({
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-medium uppercase tracking-wide",
+        "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-medium tracking-wide whitespace-nowrap",
         toneMap[tone],
         className,
       )}
@@ -123,14 +130,14 @@ export function EmptyState({
   action?: ReactNode;
 }) {
   return (
-    <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border-strong bg-surface/40 px-6 py-14 text-center">
+    <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border-strong bg-surface/60 px-6 py-12 text-center">
       {Icon ? (
-        <span className="mb-4 grid size-10 place-items-center rounded-lg border border-border bg-surface-raised">
-          <Icon className="size-4 text-muted-foreground" />
+        <span className="mb-4 grid size-11 place-items-center rounded-full bg-primary/10 text-primary">
+          <Icon className="size-5" />
         </span>
       ) : null}
       <h3 className="text-sm font-semibold">{title}</h3>
-      <p className="mt-1.5 max-w-sm text-sm text-muted-foreground">{description}</p>
+      <p className="mt-1.5 max-w-sm text-sm leading-relaxed text-muted-foreground">{description}</p>
       {action ? <div className="mt-5">{action}</div> : null}
     </div>
   );
@@ -138,13 +145,16 @@ export function EmptyState({
 
 export function ErrorState({ message, onRetry }: { message: string; onRetry?: () => void }) {
   return (
-    <div className="rounded-lg border border-destructive/30 bg-destructive/8 px-4 py-3 text-sm text-destructive">
+    <div
+      role="alert"
+      className="rounded-xl border border-destructive/25 bg-destructive/8 px-4 py-3 text-sm text-destructive"
+    >
       <div className="flex items-center justify-between gap-4">
         <span>{message}</span>
         {onRetry ? (
           <button
             onClick={onRetry}
-            className="shrink-0 rounded-md border border-destructive/40 px-2 py-1 text-xs font-medium"
+            className="shrink-0 rounded-md border border-destructive/40 bg-card px-2.5 py-1 text-xs font-medium transition-colors hover:bg-destructive/10"
           >
             Retry
           </button>
@@ -156,10 +166,20 @@ export function ErrorState({ message, onRetry }: { message: string; onRetry?: ()
 
 export function LoadingState({ label = "Loading" }: { label?: string }) {
   return (
-    <div className="flex items-center gap-2 px-1 py-10 text-sm text-muted-foreground">
+    <div role="status" className="flex items-center gap-2 px-1 py-10 text-sm text-muted-foreground">
       <Loader2 className="size-4 animate-spin" />
       {label}…
     </div>
+  );
+}
+
+/** Placeholder block for content that is still loading; reserves the final size so nothing jumps. */
+export function Skeleton({ className }: { className?: string }) {
+  return (
+    <div
+      aria-hidden="true"
+      className={cn("animate-pulse rounded-md bg-muted motion-reduce:animate-none", className)}
+    />
   );
 }
 
@@ -168,21 +188,38 @@ export function StatCard({
   value,
   hint,
   tone,
+  icon: Icon,
 }: {
   label: string;
   value: string | number;
   hint?: string;
   tone?: "default" | "accent";
+  icon?: React.ComponentType<{ className?: string }>;
 }) {
   return (
-    <div className="panel px-4 py-3.5">
-      <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-        {label}
-      </p>
-      <p className={cn("mt-2 text-2xl font-semibold tabular", tone === "accent" && "text-primary")}>
+    <div className="panel px-5 py-4">
+      <div className="flex items-start justify-between gap-3">
+        <p className="text-xs font-medium text-muted-foreground">{label}</p>
+        {Icon ? (
+          <span
+            className={cn(
+              "grid size-8 shrink-0 place-items-center rounded-lg",
+              tone === "accent" ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground",
+            )}
+          >
+            <Icon className="size-4" />
+          </span>
+        ) : null}
+      </div>
+      <p
+        className={cn(
+          "mt-3 text-[28px] font-semibold leading-none tabular",
+          tone === "accent" && "text-primary",
+        )}
+      >
         {value}
       </p>
-      {hint ? <p className="mt-1 text-xs text-muted-foreground">{hint}</p> : null}
+      {hint ? <p className="mt-2 text-xs text-muted-foreground">{hint}</p> : null}
     </div>
   );
 }
@@ -202,11 +239,11 @@ export function SectionCard({
 }) {
   return (
     <section className={cn("panel", className)}>
-      <header className="flex flex-col gap-2 border-b border-border px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+      <header className="flex flex-col gap-2 px-5 pb-0 pt-5 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h2 className="text-sm font-semibold">{title}</h2>
+          <h2 className="text-[15px] font-semibold">{title}</h2>
           {description ? (
-            <p className="mt-0.5 text-xs text-muted-foreground">{description}</p>
+            <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">{description}</p>
           ) : null}
         </div>
         {actions ? <div className="flex items-center gap-2">{actions}</div> : null}

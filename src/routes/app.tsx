@@ -19,11 +19,23 @@ export const Route = createFileRoute("/app")({
       },
       { name: "robots", content: "noindex" },
     ],
+    // Light product theme from first paint on a direct load (see html.app-ui in styles.css).
+    scripts: [{ children: 'document.documentElement.classList.add("app-ui")' }],
   }),
   component: AppLayout,
 });
 
+/** Puts the dashboard theme on <html> while /app is mounted, so portals (menus, dialogs) share it. */
+function useAppTheme() {
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.add("app-ui");
+    return () => root.classList.remove("app-ui");
+  }, []);
+}
+
 function AppLayout() {
+  useAppTheme();
   const { session, loading, user } = useAuth();
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
