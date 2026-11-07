@@ -382,6 +382,15 @@ const NATIVE_SERVICE_WORDS: [string[], string][] = [
       "દાંત",
       "ਦੰਦ",
       "ଦାନ୍ତ",
+      // The English word "teeth" written in the script ("టీత్ క్లీనింగ్"):
+      // how STT writes a code-mixed "teeth cleaning".
+      "టీత్",
+      "टीथ",
+      "டீத்",
+      "ಟೀತ್",
+      "ടീത്ത്",
+      "টিথ",
+      "ટીથ",
     ],
     "teeth",
   ],

@@ -30,6 +30,35 @@ import {
 } from "./livekit-api.ts";
 import { normalizeInboundNumber } from "./phone.ts";
 import {
+  draftConfigPolicy,
+  resolveCallAgentConfig,
+  type AgentConfigDeps,
+} from "./agent-config.server.ts";
+import {
+  buildAgentInstructions,
+  validateAgentConfig,
+  withCurrentCallSections,
+  type AgentSnapshot,
+} from "../agent-instructions.ts";
+import { findReturningCallerFirstName } from "../calendar/caller-bookings.server.ts";
+import { personalizeGreeting } from "../voice-greeting.ts";
+import { bookingNeedsPayment, paymentAmountMinorUnits } from "../payments/payment-policy.ts";
+import {
+  checkpointTranscript,
+  decideCall,
+  reportEnd,
+} from "../../../services/voice-agent/src/agent/call.ts";
+import { buildTools } from "../../../services/voice-agent/src/agent/receptionist.ts";
+import { KlyroClient } from "../../../services/voice-agent/src/backend/klyro-client.ts";
+import { CallTelemetry } from "../../../services/voice-agent/src/runtime/telemetry.ts";
+import {
+  agentSaid,
+  applyReading,
+  newConversation,
+  nextStep,
+} from "../../../services/voice-agent/src/conversation/state.ts";
+import { readUtterance } from "../../../services/voice-agent/src/conversation/understanding.ts";
+import {
   ROOM_SWEEP_ALERT_AFTER_FAILURES,
   ROOM_SWEEP_BACKOFF_MAX_MS,
   ROOM_SWEEP_MAX_ROWS_PER_RUN,
@@ -70,6 +99,7 @@ import {
   claimOutboundCall,
   completeSipCallFromLiveKit,
   endSipSession,
+  mergeTranscriptSegment,
   outboundRoomName,
   pruneVoiceAgentNonces,
   pruneVoiceAgentRateLimits,
@@ -3621,5 +3651,1512 @@ describe("F14: voice cron routes: route-specific credential, replay protection, 
       s.db.tables["webhook_events"]!.map((r) => r["provider"]),
       ["livekit"],
     );
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* G6: published agent configuration (agent-config.server.ts)          */
+/* G7: returning caller greeting name                                  */
+/* ------------------------------------------------------------------ */
+
+const validSnapshot = (over: Partial<AgentSnapshot["agent"]> = {}): AgentSnapshot => ({
+  business: {
+    name: "Smile Dental",
+    business_type: "dental_clinic",
+    description: "A friendly neighbourhood dental clinic offering cleanings and root canals.",
+    address: null,
+    city: null,
+    state: null,
+    country: "IN",
+    postal_code: null,
+    website: null,
+    email: null,
+    primary_phone: null,
+    whatsapp: null,
+    timezone: "Asia/Kolkata",
+    currency: "INR",
+  },
+  hours: [{ day_of_week: 1, open_time: "09:00", close_time: "18:00", is_closed: false }] as never,
+  services: [],
+  faqs: [{ question: "Do you open on Sundays?", answer: "Yes, 10 to 2.", is_active: true }],
+  rules: [],
+  knowledge: [],
+  agent: {
+    agent_name: "Aria",
+    persona: "friendly",
+    custom_personality: null,
+    objectives: ["answer_questions"],
+    capabilities: {},
+    primary_language: "te-IN",
+    extra_languages: [],
+    multilingual: true,
+    voice_id: "priya",
+    speaking_pace: 1,
+    greetings: { "te-IN": "నమస్కారం, స్మైల్ డెంటల్‌కి కాల్ చేసినందుకు ధన్యవాదాలు." },
+    transfer_number: null,
+    after_hours_behavior: "take_message",
+    ...over,
+  },
+});
+const BUSINESS_ROW = {
+  id: BIZ_A,
+  name: "Smile Dental",
+  country: "IN",
+  timezone: "Asia/Kolkata",
+  currency: "INR",
+};
+const SERVICE_ROWS = [
+  {
+    id: "svc-1",
+    business_id: BIZ_A,
+    name: "Teeth Cleaning",
+    description: null,
+    category: null,
+    price: 500,
+    currency: "INR",
+    duration_minutes: 30,
+    attributes: {},
+    is_active: true,
+    sort_order: 1,
+  },
+  {
+    id: "svc-2",
+    business_id: BIZ_A,
+    name: "Old Service",
+    description: null,
+    category: null,
+    price: 100,
+    currency: "INR",
+    duration_minutes: 15,
+    attributes: {},
+    is_active: false,
+    sort_order: 2,
+  },
+];
+function configDeps(
+  live: AgentSnapshot = validSnapshot(),
+): AgentConfigDeps & { liveLoads: number } {
+  const d = {
+    liveLoads: 0,
+    loadSnapshot: async () => (d.liveLoads++, live),
+    withCurrentCallSections,
+    buildAgentInstructions,
+    validateAgentConfig,
+  };
+  return d;
+}
+
+describe("G6: the published agent configuration, resolved as the Worker runtime does", () => {
+  test("the latest ACTIVE published version is used; the draft is never read", async () => {
+    const published = validSnapshot({ greetings: { "te-IN": "PUBLISHED GREETING" } });
+    const db = fakeDb({
+      businesses: [BUSINESS_ROW],
+      services: SERVICE_ROWS,
+      agent_versions: [
+        {
+          business_id: BIZ_A,
+          version: 2,
+          status: "active",
+          snapshot: published,
+          instructions: buildAgentInstructions(published),
+        },
+        {
+          business_id: BIZ_A,
+          version: 3,
+          status: "draft",
+          snapshot: validSnapshot(),
+          instructions: "DRAFT",
+        },
+        {
+          business_id: BIZ_A,
+          version: 1,
+          status: "archived",
+          snapshot: validSnapshot(),
+          instructions: "OLD",
+        },
+      ],
+    });
+    const deps = configDeps(validSnapshot({ greetings: { "te-IN": "DRAFT GREETING" } }));
+    const c = await resolveCallAgentConfig(
+      db.client as never,
+      BIZ_A,
+      deps,
+      new Date("2026-11-07T04:30:00Z"),
+    );
+    assert.ok(c.ok);
+    assert.equal(c.source, "published_version");
+    assert.equal(c.agentVersion, 2);
+    assert.equal(c.agent.greetings["te-IN"], "PUBLISHED GREETING");
+    assert.equal(deps.liveLoads, 0, "the live draft is not loaded when a version is published");
+    assert.doesNotMatch(c.instructions, /DRAFT/);
+    assert.match(c.instructions, /Teeth Cleaning/, "live services replace the published list");
+    assert.deepEqual(c.services, [
+      { id: "svc-1", name: "Teeth Cleaning", price: 500, durationMinutes: 30 },
+    ]);
+    assert.equal(c.servicesUnavailable, false);
+  });
+  test("staging with the explicit opt-in: a valid draft is used, reported as live_snapshot", async () => {
+    const db = fakeDb({ businesses: [BUSINESS_ROW], services: SERVICE_ROWS, agent_versions: [] });
+    const c = await resolveCallAgentConfig(db.client as never, BIZ_A, configDeps(), new Date(), {
+      allowDraft: true,
+    });
+    assert.ok(c.ok);
+    assert.equal(c.source, "live_snapshot");
+    assert.equal(c.agentVersion, null);
+  });
+  test("nothing published and the live configuration is incomplete: refused, with field names only", async () => {
+    const db = fakeDb({ businesses: [BUSINESS_ROW], services: SERVICE_ROWS, agent_versions: [] });
+    const c = await resolveCallAgentConfig(
+      db.client as never,
+      BIZ_A,
+      configDeps(validSnapshot({ voice_id: "", greetings: {} })),
+      new Date(),
+      { allowDraft: true },
+    );
+    assert.equal(c.ok, false);
+    assert.ok(!c.ok && c.reason === "agent_config_incomplete");
+    assert.ok(!c.ok && c.fields.includes("Voice") && c.fields.includes("Greeting"));
+  });
+  test("PRODUCTION: nothing published -> refused, even with a valid draft (the draft is never read)", async () => {
+    const db = fakeDb({ businesses: [BUSINESS_ROW], services: SERVICE_ROWS, agent_versions: [] });
+    const deps = configDeps();
+    for (const opts of [undefined, { allowDraft: false }]) {
+      const c = await resolveCallAgentConfig(db.client as never, BIZ_A, deps, new Date(), opts);
+      assert.deepEqual(c, { ok: false, reason: "no_published_version", fields: [] });
+    }
+    assert.equal(deps.liveLoads, 0);
+  });
+  test("PRODUCTION: only draft or archived versions exist -> refused (unpublished never runs)", async () => {
+    const db = fakeDb({
+      businesses: [BUSINESS_ROW],
+      services: SERVICE_ROWS,
+      agent_versions: [
+        {
+          business_id: BIZ_A,
+          version: 3,
+          status: "draft",
+          snapshot: validSnapshot(),
+          instructions: "DRAFT",
+        },
+        {
+          business_id: BIZ_A,
+          version: 1,
+          status: "archived",
+          snapshot: validSnapshot(),
+          instructions: "OLD",
+        },
+      ],
+    });
+    const c = await resolveCallAgentConfig(db.client as never, BIZ_A, configDeps());
+    assert.deepEqual(c, { ok: false, reason: "no_published_version", fields: [] });
+  });
+  test("a structurally broken published version is refused, never patched from the draft", async () => {
+    for (const [row, fields] of [
+      [{ snapshot: validSnapshot(), instructions: "   " }, ["instructions"]],
+      [{ snapshot: { ...validSnapshot(), agent: undefined }, instructions: "x" }, ["agent"]],
+      [{ snapshot: null, instructions: "x" }, ["agent", "business"]],
+    ] as const) {
+      const db = fakeDb({
+        businesses: [BUSINESS_ROW],
+        services: SERVICE_ROWS,
+        agent_versions: [{ business_id: BIZ_A, version: 2, status: "active", ...row }],
+      });
+      const deps = configDeps();
+      const c = await resolveCallAgentConfig(db.client as never, BIZ_A, deps, new Date(), {
+        allowDraft: true,
+      });
+      assert.deepEqual(c, { ok: false, reason: "invalid_published_version", fields });
+      assert.equal(deps.liveLoads, 0);
+    }
+  });
+  test("draftConfigPolicy: drafts only for an explicit development/staging opt-in; unset = production", () => {
+    const env = (vars: Record<string, string>) => (n: string) => vars[n];
+    const OPT = "VOICE_AGENT_ALLOW_DRAFT_AGENT_CONFIG";
+    assert.deepEqual(draftConfigPolicy(env({})), {
+      environment: "production",
+      allowDraft: false,
+      optInIgnored: false,
+    });
+    assert.deepEqual(draftConfigPolicy(env({ [OPT]: "true" })), {
+      environment: "production",
+      allowDraft: false,
+      optInIgnored: true,
+    });
+    assert.deepEqual(draftConfigPolicy(env({ VOICE_AGENT_ENV: "production", [OPT]: "true" })), {
+      environment: "production",
+      allowDraft: false,
+      optInIgnored: true,
+    });
+    assert.deepEqual(
+      draftConfigPolicy(env({ VOICE_AGENT_ENV: "prod-ish", [OPT]: "true" })).allowDraft,
+      false,
+    );
+    assert.deepEqual(
+      draftConfigPolicy(env({ VOICE_AGENT_ENV: "staging" })).allowDraft,
+      false,
+      "opt-in required",
+    );
+    assert.deepEqual(
+      draftConfigPolicy(env({ VOICE_AGENT_ENV: "staging", [OPT]: "true" })).allowDraft,
+      true,
+    );
+    assert.deepEqual(
+      draftConfigPolicy(env({ VOICE_AGENT_ENV: "Development", [OPT]: "TRUE" })).allowDraft,
+      true,
+    );
+  });
+  test("an unknown business is refused", async () => {
+    const c = await resolveCallAgentConfig(
+      fakeDb({ businesses: [], services: [], agent_versions: [] }).client as never,
+      BIZ_A,
+      configDeps(),
+    );
+    assert.deepEqual(c, { ok: false, reason: "no_business", fields: [] });
+  });
+  test("a failed services read keeps the call, flags the prices and offers no services", async () => {
+    const db = fakeDb({ businesses: [BUSINESS_ROW], services: SERVICE_ROWS, agent_versions: [] });
+    db.faults.fn = (table) => (table === "services" ? { message: "boom", code: "PGRST303" } : null);
+    const c = await resolveCallAgentConfig(db.client as never, BIZ_A, configDeps(), new Date(), {
+      allowDraft: true,
+    });
+    assert.ok(c.ok);
+    assert.equal(c.servicesUnavailable, true);
+    assert.deepEqual(c.services, []);
+  });
+
+  test("session start refuses the call (and closes its row) when no valid configuration exists", async () => {
+    const { deps, db } = sessionDeps({ loadBusiness: async () => null });
+    const r = await startSipSession(deps, {
+      sipCallId: "SCL_cfg",
+      roomName: "call-cfg",
+      calledNumber: PN_A.e164,
+      callerNumber: "+919876543210",
+      direction: "inbound",
+    });
+    assert.deepEqual(r, { allowed: false, reason: "agent_config_unavailable", callId: r.callId });
+    const row = db.tables["call_logs"]!.find((x) => x["provider_call_id"] === "SCL_cfg")!;
+    assert.equal(row["status"], "failed");
+    assert.equal(row["failure_reason"], "agent_config_incomplete");
+    assert.ok(row["ended_at"]);
+  });
+  test("session start records the published version on the call row", async () => {
+    const base = sessionDeps().deps;
+    const { deps, db } = sessionDeps({
+      loadBusiness: async (id) => ({
+        ...(await base.loadBusiness(id))!,
+        agentVersion: 7,
+        configSource: "published_version",
+      }),
+    });
+    const r = await startSipSession(deps, {
+      sipCallId: "SCL_ver",
+      roomName: "call-ver",
+      calledNumber: PN_A.e164,
+      callerNumber: "+919876543210",
+      direction: "inbound",
+    });
+    assert.ok(r.allowed);
+    assert.equal(db.tables["call_logs"]!.find((x) => x["id"] === r.callId)!["agent_version"], 7);
+  });
+});
+
+describe("G7: returning caller name (the Worker runtime's rule), never a guess", () => {
+  const start = (deps: SessionDeps, callerNumber: string | null, sip = "SCL_rc") =>
+    startSipSession(deps, {
+      sipCallId: sip,
+      roomName: `call-${sip}`,
+      calledNumber: PN_A.e164,
+      callerNumber,
+      direction: "inbound",
+    });
+  test("a known caller's first name is returned for the greeting", async () => {
+    const seen: unknown[] = [];
+    const { deps } = sessionDeps({
+      findCallerFirstName: async (q) => (seen.push(q), "Dhanush"),
+    });
+    const r = await start(deps, "09876543210");
+    assert.ok(r.allowed && r.callerFirstName === "Dhanush");
+    assert.deepEqual(seen, [
+      { organizationId: ORG_A, businessId: BIZ_A, callerE164: "+919876543210", country: "IN" },
+    ]);
+  });
+  test("withheld caller ID: no lookup, no name", async () => {
+    let calls = 0;
+    const { deps } = sessionDeps({ findCallerFirstName: async () => (calls++, "X") });
+    const r = await start(deps, null, "SCL_rc2");
+    assert.ok(r.allowed && r.callerFirstName === null);
+    assert.equal(calls, 0);
+  });
+  test("a failed lookup never fails the call", async () => {
+    const { deps } = sessionDeps({
+      findCallerFirstName: async () => {
+        throw new Error("db down");
+      },
+    });
+    const r = await start(deps, "+919876543210", "SCL_rc3");
+    assert.ok(r.allowed && r.callerFirstName === null);
+  });
+  test("the lookup is the Worker's own: one name per number at this business, else none", async () => {
+    const db = fakeDb({
+      contacts: [{ organization_id: ORG_A, phone: "+919876543210", name: "Dhanush Kumar" }],
+      bookings: [
+        {
+          organization_id: ORG_A,
+          business_id: BIZ_A,
+          customer_phone: "+919876543210",
+          customer_name: "dhanush",
+          created_at: "2026-11-01",
+        },
+      ],
+    });
+    assert.equal(
+      await findReturningCallerFirstName(db.client as never, {
+        organizationId: ORG_A,
+        businessId: BIZ_A,
+        callerE164: "+919876543210",
+      }),
+      "Dhanush",
+    );
+    db.tables["bookings"]!.push({
+      organization_id: ORG_A,
+      business_id: BIZ_A,
+      customer_phone: "+919876543210",
+      customer_name: "Ravi",
+      created_at: "2026-11-02",
+    });
+    assert.equal(
+      await findReturningCallerFirstName(db.client as never, {
+        organizationId: ORG_A,
+        businessId: BIZ_A,
+        callerE164: "+919876543210",
+      }),
+      null,
+      "a shared number (two names) is never greeted by name",
+    );
+  });
+  test("the greeting is personalized exactly as the Worker runtime does it", () => {
+    assert.equal(
+      personalizeGreeting("Hello, thanks for calling Smile Dental.", "Dhanush", "en-IN"),
+      "Hello Dhanush, thanks for calling Smile Dental.",
+    );
+    assert.equal(
+      personalizeGreeting("నమస్కారం, ధన్యవాదాలు.", "Dhanush", "te-IN"),
+      "నమస్కారం, ధన్యవాదాలు.",
+    );
+    assert.equal(
+      personalizeGreeting("Hello, thanks for calling.", null, "en-IN"),
+      "Hello, thanks for calling.",
+    );
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* G3: the call transcript in call_logs (dashboard contract)           */
+/* ------------------------------------------------------------------ */
+
+describe("G3: session-end stores the transcript the dashboard renders", () => {
+  async function startedCall(sip = "SCL_tx") {
+    const s = sessionDeps();
+    const r = await startSipSession(s.deps, {
+      sipCallId: sip,
+      roomName: `call-${sip}`,
+      calledNumber: PN_A.e164,
+      callerNumber: "+919876543210",
+      direction: "inbound",
+    });
+    assert.ok(r.allowed);
+    const row = () => s.db.tables["call_logs"]!.find((x) => x["id"] === r.callId)!;
+    return { ...s, callId: r.callId, sip, row };
+  }
+  const turns = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      role: (i % 2 ? "user" : "assistant") as "user" | "assistant",
+      text: i % 2 ? `caller ${i} టీత్ క్లీనింగ్` : `agent ${i}`,
+      at: new Date(Date.UTC(2026, 10, 7, 5, 0, i)).toISOString(),
+    }));
+
+  test("a bound report stores role/text/at turns and the Worker's summary line", async () => {
+    const c = await startedCall();
+    await endSipSession(c.deps, {
+      callId: c.callId,
+      reason: "caller_hangup",
+      language: "te-IN",
+      outcome: "booked",
+      roomName: `call-${c.sip}`,
+      sipCallId: c.sip,
+      transcript: turns(4),
+    });
+    const stored = c.row()["transcript"] as { role: string; text: string; at: string }[];
+    assert.equal(stored.length, 4);
+    // The dashboard contract (app.calls.tsx reads role + text; the Worker
+    // also stores at). Only the additive segment/position keys may be added.
+    for (const t of stored) {
+      assert.ok(t.role === "user" || t.role === "assistant");
+      assert.equal(typeof t.text, "string");
+      assert.ok(Number.isFinite(Date.parse(t.at)));
+      for (const k of Object.keys(t)) assert.ok(["role", "text", "at", "seg", "n"].includes(k), k);
+    }
+    assert.equal(stored[1]!.text, "caller 1 టీత్ క్లీనింగ్");
+    assert.equal(c.row()["summary"], "4 turns · te-IN");
+  });
+  test("replays and a later, shorter report never lose turns; a longer one replaces", async () => {
+    const c = await startedCall("SCL_tx2");
+    const end = (t: ReturnType<typeof turns>) =>
+      endSipSession(c.deps, {
+        callId: c.callId,
+        reason: "x",
+        roomName: `call-${c.sip}`,
+        sipCallId: c.sip,
+        transcript: t,
+      });
+    await end(turns(6));
+    await end(turns(6));
+    assert.equal((c.row()["transcript"] as unknown[]).length, 6);
+    await end(turns(3));
+    assert.equal((c.row()["transcript"] as unknown[]).length, 6, "shorter report ignored");
+    await end(turns(8));
+    assert.equal((c.row()["transcript"] as unknown[]).length, 8);
+  });
+  test("an unbound report (no room / SIP id) cannot write a transcript", async () => {
+    const c = await startedCall("SCL_tx3");
+    await endSipSession(c.deps, { callId: c.callId, reason: "x", transcript: turns(2) });
+    assert.equal(c.row()["transcript"] ?? null, null);
+  });
+  test("a report bound to another call is refused and writes nothing", async () => {
+    const c = await startedCall("SCL_tx4");
+    const r = await endSipSession(c.deps, {
+      callId: c.callId,
+      reason: "x",
+      roomName: "call-someone-else",
+      sipCallId: c.sip,
+      transcript: turns(2),
+    });
+    assert.deepEqual(r, { ok: false, reason: "binding_mismatch" });
+    assert.equal(c.row()["transcript"] ?? null, null);
+  });
+  test("HTTP: only user/assistant turns are accepted; system or tool turns are rejected", async () => {
+    const c = await startedCall("SCL_tx5");
+    const h = httpDeps(c.deps, c.db);
+    const send = async (transcript: unknown, nonce: string) =>
+      handleSessionEnd(
+        await signed(
+          "/api/internal/voice-agent/session-end",
+          {
+            callId: c.callId,
+            reason: "x",
+            roomName: `call-${c.sip}`,
+            sipCallId: c.sip,
+            transcript,
+          },
+          { nonce },
+        ),
+        h,
+      );
+    const bad = await send(
+      [{ role: "system", text: "instructions", at: new Date().toISOString() }],
+      "nonce-tx-system-aaaaaa",
+    );
+    assert.equal(bad.status, 400);
+    const tool = await send(
+      [{ role: "tool", text: "{}", at: new Date().toISOString() }],
+      "nonce-tx-tool-aaaaaaaa",
+    );
+    assert.equal(tool.status, 400);
+    const ok = await send(turns(2), "nonce-tx-ok-aaaaaaaaaa");
+    assert.equal(ok.status, 200);
+    assert.equal((c.row()["transcript"] as unknown[]).length, 2);
+  });
+  test("HTTP: session-end accepts a long transcript beyond 64 KiB; other routes keep 64 KiB", async () => {
+    const c = await startedCall("SCL_tx6");
+    const h = httpDeps(c.deps, c.db);
+    const long = Array.from({ length: 300 }, (_, i) => ({
+      role: (i % 2 ? "user" : "assistant") as "user" | "assistant",
+      text: "పళ్ళు క్లీన్ చేసుకోవాలి అనుకుంటున్నాను ".repeat(4),
+      at: new Date(Date.UTC(2026, 10, 7, 5, 0, i % 60)).toISOString(),
+    }));
+    const body = {
+      callId: c.callId,
+      reason: "x",
+      roomName: `call-${c.sip}`,
+      sipCallId: c.sip,
+      transcript: long,
+    };
+    assert.ok(new TextEncoder().encode(JSON.stringify(body)).length > 64 * 1024);
+    const res = await handleSessionEnd(
+      await signed("/api/internal/voice-agent/session-end", body, {
+        nonce: "nonce-tx-long-aaaaaaaa",
+      }),
+      h,
+    );
+    assert.equal(res.status, 200);
+    assert.equal((c.row()["transcript"] as unknown[]).length, 300);
+    const toolRes = await handleTool(
+      await signed(
+        "/api/internal/voice-agent/tool",
+        {
+          callId: c.callId,
+          tool: "check_calendar_availability",
+          input: { pad: "x".repeat(70 * 1024) },
+        },
+        { nonce: "nonce-tx-tool-big-aaaa" },
+      ),
+      h,
+    );
+    assert.equal(toolRes.status, 413);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* G5: payment-required bookings (one rule for every channel)          */
+/* G4: the caller's bookings and ownership-guarded rescheduling        */
+/* ------------------------------------------------------------------ */
+
+describe("G5: payment-policy.ts (shared with WhatsApp)", () => {
+  const caps = { booking_payment_required: true, payment_request: true };
+  test("payment only when the service has a price AND both capabilities are on", () => {
+    assert.equal(bookingNeedsPayment({ price: 500 }, caps), true);
+    assert.equal(bookingNeedsPayment({ price: 0 }, caps), false);
+    assert.equal(bookingNeedsPayment({ price: null }, caps), false);
+    assert.equal(bookingNeedsPayment(null, caps), false);
+    assert.equal(bookingNeedsPayment({ price: 500 }, { booking_payment_required: true }), false);
+    assert.equal(bookingNeedsPayment({ price: 500 }, { payment_request: true }), false);
+  });
+  test("the amount is the service price in minor units", () => {
+    assert.equal(paymentAmountMinorUnits(500), 50000);
+    assert.equal(paymentAmountMinorUnits(499.99), 49999);
+  });
+  test("WhatsApp uses the same rule (no second copy)", () => {
+    const src = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "../whatsapp/whatsapp-actions.server.ts"),
+      "utf8",
+    );
+    assert.match(src, /bookingNeedsPayment\(service, caps\)/);
+    assert.doesNotMatch(
+      src,
+      /caps\["booking_payment_required"\] === true &&\s*caps\["payment_request"\]/,
+    );
+  });
+});
+
+async function liveCall(
+  over: Partial<SessionDeps> = {},
+  callerNumber: string | null = "+919876543210",
+  sip = "SCL_tool",
+) {
+  const s = sessionDeps(over);
+  s.db.tables["businesses"] = [{ id: BIZ_A, country: "IN" }];
+  const r = await startSipSession(s.deps, {
+    sipCallId: sip,
+    roomName: `call-${sip}`,
+    calledNumber: PN_A.e164,
+    callerNumber,
+    direction: "inbound",
+  });
+  assert.ok(r.allowed);
+  return { ...s, callId: r.callId };
+}
+const SLOT_IN = { startIso: "2026-11-08T10:30:00.000Z", endIso: "2026-11-08T11:00:00.000Z" };
+
+describe("G5: book_appointment from the voice agent applies the payment rule server-side", () => {
+  const PAID = {
+    id: "svc-paid",
+    name: "Teeth Cleaning",
+    price: 500,
+    currency: "INR",
+    is_active: true,
+  };
+  const ALL = [
+    "check_calendar_availability",
+    "book_appointment",
+    "create_payment_required_booking",
+    "request_payment",
+  ];
+  function payDeps(
+    o: { tools?: string[]; service?: typeof PAID | null; hold?: string; payment?: string } = {},
+  ) {
+    const executed: { name: string; input: Record<string, unknown>; ctx: unknown }[] = [];
+    return {
+      executed,
+      over: {
+        availableTools: async () => o.tools ?? ALL,
+        loadService: async () => (o.service === undefined ? PAID : o.service),
+        executeTool: async (ctx: unknown, name: string, input: Record<string, unknown>) => {
+          executed.push({ ctx, name, input });
+          if (name === "create_payment_required_booking")
+            return {
+              content:
+                o.hold ??
+                JSON.stringify({
+                  success: true,
+                  data: { id: "hold-1", startAt: SLOT_IN.startIso, endAt: SLOT_IN.endIso },
+                }),
+            };
+          if (name === "request_payment")
+            return {
+              content:
+                o.payment ??
+                JSON.stringify({
+                  success: true,
+                  data: { whatsappSent: true, paymentLinkUrl: "https://rzp.example/x" },
+                }),
+            };
+          return {
+            content: JSON.stringify({
+              success: true,
+              bookingOutcome: "confirmed",
+              data: { id: "bk-1" },
+            }),
+          };
+        },
+      } satisfies Partial<SessionDeps>,
+    };
+  }
+  const book = (deps: SessionDeps, callId: string, input: Record<string, unknown>) =>
+    runSessionTool(deps, callId, "book_appointment", input);
+
+  test("a priced service: hold, then a payment link for the SERVICE's price (agent amounts ignored)", async () => {
+    const p = payDeps();
+    const c = await liveCall(p.over);
+    const r = await book(c.deps, c.callId, {
+      ...SLOT_IN,
+      serviceId: "svc-paid",
+      customerName: "D",
+      customerPhone: "9876543210",
+      amountMinorUnits: 1,
+    });
+    assert.ok(r.ok);
+    const body = JSON.parse(r.content);
+    assert.equal(body.bookingOutcome, "payment_pending");
+    assert.deepEqual(body.payment, { requested: true, linkSent: true });
+    assert.deepEqual(
+      p.executed.map((e) => e.name),
+      ["create_payment_required_booking", "request_payment"],
+    );
+    assert.deepEqual(p.executed[1]!.input, {
+      bookingId: "hold-1",
+      amountMinorUnits: 50000,
+      currency: "INR",
+    });
+    assert.equal(
+      (p.executed[0]!.ctx as { callId: string }).callId,
+      c.callId,
+      "keyed by call (idempotent per slot)",
+    );
+  });
+  test("a free service or a business without payment capabilities: a normal booking", async () => {
+    for (const p of [
+      payDeps({ service: { ...PAID, price: 0 } }),
+      payDeps({ tools: ["book_appointment"] }),
+      payDeps({ service: null }),
+    ]) {
+      const c = await liveCall(p.over, "+919876543210", `SCL_free_${Math.random()}`);
+      const r = await book(c.deps, c.callId, { ...SLOT_IN, serviceId: "svc-paid" });
+      assert.ok(r.ok);
+      assert.deepEqual(
+        p.executed.map((e) => e.name),
+        ["book_appointment"],
+      );
+    }
+  });
+  test("payment-only business and a service that needs no payment: not allowed", async () => {
+    const p = payDeps({
+      tools: ["create_payment_required_booking", "request_payment"],
+      service: { ...PAID, price: 0 },
+    });
+    const c = await liveCall(p.over);
+    assert.deepEqual(await book(c.deps, c.callId, { ...SLOT_IN, serviceId: "svc-paid" }), {
+      ok: false,
+      reason: "tool_not_allowed",
+    });
+    assert.equal(p.executed.length, 0);
+  });
+  test("the hold fails: its error is returned and no payment link is requested", async () => {
+    const p = payDeps({
+      hold: JSON.stringify({ success: false, error: { code: "SLOT_NO_LONGER_AVAILABLE" } }),
+    });
+    const c = await liveCall(p.over);
+    const r = await book(c.deps, c.callId, { ...SLOT_IN, serviceId: "svc-paid" });
+    assert.ok(r.ok && r.isError);
+    assert.deepEqual(
+      p.executed.map((e) => e.name),
+      ["create_payment_required_booking"],
+    );
+  });
+  test("the payment link fails: still held (payment_pending), reported as not sent", async () => {
+    const p = payDeps({
+      payment: JSON.stringify({ success: false, error: { code: "PAYMENTS_UNAVAILABLE" } }),
+    });
+    const c = await liveCall(p.over);
+    const body = JSON.parse(
+      ((await book(c.deps, c.callId, { ...SLOT_IN, serviceId: "svc-paid" })) as { content: string })
+        .content,
+    );
+    assert.equal(body.bookingOutcome, "payment_pending");
+    assert.deepEqual(body.payment, {
+      requested: false,
+      linkSent: false,
+      error: "PAYMENTS_UNAVAILABLE",
+    });
+  });
+});
+
+describe("G4: find_my_bookings and reschedule_appointment for the caller only", () => {
+  const RESCHEDULE_TOOLS = [
+    "check_calendar_availability",
+    "book_appointment",
+    "reschedule_appointment",
+  ];
+  test("find_my_bookings looks up by the CALL's caller ID; caller fields in the input are ignored", async () => {
+    const seen: unknown[] = [];
+    const c = await liveCall({
+      availableTools: async () => RESCHEDULE_TOOLS,
+      findCallerBookings: async (q) => (
+        seen.push(q),
+        [
+          {
+            id: "bk-1",
+            startAt: SLOT_IN.startIso,
+            endAt: SLOT_IN.endIso,
+            serviceId: "svc-1",
+            serviceName: "Teeth Cleaning",
+          },
+        ]
+      ),
+    });
+    const r = await runSessionTool(c.deps, c.callId, "find_my_bookings", {
+      callerE164: "+910000000000",
+      organization_id: ORG_B,
+    });
+    assert.ok(r.ok);
+    assert.deepEqual(
+      JSON.parse(r.content).data.bookings.map((b: { id: string }) => b.id),
+      ["bk-1"],
+    );
+    assert.deepEqual(seen, [
+      {
+        organizationId: ORG_A,
+        businessId: BIZ_A,
+        callerE164: "+919876543210",
+        callId: c.callId,
+        country: "IN",
+      },
+    ]);
+  });
+  test("withheld caller ID: callerIdentified false (nothing can be found)", async () => {
+    const c = await liveCall(
+      { availableTools: async () => RESCHEDULE_TOOLS, findCallerBookings: async () => [] },
+      null,
+      "SCL_anon",
+    );
+    const r = await runSessionTool(c.deps, c.callId, "find_my_bookings", {});
+    assert.ok(r.ok && JSON.parse(r.content).data.callerIdentified === false);
+  });
+  test("without the reschedule capability both tools are refused", async () => {
+    const c = await liveCall({
+      findCallerBookings: async () => [],
+      guardOwnership: async () => null,
+    });
+    assert.deepEqual(await runSessionTool(c.deps, c.callId, "find_my_bookings", {}), {
+      ok: false,
+      reason: "tool_not_allowed",
+    });
+    assert.deepEqual(
+      await runSessionTool(c.deps, c.callId, "reschedule_appointment", { bookingId: "bk-1" }),
+      { ok: false, reason: "tool_not_allowed" },
+    );
+  });
+  test("reschedule fails closed without the ownership guard", async () => {
+    const executed: string[] = [];
+    const c = await liveCall({
+      availableTools: async () => RESCHEDULE_TOOLS,
+      executeTool: async (_c, name) => (executed.push(name), { content: '{"success":true}' }),
+    });
+    assert.deepEqual(
+      await runSessionTool(c.deps, c.callId, "reschedule_appointment", {
+        bookingId: "bk-1",
+        newStartIso: SLOT_IN.startIso,
+        newEndIso: SLOT_IN.endIso,
+      }),
+      { ok: false, reason: "tool_not_allowed" },
+    );
+    assert.deepEqual(executed, []);
+  });
+  test("someone else's booking: NOT_FOUND, and nothing is moved", async () => {
+    const executed: string[] = [];
+    const guarded: unknown[] = [];
+    const c = await liveCall({
+      availableTools: async () => RESCHEDULE_TOOLS,
+      guardOwnership: async (ctx, tool, input) => (
+        guarded.push({ ctx, tool, input }),
+        { content: JSON.stringify({ success: false, error: { code: "NOT_FOUND" } }), isError: true }
+      ),
+      executeTool: async (_c, name) => (executed.push(name), { content: '{"success":true}' }),
+    });
+    const r = await runSessionTool(c.deps, c.callId, "reschedule_appointment", {
+      bookingId: "bk-other",
+      newStartIso: SLOT_IN.startIso,
+      newEndIso: SLOT_IN.endIso,
+      business_id: "x",
+    });
+    assert.ok(r.ok && r.isError && JSON.parse(r.content).error.code === "NOT_FOUND");
+    assert.deepEqual(executed, []);
+    assert.deepEqual((guarded[0] as { ctx: unknown }).ctx, {
+      organizationId: ORG_A,
+      businessId: BIZ_A,
+      callId: c.callId,
+      callerE164: "+919876543210",
+      phoneCountry: "IN",
+    });
+    assert.ok(
+      !("business_id" in (guarded[0] as { input: Record<string, unknown> }).input),
+      "tenant fields stripped",
+    );
+  });
+  test("the caller's booking: moved, reported as confirmed", async () => {
+    const c = await liveCall({
+      availableTools: async () => RESCHEDULE_TOOLS,
+      guardOwnership: async () => null,
+      executeTool: async () => ({
+        content: JSON.stringify({ success: true, data: { id: "bk-1", status: "RESCHEDULED" } }),
+      }),
+    });
+    const r = await runSessionTool(c.deps, c.callId, "reschedule_appointment", {
+      bookingId: "bk-1",
+      newStartIso: SLOT_IN.startIso,
+      newEndIso: SLOT_IN.endIso,
+    });
+    assert.ok(r.ok && !r.isError && JSON.parse(r.content).rescheduleOutcome === "confirmed");
+  });
+  test("moved in the database but the calendar update failed: saved_calendar_sync_failed (re-read, not guessed)", async () => {
+    const c = await liveCall({
+      availableTools: async () => RESCHEDULE_TOOLS,
+      guardOwnership: async () => null,
+      executeTool: async () => ({
+        content: JSON.stringify({ success: false, error: { code: "CALENDAR_API_ERROR" } }),
+        isError: true,
+      }),
+    });
+    c.db.tables["bookings"] = [
+      {
+        id: "bk-1",
+        organization_id: ORG_A,
+        business_id: BIZ_A,
+        status: "CALENDAR_SYNC_FAILED",
+        start_at: SLOT_IN.startIso,
+        end_at: SLOT_IN.endIso,
+      },
+    ];
+    const r = await runSessionTool(c.deps, c.callId, "reschedule_appointment", {
+      bookingId: "bk-1",
+      newStartIso: SLOT_IN.startIso,
+      newEndIso: SLOT_IN.endIso,
+    });
+    assert.ok(
+      r.ok &&
+        !r.isError &&
+        JSON.parse(r.content).rescheduleOutcome === "saved_calendar_sync_failed",
+    );
+    // a real failure (the booking did not move) stays an error
+    c.db.tables["bookings"]![0]!["start_at"] = "2026-11-09T05:30:00.000Z";
+    const r2 = await runSessionTool(c.deps, c.callId, "reschedule_appointment", {
+      bookingId: "bk-1",
+      newStartIso: SLOT_IN.startIso,
+      newEndIso: SLOT_IN.endIso,
+    });
+    assert.ok(r2.ok && r2.isError);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* End to end (mocked externals): the LiveKit agent's real state and   */
+/* tools -> its real KlyroClient (HMAC) -> klyro's real HTTP handlers  */
+/* -> runSessionTool -> a fake calendar/payment tool executor.          */
+/* Proves the wiring and the booking lifecycle; NOT real Vobiz SIP,    */
+/* real Sarvam speech/LLM quality, or real Google Calendar/Razorpay.   */
+/* ------------------------------------------------------------------ */
+
+describe("E2E (simulated): Telugu booking, reschedule and payment through klyro's real API", () => {
+  const NOW_MS = 1_793_600_000 * 1000;
+  const NOW = new Date(NOW_MS);
+  const istDate = (d: Date) =>
+    new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(d);
+  const TOMORROW = istDate(new Date(NOW_MS + 24 * 3600 * 1000));
+  const at = (date: string, hhmm: string) => new Date(`${date}T${hhmm}:00+05:30`).toISOString();
+  const CATALOG = [
+    { id: "svc-cleaning", name: "Teeth Cleaning", price: 500, durationMinutes: 30 },
+    { id: "svc-root-canal", name: "Root Canal Treatment", price: 5000, durationMinutes: 90 },
+  ];
+
+  function world(o: { tools?: string[]; bookings?: Row[] } = {}) {
+    const store = {
+      bookings: (o.bookings ?? []) as Row[],
+      executed: [] as { name: string; input: Record<string, unknown> }[],
+    };
+    const s = sessionDeps({
+      loadBusiness: async () => ({
+        name: "Smile Dental",
+        timezone: "Asia/Kolkata",
+        country: "IN",
+        currency: "INR",
+        services: CATALOG,
+        agentName: "Aria",
+        primaryLanguage: "en-IN",
+        extraLanguages: [],
+        greetings: { "en-IN": "Hello, thanks for calling Smile Dental. How can I help you today?" },
+        voiceId: "priya",
+        speakingPace: 1,
+        instructions: "x",
+        agentVersion: 4,
+        configSource: "published_version",
+      }),
+      findCallerFirstName: async () => "Dhanush",
+      availableTools: async () => o.tools ?? ["check_calendar_availability", "book_appointment"],
+      loadService: async (_o, _b, id) => {
+        const c = CATALOG.find((x) => x.id === id);
+        return c
+          ? { id: c.id, name: c.name, price: c.price, currency: "INR", is_active: true }
+          : null;
+      },
+      findCallerBookings: async (q) =>
+        store.bookings
+          .filter((b) => b["customer_phone"] === q.callerE164)
+          .map((b) => ({
+            id: String(b["id"]),
+            startAt: String(b["start_at"]),
+            endAt: String(b["end_at"]),
+            serviceId: String(b["service_id"]),
+            serviceName: String(b["service_name"]),
+          })),
+      guardOwnership: async (ctx, _tool, input) =>
+        store.bookings.some(
+          (b) => b["id"] === input["bookingId"] && b["customer_phone"] === ctx.callerE164,
+        )
+          ? null
+          : {
+              content: JSON.stringify({ success: false, error: { code: "NOT_FOUND" } }),
+              isError: true,
+            },
+      executeTool: async (_ctx, name, input) => {
+        store.executed.push({ name, input });
+        if (name === "check_calendar_availability") {
+          const d = String(input["dateIso"]);
+          const m = Number(input["durationMinutes"]);
+          return {
+            content: JSON.stringify({
+              success: true,
+              data: {
+                slots: ["13:30", "16:00"].map((h) => ({
+                  start: at(d, h),
+                  end: new Date(Date.parse(at(d, h)) + m * 60000).toISOString(),
+                })),
+              },
+            }),
+          };
+        }
+        if (name === "book_appointment") {
+          const existing = store.bookings.find(
+            (b) => b["start_at"] === input["startIso"] && b["call"] === "this",
+          );
+          const row = existing ?? {
+            id: `bk-${store.bookings.length + 1}`,
+            start_at: input["startIso"],
+            end_at: input["endIso"],
+            service_id: input["serviceId"],
+            customer_phone: input["customerPhone"],
+            call: "this",
+          };
+          if (!existing) store.bookings.push(row);
+          return {
+            content: JSON.stringify({
+              success: true,
+              bookingOutcome: "confirmed",
+              data: { id: row["id"], status: "CONFIRMED" },
+            }),
+          };
+        }
+        if (name === "create_payment_required_booking")
+          return {
+            content: JSON.stringify({
+              success: true,
+              data: { id: "hold-1", startAt: input["startIso"], endAt: input["endIso"] },
+            }),
+          };
+        if (name === "request_payment")
+          return { content: JSON.stringify({ success: true, data: { whatsappSent: true } }) };
+        if (name === "reschedule_appointment") {
+          const b = store.bookings.find((x) => x["id"] === input["bookingId"])!;
+          b["start_at"] = input["newStartIso"];
+          b["end_at"] = input["newEndIso"];
+          return {
+            content: JSON.stringify({
+              success: true,
+              data: { id: b["id"], status: "RESCHEDULED" },
+            }),
+          };
+        }
+        return { content: JSON.stringify({ success: false }) };
+      },
+    });
+    s.db.tables["businesses"] = [{ id: BIZ_A, country: "IN" }];
+    const h = httpDeps(s.deps, s.db);
+    const fetchImpl = (async (url: string, init: RequestInit) => {
+      const req = new Request(url, init);
+      const path = new URL(url).pathname;
+      if (path.endsWith("/session")) return handleSessionStart(req, h);
+      if (path.endsWith("/tool")) return handleTool(req, h);
+      if (path.endsWith("/session-end")) return handleSessionEnd(req, h);
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+    const client = new KlyroClient({
+      baseUrl: "https://klyro.example",
+      secret: SECRET,
+      fetchImpl,
+      now: () => NOW_MS,
+      retries: 0,
+    });
+    return { ...s, store, client };
+  }
+  async function open(w: ReturnType<typeof world>, sip: string) {
+    const telemetry = new CallTelemetry(
+      { callId: null, sipCallId: sip, room: `call-${sip}` },
+      () => undefined,
+    );
+    const d = await decideCall(
+      w.client,
+      {
+        roomName: `call-${sip}`,
+        sipCallId: sip,
+        calledNumber: PN_A.e164,
+        callerNumber: "09876543210",
+        direction: "inbound",
+      },
+      telemetry,
+      () => NOW,
+      1800,
+    );
+    assert.equal(d.kind, "accept");
+    if (d.kind !== "accept") throw new Error("rejected");
+    const tools = buildTools(
+      { business: d.business, backend: d.backend, state: d.state },
+      new Set(),
+    ) as Record<string, { execute: (a: unknown, o: unknown) => Promise<unknown> }>;
+    const run = async (name: string) =>
+      String(await tools[name]!.execute({}, { ctx: {} as never, toolCallId: "t" }));
+    const said: { role: "user" | "assistant"; text: string }[] = [
+      { role: "assistant", text: d.greeting },
+    ];
+    const say = (text: string, stt: string) => {
+      said.push({ role: "user", text });
+      applyReading(
+        d.state,
+        readUtterance(text, {
+          catalog: d.business.services,
+          sttLanguage: stt,
+          fuzzyServices:
+            !d.state.service ||
+            d.state.service.provenance === "uncertain" ||
+            d.state.lastQuestion === "service",
+        }),
+        d.business,
+      );
+      return nextStep(d.state);
+    };
+    const spoken = (text = "(agent reply)") => {
+      said.push({ role: "assistant", text });
+      agentSaid(d.state, nextStep(d.state), { interrupted: false });
+    };
+    return { d, run, say, spoken, said, telemetry };
+  }
+
+  test("the incident call, done right: Telugu service words, caller ID, one booking, transcript stored", async () => {
+    const w = world();
+    const c = await open(w, "SCL_e2e_te");
+    assert.equal(
+      c.d.greeting,
+      "Hello Dhanush, thanks for calling Smile Dental. How can I help you today?",
+    );
+    assert.deepEqual(c.say("రేపు మధ్యాహ్నం ఏం స్లాట్స్ అవైలబిలిటీ చెప్పండి.", "te-IN"), {
+      kind: "ask",
+      slot: "service",
+    });
+    assert.equal(c.d.state.language.current, "te-IN");
+    c.spoken("మీకు ఏ సర్వీస్ కావాలి?");
+    assert.equal(
+      c.say("ఫీత్ క్లీనింగ్", "te-IN").kind,
+      "check_availability",
+      "the misheard 'teeth cleaning' still resolves",
+    );
+    assert.equal(c.d.state.service?.value.id, "svc-cleaning");
+    assert.match(await c.run("check_availability"), /13:30|1:30/);
+    c.spoken("రేపు 1:30 PM, 4 PM ఖాళీగా ఉన్నాయి.");
+    c.say("1:30 PM కి ఒక స్లాట్ బుక్ చెయ్యి నాకు.", "te-IN");
+    assert.equal(c.d.state.booking.selected?.hhmm, "13:30");
+    if (nextStep(c.d.state).kind === "ask") {
+      c.spoken("మీ పేరు చెప్తారా?");
+      c.say("my name is Dhanush", "en-IN");
+    }
+    assert.equal(nextStep(c.d.state).kind, "confirm_caller_id");
+    c.spoken("మీరు కాల్ చేస్తున్న ఈ నంబర్‌నే వాడమంటారా?");
+    c.say("అవును", "te-IN");
+    assert.equal(c.d.state.phone?.provenance, "confirmed");
+    assert.equal(nextStep(c.d.state).kind, "final_confirmation");
+    c.spoken("టీత్ క్లీనింగ్, రేపు 1:30 PM. బుక్ చేయమంటారా?");
+    c.say("అవును", "te-IN");
+    assert.match(await c.run("book_appointment"), /^BOOKED/);
+    assert.match(await c.run("book_appointment"), /^NOT_ALLOWED: already_booked/, "never twice");
+    const booked = w.store.executed.filter((e) => e.name === "book_appointment");
+    assert.equal(booked.length, 1);
+    assert.equal(booked[0]!.input["serviceId"], "svc-cleaning");
+    assert.equal(booked[0]!.input["startIso"], at(TOMORROW, "13:30"));
+    assert.equal(booked[0]!.input["customerPhone"], "9876543210");
+    // 13:30 was offered for the 30-minute service it was checked for
+    const avail = w.store.executed.find((e) => e.name === "check_calendar_availability")!;
+    assert.equal(avail.input["durationMinutes"], 30);
+    // end of call: transcript + Worker summary land in call_logs
+    const transcript = c.said.map((t, i) => ({
+      ...t,
+      at: new Date(NOW_MS + i * 1000).toISOString(),
+    }));
+    await reportEnd(
+      w.client,
+      c.d.callId,
+      "caller_hangup",
+      c.d.state,
+      c.telemetry,
+      { roomName: "call-SCL_e2e_te", sipCallId: "SCL_e2e_te" },
+      transcript,
+    );
+    const row = w.db.tables["call_logs"]!.find((x) => x["id"] === c.d.callId)!;
+    assert.equal((row["transcript"] as unknown[]).length, transcript.length);
+    assert.equal(row["summary"], `${transcript.length} turns · ${c.d.state.language.current}`);
+    assert.equal(row["outcome"], "booked");
+    assert.equal(row["agent_version"], 4);
+  });
+
+  test("reschedule: the caller's booking is moved through the ownership guard; nothing new is booked", async () => {
+    const w = world({
+      tools: ["check_calendar_availability", "book_appointment", "reschedule_appointment"],
+      bookings: [
+        {
+          id: "bk-mine",
+          start_at: at(TOMORROW, "11:00"),
+          end_at: at(TOMORROW, "12:30"),
+          service_id: "svc-root-canal",
+          service_name: "Root Canal Treatment",
+          customer_phone: "+919876543210",
+        },
+        {
+          id: "bk-other",
+          start_at: at(TOMORROW, "13:30"),
+          end_at: at(TOMORROW, "14:00"),
+          service_id: "svc-cleaning",
+          service_name: "Teeth Cleaning",
+          customer_phone: "+919999999999",
+        },
+      ],
+    });
+    const c = await open(w, "SCL_e2e_rs");
+    assert.deepEqual(c.say("నా అపాయింట్మెంట్ టైం మార్చాలి", "te-IN"), { kind: "find_bookings" });
+    assert.match(
+      await c.run("find_my_bookings"),
+      /^FOUND: Root Canal Treatment/,
+      "only the caller's own booking",
+    );
+    c.say("రేపు సాయంత్రం 4 గంటలకు", "te-IN");
+    await c.run("check_availability");
+    assert.equal(
+      w.store.executed.find((e) => e.name === "check_calendar_availability")!.input[
+        "durationMinutes"
+      ],
+      90,
+    );
+    if (nextStep(c.d.state).kind === "offer_slots") {
+      c.spoken();
+      c.say("4 PM", "te-IN");
+    }
+    c.spoken();
+    c.say("అవును", "te-IN");
+    assert.match(await c.run("reschedule_appointment"), /^MOVED/);
+    assert.equal(
+      w.store.bookings.find((b) => b["id"] === "bk-mine")!["start_at"],
+      at(TOMORROW, "16:00"),
+    );
+    assert.equal(w.store.executed.filter((e) => e.name === "book_appointment").length, 0);
+    // the other customer's booking is untouchable even by id
+    const r = await runSessionTool(w.deps, c.d.callId, "reschedule_appointment", {
+      bookingId: "bk-other",
+      newStartIso: at(TOMORROW, "16:00"),
+      newEndIso: at(TOMORROW, "16:30"),
+    });
+    assert.ok(r.ok && r.isError);
+    assert.equal(
+      w.store.bookings.find((b) => b["id"] === "bk-other")!["start_at"],
+      at(TOMORROW, "13:30"),
+    );
+  });
+
+  test("payment-required: a priced service is held and a link is sent; the agent never says confirmed", async () => {
+    const w = world({
+      tools: [
+        "check_calendar_availability",
+        "book_appointment",
+        "create_payment_required_booking",
+        "request_payment",
+      ],
+    });
+    const c = await open(w, "SCL_e2e_pay");
+    c.say("teeth cleaning tomorrow at 4 PM, my name is Dhanush", "en-IN");
+    await c.run("check_availability");
+    if (nextStep(c.d.state).kind === "offer_slots") {
+      c.spoken();
+      c.say("4 PM", "en-IN");
+    }
+    while (["confirm_caller_id", "final_confirmation", "ask"].includes(nextStep(c.d.state).kind)) {
+      const k = nextStep(c.d.state);
+      c.spoken();
+      c.say(k.kind === "ask" ? "Dhanush" : "yes", "en-IN");
+    }
+    assert.match(await c.run("book_appointment"), /^PAYMENT_PENDING/);
+    assert.equal(c.d.state.booking.status, "payment_pending");
+    assert.deepEqual(
+      w.store.executed
+        .filter((e) => e.name !== "check_calendar_availability")
+        .map((e) => [e.name, e.input["amountMinorUnits"] ?? null]),
+      [
+        ["create_payment_required_booking", null],
+        ["request_payment", 50000],
+      ],
+    );
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Crash-safe transcript: checkpoints during the call                  */
+/* ------------------------------------------------------------------ */
+
+describe("transcript checkpoints: partial transcripts survive crashes; nothing duplicated or reordered", () => {
+  const T0 = Date.UTC(2026, 10, 7, 5, 0, 0);
+  const turnsFrom = (start: number, n: number, tag: string) =>
+    Array.from({ length: n }, (_, i) => ({
+      role: ((start + i) % 2 ? "user" : "assistant") as "user" | "assistant",
+      text: `${tag} ${start + i}`,
+      at: new Date(T0 + (start + i) * 1000).toISOString(),
+    }));
+  async function call(sip: string) {
+    const s = sessionDeps();
+    const r = await startSipSession(s.deps, {
+      sipCallId: sip,
+      roomName: `call-${sip}`,
+      calledNumber: PN_A.e164,
+      callerNumber: "+919876543210",
+      direction: "inbound",
+    });
+    assert.ok(r.allowed);
+    const row = () => s.db.tables["call_logs"]!.find((x) => x["id"] === r.callId)!;
+    const texts = () => ((row()["transcript"] ?? []) as { text: string }[]).map((t) => t.text);
+    const send = (o: {
+      segment?: string;
+      turns: ReturnType<typeof turnsFrom>;
+      checkpoint?: boolean;
+      roomName?: string;
+      sipCallId?: string;
+    }) =>
+      endSipSession(s.deps, {
+        callId: r.callId,
+        reason: o.checkpoint === false ? "caller_hangup" : "checkpoint",
+        roomName: o.roomName ?? `call-${sip}`,
+        sipCallId: o.sipCallId ?? sip,
+        transcript: o.turns,
+        language: "te-IN",
+        ...(o.segment ? { segment: o.segment } : {}),
+        ...(o.checkpoint === false ? {} : { checkpoint: true }),
+      });
+    return { ...s, callId: r.callId, row, texts, send };
+  }
+
+  test("a checkpoint stores the partial transcript and changes nothing else about the call", async () => {
+    const c = await call("SCL_cp1");
+    const before = structuredClone(c.row());
+    assert.deepEqual(await c.send({ segment: "AJ_1", turns: turnsFrom(0, 4, "a") }), { ok: true });
+    assert.deepEqual(c.texts(), ["a 0", "a 1", "a 2", "a 3"]);
+    assert.equal(c.row()["summary"], "4 turns · te-IN");
+    for (const k of ["status", "ended_at", "outcome", "failure_reason", "provider_metadata"])
+      assert.deepEqual(c.row()[k], before[k], k);
+  });
+  test("agent crash: the last checkpoint is what the dashboard shows (no final report needed)", async () => {
+    const c = await call("SCL_cp2");
+    await c.send({ segment: "AJ_1", turns: turnsFrom(0, 2, "a") });
+    await c.send({ segment: "AJ_1", turns: turnsFrom(0, 6, "a") });
+    // process dies here: no session-end
+    assert.equal(c.texts().length, 6);
+  });
+  test("retries, duplicates and out-of-order checkpoints never duplicate or lose turns", async () => {
+    const c = await call("SCL_cp3");
+    await c.send({ segment: "AJ_1", turns: turnsFrom(0, 6, "a") });
+    await c.send({ segment: "AJ_1", turns: turnsFrom(0, 6, "a") }); // retry
+    await c.send({ segment: "AJ_1", turns: turnsFrom(0, 4, "a") }); // late, older checkpoint
+    assert.deepEqual(c.texts(), ["a 0", "a 1", "a 2", "a 3", "a 4", "a 5"]);
+  });
+  test("final reconciliation: the end report completes the checkpointed segment", async () => {
+    const c = await call("SCL_cp4");
+    await c.send({ segment: "AJ_1", turns: turnsFrom(0, 4, "a") });
+    await c.send({ segment: "AJ_1", turns: turnsFrom(0, 9, "a"), checkpoint: false });
+    assert.equal(c.texts().length, 9);
+    assert.equal(new Set(c.texts()).size, 9, "no duplicates");
+    // the second end report (process shutdown) with the same turns changes nothing
+    await c.send({ segment: "AJ_1", turns: turnsFrom(0, 9, "a"), checkpoint: false });
+    assert.equal(c.texts().length, 9);
+  });
+  test("reconnect: a new agent job adds its segment; the crashed job's turns stay, in time order", async () => {
+    const c = await call("SCL_cp5");
+    await c.send({ segment: "AJ_old", turns: turnsFrom(0, 4, "old") });
+    // the replacement job starts its own history (shorter than what is stored)
+    await c.send({ segment: "AJ_new", turns: turnsFrom(10, 2, "new") });
+    await c.send({ segment: "AJ_new", turns: turnsFrom(10, 5, "new"), checkpoint: false });
+    assert.deepEqual(c.texts(), [
+      "old 0",
+      "old 1",
+      "old 2",
+      "old 3",
+      "new 10",
+      "new 11",
+      "new 12",
+      "new 13",
+      "new 14",
+    ]);
+  });
+  test("identity: a checkpoint needs both the room and the SIP call id, and both must match", async () => {
+    const c = await call("SCL_cp6");
+    assert.deepEqual(
+      await endSipSession(c.deps, {
+        callId: c.callId,
+        reason: "checkpoint",
+        checkpoint: true,
+        roomName: "call-SCL_cp6",
+        transcript: turnsFrom(0, 2, "x"),
+      }),
+      { ok: false, reason: "binding_mismatch" },
+    );
+    assert.deepEqual(
+      await c.send({ segment: "AJ_1", turns: turnsFrom(0, 2, "x"), roomName: "call-other" }),
+      { ok: false, reason: "binding_mismatch" },
+    );
+    assert.deepEqual(
+      await c.send({ segment: "AJ_1", turns: turnsFrom(0, 2, "x"), sipCallId: "SCL_other" }),
+      { ok: false, reason: "binding_mismatch" },
+    );
+    assert.equal(c.row()["transcript"] ?? null, null);
+  });
+  test("HTTP: checkpoints are signed requests; a malformed segment id is rejected", async () => {
+    const c = await call("SCL_cp7");
+    const h = httpDeps(c.deps, c.db);
+    const send = async (segment: string, nonce: string) =>
+      handleSessionEnd(
+        await signed(
+          "/api/internal/voice-agent/session-end",
+          {
+            callId: c.callId,
+            reason: "checkpoint",
+            checkpoint: true,
+            segment,
+            roomName: "call-SCL_cp7",
+            sipCallId: "SCL_cp7",
+            transcript: turnsFrom(0, 2, "h"),
+          },
+          { nonce },
+        ),
+        h,
+      );
+    assert.equal((await send("AJ/../x", "nonce-cp-bad-aaaaaaaa")).status, 400);
+    assert.equal((await send("AJ_abc123", "nonce-cp-ok-aaaaaaaaa")).status, 200);
+    assert.equal((c.row()["transcript"] as unknown[]).length, 2);
+  });
+  test("mergeTranscriptSegment: equal timestamps keep each segment's own order", () => {
+    const at = new Date(T0).toISOString();
+    const merged = mergeTranscriptSegment([], "S", [
+      { role: "assistant", text: "first", at },
+      { role: "user", text: "second", at },
+    ])!;
+    assert.deepEqual(
+      merged.map((t) => t.text),
+      ["first", "second"],
+    );
+    assert.equal(
+      mergeTranscriptSegment(merged, "S", [{ role: "assistant", text: "first", at }]),
+      null,
+      "shorter: no change",
+    );
+  });
+});
+
+describe("E2E (simulated): transcript checkpoints over the real signed API survive an agent crash", () => {
+  test("job A checkpoints then dies; job B reconnects, finishes; the dashboard row has both, once each, in order", async () => {
+    const NOW_MS = 1_793_600_000 * 1000;
+    const s = sessionDeps();
+    const h = httpDeps(s.deps, s.db);
+    const fetchImpl = (async (url: string, init: RequestInit) =>
+      handleSessionEnd(new Request(url, init), h)) as typeof fetch;
+    const client = new KlyroClient({
+      baseUrl: "https://klyro.example",
+      secret: SECRET,
+      fetchImpl,
+      now: () => NOW_MS,
+      retries: 0,
+    });
+    const r = await startSipSession(s.deps, {
+      sipCallId: "SCL_crash",
+      roomName: "call-SCL_crash",
+      calledNumber: PN_A.e164,
+      callerNumber: "+919876543210",
+      direction: "inbound",
+    });
+    assert.ok(r.allowed);
+    const binding = { roomName: "call-SCL_crash", sipCallId: "SCL_crash" };
+    const turn = (i: number, text: string) => ({
+      role: (i % 2 ? "user" : "assistant") as "user" | "assistant",
+      text,
+      at: new Date(NOW_MS + i * 1000).toISOString(),
+    });
+    // job A: two checkpoints (the second a superset), then the process dies
+    await checkpointTranscript(client, {
+      callId: r.callId,
+      binding,
+      segment: "AJ_a",
+      language: "te-IN",
+      transcript: [turn(0, "నమస్కారం"), turn(1, "టీత్ క్లీనింగ్")],
+    });
+    await checkpointTranscript(client, {
+      callId: r.callId,
+      binding,
+      segment: "AJ_a",
+      language: "te-IN",
+      transcript: [turn(0, "నమస్కారం"), turn(1, "టీత్ క్లీనింగ్"), turn(2, "రేపు 1:30 ఖాళీ")],
+    });
+    const row = () => s.db.tables["call_logs"]!.find((x) => x["id"] === r.callId)!;
+    assert.equal((row()["transcript"] as unknown[]).length, 3, "survives the crash");
+    // job B (same call): its own history, final report
+    const state = newConversation({ callId: r.callId, callerId: null, primaryLanguage: "te-IN" });
+    await reportEnd(
+      client,
+      r.callId,
+      "caller_hangup",
+      state,
+      new CallTelemetry(
+        { callId: r.callId, sipCallId: "SCL_crash", room: "call-SCL_crash" },
+        () => undefined,
+      ),
+      binding,
+      [turn(10, "హలో"), turn(11, "1:30 బుక్ చేయండి")],
+      "AJ_b",
+    );
+    const texts = (row()["transcript"] as { text: string }[]).map((t) => t.text);
+    assert.deepEqual(texts, [
+      "నమస్కారం",
+      "టీత్ క్లీనింగ్",
+      "రేపు 1:30 ఖాళీ",
+      "హలో",
+      "1:30 బుక్ చేయండి",
+    ]);
+    assert.equal(row()["summary"], "5 turns · te-IN");
   });
 });

@@ -12,10 +12,22 @@
  */
 import {
   asciiDigits,
+  explicitTimeAnyLanguage,
   isCorrection as lexiconIsCorrection,
   parseNameIntroduction,
+  periodAnyLanguage,
   spokenDigitsToNumerals,
 } from "../../../../src/lib/voice-intent-lexicon.ts";
+import {
+  normalizeVoiceLanguageCode,
+  textLanguageEvidence,
+  type VoiceLanguageCode,
+} from "../../../../src/lib/voice-languages.ts";
+import { resolveServiceFromText } from "../../../../src/lib/service-matching.ts";
+import {
+  callerClosingIntentAnyLanguage,
+  confirmationAnswerAnyLanguage,
+} from "../../../../src/lib/voice-call-outcomes.ts";
 import {
   calendarSpans,
   canonicalTimeText,
@@ -24,7 +36,8 @@ import {
   readTimeDetailed,
 } from "./datetime.ts";
 
-export type LanguageCode = "en-IN" | "hi-IN" | "te-IN";
+/** The production runtime's 11 voice languages (src/lib/voice-languages.ts). */
+export type LanguageCode = VoiceLanguageCode;
 export type Certainty = "explicit" | "inferred" | "uncertain";
 
 /** A time the caller asked for. `after`/`before` are constraints, not a slot. */
@@ -83,6 +96,10 @@ export interface ServiceRow {
 
 export interface Reading {
   text: string;
+  /** The transcript as STT produced it (language evidence works on the original script). */
+  rawText: string;
+  /** STT's own language label for this utterance, when it gave one. */
+  sttLanguage: string | null;
   language: LanguageCode | null;
   /** A transcript that carries no content (noise, filler, an empty final). */
   noise: boolean;
@@ -107,6 +124,13 @@ export interface Reading {
   /** The caller tried to give a date that cannot be used ("31 February", "last Monday"); why. */
   dateUnclear: string | null;
   services: ServiceRow[];
+  /**
+   * How the service was found (logged as this enum only, never the words):
+   * exact = a configured name or alias said verbatim; fuzzy = the
+   * production matcher (src/lib/service-matching.ts) found one service;
+   * ambiguous = several fit equally (the caller is asked which); none.
+   */
+  serviceMatch: ServiceMatchKind;
   name: string | null;
   phoneDigits: string | null;
   /** "which one is free?", "ఏది free gaa undi?", "कौन सा खाली है?": a question for the calendar. */
@@ -300,6 +324,43 @@ function normalize(text: string): string {
   return spokenDigitsToNumerals(shielded).replaceAll(CLOCK_COLON, ":").replace(/\s+/g, " ").trim();
 }
 
+export type ServiceMatchKind = "exact" | "fuzzy" | "ambiguous" | "none";
+
+/**
+ * The services the caller named. A configured name or alias said verbatim
+ * wins (with negation handling); otherwise the production runtime's matcher
+ * (src/lib/service-matching.ts: stems, synonyms, Indian-script loanwords)
+ * resolves natural phrasing ("clean my teeth", "టీత్ క్లీనింగ్", "root
+ * canal") onto the business's own rows. It never invents a service; a tie
+ * returns every tied row so the caller is asked which one.
+ *
+ * `fuzzy: false` limits matching to verbatim names (used once a service is
+ * settled, so a passing mention of another treatment never replaces it).
+ */
+export function resolveServices(
+  text: string,
+  catalog: ServiceRow[],
+  opts: { fuzzy?: boolean } = {},
+): { rows: ServiceRow[]; kind: ServiceMatchKind } {
+  const exact = matchServices(text, catalog);
+  if (exact.length) return { rows: exact, kind: "exact" };
+  if (opts.fuzzy === false || !catalog.length) return { rows: [], kind: "none" };
+  const byId = new Map(catalog.map((s) => [s.id, s]));
+  const result = resolveServiceFromText(
+    catalog.map((s) => ({ id: s.id, name: s.name, duration_minutes: s.durationMinutes })),
+    text,
+  );
+  if (result.kind === "match") {
+    const row = byId.get(result.row.id);
+    return row ? { rows: [row], kind: "fuzzy" } : { rows: [], kind: "none" };
+  }
+  if (result.kind === "ambiguous") {
+    const rows = result.candidates.map((c) => byId.get(c.id)).filter((r): r is ServiceRow => !!r);
+    return rows.length > 1 ? { rows, kind: "ambiguous" } : { rows: [], kind: "none" };
+  }
+  return { rows: [], kind: "none" };
+}
+
 export function matchServices(text: string, catalog: ServiceRow[]): ServiceRow[] {
   const lower = text.toLowerCase();
   const hits = catalog
@@ -328,19 +389,29 @@ export function matchServices(text: string, catalog: ServiceRow[]): ServiceRow[]
   return (kept.length ? kept : hits).sort((a, b) => a.idx - b.idx).map((h) => h.s);
 }
 
+/**
+ * The language a piece of text is in: its script or romanized markers
+ * (the production rule, src/lib/voice-languages.ts textLanguageEvidence),
+ * then STT's own label, then English for Latin text. Null when nothing
+ * shows a language. Used for the caller's words and for the model's reply.
+ */
 export function detectLanguage(text: string, sttLanguage: string | null): LanguageCode | null {
-  if (/[ఀ-౿]/.test(text)) return "te-IN";
-  if (/[ऀ-ॿ]/.test(text)) return "hi-IN";
-  const s = (sttLanguage ?? "").toLowerCase();
-  if (s.startsWith("te")) return "te-IN";
-  if (s.startsWith("hi")) return "hi-IN";
+  const evidence = textLanguageEvidence(text, sttLanguage ?? undefined);
+  if (evidence) return evidence.code;
+  const labelled = normalizeVoiceLanguageCode(sttLanguage);
+  if (labelled) return labelled;
   if (/[a-z]/i.test(text)) return "en-IN";
   return null;
 }
 
 export function readUtterance(
   rawText: string,
-  opts: { catalog: ServiceRow[]; sttLanguage?: string | null },
+  opts: {
+    catalog: ServiceRow[];
+    sttLanguage?: string | null;
+    /** Natural-language service matching (default on); see resolveServices. */
+    fuzzyServices?: boolean;
+  },
 ): Reading {
   const text = normalize(rawText);
   const noise = text.length === 0 || NOISE.test(text);
@@ -348,6 +419,8 @@ export function readUtterance(
   if (noise) {
     return {
       text,
+      rawText,
+      sttLanguage: opts.sttLanguage ?? null,
       language,
       noise,
       affirm: false,
@@ -359,6 +432,7 @@ export function readUtterance(
       timeUnclear: null,
       dateUnclear: null,
       services: [],
+      serviceMatch: "none",
       name: null,
       phoneDigits: null,
       asksAvailability: false,
@@ -366,7 +440,11 @@ export function readUtterance(
       closing: false,
     };
   }
+  // A short yes/no in any of the 11 languages (production lexicon), on top
+  // of the English/Hindi/Telugu patterns below.
+  const anyLanguageAnswer = confirmationAnswerAnyLanguage(rawText);
   const affirm =
+    anyLanguageAnswer === "yes" ||
     AFFIRM.test(text) ||
     (AFFIRM_LEAD.test(text) &&
       !CORRECTION.test(text) &&
@@ -375,7 +453,10 @@ export function readUtterance(
     /^(?:no (?:problem|worries|issue)|koi baat nahi|कोई बात नहीं|పర్వాలేదు|parvaledu)\b/i.test(
       text,
     );
-  const deny = !affirm && !notADenial && (DENY.test(text) || DENY_ANYWHERE.test(text));
+  const deny =
+    !affirm &&
+    !notADenial &&
+    (anyLanguageAnswer === "no" || DENY.test(text) || DENY_ANYWHERE.test(text));
   const correction =
     CORRECTION.test(text) || lexiconIsCorrection(text) || (deny && text.split(/\s+/).length > 1);
   const intent = INTENTS.find(([, re]) => re.test(text))?.[0] ?? null;
@@ -385,13 +466,44 @@ export function readUtterance(
   const timeRead = /\d{7,}/.test(text.replace(/[\s-]/g, ""))
     ? { reading: null, unclear: null }
     : readTimeDetailed(text, calendarSpans(canonicalTimeText(text)));
-  const time = timeRead.reading;
+  // Other languages: the production lexicon's clock and period readers
+  // ("4 மணிக்கு", "সন্ধ্যায়"), used only when the reader above found nothing.
+  const anyLanguageTime =
+    timeRead.reading || timeRead.unclear || /\d{7,}/.test(text.replace(/[\s-]/g, ""))
+      ? null
+      : explicitTimeAnyLanguage(rawText);
+  const anyLanguagePeriod =
+    timeRead.reading || timeRead.unclear || anyLanguageTime ? null : periodAnyLanguage(rawText);
+  const time: TimeReading | null =
+    timeRead.reading ??
+    (anyLanguageTime
+      ? {
+          spec: { kind: "exact", hhmm: anyLanguageTime },
+          certainty: "explicit",
+          alternatives: [],
+          evidence: rawText,
+        }
+      : anyLanguagePeriod
+        ? {
+            spec: { kind: "period", period: anyLanguagePeriod },
+            certainty: "explicit",
+            alternatives: [],
+            evidence: rawText,
+          }
+        : null);
   const date = dateRead.date;
   const intro = parseNameIntroduction(text);
+  // Fuzzy matching runs on the raw transcript (Indian-script loanwords) and
+  // is allowed while the service is open or when the caller corrects it.
+  const serviceRead = resolveServices(rawText, opts.catalog, {
+    fuzzy: opts.fuzzyServices !== false || correction,
+  });
   const digits = text.replace(/[^\d]/g, "");
   const phoneDigits = digits.length >= 10 ? digits.slice(-10) : null;
   return {
     text,
+    rawText,
+    sttLanguage: opts.sttLanguage ?? null,
     language,
     noise,
     affirm,
@@ -402,11 +514,14 @@ export function readUtterance(
     date,
     timeUnclear: time ? null : timeRead.unclear,
     dateUnclear: date ? null : dateRead.unclear,
-    services: matchServices(text, opts.catalog),
+    services: serviceRead.rows,
+    serviceMatch: serviceRead.kind,
     name: intro && !intro.rejected ? intro.name : null,
     phoneDigits,
     asksAvailability: ASKS_AVAILABILITY.test(text),
     defers: DEFERS.test(text),
-    closing: CLOSING.test(text),
+    closing:
+      CLOSING.test(text) ||
+      callerClosingIntentAnyLanguage(rawText, { awaitingAnythingElse: false }) !== null,
   };
 }

@@ -1,7 +1,8 @@
 # ClickAI voice agent (LiveKit Agents worker). Build from the REPOSITORY ROOT:
 #   docker build -f services/voice-agent/Dockerfile -t clickai-voice-agent:<git-sha> .
-# The agent reuses two pure modules from the app (src/lib/voice-intent-lexicon.ts,
-# src/lib/voice-languages.ts), copied below at the same relative paths.
+# The agent reuses pure, dependency-free modules from the app (src/lib/...),
+# copied below at the same relative paths; tests/shared-modules.spec.ts checks
+# that every module the agent imports is in that COPY list.
 #
 # Base image: the official Docker Hub node image, pinned by digest (multi-arch
 # index, verified 2026-11-02 to be identical on Docker Hub and on
@@ -55,7 +56,12 @@ COPY --from=deps /app/services/voice-agent/node_modules services/voice-agent/nod
 COPY services/voice-agent/package.json services/voice-agent/tsconfig.json services/voice-agent/
 COPY services/voice-agent/src services/voice-agent/src
 COPY services/voice-agent/deploy/verify-models.mjs services/voice-agent/deploy/
-COPY src/lib/voice-intent-lexicon.ts src/lib/voice-languages.ts src/lib/
+# Pure, dependency-free modules shared with the production runtime (the
+# agent imports them by relative path; tests/shared-modules.spec.ts checks
+# this list against every such import).
+COPY src/lib/voice-intent-lexicon.ts src/lib/voice-languages.ts src/lib/service-matching.ts \
+     src/lib/voice-call-outcomes.ts src/lib/voice-fallback-messages.ts \
+     src/lib/call-lifecycle-policy.ts src/lib/voice-greeting.ts src/lib/
 RUN chown -R node:node /home/node/.cache
 USER node
 WORKDIR /app/services/voice-agent

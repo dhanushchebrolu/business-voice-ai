@@ -220,7 +220,10 @@ describe("regression: Smile Dental production call (2026-10-29)", () => {
     spoken(s);
     step("हाँ", "hi-IN");
     assert.deepEqual(readyToBook(s), { ok: true });
-    assert.equal(s.language.switches, 3);
+    // English -> Telugu -> Hindi. The one-word "Cleaning" no longer switches
+    // a Telugu call to English: the production rule (voice-languages.ts
+    // nextCallLanguage) never lets a short answer move an established language.
+    assert.equal(s.language.switches, 2);
     assert.equal(trace.length, 9);
   });
 });

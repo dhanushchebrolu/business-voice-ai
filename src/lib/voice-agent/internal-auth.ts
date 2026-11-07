@@ -124,6 +124,8 @@ export async function verifySignedRequest(p: {
   header: (name: string) => string | null;
   nowSeconds?: number;
   claimNonce: (keyId: KeyId, nonce: string, timestamp: number) => Promise<boolean>;
+  /** The route's body limit (default MAX_BODY_BYTES); session-end allows more (transcript). */
+  maxBodyBytes?: number;
 }): Promise<VerifyResult> {
   if (!p.secrets.current) return { ok: false, reason: "not_configured" };
   const keyId = p.header("x-clickai-key-id");
@@ -138,7 +140,8 @@ export async function verifySignedRequest(p: {
   const now = p.nowSeconds ?? Math.floor(Date.now() / 1000);
   if (Math.abs(now - Number(ts)) > MAX_SKEW_SECONDS) return { ok: false, reason: "stale" };
   if (!NONCE_RE.test(nonce)) return { ok: false, reason: "bad_nonce" };
-  if (enc.encode(p.body).length > MAX_BODY_BYTES) return { ok: false, reason: "body_too_large" };
+  if (enc.encode(p.body).length > (p.maxBodyBytes ?? MAX_BODY_BYTES))
+    return { ok: false, reason: "body_too_large" };
   if (!signature.startsWith("v1=")) return { ok: false, reason: "bad_signature" };
   const expected = await hmacHex(
     secret,

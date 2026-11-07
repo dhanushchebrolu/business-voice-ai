@@ -143,9 +143,21 @@ export type Config = z.infer<typeof Env>;
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
   const r = Env.safeParse(env);
-  if (!r.success) {
-    // Names and messages only: never echo values (they may be secrets).
-    const problems = r.error.issues.map((i) => `${i.path.join(".") || "config"}: ${i.message}`);
+  // Names and messages only: never echo values (they may be secrets).
+  const problems = r.success
+    ? []
+    : r.error.issues.map((i) => `${i.path.join(".") || "config"}: ${i.message}`);
+  // The LLM provider is chosen explicitly outside development: the schema's
+  // default ("anthropic") exists for local runs and older setups, and must
+  // never be how a staging or production agent ends up on Anthropic. Listed
+  // first, with any other problem, so the cause is never hidden.
+  const appEnv = env["APP_ENV"]?.trim() || "development";
+  if (appEnv !== "development" && !env["LLM_PROVIDER"]?.trim()) {
+    problems.unshift(
+      "LLM_PROVIDER: must be set explicitly outside development (sarvam or anthropic)",
+    );
+  }
+  if (!r.success || problems.length) {
     throw new Error(`invalid configuration:\n  ${problems.join("\n  ")}`);
   }
   return r.data;

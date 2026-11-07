@@ -16,6 +16,11 @@
     "tests/**/*.ts",
     "../../src/lib/voice-intent-lexicon.ts",
     "../../src/lib/voice-languages.ts",
+    "../../src/lib/service-matching.ts",
+    "../../src/lib/voice-call-outcomes.ts",
+    "../../src/lib/voice-fallback-messages.ts",
+    "../../src/lib/call-lifecycle-policy.ts",
+    "../../src/lib/voice-greeting.ts",
     "deploy/**/*.ts"
   ]
 }

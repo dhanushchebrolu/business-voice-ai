@@ -10,7 +10,10 @@
  *   - is a second question in the same reply (one question at a time);
  *   - asks anything at all while saying goodbye (noQuestions).
  */
-import { asciiDigits } from "../../../../src/lib/voice-intent-lexicon.ts";
+import { asciiDigits, MISSING_DETAIL_QUESTION } from "../../../../src/lib/voice-intent-lexicon.ts";
+import { callOutcomeLine } from "../../../../src/lib/voice-call-outcomes.ts";
+import { localizedFallback } from "../../../../src/lib/voice-fallback-messages.ts";
+import { VOICE_LANGUAGE_CODES } from "../../../../src/lib/voice-languages.ts";
 import { spokenTime, type ConversationState } from "./state.ts";
 import { NUMBER_WORDS, type LanguageCode } from "./understanding.ts";
 
@@ -363,7 +366,39 @@ type Phrases = Record<
   string
 >;
 
-export const PHRASES: Record<LanguageCode, Phrases> = {
+/** The last sentence of a production line ("Hello, thanks for calling X. How can I help?" -> "How can I help?"). */
+function lastSentence(text: string): string {
+  const parts = text.match(/[^.!?।]+[.!?।]+/g) ?? [text];
+  return (parts[parts.length - 1] ?? text).trim();
+}
+
+/**
+ * The fixed lines for the languages beyond English, Hindi and Telugu, taken
+ * from the production runtime's own localized tables (never translated
+ * here): the missing-detail questions (voice-intent-lexicon.ts), the
+ * booking outcome lines (voice-call-outcomes.ts) and the fixed call lines
+ * (voice-fallback-messages.ts).
+ */
+function productionPhrases(language: Exclude<LanguageCode, "en-IN">): Phrases {
+  const q = MISSING_DETAIL_QUESTION[language];
+  const line = (key: Parameters<typeof callOutcomeLine>[1]) => callOutcomeLine(language, key) ?? "";
+  return {
+    intent: lastSentence(localizedFallback("defaultGreeting", language, "")),
+    service: q.service,
+    date: q.date,
+    time: q.time,
+    customerName: q.name,
+    phone: q.phone,
+    notYetBooked: line("notBookedYet"),
+    checking: localizedFallback("checkingNow", language),
+    bookingFailed: line("bookingFailed"),
+    slotTaken: line("bookingSlotTaken"),
+    goodbye: lastSentence(localizedFallback("farewell", language, "")),
+    noneFree: line("slotUnavailableNoneThatDay"),
+  };
+}
+
+const CORE_PHRASES: Record<"en-IN" | "hi-IN" | "te-IN", Phrases> = {
   "en-IN": {
     intent: "How can I help you today?",
     service: "Which service would you like to book?",
@@ -407,6 +442,16 @@ export const PHRASES: Record<LanguageCode, Phrases> = {
     noneFree: "ఆ సమయంలో ఏదీ ఖాళీగా లేదు. వేరే రోజు లేదా సమయం చెప్తారా?",
   },
 };
+
+/** Fixed lines in every supported language: hand-written for en/hi/te, production lines for the rest. */
+export const PHRASES: Record<LanguageCode, Phrases> = Object.fromEntries(
+  VOICE_LANGUAGE_CODES.map((code) => [
+    code,
+    code === "en-IN" || code === "hi-IN" || code === "te-IN"
+      ? CORE_PHRASES[code]
+      : productionPhrases(code),
+  ]),
+) as Record<LanguageCode, Phrases>;
 
 export function slotList(s: ConversationState): string {
   return s.booking.offered.map((o) => spokenTime(o.hhmm)).join(", ");

@@ -28,6 +28,15 @@ import {
   type ConversationState,
 } from "../conversation/state.ts";
 import type { LanguageCode, ServiceRow } from "../conversation/understanding.ts";
+import {
+  localizedFallback,
+  type FallbackMessageKey,
+} from "../../../../src/lib/voice-fallback-messages.ts";
+import { personalizeGreeting } from "../../../../src/lib/voice-greeting.ts";
+import {
+  resolvePrimaryLanguage,
+  VOICE_LANGUAGE_CODES,
+} from "../../../../src/lib/voice-languages.ts";
 import { CallTelemetry } from "../runtime/telemetry.ts";
 import { ReceptionistAgent } from "./receptionist.ts";
 
@@ -69,19 +78,49 @@ export interface CallCleanupOptions {
 export const APOLOGY_TIMEOUT_MS = 6_000;
 export const DISCONNECT_BACKOFF_MS = [0, 1_000, 3_000, 8_000];
 
-const DENIED: Record<LanguageCode, string> = {
-  "en-IN": "Sorry, this number cannot take calls right now. Please try again later.",
-  "hi-IN": "क्षमा करें, यह नंबर अभी कॉल नहीं ले सकता। कृपया बाद में प्रयास करें।",
-  "te-IN": "క్షమించండి, ఈ నంబర్ ఇప్పుడు కాల్స్ తీసుకోలేదు. దయచేసి తర్వాత ప్రయత్నించండి.",
-};
-const UNAVAILABLE: Record<LanguageCode, string> = {
-  "en-IN": "Sorry, we are having a technical problem. Please call again in a few minutes.",
-  "hi-IN": "क्षमा करें, तकनीकी समस्या है। कृपया कुछ मिनट बाद फिर से कॉल करें।",
-  "te-IN": "క్షమించండి, సాంకేతిక సమస్య ఉంది. దయచేసి కొన్ని నిమిషాల తర్వాత మళ్ళీ కాల్ చేయండి.",
-};
+/**
+ * One fixed line per supported language: the hand-written English, Hindi
+ * and Telugu lines, and the production runtime's own line for the other
+ * languages (voice-fallback-messages.ts), never a translation made here.
+ */
+function everyLanguage(
+  core: Record<"en-IN" | "hi-IN" | "te-IN", string>,
+  production: FallbackMessageKey,
+): Record<LanguageCode, string> {
+  return Object.fromEntries(
+    VOICE_LANGUAGE_CODES.map((code) => [
+      code,
+      code === "en-IN" || code === "hi-IN" || code === "te-IN"
+        ? core[code]
+        : localizedFallback(production, code),
+    ]),
+  ) as Record<LanguageCode, string>;
+}
 
+const DENIED = everyLanguage(
+  {
+    "en-IN": "Sorry, this number cannot take calls right now. Please try again later.",
+    "hi-IN": "क्षमा करें, यह नंबर अभी कॉल नहीं ले सकता। कृपया बाद में प्रयास करें।",
+    "te-IN": "క్షమించండి, ఈ నంబర్ ఇప్పుడు కాల్స్ తీసుకోలేదు. దయచేసి తర్వాత ప్రయత్నించండి.",
+  },
+  "repeatedErrors",
+);
+const UNAVAILABLE = everyLanguage(
+  {
+    "en-IN": "Sorry, we are having a technical problem. Please call again in a few minutes.",
+    "hi-IN": "क्षमा करें, तकनीकी समस्या है। कृपया कुछ मिनट बाद फिर से कॉल करें।",
+    "te-IN": "క్షమించండి, సాంకేతిక సమస్య ఉంది. దయచేసి కొన్ని నిమిషాల తర్వాత మళ్ళీ కాల్ చేయండి.",
+  },
+  "repeatedErrors",
+);
+
+/**
+ * A configured language as one of the 11 (the production runtime's own
+ * resolution, voice-languages.ts): every supported language is kept; only
+ * a code outside the list falls back to English.
+ */
 export function asLanguage(code: string | null | undefined): LanguageCode {
-  return code?.startsWith("hi") ? "hi-IN" : code?.startsWith("te") ? "te-IN" : "en-IN";
+  return resolvePrimaryLanguage(code);
 }
 
 export type CallDecision =
@@ -169,10 +208,16 @@ export async function decideCall(
     state,
     business,
     backend: new KlyroBookingBackend(client, r.callId, b.timezone, r.tools),
-    greeting:
+    // The configured greeting (the production default when none is set),
+    // with a returning caller's first name exactly as the Worker runtime
+    // adds it (voice-greeting.ts).
+    greeting: personalizeGreeting(
       b.greetings[language] ??
-      b.greetings["en-IN"] ??
-      `Hello, thanks for calling ${b.name}. How can I help you today?`,
+        b.greetings["en-IN"] ??
+        localizedFallback("defaultGreeting", language, b.name),
+      r.callerFirstName ?? null,
+      language,
+    ),
     instructions: b.instructions,
     voiceId: b.voiceId,
     speakingPace: b.speakingPace,
@@ -370,20 +415,106 @@ export function attachCallGuards(p: {
   return { finished };
 }
 
-const PHRASE_STILL_THERE: Record<LanguageCode, string> = {
-  "en-IN": "Are you still there?",
-  "hi-IN": "क्या आप लाइन पर हैं?",
-  "te-IN": "మీరు లైన్‌లో ఉన్నారా?",
-};
-const PHRASE_GOODBYE: Record<LanguageCode, string> = {
-  "en-IN": "I can't hear you, so I'll end the call now. Please call back anytime. Goodbye.",
-  "hi-IN":
-    "आपकी आवाज़ नहीं आ रही, इसलिए मैं कॉल समाप्त कर रही हूँ। कृपया दोबारा कॉल करें। धन्यवाद।",
-  "te-IN":
-    "మీ మాట వినిపించడం లేదు, కాబట్టి కాల్ ముగిస్తున్నాను. దయచేసి మళ్ళీ కాల్ చేయండి. ధన్యవాదాలు.",
-};
+const PHRASE_STILL_THERE = everyLanguage(
+  {
+    "en-IN": "Are you still there?",
+    "hi-IN": "क्या आप लाइन पर हैं?",
+    "te-IN": "మీరు లైన్‌లో ఉన్నారా?",
+  },
+  "silencePrompt",
+);
+const PHRASE_GOODBYE = everyLanguage(
+  {
+    "en-IN": "I can't hear you, so I'll end the call now. Please call back anytime. Goodbye.",
+    "hi-IN":
+      "आपकी आवाज़ नहीं आ रही, इसलिए मैं कॉल समाप्त कर रही हूँ। कृपया दोबारा कॉल करें। धन्यवाद।",
+    "te-IN":
+      "మీ మాట వినిపించడం లేదు, కాబట్టి కాల్ ముగిస్తున్నాను. దయచేసి మళ్ళీ కాల్ చేయండి. ధన్యవాదాలు.",
+  },
+  "silenceHangup",
+);
 
-/** Step 4: tell klyro what happened (codes only), never the transcript. */
+/** One turn of the call transcript, in klyro's call_logs.transcript shape. */
+export interface TranscriptTurn {
+  role: "user" | "assistant";
+  text: string;
+  at: string;
+}
+/** The chat-history items the transcript is built from (LiveKit ChatContext items). */
+export interface HistoryItem {
+  type: string;
+  role?: string;
+  textContent?: string | undefined;
+  createdAt?: number;
+}
+/** klyro accepts session-end bodies up to 256 KiB (http.server.ts); the transcript stays well inside. */
+export const TRANSCRIPT_BUDGET_BYTES = 200 * 1024;
+export const MAX_TRANSCRIPT_TURNS = 400;
+
+/**
+ * The conversation as the caller heard it: caller and agent speech only, in
+ * order, with each turn's time. System instructions, the per-turn directive
+ * (never added to the history), tool calls and tool results are left out.
+ * An interrupted agent turn keeps the text LiveKit recorded for it. If the
+ * call is very long, turns are shortened (never dropped or invented) until
+ * the report fits klyro's limit.
+ */
+export function transcriptFrom(items: readonly HistoryItem[]): TranscriptTurn[] {
+  const turns: TranscriptTurn[] = [];
+  for (const it of items) {
+    if (it.type !== "message" || (it.role !== "user" && it.role !== "assistant")) continue;
+    const text = (it.textContent ?? "").replace(/\s+/g, " ").trim();
+    if (!text) continue;
+    const ms =
+      typeof it.createdAt === "number" && Number.isFinite(it.createdAt)
+        ? it.createdAt < 1e12
+          ? it.createdAt * 1000
+          : it.createdAt
+        : Date.now();
+    turns.push({ role: it.role, text, at: new Date(ms).toISOString() });
+  }
+  let kept = turns.slice(0, MAX_TRANSCRIPT_TURNS);
+  for (const cap of [4000, 1000, 400, 160]) {
+    kept = kept.map((t) =>
+      t.text.length > cap ? { ...t, text: `${t.text.slice(0, cap - 1)}…` } : t,
+    );
+    if (new TextEncoder().encode(JSON.stringify(kept)).length <= TRANSCRIPT_BUDGET_BYTES) break;
+  }
+  return kept;
+}
+
+/**
+ * A transcript checkpoint to klyro during the call (crash safety; see
+ * runtime/transcript-checkpoint.ts). Bound to the call's room and SIP id;
+ * klyro changes nothing but the transcript. Rejects on failure (retried).
+ */
+export async function checkpointTranscript(
+  client: KlyroClient,
+  p: {
+    callId: string;
+    binding: { roomName: string; sipCallId: string };
+    segment: string;
+    language: string;
+    transcript: TranscriptTurn[];
+  },
+): Promise<void> {
+  await endSession(client, {
+    callId: p.callId,
+    reason: "checkpoint",
+    checkpoint: true,
+    segment: p.segment,
+    language: p.language,
+    roomName: p.binding.roomName,
+    sipCallId: p.binding.sipCallId,
+    transcript: p.transcript,
+  });
+}
+
+/**
+ * Step 4: tell klyro what happened: outcome codes, the language, and the
+ * transcript (stored in call_logs for the calls dashboard, as the Worker
+ * runtime stores it). The summary is the Worker's own "<n> turns · <lang>".
+ */
 export async function reportEnd(
   client: KlyroClient | null,
   callId: string,
@@ -392,6 +523,9 @@ export async function reportEnd(
   telemetry: CallTelemetry,
   /** The call's room and sip.callID: klyro binds the report to the call (F1). */
   binding?: { roomName: string; sipCallId: string },
+  transcript?: TranscriptTurn[],
+  /** This agent job (LiveKit job id): the transcript segment checkpoints were stored under. */
+  segment?: string,
 ): Promise<void> {
   const outcome =
     state.booking.status === "confirmed"
@@ -399,7 +533,10 @@ export async function reportEnd(
       : state.booking.status === "held_pending_sync"
         ? "booked_pending_sync"
         : (state.intent?.value ?? "no_intent");
-  const summary = `intent=${state.intent?.value ?? "none"}; booking=${state.booking.status}; turns=${state.turn}; language=${state.language.current}; switches=${state.language.switches}`;
+  const turns = transcript?.length ?? 0;
+  const summary = turns
+    ? `${turns} turns · ${state.language.current}`
+    : "No conversation recorded.";
   telemetry.emit("call.ended", {
     reason,
     outcome,
@@ -415,6 +552,8 @@ export async function reportEnd(
     language: state.language.current,
     outcome,
     ...(binding ? { roomName: binding.roomName, sipCallId: binding.sipCallId } : {}),
+    ...(transcript ? { transcript } : {}),
+    ...(segment ? { segment } : {}),
   }).catch((e) =>
     telemetry.emit("provider.error", {
       provider: "klyro",

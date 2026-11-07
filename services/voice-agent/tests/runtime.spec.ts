@@ -18,7 +18,54 @@ const BASE = {
   KLYRO_BASE_URL: "https://klyro.example",
   VOICE_AGENT_HMAC_SECRET: "x".repeat(40),
   ANTHROPIC_API_KEY: "ak",
+  // Explicit: outside development the provider is never defaulted.
+  LLM_PROVIDER: "anthropic",
 };
+
+describe("configuration: the LLM provider is explicit and Sarvam is used when chosen", () => {
+  const { LLM_PROVIDER: _omit, ...noProvider } = BASE;
+  test("staging/production refuse to start without LLM_PROVIDER (never defaulted to Anthropic)", () => {
+    for (const APP_ENV of ["staging", "production"])
+      assert.throws(
+        () => loadConfig({ ...noProvider, APP_ENV }),
+        /LLM_PROVIDER: must be set explicitly/,
+      );
+  });
+  test("the missing provider is named even when other settings are also wrong", () => {
+    const { ANTHROPIC_API_KEY: _k, ...bare } = noProvider;
+    assert.throws(
+      () => loadConfig({ ...bare, APP_ENV: "production" }),
+      /LLM_PROVIDER: must be set explicitly/,
+    );
+  });
+  test("development still defaults (local runs)", () => {
+    assert.equal(loadConfig({ ...noProvider, APP_ENV: "development" }).LLM_PROVIDER, "anthropic");
+  });
+  test("the intended production configuration: Sarvam sarvam-105b-conversations, no Anthropic key needed", () => {
+    const c = loadConfig({
+      ...noProvider,
+      ANTHROPIC_API_KEY: undefined,
+      APP_ENV: "production",
+      LLM_PROVIDER: "sarvam",
+      SARVAM_LLM_MODEL: "sarvam-105b-conversations",
+    });
+    assert.equal(c.LLM_PROVIDER, "sarvam");
+    assert.equal(c.SARVAM_LLM_MODEL, "sarvam-105b-conversations");
+    assert.equal(c.ANTHROPIC_API_KEY, undefined);
+  });
+  test("Sarvam with a fallback LLM configured is refused (no silent fallback)", () => {
+    assert.throws(
+      () =>
+        loadConfig({
+          ...BASE,
+          APP_ENV: "production",
+          LLM_PROVIDER: "sarvam",
+          FALLBACK_LLM_BASE_URL: "https://x.example/v1",
+        }),
+      /no LLM fallback/,
+    );
+  });
+});
 
 describe("configuration", () => {
   test("valid production config loads with safe defaults", () => {

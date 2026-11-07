@@ -36,13 +36,16 @@ import {
   effectiveMaxCallSeconds,
   dialOutbound,
   parseOutboundDispatch,
+  checkpointTranscript,
   reportEnd,
+  transcriptFrom,
   type SipCallInfo,
 } from "./agent/call.ts";
 import { ReceptionistAgent } from "./agent/receptionist.ts";
 import { claimOutbound } from "./backend/klyro-backend.ts";
 import { KlyroClient } from "./backend/klyro-client.ts";
 import { loadConfig, type Config } from "./runtime/config.ts";
+import { TranscriptCheckpointer } from "./runtime/transcript-checkpoint.ts";
 import { activeJobsOf, captureAgentServer, installShutdownWatchdog } from "./runtime/shutdown.ts";
 import { CallTelemetry, maskPhone } from "./runtime/telemetry.ts";
 
@@ -268,7 +271,13 @@ export default defineAgent({
       backend: decision.backend,
       state: decision.state,
       businessInstructions: decision.instructions,
-      onTurn: ({ step, language }) => telemetry.emit("turn.state", { step: step.kind, language }),
+      onTurn: ({ step, language, serviceMatch }) =>
+        telemetry.emit("turn.state", {
+          step: step.kind,
+          language,
+          service_match: serviceMatch.kind,
+          service_candidates: serviceMatch.candidates,
+        }),
       onGuard: (removed) =>
         telemetry.emit("guard.removed", {
           count: removed.length,
@@ -341,15 +350,59 @@ export default defineAgent({
         },
       },
     });
+    // The transcript is read from the session's own history at the moment
+    // of each report; klyro merges it per job segment, keeping the longest.
+    const transcript = () => transcriptFrom(session.history.items as never);
+    // Crash safety: the transcript so far is checkpointed during the call
+    // (throttled), so an agent that dies mid-call still leaves it stored.
+    const segment = ctx.job.id;
+    const checkpoints = new TranscriptCheckpointer({
+      snapshot: transcript,
+      send: (turns) =>
+        checkpointTranscript(client, {
+          callId: decision.callId,
+          binding,
+          segment,
+          language: decision.state.language.current,
+          transcript: turns,
+        }),
+      onError: (message) =>
+        telemetry.emit("provider.error", {
+          provider: "klyro",
+          stage: "transcript_checkpoint",
+          error: message,
+        }),
+    });
+    session.on(voice.AgentSessionEventTypes.ConversationItemAdded, () => checkpoints.notify());
     ctx.addShutdownCallback(async () => {
-      await reportEnd(client, decision.callId, "shutdown", decision.state, telemetry, binding);
+      await checkpoints.close();
+      await reportEnd(
+        client,
+        decision.callId,
+        "shutdown",
+        decision.state,
+        telemetry,
+        binding,
+        transcript(),
+        segment,
+      );
     });
 
     await session.start({ agent, room: ctx.room });
     telemetry.emit("call.connected", { ms: Date.now() - joinedAt });
     session.say(decision.greeting, { allowInterruptions: true });
     const { reason } = await guards.finished;
-    await reportEnd(client, decision.callId, reason, decision.state, telemetry, binding);
+    await checkpoints.close();
+    await reportEnd(
+      client,
+      decision.callId,
+      reason,
+      decision.state,
+      telemetry,
+      binding,
+      transcript(),
+      segment,
+    );
   },
 });
 

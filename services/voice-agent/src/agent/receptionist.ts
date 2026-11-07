@@ -16,6 +16,8 @@ import {
   type TransformStreamDefaultController,
 } from "node:stream/web";
 import { llm, voice } from "@livekit/agents";
+import { VOICE_LANGUAGES } from "../../../../src/lib/voice-languages.ts";
+import { callOutcomeLine } from "../../../../src/lib/voice-call-outcomes.ts";
 import { z } from "zod";
 import type { BookingBackend, Slot } from "../backend/types.ts";
 import { PHRASES, ReplyGuard, slotList, type GuardRemoval } from "../conversation/guard.ts";
@@ -23,7 +25,11 @@ import {
   agentSaid,
   applyReading,
   bookingExists,
+  describeExistingBooking,
   isoDateIn,
+  readyToReschedule,
+  rescheduling,
+  selectRescheduleTarget,
   nextStep,
   readyForAvailability,
   requestProblem,
@@ -83,17 +89,35 @@ export interface ReceptionistDeps {
   state: ConversationState;
   /** Extra business instructions from klyro (buildAgentInstructions); facts only. */
   businessInstructions?: string;
-  onTurn?: (info: { step: NextStep; state: ConversationState; language: LanguageCode }) => void;
+  onTurn?: (info: {
+    step: NextStep;
+    state: ConversationState;
+    language: LanguageCode;
+    /** How this turn's service words resolved (enum and candidate count only; never the words). */
+    serviceMatch: { kind: string; candidates: number };
+  }) => void;
   /** Removed sentences (rule, exact text, reason) and the full report for this reply. */
   onGuard?: (removed: ReplyGuard["removed"], report: GuardReport) => void;
   onTool?: (info: { name: string; ok: boolean; ms: number; detail?: string }) => void;
 }
 
-const LANGUAGE_NAME: Record<LanguageCode, string> = {
-  "en-IN": "English",
-  "hi-IN": "Hindi",
-  "te-IN": "Telugu",
-};
+/** Language names as the production runtime names them (voice-languages.ts). */
+const LANGUAGE_NAME = Object.fromEntries(VOICE_LANGUAGES.map((l) => [l.code, l.name])) as Record<
+  LanguageCode,
+  string
+>;
+const SPOKEN_LANGUAGES = VOICE_LANGUAGES.map((l) => l.name).join(", ");
+
+/** The production runtime's own line for this situation in the caller's language, as a wording hint (non-English only). */
+function suggest(s: ConversationState, key: Parameters<typeof callOutcomeLine>[1]): string {
+  const target = s.reschedule.target;
+  const line = callOutcomeLine(s.language.current, key, {
+    ...(target ? { appointment: { service: target.serviceName, startIso: target.startIso } } : {}),
+    ...(s.date ? { date: s.date.value } : {}),
+    ...(s.booking.selected ? { time: s.booking.selected.hhmm } : {}),
+  });
+  return line ? ` Suggested wording: "${line}"` : "";
+}
 
 function instructionFor(step: NextStep, s: ConversationState): string {
   const p = PHRASES[s.language.current];
@@ -115,9 +139,48 @@ function instructionFor(step: NextStep, s: ConversationState): string {
     case "ask_alternative":
       return `The calendar has nothing free for what the caller asked${s.booking.checked ? ` (${s.booking.checked.time})` : ""}. Say so plainly, then ask for another day or time. Do not suggest any time yourself and do not say anything is free.`;
     case "final_confirmation":
-      return "Read back service, day, time, name and phone number once, then ask the caller to confirm. Do not say it is booked.";
+      return rescheduling(s) && s.reschedule.target
+        ? `Read back once: move their ${describeExistingBooking(s.reschedule.target)} to ${s.booking.selected ? `${s.date ? spokenDate(s.date.value) : "the new day"} at ${spokenTime(s.booking.selected.hhmm)}` : "the new time"}, then ask the caller to confirm. Do not say it is moved.${suggest(s, "rescheduleConfirm")}`
+        : "Read back service, day, time, name and phone number once, then ask the caller to confirm. Do not say it is booked.";
     case "book":
-      return "The caller confirmed. Call the book_appointment tool now. Do not say it is booked until the tool says so.";
+      return rescheduling(s)
+        ? "The caller confirmed. Call the reschedule_appointment tool now. Do not say it is moved until the tool says so; nothing new is booked."
+        : "The caller confirmed. Call the book_appointment tool now. Do not say it is booked until the tool says so.";
+    case "find_bookings":
+      return "The caller wants to change an existing appointment. Say one short line that you are looking it up, then call the find_my_bookings tool. Do not ask for the service, name or phone number.";
+    case "choose_booking":
+      return `The caller has these upcoming appointments: ${step.options.join("; ")}. Ask which one they want to move. Do not choose for them.${again("booking")}`;
+    case "reschedule_unavailable":
+      return (
+        {
+          no_caller_id:
+            "Their caller ID is not available, so their appointment cannot be found or changed on this call. Say so briefly and suggest calling from the number it was booked with, or contacting the clinic. Do not say anything was changed.",
+          not_found:
+            "No upcoming appointment was found for the number they are calling from. Say so briefly and offer to book a new one instead. Do not say anything was changed.",
+          lookup_failed:
+            "Their appointments could not be looked up just now. Apologise briefly and suggest trying again in a little while. Do not say anything was changed.",
+          not_allowed:
+            "Appointments cannot be changed on this line. Say so briefly and suggest contacting the clinic. Do not say anything was changed.",
+        }[step.why] +
+        suggest(
+          s,
+          step.why === "no_caller_id"
+            ? "rescheduleNeedsCallerNumber"
+            : step.why === "not_found"
+              ? "rescheduleNotFound"
+              : step.why === "lookup_failed"
+                ? "rescheduleLookupFailed"
+                : "rescheduleNotPossible",
+        )
+      );
+    case "reschedule_failed":
+      return `The appointment could not be moved (${s.reschedule.error ?? "error"}); it stays as it was. Say so plainly and suggest contacting the clinic. Do not say it was moved.${suggest(s, "rescheduleNotPossible")}`;
+    case "rescheduled":
+      if (s.bookingAnnounced)
+        return "The change was already announced. Answer only what the caller just said; do not repeat it.";
+      return step.pendingSync
+        ? "The appointment was moved in the system, but the clinic calendar is not updated yet: tell the caller it is changed and the clinic team will confirm it. Do not say it is fully confirmed."
+        : "The appointment was moved, confirmed by the system. Tell the caller the new day and time and ask if there is anything else.";
     case "confirm_leave":
       return "The caller sounds like they are finishing, but the booking is not done. Ask once, briefly: do they want to finish booking now, or leave it for now? Do not say anything is booked.";
     case "close":
@@ -134,6 +197,11 @@ function instructionFor(step: NextStep, s: ConversationState): string {
       if (s.booking.status === "held_pending_sync") {
         return "The booking is saved and the slot is held, but it is not fully confirmed yet: tell the caller it is saved and the clinic team will confirm it. Do not say it is confirmed.";
       }
+      if (s.booking.status === "payment_pending") {
+        return s.booking.paymentLinkSent
+          ? "This service needs payment before the booking is confirmed. The slot is held for them and a payment link has been sent to them on WhatsApp. Explain that the booking is confirmed only once the payment is received. Do not say it is booked or confirmed."
+          : "This service needs payment before the booking is confirmed. The slot is held, but the payment link could not be sent just now; the clinic team will send it. Explain that the booking is confirmed only once the payment is received. Do not say it is booked or confirmed.";
+      }
       return "The booking request is recorded but not confirmed yet. Tell the caller the team will confirm it. Do not say it is booked.";
   }
 }
@@ -145,12 +213,20 @@ export function directive(step: NextStep, s: ConversationState, ctx?: BusinessCo
     "",
     `NEXT STEP: ${instructionFor(step, s)}`,
     `Reply in ${LANGUAGE_NAME[s.language.current]}, the language the caller just used. Keep it short and natural for a phone call.`,
+    s.language.unsupportedHeard && !s.language.unsupportedExplained
+      ? `The caller may be speaking a language you cannot speak. First say briefly, in ${LANGUAGE_NAME[s.language.current]}, that you can speak ${SPOKEN_LANGUAGES}, and ask them to continue in one of those.`
+      : "",
     "Ask at most one question. Never repeat a question the caller already answered.",
     "Never invent prices, hours, services, free times, customer records, booking ids or confirmation status; only say what is in CALL STATE or a tool result.",
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
-function timeWindow(t: TimeSpec | undefined): { notBefore?: string; notAfter?: string } {
+function timeWindow(t: TimeSpec | undefined): {
+  notBefore?: string | undefined;
+  notAfter?: string | undefined;
+} {
   if (!t) return {};
   if (t.kind === "anyOf") return { notBefore: t.hhmms[0], notAfter: t.hhmms[t.hhmms.length - 1] };
   if (t.kind === "after") return { notBefore: t.hhmm };
@@ -382,6 +458,15 @@ export function buildTools(d: ReceptionistDeps, knownPrices: Set<number>) {
             s.booking.status = "confirmed";
             return `BOOKED: the booking for ${spokenTime(sel.hhmm)} is confirmed.`;
           }
+          if (res.outcome === "payment_pending") {
+            // G5: held until paid. Never "confirmed" (the guard also blocks
+            // any "booked"/"confirmed" claim unless the status is confirmed).
+            s.booking.status = "payment_pending";
+            s.booking.paymentLinkSent = res.payment?.linkSent === true;
+            return s.booking.paymentLinkSent
+              ? `PAYMENT_PENDING: ${spokenTime(sel.hhmm)} is held until the payment is received; the payment link was sent on WhatsApp. It is NOT confirmed yet. Do not say it is booked or confirmed.`
+              : `PAYMENT_PENDING: ${spokenTime(sel.hhmm)} is held until the payment is received, but the payment link could not be sent just now; the clinic team will send it. It is NOT confirmed. Do not say it is booked or confirmed.`;
+          }
           if (res.outcome === "saved_calendar_sync_failed") {
             s.booking.status = "held_pending_sync";
             return `SAVED_NOT_CONFIRMED: the booking for ${spokenTime(sel.hhmm)} is saved and the slot is held, but the calendar could not be updated; the clinic team will confirm it. Do not say it is confirmed.`;
@@ -407,6 +492,115 @@ export function buildTools(d: ReceptionistDeps, knownPrices: Set<number>) {
         return `NOT_BOOKED: ${res.message} Nothing is booked. Offer to have the clinic call back.`;
       },
     }),
+    find_my_bookings: llm.tool({
+      description:
+        "Look up the caller's own upcoming appointments (identified by the number they are calling from), to change one. Takes no arguments.",
+      parameters: z.object({}),
+      execute: async () => {
+        if (s.reschedule.status !== "looking_up")
+          return "NOT_NEEDED: the appointment to change is already known or not being changed.";
+        if (!d.backend.findMyBookings) {
+          s.reschedule = { ...s.reschedule, status: "unavailable", why: "not_allowed" };
+          return "NOT_AVAILABLE: appointments cannot be changed on this line.";
+        }
+        const res = await timed(
+          "find_my_bookings",
+          () => d.backend.findMyBookings!(),
+          (r) => r.ok,
+          (r) => (r.ok ? `${r.bookings.length} bookings` : r.error),
+        );
+        if (!res.ok) {
+          s.reschedule = {
+            ...s.reschedule,
+            status: "unavailable",
+            why: res.error === "not_allowed" ? "not_allowed" : "lookup_failed",
+          };
+          return "LOOKUP_FAILED: the appointments could not be looked up. Nothing was changed.";
+        }
+        if (!res.callerIdentified) {
+          s.reschedule = { ...s.reschedule, status: "unavailable", why: "no_caller_id" };
+          return "NO_CALLER_ID: without the caller's number their appointments cannot be found. Nothing was changed.";
+        }
+        const tz = d.business.timeZone;
+        const bookings = res.bookings
+          .filter(
+            (b) => Number.isFinite(Date.parse(b.startIso)) && Number.isFinite(Date.parse(b.endIso)),
+          )
+          .map((b) => ({
+            ...b,
+            date: isoDateIn(tz, new Date(b.startIso)),
+            hhmm: hhmmOf(b.startIso, tz),
+          }));
+        if (!bookings.length) {
+          s.reschedule = { ...s.reschedule, status: "unavailable", why: "not_found" };
+          return "NOT_FOUND: no upcoming appointment for the caller's number. Nothing was changed.";
+        }
+        s.reschedule.bookings = bookings;
+        if (bookings.length === 1) {
+          selectRescheduleTarget(s, bookings[0]!, d.business);
+          return `FOUND: ${describeExistingBooking(bookings[0]!, d.business)}. Ask for the new day and time.`;
+        }
+        s.reschedule.status = "choose";
+        return `FOUND ${bookings.length}: ${bookings.map((b) => describeExistingBooking(b, d.business)).join("; ")}. Ask which one to move.`;
+      },
+    }),
+    reschedule_appointment: llm.tool({
+      description:
+        "Move the caller's chosen appointment to the new time they confirmed (taken from the call state). Never creates a new booking. Takes no arguments.",
+      parameters: z.object({}),
+      execute: async () => {
+        const ready = readyToReschedule(s);
+        if (!ready.ok) return `NOT_ALLOWED: ${ready.reason}. Do not tell the caller it is moved.`;
+        if (!d.backend.reschedule) {
+          s.reschedule = { ...s.reschedule, status: "failed", error: "not_allowed" };
+          return "NOT_MOVED: appointments cannot be changed on this line.";
+        }
+        const sel = s.booking.selected!;
+        const target = s.reschedule.target!;
+        const length = Date.parse(target.endIso) - Date.parse(target.startIso);
+        const endIso =
+          slotEnds.get(sel.startIso) ??
+          new Date(
+            new Date(sel.startIso).getTime() +
+              (s.service?.value.durationMinutes
+                ? s.service.value.durationMinutes * 60_000
+                : length),
+          ).toISOString();
+        s.booking.status = "booking";
+        const res = await timed(
+          "reschedule_appointment",
+          () =>
+            d.backend.reschedule!({
+              bookingId: target.id,
+              slot: { startIso: sel.startIso, endIso },
+            }),
+          (r) => r.ok,
+          (r) => (r.ok ? r.outcome : r.error),
+        );
+        if (res.ok) {
+          s.reschedule.status = res.outcome === "confirmed" ? "moved" : "moved_pending_sync";
+          s.booking.status = "none";
+          s.currentTask = "done";
+          return res.outcome === "confirmed"
+            ? `MOVED: the appointment is now at ${spokenTime(sel.hhmm)}, confirmed by the system.`
+            : `MOVED_NOT_SYNCED: the appointment is moved to ${spokenTime(sel.hhmm)} in the system, but the clinic calendar is not updated yet; the team will confirm it. Do not say it is fully confirmed.`;
+        }
+        if (res.error === "slot_taken") {
+          s.booking.status = "none";
+          s.booking.offered = [];
+          s.booking.selected = null;
+          s.booking.unavailable = [sel.hhmm];
+          return `SLOT_TAKEN: ${res.message} The appointment was NOT moved; it stays at its old time. Apologise and check availability again.`;
+        }
+        if (res.retryable) {
+          s.booking.status = "awaiting_final_confirmation";
+          return `FAILED: ${res.message} The appointment was NOT moved yet. Offer to try again.`;
+        }
+        s.reschedule = { ...s.reschedule, status: "failed", error: res.error };
+        s.booking.status = "none";
+        return `NOT_MOVED: ${res.message} The appointment stays at its old time.`;
+      },
+    }),
     get_service_price: llm.tool({
       description:
         "The clinic's price for the caller's service. Never state a price that this tool did not return.",
@@ -430,12 +624,14 @@ export class ReceptionistAgent extends voice.Agent {
   private sttLanguage: string | null = null;
   private readonly knownPrices: Set<number>;
   private observedMessageId: string | null = null;
+  /** The current directive asks the model to name the supported languages (see directive). */
+  private explainingUnsupported = false;
 
   constructor(deps: ReceptionistDeps) {
     const knownPrices = new Set<number>();
     super({
       instructions:
-        `You are the phone receptionist for ${deps.business.businessName}. You speak English, Hindi and Telugu. ` +
+        `You are the phone receptionist for ${deps.business.businessName}. You speak ${SPOKEN_LANGUAGES}. ` +
         "Each turn you receive the call state and one NEXT STEP; do exactly that step." +
         (deps.businessInstructions
           ? `\n\nBUSINESS FACTS (do not state anything else as fact):\n${deps.businessInstructions}`
@@ -453,6 +649,10 @@ export class ReceptionistAgent extends voice.Agent {
   /** What the caller actually heard; interrupted speech doesn't count as asked. */
   recordSpoken(interrupted: boolean): void {
     agentSaid(this.deps.state, this.lastStep, { interrupted });
+    if (!interrupted && this.explainingUnsupported) {
+      this.deps.state.language.unsupportedExplained = true;
+      this.explainingUnsupported = false;
+    }
   }
 
   bookingExists(): boolean {
@@ -481,16 +681,27 @@ export class ReceptionistAgent extends voice.Agent {
       const reading = readUtterance(last.textContent ?? "", {
         catalog: this.deps.business.services,
         sttLanguage: this.sttLanguage,
+        // Natural-language service matching while the service is open,
+        // being clarified or was just asked for; once it is settled only a
+        // configured name (or a correction) can change it.
+        fuzzyServices:
+          !s.service || s.service.provenance === "uncertain" || s.lastQuestion === "service",
       });
       applyReading(s, reading, this.deps.business);
       const tts = this.session?.tts as
         { updateOptions?: (o: { targetLanguageCode: string }) => void } | undefined;
       tts?.updateOptions?.({ targetLanguageCode: s.language.current });
       this.lastStep = nextStep(s);
-      this.deps.onTurn?.({ step: this.lastStep, state: s, language: s.language.current });
+      this.deps.onTurn?.({
+        step: this.lastStep,
+        state: s,
+        language: s.language.current,
+        serviceMatch: { kind: reading.serviceMatch, candidates: reading.services.length },
+      });
     } else {
       this.lastStep = nextStep(s);
     }
+    this.explainingUnsupported = !!s.language.unsupportedHeard && !s.language.unsupportedExplained;
     ctx.items.splice(
       Math.max(0, ctx.items.length - 1),
       0,

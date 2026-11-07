@@ -24,6 +24,8 @@ import {
   type VoiceAgentLimiter,
 } from "./rate-limits.ts";
 import {
+  MAX_TRANSCRIPT_TEXT,
+  MAX_TRANSCRIPT_TURNS,
   claimOutboundCall,
   completeSipCallFromLiveKit,
   endSipSession,
@@ -46,12 +48,19 @@ export interface HttpDeps {
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
-async function readLimited(request: Request): Promise<string | null> {
+async function readLimited(request: Request, maxBytes = MAX_BODY_BYTES): Promise<string | null> {
   const declared = Number(request.headers.get("content-length") ?? "0");
-  if (declared > MAX_BODY_BYTES) return null;
+  if (declared > maxBytes) return null;
   const text = await request.text();
-  return new TextEncoder().encode(text).length > MAX_BODY_BYTES ? null : text;
+  return new TextEncoder().encode(text).length > maxBytes ? null : text;
 }
+
+/**
+ * session-end alone carries the call transcript (G3), so it may be larger
+ * than the other internal requests; the agent keeps its report within this
+ * (services/voice-agent src/agent/call.ts TRANSCRIPT_BUDGET_BYTES).
+ */
+export const SESSION_END_MAX_BODY_BYTES = 256 * 1024;
 
 /**
  * Response for a request that failed verification. The signature was
@@ -87,9 +96,10 @@ function rejectAuth(
 async function authenticate(
   request: Request,
   deps: HttpDeps,
+  maxBytes: number = MAX_BODY_BYTES,
 ): Promise<{ body: string } | { response: Response }> {
   const ip = clientIp(request);
-  const body = await readLimited(request);
+  const body = await readLimited(request, maxBytes);
   if (body === null)
     return {
       response: rejectAuth(
@@ -113,6 +123,7 @@ async function authenticate(
     ...(deps.nowSeconds ? { nowSeconds: deps.nowSeconds() } : {}),
     claimNonce: (keyId: KeyId, nonce: string, ts: number) =>
       deps.claimOnce("voice_agent_request", `${keyId}:${nonce}`, { ts }),
+    maxBodyBytes: maxBytes,
   });
   if (!result.ok) {
     console.warn("voice_agent:auth_rejected", { reason: result.reason, path: url.pathname });
@@ -190,6 +201,28 @@ const EndSchema = z.object({
   /** F1: the reporting agent's room and SIP call id; must match the call. */
   roomName: id.optional(),
   sipCallId: id.optional(),
+  /**
+   * G3: the conversation as the caller heard it, in the dashboard's
+   * call_logs.transcript shape (the Worker runtime's ConversationTurn).
+   * Caller and agent speech only: never system instructions or tool data.
+   */
+  transcript: z
+    .array(
+      z.object({
+        role: z.enum(["user", "assistant"]),
+        text: z.string().min(1).max(MAX_TRANSCRIPT_TEXT),
+        at: z.string().datetime(),
+      }),
+    )
+    .max(MAX_TRANSCRIPT_TURNS)
+    .optional(),
+  /** The reporting LiveKit job: one transcript segment per job. */
+  segment: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{1,64}$/)
+    .optional(),
+  /** A transcript checkpoint during the call (nothing else changes). */
+  checkpoint: z.boolean().optional(),
 });
 
 export async function handleSessionStart(request: Request, deps: HttpDeps): Promise<Response> {
@@ -221,7 +254,7 @@ export async function handleTool(request: Request, deps: HttpDeps): Promise<Resp
 }
 
 export async function handleSessionEnd(request: Request, deps: HttpDeps): Promise<Response> {
-  const a = await authenticate(request, deps);
+  const a = await authenticate(request, deps, SESSION_END_MAX_BODY_BYTES);
   if ("response" in a) return a.response;
   const p = parse(EndSchema, a.body);
   if (!p.ok) return p.response;

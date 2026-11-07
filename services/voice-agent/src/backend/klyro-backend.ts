@@ -6,7 +6,15 @@
  * answers into the agent's types and nothing else.
  */
 import { KlyroClient, KlyroError } from "./klyro-client.ts";
-import type { AvailabilityResult, BookResult, BookingBackend, BookingOutcome } from "./types.ts";
+import type {
+  FindBookingsResult,
+  RescheduleResult,
+  AvailabilityResult,
+  BookResult,
+  BookingBackend,
+  BookingOutcome,
+  Slot,
+} from "./types.ts";
 
 export interface SessionBusiness {
   name: string;
@@ -32,6 +40,8 @@ export type StartSessionResponse =
       callerNumber: string | null;
       /** klyro's maximum call duration (seconds); absent from older klyro versions. */
       maxCallSeconds?: number;
+      /** A returning caller's first name for the greeting (absent from older klyro versions). */
+      callerFirstName?: string | null;
     }
   | { allowed: false; reason: string; callId: string | null };
 
@@ -92,6 +102,12 @@ export async function endSession(
     /** The call's LiveKit room and sip.callID: klyro refuses a report that does not match. */
     roomName?: string;
     sipCallId?: string;
+    /** The conversation, stored by klyro in call_logs.transcript (dashboard). */
+    transcript?: { role: "user" | "assistant"; text: string; at: string }[];
+    /** This agent job (LiveKit job id): klyro keeps one transcript segment per job. */
+    segment?: string;
+    /** A transcript checkpoint during the call: klyro changes nothing else. */
+    checkpoint?: boolean;
   },
 ): Promise<void> {
   await client.post(PATHS.sessionEnd, p, { idempotent: true });
@@ -127,6 +143,8 @@ export class KlyroBookingBackend implements BookingBackend {
       data?: unknown;
       error?: { code?: string; message?: string };
       bookingOutcome?: string;
+      rescheduleOutcome?: string;
+      payment?: { requested?: boolean; linkSent?: boolean };
     };
     try {
       parsed = JSON.parse(r.content);
@@ -178,7 +196,9 @@ export class KlyroBookingBackend implements BookingBackend {
   }
 
   async book(req: Parameters<BookingBackend["book"]>[0]): Promise<BookResult> {
-    if (!this.tools.has("book_appointment")) {
+    // klyro decides between a plain booking and a payment-required hold
+    // (payment-policy.ts), so either capability lets the agent ask.
+    if (!this.tools.has("book_appointment") && !this.tools.has("create_payment_required_booking")) {
       return {
         ok: false,
         error: "not_allowed",
@@ -202,11 +222,26 @@ export class KlyroBookingBackend implements BookingBackend {
       if (r.success) {
         const data = r.data as { id?: string };
         const outcome = (
-          ["confirmed", "saved_calendar_sync_failed", "pending"].includes(r.bookingOutcome ?? "")
+          ["confirmed", "saved_calendar_sync_failed", "pending", "payment_pending"].includes(
+            r.bookingOutcome ?? "",
+          )
             ? r.bookingOutcome
             : "pending"
         ) as BookingOutcome;
-        return { ok: true, bookingId: data.id ?? "unknown", outcome, slot: req.slot };
+        return {
+          ok: true,
+          bookingId: data.id ?? "unknown",
+          outcome,
+          slot: req.slot,
+          ...(outcome === "payment_pending"
+            ? {
+                payment: {
+                  requested: r.payment?.requested === true,
+                  linkSent: r.payment?.linkSent === true,
+                },
+              }
+            : {}),
+        };
       }
       const code = r.error?.code ?? "UNKNOWN";
       if (code === "SLOT_NO_LONGER_AVAILABLE" || code === "CALENDAR_CONFLICT") {
@@ -231,6 +266,93 @@ export class KlyroBookingBackend implements BookingBackend {
         retryable: false,
         message: r.error?.message ?? "The booking was not accepted.",
       };
+    } catch (e) {
+      return {
+        ok: false,
+        error: "backend_unavailable",
+        retryable: true,
+        message: e instanceof KlyroError ? e.code : "network",
+      };
+    }
+  }
+
+  /** G4: the caller's upcoming bookings; klyro identifies the caller by the call's caller ID. */
+  async findMyBookings(): Promise<FindBookingsResult> {
+    if (!this.tools.has("reschedule_appointment")) return { ok: false, error: "not_allowed" };
+    try {
+      const r = await this.tool("find_my_bookings", {}, true);
+      if (!r.success) return { ok: false, error: "backend_unavailable" };
+      const d = (r.data ?? {}) as {
+        callerIdentified?: boolean;
+        bookings?: {
+          id: string;
+          startAt: string;
+          endAt: string;
+          serviceId: string | null;
+          serviceName: string | null;
+        }[];
+      };
+      return {
+        ok: true,
+        callerIdentified: d.callerIdentified === true,
+        bookings: (d.bookings ?? []).map((b) => ({
+          id: b.id,
+          startIso: b.startAt,
+          endIso: b.endAt,
+          serviceId: b.serviceId ?? null,
+          serviceName: b.serviceName ?? null,
+        })),
+      };
+    } catch {
+      return { ok: false, error: "backend_unavailable" };
+    }
+  }
+
+  /**
+   * G4: moves the booking (klyro checks ownership, re-checks the calendar,
+   * updates Google Calendar). Moving to the time it already has is a no-op
+   * at klyro, so a retry is safe.
+   */
+  async reschedule(req: { bookingId: string; slot: Slot }): Promise<RescheduleResult> {
+    if (!this.tools.has("reschedule_appointment"))
+      return {
+        ok: false,
+        error: "not_allowed",
+        retryable: false,
+        message: "Rescheduling is not enabled.",
+      };
+    try {
+      const r = await this.tool(
+        "reschedule_appointment",
+        { bookingId: req.bookingId, newStartIso: req.slot.startIso, newEndIso: req.slot.endIso },
+        true,
+      );
+      if (r.success) {
+        return {
+          ok: true,
+          outcome:
+            r.rescheduleOutcome === "saved_calendar_sync_failed"
+              ? "saved_calendar_sync_failed"
+              : "confirmed",
+          slot: req.slot,
+        };
+      }
+      const code = r.error?.code ?? "UNKNOWN";
+      const message = r.error?.message ?? "The booking was not moved.";
+      if (
+        code === "SLOT_NO_LONGER_AVAILABLE" ||
+        code === "CALENDAR_CONFLICT" ||
+        code === "SLOT_OUTSIDE_SCHEDULE"
+      )
+        return { ok: false, error: "slot_taken", retryable: false, message };
+      if (code === "NOT_FOUND") return { ok: false, error: "not_found", retryable: false, message };
+      if (code === "NOT_RESCHEDULABLE")
+        return { ok: false, error: "not_reschedulable", retryable: false, message };
+      if (code === "PAYMENT_PENDING")
+        return { ok: false, error: "payment_pending", retryable: false, message };
+      if (/UNAVAILABLE|RATE_LIMITED/.test(code))
+        return { ok: false, error: "backend_unavailable", retryable: true, message };
+      return { ok: false, error: "invalid_request", retryable: false, message };
     } catch (e) {
       return {
         ok: false,

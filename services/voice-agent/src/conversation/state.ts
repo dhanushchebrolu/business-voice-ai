@@ -17,6 +17,12 @@
  * model produced. A day with two real readings is `uncertain` and clarified.
  */
 import { daysInMonth } from "./numbers.ts";
+import {
+  MIN_SWITCH_WORDS,
+  nextCallLanguage,
+  normalizeVoiceLanguageCode,
+} from "../../../../src/lib/voice-languages.ts";
+import { optionReference } from "../../../../src/lib/voice-intent-lexicon.ts";
 import type {
   DateExpr,
   Intent,
@@ -38,7 +44,7 @@ export interface Fact<T> {
   turn: number;
   evidence: string;
   alternatives: T[];
-  source?: "caller" | "caller_id" | "model";
+  source?: "caller" | "caller_id" | "model" | "existing_booking";
 }
 
 export interface OfferedSlot {
@@ -60,6 +66,12 @@ export type BookingStatus =
   | "pending"
   /** The calendar was checked and nothing is free for this service/day/time: ask for another. */
   | "no_availability"
+  /**
+   * G5: the slot is HELD until the customer pays (payment-required booking);
+   * a payment link was requested. Never "confirmed": the payment webhook
+   * confirms it, or the hold expires.
+   */
+  | "payment_pending"
   | "failed";
 
 /** The booking exists in the backend (in any state): never book it again. */
@@ -67,8 +79,54 @@ export function bookingExists(s: { booking: { status: BookingStatus } }): boolea
   return (
     s.booking.status === "confirmed" ||
     s.booking.status === "held_pending_sync" ||
-    s.booking.status === "pending"
+    s.booking.status === "pending" ||
+    s.booking.status === "payment_pending"
   );
+}
+
+/** One of the caller's own upcoming bookings (klyro find_my_bookings), in the business's time zone. */
+export interface ExistingBooking {
+  id: string;
+  startIso: string;
+  endIso: string;
+  serviceId: string | null;
+  serviceName: string | null;
+  /** YYYY-MM-DD and HH:MM in the business's time zone. */
+  date: string;
+  hhmm: string;
+}
+
+/**
+ * G4: moving one of the caller's existing bookings (never a second booking).
+ *   looking_up   the caller asked to reschedule; their bookings are looked up
+ *   choose       several upcoming bookings: the caller picks one
+ *   ready        the booking to move is known; collect and check the new time
+ *   unavailable  nothing to move (why: no caller ID, none found, lookup failed, not allowed)
+ *   moved        the backend moved it (calendar updated)
+ *   moved_pending_sync  moved, but the calendar copy failed: the team will confirm
+ *   failed       the backend refused or failed: nothing changed
+ */
+export interface RescheduleState {
+  status:
+    | "none"
+    | "looking_up"
+    | "choose"
+    | "ready"
+    | "unavailable"
+    | "moved"
+    | "moved_pending_sync"
+    | "failed";
+  why: "no_caller_id" | "not_found" | "lookup_failed" | "not_allowed" | null;
+  bookings: ExistingBooking[];
+  target: ExistingBooking | null;
+  /** The backend's error for a failed move (code only). */
+  error: string | null;
+  /** The "nothing to move" explanation has been said once. */
+  explained: boolean;
+}
+
+export function rescheduling(s: { reschedule: RescheduleState }): boolean {
+  return s.reschedule.status !== "none";
 }
 
 export interface ToolRun {
@@ -88,7 +146,26 @@ export interface ChangeRecord {
 
 export interface ConversationState {
   turn: number;
-  language: { current: LanguageCode; preferred: Fact<LanguageCode> | null; switches: number };
+  language: {
+    /** The language replies are spoken in: the caller's once established, else the business's primary. */
+    current: LanguageCode;
+    preferred: Fact<LanguageCode> | null;
+    switches: number;
+    /**
+     * The production runtime's call-language state (src/lib/voice-languages.ts
+     * nextCallLanguage): `established` is null until the caller's language is
+     * reliably known; `pending` is a different language seen once, awaiting
+     * confirmation. Short fillers never move it.
+     */
+    established: LanguageCode | null;
+    pending: LanguageCode | null;
+    /**
+     * STT heard a real sentence in a language the agent cannot speak (its
+     * code, e.g. "ur-IN"): the caller is told, once, which languages it can.
+     */
+    unsupportedHeard: string | null;
+    unsupportedExplained: boolean;
+  };
   intent: Fact<Intent> | null;
   service: Fact<ServiceRow> | null;
   date: Fact<string> | null; // YYYY-MM-DD in the business's time zone
@@ -125,6 +202,8 @@ export interface ConversationState {
      * unavailable; cleared whenever the service, date or time changes.
      */
     unavailable: string[];
+    /** payment_pending only: the payment link was created and sent on WhatsApp. */
+    paymentLinkSent: boolean;
   };
   /**
    * The caller is wrapping up. `leaveConfirmed`: they chose to leave
@@ -136,6 +215,7 @@ export interface ConversationState {
   bookingAnnounced: boolean;
   tools: ToolRun[];
   changes: ChangeRecord[];
+  reschedule: RescheduleState;
 }
 
 export interface BusinessContext {
@@ -170,7 +250,15 @@ export function newConversation(opts: {
       : null;
   return {
     turn: 0,
-    language: { current: opts.primaryLanguage, preferred: null, switches: 0 },
+    language: {
+      current: opts.primaryLanguage,
+      preferred: null,
+      switches: 0,
+      established: null,
+      pending: null,
+      unsupportedHeard: null,
+      unsupportedExplained: false,
+    },
     intent: null,
     service: null,
     date: null,
@@ -190,11 +278,20 @@ export function newConversation(opts: {
       idempotencyKey: `${opts.callId}:booking:1`,
       checked: null,
       unavailable: [],
+      paymentLinkSent: false,
     },
     closing: { requested: false, leaveConfirmed: false, closed: false },
     bookingAnnounced: false,
     tools: [],
     changes: [],
+    reschedule: {
+      status: "none",
+      why: null,
+      bookings: [],
+      target: null,
+      error: null,
+      explained: false,
+    },
   };
 }
 
@@ -533,6 +630,124 @@ function answerReadBack(s: ConversationState, r: Reading): boolean {
   return false;
 }
 
+/**
+ * G4: the booking the caller means among their upcoming ones, or null when
+ * the answer does not single one out (they are asked again; nothing is
+ * guessed).
+ */
+function chooseBooking(
+  bookings: ExistingBooking[],
+  r: Reading,
+  ctx: BusinessContext,
+): { booking: ExistingBooking; byDate: boolean; byTime: boolean } | null {
+  const ref = optionReference(r.rawText);
+  if (ref && typeof ref === "object" && ref.position >= 1 && ref.position <= bookings.length)
+    return { booking: bookings[ref.position - 1]!, byDate: false, byTime: false };
+  if (ref === "last" && bookings.length)
+    return { booking: bookings[bookings.length - 1]!, byDate: false, byTime: false };
+  let candidates = bookings;
+  let byDate = false;
+  let byTime = false;
+  const serviceIds = new Set(r.services.map((x) => x.id));
+  if (serviceIds.size) {
+    const hit = candidates.filter((b) => b.serviceId && serviceIds.has(b.serviceId));
+    if (hit.length) candidates = hit;
+  }
+  if (r.date) {
+    const day = resolveDateCandidates(r.date.value, ctx);
+    const hit = candidates.filter((b) => b.date === day.primary);
+    if (hit.length) {
+      candidates = hit;
+      byDate = true;
+    }
+  }
+  if (r.time && r.time.spec.kind === "exact") {
+    const hhmm = r.time.spec.hhmm;
+    const hit = candidates.filter((b) => b.hhmm === hhmm);
+    if (hit.length) {
+      candidates = hit;
+      byTime = true;
+    }
+  }
+  return candidates.length === 1 && candidates.length < bookings.length
+    ? { booking: candidates[0]!, byDate, byTime }
+    : null;
+}
+
+/**
+ * G4: the booking to move is known. Its service (and the catalogue duration,
+ * else the booked length) is what the new time is checked for; the caller's
+ * name and number are not asked again (klyro proves ownership by caller ID).
+ */
+export function selectRescheduleTarget(
+  s: ConversationState,
+  b: ExistingBooking,
+  ctx: BusinessContext,
+): void {
+  const booked = Math.max(5, Math.round((Date.parse(b.endIso) - Date.parse(b.startIso)) / 60_000));
+  const row =
+    ctx.services.find((x) => x.id === b.serviceId) ??
+    ({
+      id: b.serviceId ?? "",
+      name: b.serviceName ?? "appointment",
+      durationMinutes: booked,
+    } satisfies ServiceRow);
+  s.reschedule.target = b;
+  s.reschedule.status = "ready";
+  s.service = {
+    value: row,
+    provenance: "confirmed",
+    turn: s.turn,
+    evidence: "the caller's existing booking",
+    alternatives: [],
+    source: "existing_booking",
+  };
+  // Any slot work from before belongs to no booking: start the new-time search clean.
+  s.booking = {
+    ...s.booking,
+    status: "none",
+    offered: [],
+    selected: null,
+    checked: null,
+    unavailable: [],
+    error: null,
+  };
+}
+
+/** "Root Canal Treatment on 12 November at 4 PM" (for the model and the choice question). */
+export function describeExistingBooking(b: ExistingBooking, ctx?: BusinessContext): string {
+  return `${b.serviceName ?? "appointment"} on ${spokenDate(b.date, ctx)} at ${spokenTime(b.hhmm)}`;
+}
+
+/**
+ * The caller's language, by the production runtime's rules (nextCallLanguage):
+ * script or romanized words decide; a short filler ("ok", "సరే", "हाँ") never
+ * moves an established language; a language change needs a real sentence.
+ * A language outside the 11 is never answered in English silently: it is
+ * recorded so the caller is told which languages the agent speaks.
+ */
+function applyLanguage(s: ConversationState, r: Reading): void {
+  const { state, decision } = nextCallLanguage(
+    { current: s.language.established, pending: s.language.pending },
+    { text: r.rawText, language: r.sttLanguage ?? undefined },
+  );
+  s.language.established = state.current;
+  s.language.pending = state.pending;
+  if (
+    decision === "ignored_unsupported" &&
+    r.sttLanguage &&
+    !normalizeVoiceLanguageCode(r.sttLanguage) &&
+    r.rawText.split(/\s+/).filter((w) => /\p{L}/u.test(w)).length >= MIN_SWITCH_WORDS
+  ) {
+    s.language.unsupportedHeard = r.sttLanguage;
+  }
+  const next = state.current ?? s.language.current;
+  if (next !== s.language.current) {
+    s.language.switches += 1;
+    s.language.current = next;
+  }
+}
+
 export function applyReading(
   s: ConversationState,
   r: Reading,
@@ -541,13 +756,42 @@ export function applyReading(
   s.turn += 1;
   if (r.noise) return s; // background noise / filler never changes anything
 
-  if (r.language && r.language !== s.language.current) {
-    s.language.switches += 1;
-    s.language.current = r.language;
-  }
+  applyLanguage(s, r);
 
   const answeredReadBack = answerReadBack(s, r);
   const cert = (c: "explicit" | "inferred" | "uncertain"): Provenance => c;
+
+  // G4: "I want to reschedule / move my appointment": the caller's own
+  // booking is looked up and moved; nothing new is booked. Only from a
+  // call that has not booked or started booking something itself.
+  if (
+    r.intent === "reschedule" &&
+    s.reschedule.status === "none" &&
+    !bookingExists(s) &&
+    ["none", "no_availability", "failed"].includes(s.booking.status)
+  ) {
+    s.reschedule = {
+      status: "looking_up",
+      why: null,
+      bookings: [],
+      target: null,
+      error: null,
+      explained: false,
+    };
+    s.service = null; // the booking being moved decides the service
+    s.currentTask = "collecting";
+  }
+  // G4: several upcoming bookings: the caller's answer picks one (by
+  // service, day, time or "the second one"). A day or time used to pick it
+  // is not taken as the NEW day or time.
+  let usedForChoice = { date: false, time: false };
+  if (s.reschedule.status === "choose") {
+    const picked = chooseBooking(s.reschedule.bookings, r, ctx);
+    if (picked) {
+      selectRescheduleTarget(s, picked.booking, ctx);
+      usedForChoice = { date: picked.byDate, time: picked.byTime };
+    }
+  }
 
   if (r.intent && (!s.intent || s.intent.value !== r.intent)) {
     // Asking about free slots inside a booking keeps the booking intent.
@@ -611,7 +855,7 @@ export function applyReading(
     }
   }
   const dateQuestion = s.lastQuestion === "date";
-  if (r.date) {
+  if (r.date && !usedForChoice.date) {
     let c = resolveDateCandidates(r.date.value, ctx);
     if (r.date.crossCheck?.length) c = crossCheckDate(c, r.date.crossCheck, ctx);
     if (c.passed) {
@@ -651,7 +895,9 @@ export function applyReading(
           r.time!.alternatives.some((a) => a.kind === "exact" && a.hhmm === o.hhmm),
         ))
       : undefined;
-  if (r.time && offeredHit) {
+  if (usedForChoice.time) {
+    // The time named the booking to move, not a new time.
+  } else if (r.time && offeredHit) {
     setFact(
       s,
       "time",
@@ -873,7 +1119,20 @@ export type NextStep =
   /** The caller is wrapping up with work pending: ask once whether to finish it now. */
   | { kind: "confirm_leave" }
   /** Say goodbye: no questions, nothing reopened. */
-  | { kind: "close"; outcome: "booked" | "not_booked" };
+  | { kind: "close"; outcome: "booked" | "not_booked" }
+  /** G4: look up the caller's upcoming bookings (find_my_bookings tool). */
+  | { kind: "find_bookings" }
+  /** G4: the caller has several upcoming bookings: ask which one to move. */
+  | { kind: "choose_booking"; options: string[] }
+  /** G4: there is nothing this call can move (and why). */
+  | {
+      kind: "reschedule_unavailable";
+      why: "no_caller_id" | "not_found" | "lookup_failed" | "not_allowed";
+    }
+  /** G4: the move was refused or failed; nothing changed. */
+  | { kind: "reschedule_failed" }
+  /** G4: the booking was moved (pendingSync: saved, calendar copy pending). */
+  | { kind: "rescheduled"; pendingSync: boolean };
 
 function describe(v: unknown, ctx?: BusinessContext): string {
   if (v && typeof v === "object" && "kind" in (v as object)) {
@@ -899,6 +1158,7 @@ export function spokenTime(hhmm: string): string {
 
 /** Exactly one thing to do next. Uncertainty is always resolved first. */
 export function nextStep(s: ConversationState): NextStep {
+  if (rescheduling(s)) return nextRescheduleStep(s);
   if (bookingExists(s))
     return s.closing.requested ? { kind: "close", outcome: "booked" } : { kind: "done" };
   if (s.closing.requested) {
@@ -937,6 +1197,78 @@ export function nextStep(s: ConversationState): NextStep {
   return { kind: "done" };
 }
 
+/** G4: the next step while moving an existing booking. */
+function nextRescheduleStep(s: ConversationState): NextStep {
+  const r = s.reschedule;
+  const done = r.status === "moved" || r.status === "moved_pending_sync";
+  if (s.closing.requested) {
+    if (!done && !s.closing.leaveConfirmed && r.status === "ready" && !s.timesAsked.leave)
+      return { kind: "confirm_leave" };
+    return { kind: "close", outcome: done ? "booked" : "not_booked" };
+  }
+  switch (r.status) {
+    case "looking_up":
+      return { kind: "find_bookings" };
+    case "unavailable":
+      return r.explained
+        ? { kind: "done" }
+        : { kind: "reschedule_unavailable", why: r.why ?? "not_found" };
+    case "choose":
+      return { kind: "choose_booking", options: r.bookings.map((b) => describeExistingBooking(b)) };
+    case "moved":
+    case "moved_pending_sync":
+      return { kind: "rescheduled", pendingSync: r.status === "moved_pending_sync" };
+    case "failed":
+      return { kind: "reschedule_failed" };
+    default:
+      break;
+  }
+  for (const k of ["date", "time"] as const) {
+    const f = s[k] as Fact<unknown> | null;
+    if (f?.provenance === "uncertain") {
+      return {
+        kind: "clarify",
+        slot: k,
+        options: [f.value, ...f.alternatives].map((v) =>
+          k === "date" && typeof v === "string" ? `${describe(v)} ${v.slice(0, 4)}` : describe(v),
+        ),
+      };
+    }
+  }
+  if (!usable(s.date)) return { kind: "ask", slot: "date" };
+  if (!usable(s.time)) return { kind: "ask", slot: "time" };
+  if (s.booking.status === "no_availability") return { kind: "ask_alternative" };
+  if (
+    s.booking.status === "none" ||
+    s.booking.status === "failed" ||
+    s.booking.status === "checking"
+  )
+    return { kind: "check_availability" };
+  if (s.booking.status === "slots_offered") return { kind: "offer_slots" };
+  if (s.booking.status === "slot_selected") return { kind: "final_confirmation" };
+  if (s.booking.status === "awaiting_final_confirmation" || s.booking.status === "booking")
+    return { kind: "book" };
+  return { kind: "done" };
+}
+
+/** G4: everything needed to move the booking, with the caller's yes to the read-back. */
+export function readyToReschedule(
+  s: ConversationState,
+): { ok: true } | { ok: false; reason: string } {
+  const r = s.reschedule;
+  if (r.status === "moved" || r.status === "moved_pending_sync")
+    return { ok: false, reason: "already_moved" };
+  if (r.status !== "ready" || !r.target) return { ok: false, reason: "no_booking_chosen" };
+  if (!s.booking.selected) return { ok: false, reason: "no_slot_selected" };
+  if (s.booking.status !== "awaiting_final_confirmation")
+    return { ok: false, reason: "caller_has_not_confirmed" };
+  for (const k of ["date", "time"] as const) {
+    if ((s[k] as Fact<unknown> | null)?.provenance !== "confirmed")
+      return { ok: false, reason: `${k}_not_confirmed` };
+  }
+  return { ok: true };
+}
+
 /* ------------------------------------------------------------------ */
 /* What the agent said                                                 */
 /* ------------------------------------------------------------------ */
@@ -958,7 +1290,8 @@ export function agentSaid(
     s.lastQuestion = null;
     return;
   }
-  if (step.kind === "done") s.bookingAnnounced = true;
+  if (step.kind === "done" || step.kind === "rescheduled") s.bookingAnnounced = true;
+  if (step.kind === "reschedule_unavailable") s.reschedule.explained = true;
   const slot: QuestionKey | null =
     step.kind === "ask" || step.kind === "clarify"
       ? step.slot
@@ -1005,6 +1338,9 @@ export function stateSummary(s: ConversationState, ctx?: BusinessContext): strin
       : "",
     s.booking.status === "no_availability" && s.booking.checked
       ? `- the calendar has nothing free for ${d(s.booking.checked.date)}, ${s.booking.checked.time}`
+      : "",
+    rescheduling(s)
+      ? `- rescheduling an existing booking (${s.reschedule.status})${s.reschedule.target ? `: ${describeExistingBooking(s.reschedule.target, ctx)}` : ""}; nothing new is booked`
       : "",
     s.closing.requested ? "- the caller is wrapping up the call" : "",
   ]

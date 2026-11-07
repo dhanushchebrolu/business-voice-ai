@@ -21,6 +21,7 @@
  * retried session start can never create a second row). No schema change:
  * call_logs.provider is free text (20260904120000).
  */
+import { bookingNeedsPayment, paymentAmountMinorUnits } from "../payments/payment-policy.ts";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { normalizeInboundNumber } from "./phone.ts";
@@ -64,6 +65,9 @@ export const VOICE_AGENT_TOOLS = [
   "check_calendar_availability",
   "book_appointment",
   "reschedule_appointment",
+  // Read-only, klyro-side: the caller's own upcoming bookings (by the call's
+  // caller ID). Allowed when the business allows rescheduling.
+  "find_my_bookings",
 ] as const;
 export type VoiceAgentTool = (typeof VOICE_AGENT_TOOLS)[number];
 
@@ -84,7 +88,24 @@ export interface SessionDeps {
     phoneNumberId: string,
     direction: "inbound" | "outbound",
   ) => Promise<{ allowed: boolean; reason: string | null }>;
-  loadBusiness: (businessId: string) => Promise<SessionBusiness>;
+  /**
+   * The business and the agent configuration the call runs with
+   * (agent-config.server.ts: the published version, or a validated live
+   * configuration when none is published). Null when the call cannot be
+   * served: no valid configuration.
+   */
+  loadBusiness: (businessId: string) => Promise<SessionBusiness | null>;
+  /**
+   * A returning caller's first name for the greeting (the Worker runtime's
+   * rule, calendar/caller-bookings.server.ts findReturningCallerFirstName):
+   * exactly one name known for this number at this business, else null.
+   */
+  findCallerFirstName?: (q: {
+    organizationId: string;
+    businessId: string;
+    callerE164: string;
+    country: string | null;
+  }) => Promise<string | null>;
   availableTools: (orgId: string, businessId: string) => Promise<string[]>;
   executeTool: (
     ctx: {
@@ -100,6 +121,50 @@ export interface SessionDeps {
     call: Pick<CallLog, "id" | "organization_id" | "direction">,
     seconds: number,
   ) => Promise<unknown>;
+  /** G5: one of the business's services (price for the payment rule), scoped to the tenant. */
+  loadService?: (
+    organizationId: string,
+    businessId: string,
+    serviceId: string,
+  ) => Promise<{
+    id: string;
+    name: string;
+    price: number | null;
+    currency: string;
+    is_active: boolean;
+  } | null>;
+  /** G4: the caller's upcoming, movable bookings (calendar/caller-bookings.server.ts). */
+  findCallerBookings?: (q: {
+    organizationId: string;
+    businessId: string;
+    callerE164: string | null;
+    callId: string;
+    country: string | null;
+  }) => Promise<
+    {
+      id: string;
+      startAt: string;
+      endAt: string;
+      serviceId: string | null;
+      serviceName: string | null;
+    }[]
+  >;
+  /**
+   * G4: the Worker runtime's ownership guard (guardBookingOwnership): a tool
+   * that changes an existing booking runs only for the caller who owns it.
+   * Null = may proceed; otherwise the NOT_FOUND result to return.
+   */
+  guardOwnership?: (
+    ctx: {
+      organizationId: string;
+      businessId: string;
+      callId: string;
+      callerE164: string | null;
+      phoneCountry: string | null;
+    },
+    tool: string,
+    input: Record<string, unknown>,
+  ) => Promise<{ content: string; isError: boolean } | null>;
   /**
    * Atomic check-and-insert of an outbound call row with the per-organization
    * caps (public.reserve_voice_agent_outbound_call, migration
@@ -147,6 +212,10 @@ export interface SessionBusiness {
   voiceId: string;
   speakingPace: number;
   instructions: string;
+  /** Published agent version the call runs with; null for a validated live configuration. */
+  agentVersion?: number | null;
+  /** Where the configuration came from (logged; never silent). */
+  configSource?: "published_version" | "live_snapshot";
 }
 
 export interface StartSessionInput {
@@ -176,11 +245,18 @@ export type StartSessionResult =
       callerNumber: string | null;
       /** klyro's maximum call duration for this call (seconds). */
       maxCallSeconds: number;
+      /** A returning caller's first name for the greeting, or null (unknown, shared number, withheld). */
+      callerFirstName: string | null;
     }
   | {
       allowed: false;
       reason:
-        "unknown_number" | "not_entitled" | "invalid_outbound" | "call_ended" | "already_started";
+        | "unknown_number"
+        | "not_entitled"
+        | "invalid_outbound"
+        | "call_ended"
+        | "already_started"
+        | "agent_config_unavailable";
       callId: string | null;
     };
 
@@ -253,6 +329,7 @@ export async function startSipSession(
     }
     if (!call.business_id) return { allowed: false, reason: "invalid_outbound", callId: null };
     const business = await deps.loadBusiness(call.business_id);
+    if (!business) return { allowed: false, reason: "agent_config_unavailable", callId: call.id };
     const tools = await deps.availableTools(call.organization_id, call.business_id);
     return {
       allowed: true,
@@ -261,6 +338,7 @@ export async function startSipSession(
       tools,
       callerNumber: call.destination_number ?? caller,
       maxCallSeconds: agreedMaxCallSeconds(deps, input).agreed ?? klyroMax(deps),
+      callerFirstName: null,
     };
   }
 
@@ -321,7 +399,49 @@ export async function startSipSession(
     return { allowed: false, reason: "call_ended", callId: call.id };
 
   const business = await deps.loadBusiness(number.business_id);
+  if (!business) {
+    // No published version and an incomplete live configuration: the call
+    // is not served (the Worker runtime refuses the same way).
+    await deps.db
+      .from("call_logs")
+      .update({
+        status: "failed",
+        failure_reason: "agent_config_incomplete",
+        ended_at: deps.now().toISOString(),
+      })
+      .eq("id", call.id)
+      .eq("status", "answered")
+      .is("ended_at", null);
+    console.warn("voice_agent:agent_config_unavailable", { callId: call.id });
+    return { allowed: false, reason: "agent_config_unavailable", callId: call.id };
+  }
+  // The version the call runs with, recorded once (dashboard and audits).
+  if (business.agentVersion !== undefined && call.agent_version !== business.agentVersion) {
+    await deps.db
+      .from("call_logs")
+      .update({ agent_version: business.agentVersion })
+      .eq("id", call.id);
+  }
+  console.info("voice_agent:agent_config", {
+    callId: call.id,
+    source: business.configSource ?? "unknown",
+    agentVersion: business.agentVersion ?? null,
+  });
   const tools = await deps.availableTools(number.organization_id, number.business_id);
+  // Returning caller: only with a caller ID, only one known name, never fatal.
+  let callerFirstName: string | null = null;
+  if (caller && deps.findCallerFirstName) {
+    try {
+      callerFirstName = await deps.findCallerFirstName({
+        organizationId: number.organization_id,
+        businessId: number.business_id,
+        callerE164: caller,
+        country: business.country,
+      });
+    } catch {
+      console.warn("voice_agent:returning_caller_lookup_failed", { callId: call.id });
+    }
+  }
   return {
     allowed: true,
     callId: call.id,
@@ -329,6 +449,7 @@ export async function startSipSession(
     tools,
     callerNumber: caller,
     maxCallSeconds: validMaxCallSeconds(meta(call)["max_call_seconds"]) ?? agreed ?? klyroMax(deps),
+    callerFirstName,
   };
 }
 
@@ -361,34 +482,240 @@ export async function runSessionTool(
   if (!call || !call.business_id) return { ok: false, reason: "unknown_call" };
   if (TERMINAL.includes(call.status)) return { ok: false, reason: "call_ended" };
   const allowed = await deps.availableTools(call.organization_id, call.business_id);
-  if (!allowed.includes(tool)) return { ok: false, reason: "tool_not_allowed" };
   const clean: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(input)) {
     if (/^(organization|org|business|agent|tenant|call)_?id$/i.test(k)) continue;
     clean[k] = v;
   }
-  // The agent config is the one currently assigned to the number the call came in on.
-  let agentConfigId: string | null = null;
-  if (call.phone_number_id) {
-    const { data: pn } = await deps.db
-      .from("phone_numbers")
-      .select("agent_config_id, organization_id")
-      .eq("id", call.phone_number_id)
+  const businessId = call.business_id;
+  // The caller's identity is the call row's caller ID (the SIP From klyro
+  // normalized at session start), never anything in the tool input.
+  const callerE164 = call.caller_number ?? null;
+  const country = async () => {
+    const { data } = await deps.db
+      .from("businesses")
+      .select("country")
+      .eq("id", businessId)
       .maybeSingle();
-    if (pn && pn.organization_id === call.organization_id)
-      agentConfigId = pn.agent_config_id ?? null;
+    return (data as { country?: string | null } | null)?.country ?? null;
+  };
+
+  if (tool === "find_my_bookings") {
+    if (!allowed.includes("reschedule_appointment") || !deps.findCallerBookings)
+      return { ok: false, reason: "tool_not_allowed" };
+    const bookings = await deps.findCallerBookings({
+      organizationId: call.organization_id,
+      businessId,
+      callerE164,
+      callId: call.id,
+      country: await country(),
+    });
+    return {
+      ok: true,
+      content: JSON.stringify({
+        success: true,
+        data: {
+          callerIdentified: callerE164 !== null,
+          bookings: bookings.map((b) => ({
+            id: b.id,
+            startAt: b.startAt,
+            endAt: b.endAt,
+            serviceId: b.serviceId,
+            serviceName: b.serviceName,
+          })),
+        },
+      }),
+      isError: false,
+    };
+  }
+  if (tool === "book_appointment") {
+    return bookForCall(deps, call, allowed, clean, await agentConfigOf(deps, call));
+  }
+  if (!allowed.includes(tool)) return { ok: false, reason: "tool_not_allowed" };
+  if (tool === "reschedule_appointment") {
+    // Fails closed: without the ownership guard nothing is moved.
+    if (!deps.guardOwnership) return { ok: false, reason: "tool_not_allowed" };
+    const refused = await deps.guardOwnership(
+      {
+        organizationId: call.organization_id,
+        businessId,
+        callId: call.id,
+        callerE164,
+        phoneCountry: await country(),
+      },
+      tool,
+      clean,
+    );
+    if (refused) return { ok: true, content: refused.content, isError: true };
+    return rescheduleForCall(deps, call, clean, await agentConfigOf(deps, call));
   }
   const out = await deps.executeTool(
     {
       organizationId: call.organization_id,
       businessId: call.business_id,
-      agentConfigId,
+      agentConfigId: await agentConfigOf(deps, call),
       callId: call.id,
     },
     tool,
     clean,
   );
   return { ok: true, content: out.content, isError: out.isError === true };
+}
+
+/**
+ * G4: moves the caller's booking with the shared reschedule tool
+ * (update_calendar_event: atomic DB move with a conflict re-check, then the
+ * Google Calendar update) and reports one outcome the agent can say
+ * honestly: "confirmed", or "saved_calendar_sync_failed" when the database
+ * move succeeded but the calendar copy did not (the booking is then marked
+ * CALENDAR_SYNC_FAILED by the booking service; the team confirms it).
+ */
+async function rescheduleForCall(
+  deps: SessionDeps,
+  call: CallLog,
+  input: Record<string, unknown>,
+  agentConfigId: string | null,
+): Promise<ToolCallResult> {
+  const out = await deps.executeTool(
+    {
+      organizationId: call.organization_id,
+      businessId: call.business_id!,
+      agentConfigId,
+      callId: call.id,
+    },
+    "reschedule_appointment",
+    input,
+  );
+  const parsed = parseToolContent(out.content);
+  if (parsed.success) {
+    return {
+      ok: true,
+      content: JSON.stringify({ ...parsed, rescheduleOutcome: "confirmed" }),
+      isError: false,
+    };
+  }
+  const bookingId = typeof input["bookingId"] === "string" ? input["bookingId"] : null;
+  const newStart =
+    typeof input["newStartIso"] === "string" ? Date.parse(input["newStartIso"]) : NaN;
+  if (bookingId && Number.isFinite(newStart)) {
+    const { data: row } = await deps.db
+      .from("bookings")
+      .select("id, status, start_at, end_at")
+      .eq("id", bookingId)
+      .eq("organization_id", call.organization_id)
+      .eq("business_id", call.business_id!)
+      .maybeSingle();
+    const b = row as { id: string; status: string; start_at: string; end_at: string } | null;
+    if (b && b.status === "CALENDAR_SYNC_FAILED" && Date.parse(b.start_at) === newStart) {
+      console.warn("voice_agent:reschedule_calendar_sync_failed", { callId: call.id });
+      return {
+        ok: true,
+        content: JSON.stringify({
+          success: true,
+          rescheduleOutcome: "saved_calendar_sync_failed",
+          data: { id: b.id, startAt: b.start_at, endAt: b.end_at },
+        }),
+        isError: false,
+      };
+    }
+  }
+  return { ok: true, content: out.content, isError: true };
+}
+
+/** The agent config currently assigned to the number the call came in on. */
+async function agentConfigOf(deps: SessionDeps, call: CallLog): Promise<string | null> {
+  if (!call.phone_number_id) return null;
+  const { data: pn } = await deps.db
+    .from("phone_numbers")
+    .select("agent_config_id, organization_id")
+    .eq("id", call.phone_number_id)
+    .maybeSingle();
+  return pn && pn.organization_id === call.organization_id ? (pn.agent_config_id ?? null) : null;
+}
+
+function parseToolContent(content: string): {
+  success?: boolean;
+  data?: Record<string, unknown>;
+  error?: { code?: string; message?: string };
+} {
+  try {
+    return JSON.parse(content);
+  } catch {
+    return { success: false, error: { code: "BAD_TOOL_OUTPUT" } };
+  }
+}
+
+/**
+ * G5: a voice booking, with the same payment rule as every other channel
+ * (payments/payment-policy.ts). When the business requires payment for this
+ * service, the slot is HELD (create_payment_required_booking) and a payment
+ * link is requested for the service's own price (request_payment, sent to
+ * the customer over WhatsApp) — the WhatsApp channel's exact sequence. The
+ * hold is never reported as confirmed: the existing payment webhook confirms
+ * it when the payment is captured, and the hold expires otherwise. Both
+ * steps are idempotent per call and slot (voiceBookingIdempotencyKey;
+ * payment_request:<bookingId>), so a retried request never creates a
+ * second hold or a second payment request.
+ */
+async function bookForCall(
+  deps: SessionDeps,
+  call: CallLog,
+  allowed: string[],
+  input: Record<string, unknown>,
+  agentConfigId: string | null,
+): Promise<ToolCallResult> {
+  const ctx = {
+    organizationId: call.organization_id,
+    businessId: call.business_id!,
+    agentConfigId,
+    callId: call.id,
+  };
+  const serviceId = typeof input["serviceId"] === "string" ? input["serviceId"] : null;
+  const service =
+    serviceId && deps.loadService
+      ? await deps.loadService(call.organization_id, call.business_id!, serviceId)
+      : null;
+  const needsPayment = bookingNeedsPayment(service && service.is_active ? service : null, {
+    booking_payment_required: allowed.includes("create_payment_required_booking"),
+    payment_request: allowed.includes("request_payment"),
+  });
+  if (!needsPayment) {
+    if (!allowed.includes("book_appointment")) return { ok: false, reason: "tool_not_allowed" };
+    const out = await deps.executeTool(ctx, "book_appointment", input);
+    return { ok: true, content: out.content, isError: out.isError === true };
+  }
+  const holdOut = await deps.executeTool(ctx, "create_payment_required_booking", input);
+  const hold = parseToolContent(holdOut.content);
+  const bookingId = hold.data?.["id"];
+  if (!hold.success || typeof bookingId !== "string")
+    return { ok: true, content: holdOut.content, isError: true };
+  const payOut = await deps.executeTool(ctx, "request_payment", {
+    bookingId,
+    // The service's own price, never anything from the agent's input.
+    amountMinorUnits: paymentAmountMinorUnits(service!.price!),
+    currency: service!.currency,
+  });
+  const payment = parseToolContent(payOut.content);
+  console.info("voice_agent:payment_booking", {
+    callId: call.id,
+    held: true,
+    paymentRequested: payment.success === true,
+    linkSent: payment.data?.["whatsappSent"] === true,
+  });
+  return {
+    ok: true,
+    content: JSON.stringify({
+      success: true,
+      bookingOutcome: "payment_pending",
+      data: { id: bookingId, startAt: hold.data?.["startAt"], endAt: hold.data?.["endAt"] },
+      payment: {
+        requested: payment.success === true,
+        linkSent: payment.data?.["whatsappSent"] === true,
+        ...(payment.success ? {} : { error: payment.error?.code ?? "UNKNOWN" }),
+      },
+    }),
+    isError: false,
+  };
 }
 
 export interface EndSessionInput {
@@ -414,6 +741,84 @@ export interface EndSessionInput {
    */
   roomName?: string | undefined;
   sipCallId?: string | undefined;
+  /** G3: the full conversation (see TranscriptTurn); stored in call_logs.transcript. */
+  transcript?: TranscriptTurn[] | undefined;
+  /**
+   * The reporting agent job (LiveKit job id): one transcript segment per
+   * job, so a job that replaced a crashed one adds its turns beside the
+   * earlier ones instead of overwriting them. Absent = the single unnamed
+   * segment (older agents).
+   */
+  segment?: string | undefined;
+  /**
+   * A transcript checkpoint during the call, not the end of the session:
+   * only the transcript is merged; nothing else about the call changes.
+   * Must be bound (room and SIP call id).
+   */
+  checkpoint?: boolean | undefined;
+}
+
+/**
+ * One turn of call_logs.transcript: exactly the Cloudflare Worker voice
+ * runtime's ConversationTurn (voice-runtime.server.ts), which the calls
+ * dashboard renders (app.calls.tsx: role + text).
+ */
+export interface TranscriptTurn {
+  role: "user" | "assistant";
+  text: string;
+  at: string;
+}
+export const MAX_TRANSCRIPT_TURNS = 400;
+export const MAX_TRANSCRIPT_TEXT = 4000;
+
+/** A stored turn: the dashboard contract plus the segment and position it came from (ignored by the dashboard). */
+export interface StoredTranscriptTurn extends TranscriptTurn {
+  seg?: string;
+  n?: number;
+}
+
+/**
+ * Merges one segment's snapshot into the stored transcript. A segment's
+ * turns are replaced only by a snapshot at least as long as what is stored
+ * for it (a replay, a duplicate or a late, shorter checkpoint changes
+ * nothing); other segments are kept. The result is ordered by time, then
+ * by position within its segment. Returns null when nothing changed.
+ */
+export function mergeTranscriptSegment(
+  stored: readonly StoredTranscriptTurn[],
+  segment: string,
+  incoming: readonly TranscriptTurn[],
+): StoredTranscriptTurn[] | null {
+  const mine = stored.filter((t) => (t.seg ?? "") === segment);
+  if (incoming.length < mine.length) return null;
+  const same =
+    incoming.length === mine.length &&
+    incoming.every(
+      (t, i) => t.role === mine[i]!.role && t.text === mine[i]!.text && t.at === mine[i]!.at,
+    );
+  if (same) return null;
+  const tagged: StoredTranscriptTurn[] = incoming.map((t, n) => ({
+    role: t.role,
+    text: t.text,
+    at: t.at,
+    ...(segment ? { seg: segment } : {}),
+    n,
+  }));
+  const merged = [...stored.filter((t) => (t.seg ?? "") !== segment), ...tagged];
+  return merged
+    .map((t, i) => ({ t, i }))
+    .sort(
+      (a, b) =>
+        Date.parse(a.t.at) - Date.parse(b.t.at) ||
+        ((a.t.seg ?? "") === (b.t.seg ?? "") ? (a.t.n ?? 0) - (b.t.n ?? 0) : a.i - b.i),
+    )
+    .map(({ t }) => t)
+    .slice(0, MAX_TRANSCRIPT_TURNS * 2);
+}
+
+/** The Worker runtime's call summary line: "<n> turns · <language>". */
+export function callSummaryLine(turns: number, language: string | undefined): string {
+  return turns ? `${turns} turns · ${language ?? "unknown"}` : "No conversation recorded.";
 }
 
 /**
@@ -454,6 +859,15 @@ export async function endSipSession(
     return { ok: false, reason: "binding_mismatch" };
   }
   const bound = input.roomName !== undefined || input.sipCallId !== undefined;
+  if (input.checkpoint) {
+    // A checkpoint must name BOTH the room and the SIP call it belongs to.
+    if (input.roomName === undefined || input.sipCallId === undefined || !input.transcript) {
+      console.warn("voice_agent:transcript_checkpoint_unbound", { callId: call.id });
+      return { ok: false, reason: "binding_mismatch" };
+    }
+    await storeTranscript(deps, call, input);
+    return { ok: true };
+  }
   const nowIso = deps.now().toISOString();
   // An outbound row that never reached session start ("initiated" or
   // claimed "ringing") was never answered: the dial failed (busy, no answer,
@@ -503,6 +917,19 @@ export async function endSipSession(
   }
   const patch: Database["public"]["Tables"]["call_logs"]["Update"] = {};
   if (input.summary) patch.summary = input.summary.slice(0, 2000);
+  // G3: the final transcript, from a report bound to this call only, merged
+  // with the checkpoints already stored (mergeTranscriptSegment): a replay,
+  // the second report (end of conversation, then process shutdown) or a
+  // late, shorter one never loses or duplicates turns.
+  if (input.transcript && bound) {
+    const merged = mergedTranscript(call, input);
+    if (merged) {
+      patch.transcript = merged as never;
+      patch.summary = callSummaryLine(merged.length, input.language);
+    }
+  } else if (input.transcript) {
+    console.warn("voice_agent:transcript_unbound_ignored", { callId: call.id });
+  }
   if (input.language) patch.language = input.language.slice(0, 16);
   if (input.outcome) patch.outcome = input.outcome.slice(0, 64);
   if (Object.keys(patch).length)
@@ -511,6 +938,37 @@ export async function endSipSession(
       await deps.db.from("call_logs").update(patch).eq("id", call.id),
     );
   return { ok: true };
+}
+
+function mergedTranscript(call: CallLog, input: EndSessionInput): StoredTranscriptTurn[] | null {
+  const incoming = (input.transcript ?? [])
+    .filter((t) => (t.role === "user" || t.role === "assistant") && t.text.trim())
+    .slice(0, MAX_TRANSCRIPT_TURNS)
+    .map((t) => ({ role: t.role, text: t.text.trim().slice(0, MAX_TRANSCRIPT_TEXT), at: t.at }));
+  const stored = (Array.isArray(call.transcript)
+    ? call.transcript
+    : []) as unknown as StoredTranscriptTurn[];
+  return mergeTranscriptSegment(stored, input.segment ?? "", incoming);
+}
+
+/** A checkpoint: only the transcript (and its summary line) is written, and only when it changed. */
+async function storeTranscript(
+  deps: SessionDeps,
+  call: CallLog,
+  input: EndSessionInput,
+): Promise<void> {
+  const merged = mergedTranscript(call, input);
+  if (!merged) return;
+  checked(
+    "call_logs.transcript_checkpoint",
+    await deps.db
+      .from("call_logs")
+      .update({
+        transcript: merged as never,
+        summary: callSummaryLine(merged.length, input.language),
+      })
+      .eq("id", call.id),
+  );
 }
 
 /** A billing lease older than this is presumed dead (its holder crashed). */
@@ -1117,13 +1575,18 @@ export async function pruneVoiceAgentRateLimits(
 
 /** Production wiring of SessionDeps to the existing modules (lazy, server-only). */
 export async function defaultSessionDeps(): Promise<SessionDeps> {
-  const [{ supabaseAdmin }, guard, agentService, instr, tools] = await Promise.all([
+  const [{ supabaseAdmin }, guard, agentConfig, tools, callerBookings] = await Promise.all([
     import("@/integrations/supabase/client.server"),
     import("@/lib/telephony-guard.server"),
-    import("@/lib/agent-service.server"),
-    import("@/lib/agent-instructions"),
+    import("./agent-config.server"),
     import("@/lib/ai-tools.server"),
+    import("@/lib/calendar/caller-bookings.server"),
   ]);
+  const configDeps = await agentConfig.defaultAgentConfigDeps();
+  const draftPolicy = agentConfig.draftConfigPolicy((n) => process.env[n]);
+  if (draftPolicy.optInIgnored) {
+    console.warn("voice_agent:draft_config_opt_in_ignored_in_production", {});
+  }
   const db = supabaseAdmin as unknown as Client;
   return {
     db,
@@ -1133,33 +1596,58 @@ export async function defaultSessionDeps(): Promise<SessionDeps> {
       return { allowed: g.allowed, reason: g.reason };
     },
     loadBusiness: async (businessId) => {
-      const snap = await agentService.loadSnapshot(db, businessId);
-      const { data: rows } = await db
-        .from("services")
-        .select("id, name, price, duration_minutes, is_active")
-        .eq("business_id", businessId);
+      const c = await agentConfig.resolveCallAgentConfig(db, businessId, configDeps, new Date(), {
+        allowDraft: draftPolicy.allowDraft,
+      });
+      if (!c.ok) {
+        // Field names only (never configuration values).
+        console.warn("voice_agent:agent_config_refused", { reason: c.reason, fields: c.fields });
+        return null;
+      }
       return {
-        name: snap.business.name,
-        timezone: snap.business.timezone,
-        country: snap.business.country ?? null,
-        currency: snap.business.currency,
-        services: (rows ?? [])
-          .filter((r) => r.is_active)
-          .map((r) => ({
-            id: r.id,
-            name: r.name,
-            price: r.price ?? null,
-            durationMinutes: r.duration_minutes ?? null,
-          })),
-        agentName: snap.agent.agent_name,
-        primaryLanguage: snap.agent.primary_language,
-        extraLanguages: snap.agent.extra_languages,
-        greetings: snap.agent.greetings,
-        voiceId: snap.agent.voice_id,
-        speakingPace: snap.agent.speaking_pace,
-        instructions: instr.buildAgentInstructions(snap),
+        name: c.businessName,
+        timezone: c.timezone,
+        country: c.country,
+        currency: c.currency,
+        services: c.services,
+        agentName: c.agent.agent_name,
+        primaryLanguage: c.agent.primary_language,
+        extraLanguages: c.agent.extra_languages,
+        greetings: c.agent.greetings,
+        voiceId: c.agent.voice_id,
+        speakingPace: c.agent.speaking_pace,
+        instructions: c.instructions,
+        agentVersion: c.agentVersion,
+        configSource: c.source,
       };
     },
+    loadService: async (org, biz, id) => {
+      const { data } = await db
+        .from("services")
+        .select("id, name, price, currency, is_active")
+        .eq("id", id)
+        .eq("organization_id", org)
+        .eq("business_id", biz)
+        .maybeSingle();
+      return (data as never) ?? null;
+    },
+    findCallerBookings: (q) =>
+      callerBookings.findCallerUpcomingBookings(db as never, {
+        organizationId: q.organizationId,
+        businessId: q.businessId,
+        callerE164: q.callerE164,
+        callId: q.callId,
+        country: q.country,
+      }),
+    guardOwnership: (ctx, tool, input) =>
+      callerBookings.guardBookingOwnership(db as never, ctx, tool, input),
+    findCallerFirstName: (q) =>
+      callerBookings.findReturningCallerFirstName(db as never, {
+        organizationId: q.organizationId,
+        businessId: q.businessId,
+        callerE164: q.callerE164,
+        country: q.country,
+      }),
     availableTools: async (org, biz) =>
       (await tools.resolveAvailableTools(db, org, biz)).map((t) => t.name),
     executeTool: (ctx, name, input) =>
