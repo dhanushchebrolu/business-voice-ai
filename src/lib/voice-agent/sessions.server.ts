@@ -172,6 +172,13 @@ export interface SessionDeps {
    */
   reserveOutbound?: (p: ReserveOutboundInput) => Promise<ReserveOutboundOutcome>;
   /**
+   * Atomic store of one agent job's transcript segment and rebuild of
+   * call_logs.transcript (public.store_voice_agent_transcript_segment,
+   * migration 20261107090000). Absent = transcripts cannot be stored: a
+   * report carrying one fails (never reported as stored).
+   */
+  storeTranscriptSegment?: (p: StoreTranscriptInput) => Promise<StoreTranscriptOutcome>;
+  /**
    * klyro's maximum call duration (VOICE_AGENT_MAX_CALL_SECONDS, default
    * 1800). Returned at session start; the agent ends the call at the smaller
    * of this and its own MAX_CALL_SECONDS, so the room sweep
@@ -198,6 +205,19 @@ export interface ReserveOutboundInput {
 export type ReserveOutboundOutcome =
   | { outcome: "created" | "existing"; callId: string; status: string }
   | { outcome: "conflict" | "limit_active" | "limit_daily"; callId: null; status: null };
+
+export interface StoreTranscriptInput {
+  callId: string;
+  /** Required for a checkpoint (must equal the call's SIP call id); optional for a final report. */
+  sipCallId: string | null;
+  /** The reporting LiveKit job; "" = the single unnamed segment (older agents). */
+  segment: string;
+  turns: TranscriptTurn[];
+  /** The final report for this segment (not a checkpoint). */
+  final: boolean;
+  language: string | null;
+}
+export type StoreTranscriptOutcome = "stored" | "unchanged" | "unknown_call" | "binding_mismatch";
 
 export interface SessionBusiness {
   name: string;
@@ -771,56 +791,6 @@ export interface TranscriptTurn {
 export const MAX_TRANSCRIPT_TURNS = 400;
 export const MAX_TRANSCRIPT_TEXT = 4000;
 
-/** A stored turn: the dashboard contract plus the segment and position it came from (ignored by the dashboard). */
-export interface StoredTranscriptTurn extends TranscriptTurn {
-  seg?: string;
-  n?: number;
-}
-
-/**
- * Merges one segment's snapshot into the stored transcript. A segment's
- * turns are replaced only by a snapshot at least as long as what is stored
- * for it (a replay, a duplicate or a late, shorter checkpoint changes
- * nothing); other segments are kept. The result is ordered by time, then
- * by position within its segment. Returns null when nothing changed.
- */
-export function mergeTranscriptSegment(
-  stored: readonly StoredTranscriptTurn[],
-  segment: string,
-  incoming: readonly TranscriptTurn[],
-): StoredTranscriptTurn[] | null {
-  const mine = stored.filter((t) => (t.seg ?? "") === segment);
-  if (incoming.length < mine.length) return null;
-  const same =
-    incoming.length === mine.length &&
-    incoming.every(
-      (t, i) => t.role === mine[i]!.role && t.text === mine[i]!.text && t.at === mine[i]!.at,
-    );
-  if (same) return null;
-  const tagged: StoredTranscriptTurn[] = incoming.map((t, n) => ({
-    role: t.role,
-    text: t.text,
-    at: t.at,
-    ...(segment ? { seg: segment } : {}),
-    n,
-  }));
-  const merged = [...stored.filter((t) => (t.seg ?? "") !== segment), ...tagged];
-  return merged
-    .map((t, i) => ({ t, i }))
-    .sort(
-      (a, b) =>
-        Date.parse(a.t.at) - Date.parse(b.t.at) ||
-        ((a.t.seg ?? "") === (b.t.seg ?? "") ? (a.t.n ?? 0) - (b.t.n ?? 0) : a.i - b.i),
-    )
-    .map(({ t }) => t)
-    .slice(0, MAX_TRANSCRIPT_TURNS * 2);
-}
-
-/** The Worker runtime's call summary line: "<n> turns · <language>". */
-export function callSummaryLine(turns: number, language: string | undefined): string {
-  return turns ? `${turns} turns · ${language ?? "unknown"}` : "No conversation recorded.";
-}
-
 /**
  * The agent's own report that its session ended. It is NOT trusted for
  * billing (the agent could be wrong or compromised): it records the
@@ -860,13 +830,21 @@ export async function endSipSession(
   }
   const bound = input.roomName !== undefined || input.sipCallId !== undefined;
   if (input.checkpoint) {
-    // A checkpoint must name BOTH the room and the SIP call it belongs to.
-    if (input.roomName === undefined || input.sipCallId === undefined || !input.transcript) {
+    // A checkpoint must name BOTH the room and the SIP call it belongs to,
+    // and the call must already have that SIP call id recorded.
+    if (
+      input.roomName === undefined ||
+      input.sipCallId === undefined ||
+      call.provider_call_id !== input.sipCallId ||
+      !input.transcript
+    ) {
       console.warn("voice_agent:transcript_checkpoint_unbound", { callId: call.id });
       return { ok: false, reason: "binding_mismatch" };
     }
-    await storeTranscript(deps, call, input);
-    return { ok: true };
+    const stored = await storeTranscript(deps, call.id, input, false);
+    return stored === "stored" || stored === "unchanged"
+      ? { ok: true }
+      : { ok: false, reason: stored };
   }
   const nowIso = deps.now().toISOString();
   // An outbound row that never reached session start ("initiated" or
@@ -916,19 +894,21 @@ export async function endSipSession(
     );
   }
   const patch: Database["public"]["Tables"]["call_logs"]["Update"] = {};
-  if (input.summary) patch.summary = input.summary.slice(0, 2000);
-  // G3: the final transcript, from a report bound to this call only, merged
-  // with the checkpoints already stored (mergeTranscriptSegment): a replay,
-  // the second report (end of conversation, then process shutdown) or a
-  // late, shorter one never loses or duplicates turns.
+  // G3: the final transcript, from a report bound to this call only, stored
+  // atomically with the checkpoints already stored (storeTranscript): a
+  // replay, the second report (end of conversation, then process shutdown),
+  // a late, shorter one or a concurrent checkpoint never loses or
+  // duplicates turns. The database writes the summary line with it.
   if (input.transcript && bound) {
-    const merged = mergedTranscript(call, input);
-    if (merged) {
-      patch.transcript = merged as never;
-      patch.summary = callSummaryLine(merged.length, input.language);
+    const stored = await storeTranscript(deps, call.id, input, true);
+    if (stored === "unknown_call" || stored === "binding_mismatch") {
+      console.warn("voice_agent:end_report_transcript_refused", { callId: call.id, stored });
+      return { ok: false, reason: stored };
     }
-  } else if (input.transcript) {
-    console.warn("voice_agent:transcript_unbound_ignored", { callId: call.id });
+  } else {
+    if (input.transcript)
+      console.warn("voice_agent:transcript_unbound_ignored", { callId: call.id });
+    if (input.summary) patch.summary = input.summary.slice(0, 2000);
   }
   if (input.language) patch.language = input.language.slice(0, 16);
   if (input.outcome) patch.outcome = input.outcome.slice(0, 64);
@@ -940,35 +920,33 @@ export async function endSipSession(
   return { ok: true };
 }
 
-function mergedTranscript(call: CallLog, input: EndSessionInput): StoredTranscriptTurn[] | null {
-  const incoming = (input.transcript ?? [])
+/**
+ * Stores this report's transcript segment in ONE database transaction
+ * (deps.storeTranscriptSegment): concurrent checkpoints, the final report
+ * and other agent jobs' segments are serialized by the database, so none
+ * overwrites another. Only the transcript and its summary line are written,
+ * and only when they changed. A database failure throws (the request fails;
+ * nothing is reported as stored).
+ */
+async function storeTranscript(
+  deps: SessionDeps,
+  callId: string,
+  input: EndSessionInput,
+  final: boolean,
+): Promise<StoreTranscriptOutcome> {
+  if (!deps.storeTranscriptSegment) throw new Error("transcript store unavailable");
+  const turns = (input.transcript ?? [])
     .filter((t) => (t.role === "user" || t.role === "assistant") && t.text.trim())
     .slice(0, MAX_TRANSCRIPT_TURNS)
     .map((t) => ({ role: t.role, text: t.text.trim().slice(0, MAX_TRANSCRIPT_TEXT), at: t.at }));
-  const stored = (Array.isArray(call.transcript)
-    ? call.transcript
-    : []) as unknown as StoredTranscriptTurn[];
-  return mergeTranscriptSegment(stored, input.segment ?? "", incoming);
-}
-
-/** A checkpoint: only the transcript (and its summary line) is written, and only when it changed. */
-async function storeTranscript(
-  deps: SessionDeps,
-  call: CallLog,
-  input: EndSessionInput,
-): Promise<void> {
-  const merged = mergedTranscript(call, input);
-  if (!merged) return;
-  checked(
-    "call_logs.transcript_checkpoint",
-    await deps.db
-      .from("call_logs")
-      .update({
-        transcript: merged as never,
-        summary: callSummaryLine(merged.length, input.language),
-      })
-      .eq("id", call.id),
-  );
+  return deps.storeTranscriptSegment({
+    callId,
+    sipCallId: input.sipCallId ?? null,
+    segment: input.segment ?? "",
+    turns,
+    final,
+    language: input.language ?? null,
+  });
 }
 
 /** A billing lease older than this is presumed dead (its holder crashed). */
@@ -1692,6 +1670,35 @@ export async function defaultSessionDeps(): Promise<SessionDeps> {
       )
         return { outcome: row.outcome, callId: null, status: null };
       throw new Error(`unexpected reservation outcome: ${row.outcome}`);
+    },
+    storeTranscriptSegment: async (p) => {
+      // Not in the generated Database types until the migration is applied
+      // and types are regenerated; bound to the client (rpc reads this.rest).
+      const rpc = supabaseAdmin.rpc.bind(supabaseAdmin) as unknown as (
+        fn: string,
+        args: Record<string, unknown>,
+      ) => PromiseLike<{
+        data: Array<{ outcome: string; total_turns: number | null }> | null;
+        error: { message: string } | null;
+      }>;
+      const { data, error } = await rpc("store_voice_agent_transcript_segment", {
+        _call_id: p.callId,
+        _sip_call_id: p.sipCallId,
+        _segment: p.segment,
+        _turns: p.turns,
+        _final: p.final,
+        _language: p.language,
+      });
+      if (error) throw new Error(error.message);
+      const outcome = data?.[0]?.outcome;
+      if (
+        outcome === "stored" ||
+        outcome === "unchanged" ||
+        outcome === "unknown_call" ||
+        outcome === "binding_mismatch"
+      )
+        return outcome;
+      throw new Error(`unexpected transcript store outcome: ${String(outcome)}`);
     },
     maxCallSeconds: maxCallSecondsFromEnv(process.env["VOICE_AGENT_MAX_CALL_SECONDS"]),
     now: () => new Date(),

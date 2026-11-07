@@ -78,16 +78,17 @@ No new critical or high-severity code blocker was found in Phase 2.16 (§14).
 
 ## 5. Migration safety
 
-| Item                                                                                           | Status                                           |
-| ---------------------------------------------------------------------------------------------- | ------------------------------------------------ |
-| `20261102090000_voice_agent_outbound_reservation.sql` untracked, never executed                | VERIFIED (`git status`: `??`; `git ls-files`: 0) |
-| `20261102100000_voice_agent_room_sweep_indexes.sql` untracked, never executed                  | VERIFIED                                         |
-| Neither is needed for inbound-only staging (outbound-only RPC; indexes not referenced by code) | VERIFIED (code search)                           |
-| No workflow runs the Supabase CLI; `supabase/config.toml` has only `project_id`                | VERIFIED                                         |
-| PR #4 (added a migration, 2026-09-11) had no Supabase Preview check/comment                    | VERIFIED                                         |
-| Supabase "Deploy to production" (S1–S4), Branching (S5), applied versions (S6)                 | **UNKNOWN** (dashboard)                          |
-| Lovable GitHub sync and migration behaviour (L1–L3)                                            | **UNKNOWN** (dashboard / Lovable support)        |
-| Schema compatibility for inbound (`scripts/staging/check-voice-agent-schema.sql`, read-only)   | PENDING (run it in the staging SQL editor, D0)   |
+| Item                                                                                                                                                              | Status                                                    |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| `20261102090000_voice_agent_outbound_reservation.sql` untracked, never executed                                                                                   | VERIFIED (`git status`: `??`; `git ls-files`: 0)          |
+| `20261102100000_voice_agent_room_sweep_indexes.sql` untracked, never executed                                                                                     | VERIFIED                                                  |
+| Neither is needed for inbound-only staging (outbound-only RPC; indexes not referenced by code)                                                                    | VERIFIED (code search)                                    |
+| `20261107090000_voice_agent_transcript_segments.sql` IS needed for inbound: transcripts are stored only through its function (atomic; DEPLOYMENT_CHECKLIST.md §1) | PENDING (apply by hand, with approval, before the Worker) |
+| No workflow runs the Supabase CLI; `supabase/config.toml` has only `project_id`                                                                                   | VERIFIED                                                  |
+| PR #4 (added a migration, 2026-09-11) had no Supabase Preview check/comment                                                                                       | VERIFIED                                                  |
+| Supabase "Deploy to production" (S1–S4), Branching (S5), applied versions (S6)                                                                                    | **UNKNOWN** (dashboard)                                   |
+| Lovable GitHub sync and migration behaviour (L1–L3)                                                                                                               | **UNKNOWN** (dashboard / Lovable support)                 |
+| Schema compatibility for inbound (`scripts/staging/check-voice-agent-schema.sql`, read-only)                                                                      | PENDING (run it in the staging SQL editor, D0)            |
 
 Rule: until S3/S5/L3 are confirmed safe, both files stay out of every commit (checklist: STAGING_DEPLOYMENT.md §1).
 
@@ -204,7 +205,7 @@ Independent steps, fastest first (detail: STAGING_DEPLOYMENT.md §6, RUNBOOK.md)
 2. **Agent:** `kubectl -n <ns> scale deploy/voice-agent --replicas=0` (active calls drain, ≤ 31 min) or `kubectl rollout undo`.
 3. **klyro:** redeploy the previous Worker build from the Cloudflare dashboard; the voice routes are inert without SIP traffic.
 4. **Cron:** `select cron.unschedule('clickai-staging-sweep-sip-rooms'); select cron.unschedule('clickai-staging-reconcile-sip-calls');` (production: remove both from the scheduler; this re-opens the stranded-caller risk).
-5. **Database:** nothing to roll back for inbound (no migration needed). Index migration, if applied: `DROP INDEX IF EXISTS public.idx_call_logs_livekit_inbound_answered; DROP INDEX IF EXISTS public.idx_call_logs_livekit_room;`. Outbound migration, if applied: `DROP FUNCTION public.reserve_voice_agent_outbound_call(...)` (outbound then fails closed).
+5. **Database:** transcript migration, if applied: first redeploy a Worker that does not call it, then `DROP FUNCTION IF EXISTS public.store_voice_agent_transcript_segment(uuid, text, text, jsonb, boolean, text); DROP TABLE IF EXISTS public.call_transcript_segments;` (call_logs.transcript keeps what was written). Index migration, if applied: `DROP INDEX IF EXISTS public.idx_call_logs_livekit_inbound_answered; DROP INDEX IF EXISTS public.idx_call_logs_livekit_room;`. Outbound migration, if applied: `DROP FUNCTION public.reserve_voice_agent_outbound_call(...)` (outbound then fails closed).
 
 ## 14. Phase 2.16 review: new blockers
 

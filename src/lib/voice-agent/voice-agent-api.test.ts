@@ -99,7 +99,6 @@ import {
   claimOutboundCall,
   completeSipCallFromLiveKit,
   endSipSession,
-  mergeTranscriptSegment,
   outboundRoomName,
   pruneVoiceAgentNonces,
   pruneVoiceAgentRateLimits,
@@ -107,6 +106,9 @@ import {
   runSessionTool,
   startSipSession,
   type SessionDeps,
+  type StoreTranscriptInput,
+  type StoreTranscriptOutcome,
+  type TranscriptTurn,
 } from "./sessions.server.ts";
 
 /* ------------------------------------------------------------------ */
@@ -276,6 +278,71 @@ function fakeDb(seed: Record<string, Row[]> = {}) {
 }
 
 /**
+ * In-memory mirror of public.store_voice_agent_transcript_segment (migration
+ * 20261107090000). Synchronous, so atomic within this process, like the
+ * function's row lock. Segments are kept in tables.call_transcript_segments.
+ * The SQL itself, including genuinely concurrent connections, is exercised
+ * in supabase/migrations/voice_agent_transcript_segments.pg.test.ts.
+ */
+function fakeStoreTranscript(
+  tables: Record<string, Row[]>,
+  p: StoreTranscriptInput,
+): StoreTranscriptOutcome {
+  const call = tables["call_logs"]!.find((r) => r["id"] === p.callId);
+  if (!call || call["provider"] !== "livekit_sip") return "unknown_call";
+  const sip = (call["provider_call_id"] ?? null) as string | null;
+  if (
+    (!p.final && (p.sipCallId === null || sip !== p.sipCallId)) ||
+    (p.sipCallId !== null && sip !== null && sip !== p.sipCallId)
+  )
+    return "binding_mismatch";
+  const segs = (tables["call_transcript_segments"] ??= []);
+  const incoming = p.turns.map((t) => ({ role: t.role, text: t.text, at: t.at }));
+  const ex = segs.find((s) => s["call_id"] === p.callId && s["segment"] === p.segment);
+  let changed = false;
+  if (!ex) {
+    segs.push({ call_id: p.callId, segment: p.segment, turns: incoming, final: p.final });
+    changed = true;
+  } else {
+    const old = ex["turns"] as TranscriptTurn[];
+    if (ex["final"]) {
+      if (p.final && incoming.length > old.length) {
+        ex["turns"] = incoming;
+        changed = true;
+      }
+    } else if (
+      incoming.length > old.length ||
+      (p.final &&
+        incoming.length === old.length &&
+        JSON.stringify(incoming) !== JSON.stringify(old))
+    ) {
+      ex["turns"] = incoming;
+      ex["final"] = p.final;
+      changed = true;
+    } else if (p.final) ex["final"] = true;
+  }
+  if (!changed) return "unchanged";
+  const merged = segs
+    .filter((s) => s["call_id"] === p.callId)
+    .flatMap((s) =>
+      (s["turns"] as TranscriptTurn[]).map((t, n) => ({
+        turn: { ...t, ...(s["segment"] ? { seg: s["segment"] as string } : {}), n },
+        at: Date.parse(t.at),
+        seg: s["segment"] as string,
+        n,
+      })),
+    )
+    .sort((a, b) => a.at - b.at || (a.seg < b.seg ? -1 : a.seg > b.seg ? 1 : a.n - b.n))
+    .slice(0, 800)
+    .map((x) => x.turn);
+  call["transcript"] = merged;
+  call["summary"] = merged.length
+    ? `${merged.length} turns · ${p.language ?? "unknown"}`
+    : "No conversation recorded.";
+  return "stored";
+}
+
+/**
  * In-memory mirror of public.reserve_voice_agent_outbound_call (migration
  * 20261102090000). Synchronous, so atomic within this process. The SQL
  * itself is exercised against real PostgreSQL with concurrent connections in
@@ -377,6 +444,7 @@ function sessionDeps(over: Partial<SessionDeps> = {}) {
     ),
     finalizeBilling: async (call, seconds) => billed.push({ id: call.id, seconds }),
     reserveOutbound: async (p) => fakeReserve(db.tables, p),
+    storeTranscriptSegment: async (p) => fakeStoreTranscript(db.tables, p),
     now: () => new Date("2026-11-02T04:30:00Z"),
     ...over,
   };
@@ -5071,20 +5139,103 @@ describe("transcript checkpoints: partial transcripts survive crashes; nothing d
     assert.equal((await send("AJ_abc123", "nonce-cp-ok-aaaaaaaaa")).status, 200);
     assert.equal((c.row()["transcript"] as unknown[]).length, 2);
   });
-  test("mergeTranscriptSegment: equal timestamps keep each segment's own order", () => {
+  test("equal timestamps keep each segment's own order", async () => {
+    const c = await call("SCL_cp8");
     const at = new Date(T0).toISOString();
-    const merged = mergeTranscriptSegment([], "S", [
-      { role: "assistant", text: "first", at },
-      { role: "user", text: "second", at },
-    ])!;
+    await c.send({
+      segment: "S",
+      turns: [
+        { role: "assistant", text: "first", at },
+        { role: "user", text: "second", at },
+      ],
+    });
+    assert.deepEqual(c.texts(), ["first", "second"]);
+    await c.send({ segment: "S", turns: [{ role: "assistant", text: "first", at }] });
+    assert.deepEqual(c.texts(), ["first", "second"], "shorter: no change");
+  });
+  test("after the final report, stale checkpoints of that segment change nothing", async () => {
+    const c = await call("SCL_cp9");
+    await c.send({ segment: "AJ_1", turns: turnsFrom(0, 6, "final"), checkpoint: false });
+    await c.send({ segment: "AJ_1", turns: turnsFrom(0, 4, "stale") });
+    await c.send({ segment: "AJ_1", turns: turnsFrom(0, 6, "stale") }); // same length, older text
+    await c.send({ segment: "AJ_1", turns: turnsFrom(0, 7, "stale") }); // even a longer one
     assert.deepEqual(
-      merged.map((t) => t.text),
-      ["first", "second"],
+      c.texts(),
+      turnsFrom(0, 6, "final").map((t) => t.text),
     );
-    assert.equal(
-      mergeTranscriptSegment(merged, "S", [{ role: "assistant", text: "first", at }]),
-      null,
-      "shorter: no change",
+    assert.equal(c.row()["summary"], "6 turns · te-IN");
+  });
+  test("a final report shorter than the stored checkpoint keeps every checkpointed turn", async () => {
+    const c = await call("SCL_cp10");
+    await c.send({ segment: "AJ_1", turns: turnsFrom(0, 8, "a") });
+    await c.send({ segment: "AJ_1", turns: turnsFrom(0, 5, "a"), checkpoint: false });
+    assert.equal(c.texts().length, 8);
+    await c.send({ segment: "AJ_1", turns: turnsFrom(0, 9, "late") }); // checkpoint after final
+    assert.equal(c.texts().length, 8, "segment is final");
+  });
+  test("a checkpoint for a call whose SIP call id is not yet recorded is refused", async () => {
+    const c = await call("SCL_cp11");
+    c.row()["provider_call_id"] = null;
+    assert.deepEqual(await c.send({ segment: "AJ_1", turns: turnsFrom(0, 2, "x") }), {
+      ok: false,
+      reason: "binding_mismatch",
+    });
+    assert.equal(c.row()["transcript"] ?? null, null);
+  });
+  test("concurrent checkpoints and final reports from two jobs: every segment survives", async () => {
+    const c = await call("SCL_cp12");
+    await Promise.all([
+      c.send({ segment: "AJ_a", turns: turnsFrom(0, 3, "a") }),
+      c.send({ segment: "AJ_b", turns: turnsFrom(20, 2, "b") }),
+      c.send({ segment: "AJ_a", turns: turnsFrom(0, 5, "a"), checkpoint: false }),
+      c.send({ segment: "AJ_b", turns: turnsFrom(20, 4, "b") }),
+      c.send({ segment: "AJ_a", turns: turnsFrom(0, 2, "a") }),
+    ]);
+    assert.deepEqual(c.texts(), [
+      ...turnsFrom(0, 5, "a").map((t) => t.text),
+      ...turnsFrom(20, 4, "b").map((t) => t.text),
+    ]);
+  });
+  test("a database failure fails the request; nothing is reported as stored", async () => {
+    for (const checkpoint of [true, false]) {
+      const c = await call(`SCL_cp13${checkpoint ? "c" : "f"}`);
+      c.deps.storeTranscriptSegment = async () => {
+        throw new Error("connection reset");
+      };
+      await assert.rejects(
+        c.send({ segment: "AJ_1", turns: turnsFrom(0, 2, "x"), checkpoint }),
+        /connection reset/,
+      );
+      const h = httpDeps(c.deps, c.db);
+      await assert.rejects(
+        handleSessionEnd(
+          await signed(
+            "/api/internal/voice-agent/session-end",
+            {
+              callId: c.callId,
+              reason: "checkpoint",
+              ...(checkpoint ? { checkpoint: true } : {}),
+              segment: "AJ_1",
+              roomName: `call-SCL_cp13${checkpoint ? "c" : "f"}`,
+              sipCallId: `SCL_cp13${checkpoint ? "c" : "f"}`,
+              transcript: turnsFrom(0, 2, "x"),
+            },
+            { nonce: `nonce-cp-dbfail-${checkpoint}-aaaa` },
+          ),
+          h,
+        ),
+        /connection reset/,
+        "the route turns this into a 500, never a 200",
+      );
+      assert.equal(c.row()["transcript"] ?? null, null);
+    }
+  });
+  test("no transcript store configured: a report carrying a transcript fails, never silently drops it", async () => {
+    const c = await call("SCL_cp14");
+    delete c.deps.storeTranscriptSegment;
+    await assert.rejects(
+      c.send({ segment: "AJ_1", turns: turnsFrom(0, 2, "x") }),
+      /transcript store unavailable/,
     );
   });
 });
