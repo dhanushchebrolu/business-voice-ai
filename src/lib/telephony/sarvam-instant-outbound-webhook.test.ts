@@ -17,7 +17,10 @@ import {
  * final_agent_variables, webhook_config {url, metadata}, interaction_transcript.
  */
 
-const adapter = new SarvamTelephonyAdapter({ outboundApiKey: "sk_test" });
+const adapter = new SarvamTelephonyAdapter({
+  inboundApiKey: "sk_test_in",
+  outboundApiKey: "sk_test",
+});
 const CALL_ID = "8f14e45f-ceea-467e-a4a9-1c1c1c1c1c1c";
 
 function payload(overrides: Record<string, unknown> = {}) {
