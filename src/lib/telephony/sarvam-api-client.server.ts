@@ -417,6 +417,13 @@ export interface InstantOutboundResult {
    * not this return value.
    */
   interactionId: string | undefined;
+  /**
+   * Sarvam's documented response for this endpoint is `{ attempt_id }`
+   * (docs.sarvam.ai/voice-agents/api/instant-outbound/create.md), and the
+   * same attempt_id is on every single-call webhook, connected or not — so
+   * this is what callers persist as the call's provider_call_id.
+   */
+  attemptId: string | undefined;
   raw: Record<string, unknown>;
 }
 
@@ -466,8 +473,10 @@ export async function createInstantOutbound(
   );
   const obj = asPlainObject(parsed) ?? {};
   const interactionId = obj["interaction_id"];
+  const attemptId = obj["attempt_id"];
   return {
     interactionId: typeof interactionId === "string" && interactionId ? interactionId : undefined,
+    attemptId: typeof attemptId === "string" && attemptId ? attemptId : undefined,
     raw: obj,
   };
 }

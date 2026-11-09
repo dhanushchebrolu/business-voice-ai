@@ -432,4 +432,19 @@ describe("response parsing — never fabricates an id the response didn't actual
     assert.equal(result.interactionId, undefined);
     assert.deepEqual(result.raw, { accepted: true });
   });
+
+  test("createInstantOutbound: the documented { attempt_id } response is surfaced as attemptId", async () => {
+    const config = { ...baseConfig, fetchImpl: mockFetch(200, { attempt_id: "att_777" }) };
+    const result = await createInstantOutbound(config, {
+      appId: "a",
+      appVersion: 1,
+      connectionId: "c",
+      fromE164: "+912222222222",
+      toE164: "+919876543210",
+      webhookUrl: "https://klyro.example.com/api/public/webhooks/telephony?provider=sarvam",
+      metadata: { organizationId: "org_1", callId: "call_1" },
+    });
+    assert.equal(result.attemptId, "att_777");
+    assert.equal(result.interactionId, undefined);
+  });
 });

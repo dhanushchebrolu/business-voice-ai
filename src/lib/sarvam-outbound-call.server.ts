@@ -108,14 +108,18 @@ export async function sendSarvamInstantOutboundCall(
       metadata: { organizationId: phoneNumber.organization_id, callId: call.id },
     });
 
-    // interaction_id may not be returned synchronously — see
-    // SarvamTelephonyAdapter.createInstantOutbound's doc. When absent,
-    // provider_call_id stays null (never fabricated); the webhook's own
-    // interaction_id, or the clientReference fallback, backfills it later.
-    if (dialed.interactionId) {
+    // Sarvam's documented response is { attempt_id }, the same key every
+    // single-call webhook carries, so only it becomes provider_call_id. When
+    // it is missing, provider_call_id stays null (never an interaction_id, so
+    // the webhook route's attempt-id check can't reject the real webhook) and
+    // the webhook's metadata.call_id fallback backfills it.
+    const patch: Record<string, unknown> = {};
+    if (dialed.attemptId) patch["provider_call_id"] = dialed.attemptId;
+    if (dialed.interactionId) patch["provider_metadata"] = { interaction_id: dialed.interactionId };
+    if (Object.keys(patch).length > 0) {
       await supabaseAdmin
         .from("call_logs")
-        .update({ provider_call_id: dialed.interactionId })
+        .update(patch as never)
         .eq("id", call.id);
     }
     return { callId: call.id, interactionId: dialed.interactionId ?? null };

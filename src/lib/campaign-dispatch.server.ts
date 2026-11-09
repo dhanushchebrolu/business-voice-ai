@@ -240,12 +240,20 @@ async function dispatchOneCampaign(
           organizationId: campaign.organization_id,
           campaignId: campaign.id,
           campaignContactId: cc.id,
+          // The webhook route resolves its clientReference fallback by call_logs id.
+          callId: call.id,
         },
       });
-      if (result.interactionId) {
+      // Only Sarvam's attempt_id (on every single-call webhook) becomes
+      // provider_call_id; see sendSarvamInstantOutboundCall for why never interaction_id.
+      const patch: Record<string, unknown> = {};
+      if (result.attemptId) patch["provider_call_id"] = result.attemptId;
+      if (result.interactionId)
+        patch["provider_metadata"] = { interaction_id: result.interactionId };
+      if (Object.keys(patch).length > 0) {
         await supabaseAdmin
           .from("call_logs")
-          .update({ provider_call_id: result.interactionId })
+          .update(patch as never)
           .eq("id", call.id);
       }
       dialed++;

@@ -44,3 +44,40 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 export function isPlausibleClientReference(value: string): boolean {
   return UUID_RE.test(value);
 }
+
+/**
+ * Defense-in-depth cross-check once a Klyro-owned call_logs row is resolved:
+ * an organization_id echoed back in the webhook's metadata (which Klyro
+ * itself sent) must agree with the row's own organization. Absent metadata
+ * passes — the row, never the payload, decides the organization.
+ */
+export function metadataOrganizationMatches(
+  event: Pick<NormalizedCallEvent, "metadataOrganizationId">,
+  rowOrganizationId: string,
+): boolean {
+  return !event.metadataOrganizationId || event.metadataOrganizationId === rowOrganizationId;
+}
+
+export type ClientReferenceMatch =
+  | { ok: true; backfillProviderCallId: boolean }
+  | { ok: false; reason: "organization_mismatch" | "provider_call_id_mismatch" };
+
+/**
+ * Decides whether an outbound event matched only through its clientReference
+ * (metadata.call_id) may be applied to that row. Rejected: a disagreeing
+ * metadata organization, or a row already bound to a different provider call
+ * id (for Sarvam, a different attempt_id) — every attempt has its own row, so
+ * that is never legitimate. A row with no provider_call_id yet is backfilled.
+ */
+export function checkClientReferenceMatch(
+  row: { organization_id: string; provider_call_id: string | null },
+  event: Pick<NormalizedCallEvent, "metadataOrganizationId" | "providerCallId">,
+): ClientReferenceMatch {
+  if (!metadataOrganizationMatches(event, row.organization_id)) {
+    return { ok: false, reason: "organization_mismatch" };
+  }
+  if (row.provider_call_id && row.provider_call_id !== event.providerCallId) {
+    return { ok: false, reason: "provider_call_id_mismatch" };
+  }
+  return { ok: true, backfillProviderCallId: !row.provider_call_id };
+}

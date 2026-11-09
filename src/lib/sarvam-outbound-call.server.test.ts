@@ -155,9 +155,12 @@ describe("sendSarvamInstantOutboundCall — happy path", () => {
     assert.ok(insertCall);
     assert.equal((insertCall!.payload as { status: string }).status, "initiated");
 
+    // interaction_id alone is kept in provider_metadata but never becomes provider_call_id.
     const updateCall = calls.find((c) => c.table === "call_logs" && c.type === "update");
     assert.ok(updateCall);
-    assert.equal((updateCall!.payload as { provider_call_id: string }).provider_call_id, "int_1");
+    const payload = updateCall!.payload as Record<string, unknown>;
+    assert.equal("provider_call_id" in payload, false);
+    assert.deepEqual(payload["provider_metadata"], { interaction_id: "int_1" });
   });
 
   test("never writes provider_call_id when interaction_id is absent from the response — no fabricated id", async () => {
@@ -175,6 +178,30 @@ describe("sendSarvamInstantOutboundCall — happy path", () => {
     assert.equal(result.interactionId, null);
     const updateCall = calls.find((c) => c.table === "call_logs" && c.type === "update");
     assert.equal(updateCall, undefined);
+  });
+
+  test("persists the documented attempt_id as provider_call_id", async () => {
+    const { client, calls } = makeFakeSupabase({
+      phone_numbers: { select: [{ data: PHONE_NUMBER_ROW, error: null }] },
+      telephony_connections: { select: [{ data: CONNECTION_ROW, error: null }] },
+      agent_configs: { select: [{ data: AGENT_CONFIG_ROW, error: null }] },
+      call_logs: {
+        insert: [{ data: { id: "call_1" }, error: null }],
+        update: [{ data: null, error: null }],
+      },
+    });
+
+    const { requestBody } = await withSarvamEnvAndFetch(
+      { status: 200, body: { attempt_id: "att_1" } },
+      () =>
+        sendSarvamInstantOutboundCall(client, { phoneNumberId: "num_1", toE164: "+912222222222" }),
+    );
+
+    const updateCall = calls.find((c) => c.table === "call_logs" && c.type === "update");
+    assert.equal((updateCall!.payload as { provider_call_id: string }).provider_call_id, "att_1");
+    const metadata = (requestBody as { webhook_config: { metadata: Record<string, string> } })
+      .webhook_config.metadata;
+    assert.equal(metadata["call_id"], "call_1");
   });
 });
 

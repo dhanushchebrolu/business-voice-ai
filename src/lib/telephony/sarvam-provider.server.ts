@@ -326,25 +326,48 @@ function classifyOutboundStatus(
 }
 
 /**
+ * The metadata object Klyro sent in `webhook_config.metadata`. Campaign
+ * webhooks echo it as a top-level `metadata`; single-call (instant outbound)
+ * webhooks echo the whole `webhook_config: {url, metadata}` instead
+ * (docs.sarvam.ai/voice-agents/api/instant-outbound/webhook-payload.md).
+ */
+function webhookMetadata(fields: Record<string, unknown>): Record<string, unknown> | undefined {
+  return (
+    asPlainObject(fields["metadata"]) ??
+    asPlainObject(asPlainObject(fields["webhook_config"])?.["metadata"])
+  );
+}
+
+/** Single-call webhook `status` values, verbatim from the instant-outbound webhook docs. */
+const INSTANT_OUTBOUND_STATUS: Record<string, NormalizedCallStatus> = {
+  connected: "completed", // sent once the attempt has finished, so a connected call is over
+  no_answer: "no_answer",
+  busy: "busy",
+  failed: "failed",
+};
+
+/**
  * Best-effort candidate client-reference — see the module doc's note on
  * `clientReference`. Per the outbound request body Klyro now sends
  * (sarvam-api-client.server.ts's toInstantOutboundBody), `webhook_config`
- * carries a structured `metadata` OBJECT with `campaign_contact_id`,
+ * carries a structured `metadata` OBJECT with `call_id`, `campaign_contact_id`,
  * `organization_id`, `campaign_id`, `lead_id` — not a single flat string —
- * so that shape is checked first. `campaign_contact_id` is preferred (it is
- * the most specific Klyro-owned row available); `organization_id` alone is
- * never sufficient for correlation to a specific call, only used elsewhere
- * as a defense-in-depth cross-check once a row is already resolved. The
- * older flat `user_identifier`/`metadata`-as-string shape is still checked
- * as a fallback for backward compatibility with the previous request body.
+ * so that shape is checked first. `call_id` is preferred: it is the
+ * pre-created call_logs row's own id, the only value the webhook route's
+ * resolveOutboundCallByClientReference can actually look up;
+ * `organization_id` alone is never sufficient for correlation to a specific
+ * call, only used elsewhere as a defense-in-depth cross-check once a row is
+ * already resolved. The older flat `user_identifier`/`metadata`-as-string
+ * shape is still checked as a fallback for backward compatibility with the
+ * previous request body.
  */
 function extractClientReference(fields: Record<string, unknown>): string | undefined {
-  const metadataObj = asPlainObject(fields["metadata"]);
+  const metadataObj = webhookMetadata(fields);
   if (metadataObj) {
-    const campaignContactId = metadataObj["campaign_contact_id"];
-    if (isNonEmptyString(campaignContactId)) return campaignContactId;
     const callId = metadataObj["call_id"];
     if (isNonEmptyString(callId)) return callId;
+    const campaignContactId = metadataObj["campaign_contact_id"];
+    if (isNonEmptyString(campaignContactId)) return campaignContactId;
     const leadId = metadataObj["lead_id"];
     if (isNonEmptyString(leadId)) return leadId;
   }
@@ -367,7 +390,7 @@ function extractClientReference(fields: Record<string, unknown>): string | undef
  * such rather than trusting either value blindly.
  */
 function extractMetadataOrganizationId(fields: Record<string, unknown>): string | undefined {
-  const metadataObj = asPlainObject(fields["metadata"]);
+  const metadataObj = webhookMetadata(fields);
   if (!metadataObj) return undefined;
   const organizationId = metadataObj["organization_id"];
   return isNonEmptyString(organizationId) ? organizationId : undefined;
@@ -564,6 +587,44 @@ export class SarvamTelephonyAdapter implements TelephonyProviderAdapter {
       fields = obj;
     } catch {
       return null;
+    }
+
+    // Single-call (instant outbound) webhook: keyed by attempt_id, which is on
+    // every attempt; interaction_id is null when the call never connected.
+    // Recognised by its own `status` field — campaign webhooks use
+    // completion_status/connectivity_status instead and keep the path below.
+    const attemptId = fields["attempt_id"];
+    if (
+      isNonEmptyString(attemptId) &&
+      isNonEmptyString(fields["status"]) &&
+      fields["completion_status"] === undefined
+    ) {
+      const status = INSTANT_OUTBOUND_STATUS[fields["status"]];
+      if (!status) return null; // undocumented value: reject rather than guess a billing outcome
+      const agentPhone = asPlainObject(fields["channel_info"])?.["agent_phone_number"];
+      return {
+        eventId: attemptId,
+        providerCallId: attemptId,
+        status,
+        direction: "outbound",
+        fromE164: isPlausibleE164(agentPhone) ? agentPhone : undefined,
+        // Only a connected call has billable time: the route bills durationSeconds
+        // for every terminal status, and Sarvam doesn't charge unanswered/busy/failed calls.
+        durationSeconds: status === "completed" ? toDurationSeconds(fields["duration"]) : undefined,
+        recordingUrl: null,
+        failureReason: isNonEmptyString(fields["failure_reason"]) ? fields["failure_reason"] : null,
+        occurredAt: new Date().toISOString(),
+        transcript: parseTranscript(fields["interaction_transcript"]),
+        agentVariables: collectAgentVariables(
+          undefined,
+          fields["final_agent_variables"],
+          undefined,
+        ),
+        providerAttemptId: attemptId,
+        clientReference: extractClientReference(fields),
+        metadataOrganizationId: extractMetadataOrganizationId(fields),
+        raw: fields,
+      };
     }
 
     const interactionId = fields["interaction_id"];

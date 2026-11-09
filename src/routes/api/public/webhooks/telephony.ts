@@ -13,7 +13,9 @@ import type { NormalizedCallEvent } from "@/lib/telephony/adapter";
 import { maskCallSid } from "@/lib/telephony/media-session-authorization.server";
 import {
   buildProviderMetadata,
+  checkClientReferenceMatch,
   isPlausibleClientReference,
+  metadataOrganizationMatches,
 } from "@/lib/telephony/webhook-correlation.server";
 import {
   applyOutcomeToCampaignContact,
@@ -208,6 +210,10 @@ export async function processTelephonyEvent(
   });
 
   if (existingCall) {
+    if (!metadataOrganizationMatches(event, existingCall.organization_id)) {
+      console.error("telephony:webhook_organization_mismatch", existingCall.id);
+      return;
+    }
     await applyCallEvent(existingCall, event);
     return;
   }
@@ -232,11 +238,17 @@ export async function processTelephonyEvent(
       console.error("telephony:webhook_unknown_outbound_call", event.providerCallId);
       return;
     }
-    if (!resolved.provider_call_id) {
+    const match = checkClientReferenceMatch(resolved, event);
+    if (!match.ok) {
+      console.error(`telephony:webhook_${match.reason}`, resolved.id);
+      return;
+    }
+    if (match.backfillProviderCallId) {
       await supabaseAdmin
         .from("call_logs")
         .update({ provider_call_id: event.providerCallId })
-        .eq("id", resolved.id);
+        .eq("id", resolved.id)
+        .is("provider_call_id", null); // never overwrite an id the call-start code saved meanwhile
       resolved.provider_call_id = event.providerCallId;
     }
     await applyCallEvent(resolved, event);

@@ -86,7 +86,7 @@ describe("telephony webhook route — outbound tenant correlation (Sarvam additi
   test("imports the correlation helpers from webhook-correlation.server, not ad hoc logic", () => {
     assert.match(
       routeSrc,
-      /import\s*\{\s*buildProviderMetadata,\s*\n?\s*isPlausibleClientReference,?\s*\}\s*from\s*"@\/lib\/telephony\/webhook-correlation\.server"/,
+      /import\s*\{\s*buildProviderMetadata,\s*\n?\s*checkClientReferenceMatch,\s*\n?\s*isPlausibleClientReference,\s*\n?\s*metadataOrganizationMatches,?\s*\}\s*from\s*"@\/lib\/telephony\/webhook-correlation\.server"/,
     );
   });
 
