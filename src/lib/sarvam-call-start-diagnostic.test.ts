@@ -33,10 +33,9 @@ describe("input validation", () => {
     );
   });
 
-  test("sanitizes and caps ID-like values and key names", () => {
-    const s = summarizeCallStart({ app_id: "a\nb<script>" + "x".repeat(100), ["k\n" + "y"]: 1 })!;
+  test("sanitizes and caps ID-like values", () => {
+    const s = summarizeCallStart({ app_id: "a\nb<script>" + "x".repeat(100) })!;
     assert.match(s.app_id, /^[A-Za-z0-9._:?-]{1,64}$/);
-    assert.ok(s.received_keys.every((k) => /^[A-Za-z0-9._:?-]*$/.test(k)));
   });
 });
 
@@ -47,25 +46,26 @@ describe("safe logging", () => {
     assert.equal(maskPhone("@Agent phone number"), "[unrecognized len=19]");
   });
 
-  test("no raw phone number or unknown field value ever appears in the summary", () => {
+  test("logs exactly the five fields plus the format flag; raw numbers and other fields never appear", () => {
     const s = summarizeCallStart({
       agent_phone_number: AGENT,
       user_identifier: CALLER,
-      user_identifier_type: "phone",
+      organization_id: "org-uuid-should-not-appear",
       transcript: "my card number is 4111",
       api_key: "sk_live_secret",
     })!;
-    const logged = JSON.stringify(s);
-    for (const secret of [AGENT, CALLER, "8047168", "9876543", "4111", "sk_live_secret"]) {
-      assert.ok(!logged.includes(secret), `leaked ${secret}`);
-    }
-    assert.deepEqual(s.received_keys, [
+    assert.deepEqual(Object.keys(s).sort(), [
+      "agent_phone_e164",
       "agent_phone_number",
+      "app_id",
+      "app_version",
+      "interaction_id",
       "user_identifier",
-      "user_identifier_type",
-      "transcript",
-      "api_key",
     ]);
+    const logged = JSON.stringify(s);
+    for (const leak of [AGENT, CALLER, "8047168", "9876543", "4111", "sk_live", "org-uuid"]) {
+      assert.ok(!logged.includes(leak), `leaked ${leak}`);
+    }
   });
 });
 
@@ -84,8 +84,8 @@ describe("route — auth and read-only", () => {
     assert.ok(src.indexOf("if (!secret)") < authIdx);
   });
 
-  test("logs only the summary, never the raw body, and never writes to the database", () => {
+  test("logs only the summary, never the raw body, and never touches the database", () => {
     assert.doesNotMatch(src, /console\.\w+\([^)]*\braw\b/);
-    assert.doesNotMatch(src, /\.(insert|update|upsert|delete)\(/);
+    assert.doesNotMatch(src, /supabase|organization/i);
   });
 });

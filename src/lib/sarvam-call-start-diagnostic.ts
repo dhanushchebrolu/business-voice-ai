@@ -11,19 +11,14 @@
 
 export const CALL_START_FIELDS = [
   "agent_phone_number",
+  "user_identifier",
   "app_id",
   "app_version",
   "interaction_id",
-  "campaign_id",
-  "user_identifier",
-  "user_identifier_type",
 ] as const;
 
 type Field = (typeof CALL_START_FIELDS)[number];
-export type CallStartDiagnostic = Record<Field, string> & {
-  agent_phone_e164: boolean;
-  received_keys: string[];
-};
+export type CallStartDiagnostic = Record<Field, string> & { agent_phone_e164: boolean };
 
 const PHONE_FIELDS = new Set<Field>(["agent_phone_number", "user_identifier"]);
 
@@ -40,7 +35,7 @@ function safeId(value: string): string {
   return value.replace(/[^A-Za-z0-9._:-]/g, "?").slice(0, 64);
 }
 
-/** Returns null when the body isn't a JSON object; missing/empty fields are reported, never rejected, since seeing what arrives is the point. */
+/** Returns null when the body isn't a JSON object; missing/empty fields are reported, never rejected, since seeing what arrives is the point. Every other body field is ignored. */
 export function summarizeCallStart(body: unknown): CallStartDiagnostic | null {
   if (!body || typeof body !== "object" || Array.isArray(body)) return null;
   const input = body as Record<string, unknown>;
@@ -52,10 +47,6 @@ export function summarizeCallStart(body: unknown): CallStartDiagnostic | null {
   }
   const agentPhone =
     typeof input["agent_phone_number"] === "string" ? input["agent_phone_number"].trim() : "";
-  return {
-    ...out,
-    agent_phone_e164: /^\+[1-9]\d{7,14}$/.test(agentPhone),
-    // Key names only (never values) reveal anything extra Sarvam sends.
-    received_keys: Object.keys(input).slice(0, 20).map(safeId),
-  };
+  // Format only, no data: tells us whether the value could later be looked up as E.164.
+  return { ...out, agent_phone_e164: /^\+[1-9]\d{7,14}$/.test(agentPhone) };
 }
