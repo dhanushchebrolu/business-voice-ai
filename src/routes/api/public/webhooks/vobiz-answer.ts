@@ -18,8 +18,8 @@ import { VOBIZ_MEDIA_STREAM_PATH } from "@/lib/telephony/vobiz-media-stream-path
  * goes through the single shared `/api/public/webhooks/telephony` route
  * unchanged (see telephony.server.ts's dedicated vobiz branch and
  * VobizTelephonyAdapter's module doc); this file does not duplicate that
- * pipeline, it reuses it: `processTelephonyEvent` (exported from
- * telephony.ts for exactly this reuse) is fired in the background to
+ * pipeline, it reuses it: `processTelephonyEvent` (from
+ * telephony-event-processing.server.ts, shared with telephony.ts) is fired in the background to
  * create/update the call_logs row and trigger agent-runtime routing — the
  * identical side effects a normal webhook delivery would cause — while
  * this route's own synchronous work is limited to the one thing only it
@@ -79,7 +79,8 @@ async function handleVobizAnswer(request: Request): Promise<Response> {
   // Background: the exact same call_logs/entitlement/runtime-routing
   // pipeline a normal telephony webhook event causes — see this file's own
   // module doc for why this must not block the XML response below.
-  const { processTelephonyEvent } = await import("@/routes/api/public/webhooks/telephony");
+  const { processTelephonyEvent } =
+    await import("@/lib/telephony/telephony-event-processing.server");
   runInBackground(
     processTelephonyEvent("vobiz", event, waitUntil),
     waitUntil,

@@ -1,11 +1,15 @@
 import { createServerFn } from "@tanstack/react-start";
+import { normalizeCustomerPhone } from "@/lib/phone-number";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { assertPlatformAdmin, writeAudit } from "@/lib/platform-admin.server";
 import { getTelephonyAdapter, validateSarvamEnv } from "@/lib/telephony.server";
 import { SarvamTelephonyAdapter } from "@/lib/telephony/sarvam-provider.server";
 import { TelephonyAdapterError } from "@/lib/telephony/adapter";
 import { createInboundDeploymentForNumbers } from "@/lib/sarvam-inbound-deployment.server";
-import { sendSarvamInstantOutboundCall } from "@/lib/sarvam-outbound-call.server";
+import {
+  INVALID_DESTINATION_MESSAGE,
+  sendSarvamInstantOutboundCall,
+} from "@/lib/sarvam-outbound-call.server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/integrations/supabase/types";
 
@@ -602,12 +606,14 @@ export const testSarvamOutboundCall = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: TestSarvamOutboundCallInput) => {
     if (!input?.phoneNumberId) throw new Error("phoneNumberId is required");
-    if (!input.toE164 || !/^\+\d{6,15}$/.test(input.toE164))
-      throw new Error("A valid E.164 destination number is required");
+    // Canonical E.164 (phone-number.ts): the exact string stored and reserved.
+    // No country is assumed here, so the number must include its country code.
+    const toE164 = normalizeCustomerPhone(input.toE164, null);
+    if (!toE164) throw new Error(INVALID_DESTINATION_MESSAGE);
     if (input.confirmTest !== true)
       throw new Error("This places a real outbound call — explicit confirmation is required.");
     if (!input.reason?.trim()) throw new Error("A reason is required");
-    return input;
+    return { ...input, toE164 };
   })
   .handler(async ({ data, context }) => {
     const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
@@ -633,9 +639,112 @@ export const testSarvamOutboundCall = createServerFn({ method: "POST" })
       entityType: "call_log",
       entityId: result.callId,
       organizationId: numberRow.organization_id,
-      newValue: { toE164: data.toE164, interactionId: result.interactionId },
+      newValue: {
+        toE164: data.toE164,
+        interactionId: result.interactionId,
+        outcome: result.outcome,
+      },
       reason: data.reason,
     });
 
     return result;
+  });
+
+export interface ResolveUnknownSarvamCallInput {
+  callId: string;
+  resolution: "not_placed" | "placed";
+  outcome?: "completed" | "no_answer" | "busy" | "failed";
+  durationSeconds?: number;
+  attemptId?: string;
+  /** Required by the resolver for an `initiated` call (it may still be active). */
+  confirmedCheckedInSarvam?: boolean;
+  reason: string;
+}
+
+/**
+ * Operator resolution for a Sarvam outbound call stuck in outcome_unknown
+ * (or initiated with an attempt id but no webhook) — see
+ * sarvam-call-resolution.server.ts. Platform admins only, always audited.
+ * "placed" reuses the shared telephony pipeline (telephony-event-processing.server.ts),
+ * so billing and campaign rules are exactly those of a real webhook.
+ */
+export const resolveUnknownSarvamCall = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: ResolveUnknownSarvamCallInput) => {
+    if (!input?.callId) throw new Error("callId is required");
+    if (input.resolution !== "not_placed" && input.resolution !== "placed")
+      throw new Error("Choose whether the call was placed");
+    if (
+      input.resolution === "placed" &&
+      !["completed", "no_answer", "busy", "failed"].includes(input.outcome ?? "")
+    )
+      throw new Error("Choose the call's outcome");
+    if (
+      input.durationSeconds !== undefined &&
+      (!Number.isInteger(input.durationSeconds) || input.durationSeconds < 0)
+    )
+      throw new Error("Duration must be a whole number of seconds");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { resolveUnknownSarvamCall: resolve } =
+      await import("@/lib/sarvam-call-resolution.server");
+
+    const result = await resolve(
+      supabaseAdmin,
+      {
+        callId: data.callId,
+        resolution: data.resolution,
+        outcome: data.outcome,
+        durationSeconds: data.durationSeconds,
+        attemptId: data.attemptId?.trim() || undefined,
+        confirmedCheckedInSarvam: data.confirmedCheckedInSarvam === true,
+      },
+      {
+        applyCampaignFailure: async (call) => {
+          const { applyOutcomeToCampaignContact, maybeCompleteCampaign } =
+            await import("@/lib/campaign-dispatch.server");
+          const [{ data: campaign }, { data: cc }] = await Promise.all([
+            supabaseAdmin
+              .from("campaigns")
+              .select("max_attempts, retry_after_minutes, retry_statuses")
+              .eq("id", call.campaign_id!)
+              .maybeSingle(),
+            supabaseAdmin
+              .from("campaign_contacts")
+              .select("attempts")
+              .eq("id", call.campaign_contact_id!)
+              .maybeSingle(),
+          ]);
+          if (!campaign || !cc) return;
+          await applyOutcomeToCampaignContact(
+            call.campaign_contact_id!,
+            "failed",
+            cc.attempts,
+            campaign,
+            null,
+          );
+          await maybeCompleteCampaign(call.campaign_id!);
+        },
+      },
+    );
+
+    await writeAudit(admin, {
+      action: "SARVAM_CALL_OUTCOME_RESOLVED",
+      entityType: "call_log",
+      entityId: data.callId,
+      organizationId: result.organizationId,
+      newValue: {
+        resolution: data.resolution,
+        status: result.status,
+        durationSeconds: data.durationSeconds ?? null,
+        attemptId: data.attemptId ?? null,
+        confirmedCheckedInSarvam: data.confirmedCheckedInSarvam === true,
+      },
+      reason: data.reason,
+    });
+    return { status: result.status };
   });

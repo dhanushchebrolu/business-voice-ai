@@ -109,12 +109,16 @@ describe("billing: only a connected single call carries billable duration", () =
   }
 
   test("the route passes event.durationSeconds (defaulting to 0) to finalizeCallBilling", () => {
-    const route = readFileSync(
-      join(
-        dirname(fileURLToPath(import.meta.url)),
-        "../../routes/api/public/webhooks/telephony.ts",
-      ),
-      "utf8",
+    const route = (
+      readFileSync(
+        join(
+          dirname(fileURLToPath(import.meta.url)),
+          "../../routes/api/public/webhooks/telephony.ts",
+        ),
+        "utf8",
+      ) +
+      "\n" +
+      readFileSync(new URL("./telephony-event-processing.server.ts", import.meta.url), "utf8")
     ).replace(/\r\n/g, "\n");
     assert.match(
       route,
@@ -175,9 +179,16 @@ describe("duplicate deliveries and mismatched organizations", () => {
     );
   });
 
-  const route = readFileSync(
-    join(dirname(fileURLToPath(import.meta.url)), "../../routes/api/public/webhooks/telephony.ts"),
-    "utf8",
+  const route = (
+    readFileSync(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        "../../routes/api/public/webhooks/telephony.ts",
+      ),
+      "utf8",
+    ) +
+    "\n" +
+    readFileSync(new URL("./telephony-event-processing.server.ts", import.meta.url), "utf8")
   ).replace(/\r\n/g, "\n");
 
   test("checkClientReferenceMatch: a row bound to attempt A rejects attempt B", () => {

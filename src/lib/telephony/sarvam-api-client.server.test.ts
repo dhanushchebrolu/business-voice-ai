@@ -340,9 +340,47 @@ describe("network failure / timeout — never fakes success", () => {
       (err: unknown) => {
         assert.ok(err instanceof TelephonyAdapterError);
         assert.equal(err.status, 503);
+        assert.equal(err.outcomeUnknown, true, "a timed-out request may have reached Sarvam");
         return true;
       },
     );
+  });
+
+  test("a network failure leaves the outcome unknown", async () => {
+    const fetchImpl = (async () => {
+      throw new Error("socket hang up");
+    }) as typeof fetch;
+    await assert.rejects(
+      () => listCampaigns({ ...baseConfig, fetchImpl }),
+      (err: unknown) => err instanceof TelephonyAdapterError && err.outcomeUnknown === true,
+    );
+  });
+});
+
+describe("outcome classification — definite rejection vs unknown", () => {
+  const classify = async (status: number) => {
+    try {
+      await listCampaigns({ ...baseConfig, fetchImpl: mockFetch(status, { message: "x" }) });
+    } catch (err) {
+      assert.ok(err instanceof TelephonyAdapterError);
+      return err.outcomeUnknown;
+    }
+    throw new Error("expected a rejection");
+  };
+
+  for (const status of [400, 401, 403, 404, 422]) {
+    test(`${status} is a definite rejection (outcomeUnknown false)`, async () => {
+      assert.equal(await classify(status), false);
+    });
+  }
+  for (const status of [408, 409, 429, 500, 502, 503, 504, 418]) {
+    test(`${status} leaves the outcome unknown`, async () => {
+      assert.equal(await classify(status), true);
+    });
+  }
+
+  test("errors built without the flag default to a definite outcome", () => {
+    assert.equal(new TelephonyAdapterError("x", 503).outcomeUnknown, false);
   });
 });
 

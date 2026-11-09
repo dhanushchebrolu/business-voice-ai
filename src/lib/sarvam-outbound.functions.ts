@@ -1,7 +1,11 @@
 import { createServerFn } from "@tanstack/react-start";
+import { normalizeCustomerPhone } from "@/lib/phone-number";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { checkTelephonyAccess, walletCanAffordOutbound } from "@/lib/telephony-guard.server";
-import { sendSarvamInstantOutboundCall } from "@/lib/sarvam-outbound-call.server";
+import {
+  INVALID_DESTINATION_MESSAGE,
+  sendSarvamInstantOutboundCall,
+} from "@/lib/sarvam-outbound-call.server";
 
 /**
  * Sarvam instant-outbound call initiation — the Sarvam-specific counterpart
@@ -31,9 +35,11 @@ export const createSarvamInstantOutboundCall = createServerFn({ method: "POST" }
   .middleware([requireSupabaseAuth])
   .inputValidator((input: CreateSarvamInstantOutboundCallInput) => {
     if (!input?.phoneNumberId) throw new Error("phoneNumberId is required");
-    if (!input.toE164 || !/^\+\d{6,15}$/.test(input.toE164))
-      throw new Error("A valid E.164 destination number is required");
-    return input;
+    // Canonical E.164 (phone-number.ts): the exact string stored and reserved.
+    // No country is assumed here, so the number must include its country code.
+    const toE164 = normalizeCustomerPhone(input.toE164, null);
+    if (!toE164) throw new Error(INVALID_DESTINATION_MESSAGE);
+    return { ...input, toE164 };
   })
   .handler(async ({ data, context }) => {
     const { supabase, userId } = context;
@@ -63,5 +69,7 @@ export const createSarvamInstantOutboundCall = createServerFn({ method: "POST" }
       toE164: data.toE164,
     });
 
-    return { callId: result.callId };
+    // outcome "unknown": Sarvam may have placed the call; it stays unconfirmed
+    // in call history until a webhook or an operator resolves it.
+    return { callId: result.callId, outcome: result.outcome };
   });

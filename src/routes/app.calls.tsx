@@ -125,7 +125,7 @@ function CallsPage() {
                         }
                         dot={false}
                       >
-                        {call.status}
+                        {call.status === "outcome_unknown" ? "Unconfirmed" : call.status}
                       </StatusPill>
                     </td>
                   </tr>

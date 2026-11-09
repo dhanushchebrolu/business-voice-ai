@@ -233,18 +233,24 @@ describe("Caller ID reaches the voice runtime (trusted webhook `From`, never spe
     join(telephonyDir, "vobiz-call-session-durable-object.server.ts"),
     "utf8",
   );
-  const webhookSrc = readFileSync(
-    join(
-      dirname(fileURLToPath(import.meta.url)),
-      "..",
-      "routes",
-      "api",
-      "public",
-      "webhooks",
-      "telephony.ts",
-    ),
-    "utf8",
-  );
+  const webhookSrc =
+    readFileSync(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        "..",
+        "routes",
+        "api",
+        "public",
+        "webhooks",
+        "telephony.ts",
+      ),
+      "utf8",
+    ) +
+    "\n" +
+    readFileSync(
+      new URL("./telephony/telephony-event-processing.server.ts", import.meta.url),
+      "utf8",
+    );
 
   test("the Durable Object RPC body and the in-process fallback both carry callerE164 as callerNumber", () => {
     const rpcStart = runtimeSrc.indexOf("const rpcInput: StartRuntimeRpcInput = {");

@@ -191,8 +191,16 @@ export type HangupOutcome = "hung_up" | "call_not_found";
 
 export class TelephonyAdapterError extends Error {
   status: number;
-  constructor(message: string, status = 502) {
+  /**
+   * True when the provider may have acted on the request even though we got
+   * an error (timeout, network failure, ambiguous provider response). A
+   * caller must then treat the operation's outcome as unknown — e.g. never
+   * assume an outbound call was not placed. Defaults to false.
+   */
+  outcomeUnknown: boolean;
+  constructor(message: string, status = 502, outcomeUnknown = false) {
     super(message);
     this.status = status;
+    this.outcomeUnknown = outcomeUnknown;
   }
 }

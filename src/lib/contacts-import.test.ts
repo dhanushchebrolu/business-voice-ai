@@ -134,3 +134,37 @@ describe("applyVariableMapping", () => {
     assert.deepEqual(applyVariableMapping({ a: "1" }, {}), {});
   });
 });
+
+describe("validateContactRows uses the canonical normalizer", () => {
+  test("equivalent formats in one CSV are recognised as the same contact", () => {
+    const table = csvToTable(
+      "name,phone\nA,9876543210\nB,+91 98765 43210\nC,0091 98765 43210\nD,09876543210\n",
+    );
+    const summary = validateContactRows(table, "phone");
+    assert.deepEqual(
+      summary.valid.map((r) => r.phone),
+      ["+919876543210"],
+    );
+    assert.equal(summary.duplicates.length, 3);
+  });
+
+  test("a +91 number with a trunk 0 is rejected, not stored in a second form", () => {
+    const summary = validateContactRows(csvToTable("name,phone\nA,+91 098765 43210\n"), "phone");
+    assert.equal(summary.valid.length, 0);
+    assert.equal(summary.invalid.length, 1);
+  });
+
+  test("national numbers are read as Indian by default, and need a country code otherwise", () => {
+    const table = csvToTable("name,phone\nA,9876543210\nB,+14155550123\n");
+    assert.deepEqual(
+      validateContactRows(table, "phone").valid.map((r) => r.phone),
+      ["+919876543210", "+14155550123"],
+    );
+    const us = validateContactRows(table, "phone", "US");
+    assert.deepEqual(
+      us.valid.map((r) => r.phone),
+      ["+14155550123"],
+    );
+    assert.equal(us.invalid.length, 1);
+  });
+});

@@ -8,6 +8,8 @@
  * a server function and in tests without mocking anything.
  */
 
+import { normalizeCustomerPhone } from "./phone-number.ts";
+
 /** RFC4180-ish CSV parser: handles quoted fields, escaped quotes ("" ), and
  * commas/newlines inside quotes. Does not support alternate delimiters. */
 export function parseCsv(text: string): string[][] {
@@ -83,6 +85,11 @@ export function csvToTable(text: string): ParsedCsvTable {
 }
 
 /**
+ * Lenient number parsing kept ONLY for the Exotel/Vobiz webhook parsers
+ * (exotel-provider.ts, vobiz-provider.ts), which match inbound numbers this
+ * way. Contacts and outbound calls use normalizeCustomerPhone
+ * (phone-number.ts) instead — the canonical form.
+ *
  * Normalizes a phone number to E.164. Bare 10-digit numbers are assumed
  * Indian (matching the rest of this codebase's IN-first defaults —
  * organizations.country/currency both default to India) and get +91
@@ -141,6 +148,8 @@ export interface ContactImportSummary {
 export function validateContactRows(
   table: ParsedCsvTable,
   phoneColumn: string,
+  /** How national-format numbers (no "+"/"00") are read; ClickAI's default market is India. */
+  countryCode: string = "IN",
 ): ContactImportSummary {
   const valid: ContactImportRow[] = [];
   const invalid: ContactImportSummary["invalid"] = [];
@@ -154,7 +163,9 @@ export function validateContactRows(
       invalid.push({ rowIndex, phoneRaw, reason: "Missing phone number" });
       return;
     }
-    const phone = normalizeToE164(phoneRaw);
+    // The canonical normalizer shared with every outbound call path, so a
+    // stored contact number is the exact string a call to it will use.
+    const phone = normalizeCustomerPhone(phoneRaw, countryCode);
     if (!phone) {
       invalid.push({ rowIndex, phoneRaw, reason: "Invalid or unrecognized phone number" });
       return;

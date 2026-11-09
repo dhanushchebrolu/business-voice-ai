@@ -20,7 +20,12 @@ type OpType = "select" | "update" | "insert";
 
 function makeFakeSupabase(script: Record<string, Partial<Record<OpType, QueryResult[]>>>) {
   const consumedIdx: Record<string, Record<OpType, number>> = {};
-  const calls: { table: string; type: OpType; payload?: unknown }[] = [];
+  const calls: {
+    table: string;
+    type: OpType;
+    payload?: unknown;
+    filters?: [string, unknown][];
+  }[] = [];
 
   function nextResult(table: string, type: OpType): QueryResult {
     consumedIdx[table] ??= { select: 0, update: 0, insert: 0 };
@@ -31,11 +36,20 @@ function makeFakeSupabase(script: Record<string, Partial<Record<OpType, QueryRes
   }
 
   function makeBuilder(table: string, type: OpType, payload?: unknown) {
+    const filters: [string, unknown][] = [];
     const builder = {
       select() {
         return builder;
       },
-      eq() {
+      eq(column: string, value: unknown) {
+        filters.push([column, value]);
+        return builder;
+      },
+      in(column: string, values: unknown[]) {
+        filters.push([`${column} in`, values]);
+        return builder;
+      },
+      limit() {
         return builder;
       },
       maybeSingle() {
@@ -45,7 +59,7 @@ function makeFakeSupabase(script: Record<string, Partial<Record<OpType, QueryRes
         return builder;
       },
       then(resolve: (r: QueryResult) => void, reject: (e: unknown) => void): Promise<void> {
-        calls.push({ table, type, payload });
+        calls.push({ table, type, payload, filters });
         return Promise.resolve(nextResult(table, type)).then(resolve as never, reject);
       },
     };
@@ -130,6 +144,7 @@ describe("sendSarvamInstantOutboundCall — happy path", () => {
       telephony_connections: { select: [{ data: CONNECTION_ROW, error: null }] },
       agent_configs: { select: [{ data: AGENT_CONFIG_ROW, error: null }] },
       call_logs: {
+        select: [{ data: null, error: null }], // no unresolved earlier call to this number
         insert: [{ data: { id: "call_1" }, error: null }],
         update: [{ data: null, error: null }],
       },
@@ -144,7 +159,7 @@ describe("sendSarvamInstantOutboundCall — happy path", () => {
         }),
     );
 
-    assert.deepEqual(result, { callId: "call_1", interactionId: "int_1" });
+    assert.deepEqual(result, { callId: "call_1", interactionId: "int_1", outcome: "started" });
     assert.equal((requestBody as { app_config: { app_id: string } }).app_config.app_id, "app_1");
     assert.equal(
       (requestBody as { user_config: { user_phone_number: string } }).user_config.user_phone_number,
@@ -168,7 +183,10 @@ describe("sendSarvamInstantOutboundCall — happy path", () => {
       phone_numbers: { select: [{ data: PHONE_NUMBER_ROW, error: null }] },
       telephony_connections: { select: [{ data: CONNECTION_ROW, error: null }] },
       agent_configs: { select: [{ data: AGENT_CONFIG_ROW, error: null }] },
-      call_logs: { insert: [{ data: { id: "call_1" }, error: null }] },
+      call_logs: {
+        select: [{ data: null, error: null }],
+        insert: [{ data: { id: "call_1" }, error: null }],
+      },
     });
 
     const { result } = await withSarvamEnvAndFetch({ status: 200, body: {} }, () =>
@@ -186,6 +204,7 @@ describe("sendSarvamInstantOutboundCall — happy path", () => {
       telephony_connections: { select: [{ data: CONNECTION_ROW, error: null }] },
       agent_configs: { select: [{ data: AGENT_CONFIG_ROW, error: null }] },
       call_logs: {
+        select: [{ data: null, error: null }], // no unresolved earlier call to this number
         insert: [{ data: { id: "call_1" }, error: null }],
         update: [{ data: null, error: null }],
       },
@@ -268,27 +287,172 @@ describe("sendSarvamInstantOutboundCall — validation before ever dialing", () 
   });
 });
 
+function scriptForStartFailure(updateRows: unknown[]) {
+  return makeFakeSupabase({
+    phone_numbers: { select: [{ data: PHONE_NUMBER_ROW, error: null }] },
+    telephony_connections: { select: [{ data: CONNECTION_ROW, error: null }] },
+    agent_configs: { select: [{ data: AGENT_CONFIG_ROW, error: null }] },
+    call_logs: {
+      select: [{ data: null, error: null }],
+      insert: [{ data: { id: "call_1" }, error: null }],
+      update: [{ data: updateRows, error: null }],
+    },
+  });
+}
+const dial = (client: never, status: number) =>
+  withSarvamEnvAndFetch({ status, body: { error: "boom" } }, () =>
+    sendSarvamInstantOutboundCall(client, { phoneNumberId: "num_1", toE164: "+912222222222" }),
+  );
+
 describe("sendSarvamInstantOutboundCall — does not fake success", () => {
-  test("marks the call_logs row failed and rethrows when the Sarvam call itself fails — never silently drops it", async () => {
+  test("a definite rejection (400) marks the row failed, only while still initiated, and rethrows", async () => {
+    const { client, calls } = scriptForStartFailure([{ id: "call_1" }]);
+    await assert.rejects(dial(client, 400));
+
+    const updateCall = calls.find((c) => c.table === "call_logs" && c.type === "update")!;
+    assert.equal((updateCall.payload as { status: string }).status, "failed");
+    assert.ok((updateCall.payload as { failure_reason: string }).failure_reason);
+    assert.deepEqual(updateCall.filters, [
+      ["id", "call_1"],
+      ["status", "initiated"],
+    ]);
+  });
+
+  for (const status of [503, 429]) {
+    test(`an ambiguous ${status} marks the row outcome_unknown (no ended_at) and reports outcome unknown`, async () => {
+      const { client, calls } = scriptForStartFailure([{ id: "call_1" }]);
+      const { result } = await dial(client, status);
+      assert.deepEqual(result, { callId: "call_1", interactionId: null, outcome: "unknown" });
+
+      const updateCall = calls.find((c) => c.table === "call_logs" && c.type === "update")!;
+      const payload = updateCall.payload as Record<string, unknown>;
+      assert.equal(payload["status"], "outcome_unknown");
+      assert.equal("ended_at" in payload, false);
+      assert.deepEqual(updateCall.filters, [
+        ["id", "call_1"],
+        ["status", "initiated"],
+      ]);
+    });
+  }
+
+  test("a webhook that already resolved the call wins: nothing is overwritten and no error is thrown", async () => {
+    // The conditional update matched no row: the call had already left `initiated`.
+    const { client } = scriptForStartFailure([]);
+    const { result } = await dial(client, 400);
+    assert.equal(result.outcome, "started");
+  });
+
+  test("refuses to call a number that has an unresolved earlier call — nothing inserted, nothing dialled", async () => {
+    const { client, calls } = makeFakeSupabase({
+      phone_numbers: { select: [{ data: PHONE_NUMBER_ROW, error: null }] },
+      telephony_connections: { select: [{ data: CONNECTION_ROW, error: null }] },
+      agent_configs: { select: [{ data: AGENT_CONFIG_ROW, error: null }] },
+      call_logs: { select: [{ data: { id: "earlier_call" }, error: null }] },
+    });
+    await assert.rejects(dial(client, 200), /hasn't finished or has an unconfirmed outcome/);
+    const guard = calls.find((c) => c.table === "call_logs" && c.type === "select")!;
+    // Blocks exactly the calls an operator can resolve: initiated (with or
+    // without an attempt id) or outcome_unknown.
+    assert.ok(
+      guard.filters!.some(
+        ([k, v]) => k === "status in" && JSON.stringify(v) === '["initiated","outcome_unknown"]',
+      ),
+    );
+    assert.ok(guard.filters!.some(([k, v]) => k === "destination_number" && v === "+912222222222"));
+    assert.equal(
+      calls.some((c) => c.type === "insert"),
+      false,
+    );
+  });
+
+  test("a concurrent request that reserved the number first (23505 on insert): refused, nothing dialled", async () => {
     const { client, calls } = makeFakeSupabase({
       phone_numbers: { select: [{ data: PHONE_NUMBER_ROW, error: null }] },
       telephony_connections: { select: [{ data: CONNECTION_ROW, error: null }] },
       agent_configs: { select: [{ data: AGENT_CONFIG_ROW, error: null }] },
       call_logs: {
+        select: [{ data: null, error: null }], // the pre-check ran before the other request inserted
+        insert: [
+          {
+            data: null,
+            error: {
+              code: "23505",
+              message: 'violates "idx_call_logs_sarvam_outbound_number_reservation"',
+            },
+          },
+        ],
+      },
+    });
+    let dialled = false;
+    const originalFetch = globalThis.fetch;
+    await assert.rejects(
+      withSarvamEnvAndFetch({ status: 200, body: { attempt_id: "att_x" } }, async () => {
+        const realFetch = globalThis.fetch;
+        globalThis.fetch = (async (...args: Parameters<typeof fetch>) => {
+          dialled = true;
+          return realFetch(...args);
+        }) as typeof fetch;
+        return sendSarvamInstantOutboundCall(client, {
+          phoneNumberId: "num_1",
+          toE164: "+912222222222",
+        });
+      }),
+      /hasn't finished or has an unconfirmed outcome/,
+    );
+    globalThis.fetch = originalFetch;
+    assert.equal(dialled, false);
+    assert.equal(
+      calls.some((c) => c.type === "update"),
+      false,
+    );
+  });
+});
+
+describe("sendSarvamInstantOutboundCall — canonical destination numbers", () => {
+  test("an invalid number is rejected before any database access or Sarvam request", async () => {
+    // An empty script: any database call would fail the test with "no scripted … result".
+    const { client, calls } = makeFakeSupabase({});
+    for (const bad of ["+910987654321", "9876543210", "+0919876543210", "not a number"]) {
+      const { requestBody } = await withSarvamEnvAndFetch({ status: 200, body: {} }, async () => {
+        await assert.rejects(
+          sendSarvamInstantOutboundCall(client, { phoneNumberId: "num_1", toE164: bad }),
+          /valid destination number with its country code/,
+        );
+      });
+      assert.equal(requestBody, undefined, `nothing sent to Sarvam for ${bad}`);
+    }
+    assert.deepEqual(calls, []);
+  });
+
+  test("an equivalent format is reserved, inserted and dialled as the canonical number", async () => {
+    const { client, calls } = makeFakeSupabase({
+      phone_numbers: { select: [{ data: PHONE_NUMBER_ROW, error: null }] },
+      telephony_connections: { select: [{ data: CONNECTION_ROW, error: null }] },
+      agent_configs: { select: [{ data: AGENT_CONFIG_ROW, error: null }] },
+      call_logs: {
+        select: [{ data: null, error: null }],
         insert: [{ data: { id: "call_1" }, error: null }],
         update: [{ data: null, error: null }],
       },
     });
-
-    await assert.rejects(
-      withSarvamEnvAndFetch({ status: 500, body: { error: "boom" } }, () =>
-        sendSarvamInstantOutboundCall(client, { phoneNumberId: "num_1", toE164: "+912222222222" }),
-      ),
+    const { requestBody } = await withSarvamEnvAndFetch(
+      { status: 200, body: { attempt_id: "att_1" } },
+      () =>
+        sendSarvamInstantOutboundCall(client, {
+          phoneNumberId: "num_1",
+          toE164: "0091 98765 43210",
+        }),
     );
-
-    const updateCall = calls.find((c) => c.table === "call_logs" && c.type === "update");
-    assert.ok(updateCall);
-    assert.equal((updateCall!.payload as { status: string }).status, "failed");
-    assert.ok((updateCall!.payload as { failure_reason: string }).failure_reason);
+    const guard = calls.find((c) => c.table === "call_logs" && c.type === "select")!;
+    assert.ok(guard.filters!.some(([k, v]) => k === "destination_number" && v === "+919876543210"));
+    const insert = calls.find((c) => c.table === "call_logs" && c.type === "insert")!;
+    assert.equal(
+      (insert.payload as { destination_number: string }).destination_number,
+      "+919876543210",
+    );
+    assert.equal(
+      (requestBody as { user_config: { user_phone_number: string } }).user_config.user_phone_number,
+      "+919876543210",
+    );
   });
 });

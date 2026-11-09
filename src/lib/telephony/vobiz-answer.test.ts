@@ -32,8 +32,11 @@ const routeSrc = readFileSync(
 );
 
 describe("vobiz-answer route — reuses the existing call-session pipeline, never a second copy", () => {
-  test("imports processTelephonyEvent from the shared webhook route rather than reimplementing call_logs/entitlement/runtime-routing logic", () => {
-    assert.match(routeSrc, /import\("@\/routes\/api\/public\/webhooks\/telephony"\)/);
+  test("imports processTelephonyEvent from the shared telephony event processor rather than reimplementing call_logs/entitlement/runtime-routing logic", () => {
+    assert.match(
+      routeSrc,
+      /import\(\s*"@\/lib\/telephony\/telephony-event-processing\.server"\s*\)/,
+    );
     assert.match(routeSrc, /processTelephonyEvent\("vobiz", event, waitUntil\)/);
   });
 

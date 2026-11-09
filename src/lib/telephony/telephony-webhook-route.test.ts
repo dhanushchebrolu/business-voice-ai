@@ -20,19 +20,22 @@ import { dirname, join } from "node:path";
  * in the source as written.
  */
 
-const routeSrc = readFileSync(
-  join(
-    dirname(fileURLToPath(import.meta.url)),
-    "..",
-    "..",
-    "routes",
-    "api",
-    "public",
-    "webhooks",
-    "telephony.ts",
-  ),
-  "utf8",
-);
+const routeSrc =
+  readFileSync(
+    join(
+      dirname(fileURLToPath(import.meta.url)),
+      "..",
+      "..",
+      "routes",
+      "api",
+      "public",
+      "webhooks",
+      "telephony.ts",
+    ),
+    "utf8",
+  ) +
+  "\n" +
+  readFileSync(new URL("./telephony-event-processing.server.ts", import.meta.url), "utf8");
 
 describe("telephony webhook route — signature verification and idempotency (unchanged)", () => {
   test("verifies the webhook signature before anything from the payload is trusted", () => {
@@ -577,9 +580,14 @@ describe("telephony webhook route — Exotel/Vobiz Passthru/Voicebot deadlock fi
   });
 
   test("handleTelephonyWebhook reads waitUntil off the request and threads it into processTelephonyEvent, so runInBackground can register the handoff with Cloudflare's ExecutionContext", () => {
+    // Split by the extraction: the route reads waitUntil, the shared processor runs in background.
     assert.match(
       routeSrc,
-      /import\s*\{\s*getRequestWaitUntil,\s*runInBackground,\s*type WaitUntil\s*\}\s*from\s*["']@\/lib\/background-task\.server["']/,
+      /import\s*\{\s*getRequestWaitUntil\s*\}\s*from\s*["']@\/lib\/background-task\.server["']/,
+    );
+    assert.match(
+      routeSrc,
+      /import\s*\{\s*runInBackground,\s*type WaitUntil\s*\}\s*from\s*["']@\/lib\/background-task\.server["']/,
     );
     const handlerIdx = routeSrc.indexOf("async function handleTelephonyWebhook");
     const handlerSrc = routeSrc.slice(

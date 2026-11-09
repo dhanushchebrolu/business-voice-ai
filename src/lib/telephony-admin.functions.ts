@@ -6,6 +6,7 @@ import { provisionOrganizationAfterPayment } from "@/lib/provisioning-orchestrat
 import { TelephonyAdapterError } from "@/lib/telephony/adapter";
 import { VobizTelephonyAdapter } from "@/lib/telephony/vobiz-provider";
 import type { Json } from "@/integrations/supabase/types";
+import { UNRESOLVED_SARVAM_STATUSES } from "@/lib/sarvam-call-review";
 
 /**
  * Admin telephony control plane: phone-number lifecycle and the
@@ -513,13 +514,21 @@ export interface AdminCallRow {
   currency: string;
   startedAt: string;
   endedAt: string | null;
+  provider: string;
+  /** Whether the provider's call/attempt id is known (the value itself isn't sent to the browser). */
+  hasProviderCallId: boolean;
 }
 
 export const listAllCalls = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
   .inputValidator(
-    (input?: { orgId?: string; status?: string; direction?: string; limit?: number }) =>
-      input ?? {},
+    (input?: {
+      orgId?: string;
+      status?: string;
+      direction?: string;
+      limit?: number;
+      needsReview?: boolean;
+    }) => input ?? {},
   )
   .handler(async ({ data, context }): Promise<AdminCallRow[]> => {
     await assertPlatformAdmin(context.supabase, context.userId, "billing.read");
@@ -533,6 +542,12 @@ export const listAllCalls = createServerFn({ method: "GET" })
     if (data.orgId) query = query.eq("organization_id", data.orgId);
     if (data.status) query = query.eq("status", data.status);
     if (data.direction) query = query.eq("direction", data.direction);
+    // Same rule as isResolvableSarvamCall (sarvam-call-review.ts), as a query.
+    if (data.needsReview)
+      query = query
+        .eq("provider", "sarvam")
+        .eq("direction", "outbound")
+        .in("status", [...UNRESOLVED_SARVAM_STATUSES]);
     const { data: calls, error } = await query;
     if (error) throw error;
 
@@ -559,6 +574,8 @@ export const listAllCalls = createServerFn({ method: "GET" })
       currency: c.currency,
       startedAt: c.started_at,
       endedAt: c.ended_at,
+      provider: c.provider,
+      hasProviderCallId: Boolean(c.provider_call_id),
     }));
   });
 

@@ -79,7 +79,19 @@ export function normalizePhoneNumber(
   return { ok: false, reason: "invalid" };
 }
 
-/** normalizePhoneNumber's E.164 result, or null when it can't be normalized. */
+/**
+ * normalizePhoneNumber's E.164 result, or null when it can't be normalized.
+ *
+ * The ONE canonical form for every stored contact number and every outbound
+ * call number (contact imports, campaign enrolment, single/admin/generic
+ * outbound calls, the campaign dispatcher), so equal numbers are equal
+ * strings — which the per-number call reservation relies on
+ * (idx_call_logs_sarvam_outbound_number_reservation). Country assumptions:
+ * "+…"/"00…" input is international everywhere; national-format input is
+ * read as Indian only where the caller passes an India country code (CSV
+ * imports do, matching ClickAI's India default; outbound call inputs pass
+ * none, so they must be international).
+ */
 export function normalizeCustomerPhone(
   raw: string | null | undefined,
   countryCode: string | null | undefined,

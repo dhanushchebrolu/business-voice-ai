@@ -308,3 +308,74 @@ describe("isClosingUtterance", () => {
     );
   });
 });
+
+describe("canonical E.164 for contacts and outbound calls (normalizeCustomerPhone)", () => {
+  const CANONICAL = "+919876543210";
+
+  test("equivalent Indian formats resolve to exactly the same string", () => {
+    for (const raw of [
+      "+919876543210",
+      "+91 98765 43210",
+      "+91-98765-43210",
+      "(+91) 98765 43210",
+      "0091 98765 43210",
+      "00919876543210",
+    ]) {
+      assert.equal(normalizeCustomerPhone(raw, null), CANONICAL, `international: ${raw}`);
+      assert.equal(normalizeCustomerPhone(raw, "IN"), CANONICAL, `international, IN: ${raw}`);
+    }
+    for (const raw of [
+      "9876543210",
+      "09876543210",
+      "098765 43210",
+      "919876543210",
+      "98765-43210",
+    ]) {
+      assert.equal(normalizeCustomerPhone(raw, "IN"), CANONICAL, `national, IN: ${raw}`);
+    }
+  });
+
+  test("0-prefixed local landline numbers resolve with the trunk 0 removed", () => {
+    assert.equal(normalizeCustomerPhone("08071580870", "IN"), "+918071580870");
+    assert.equal(normalizeCustomerPhone("022 1234 5678", "IN"), "+912212345678");
+    assert.equal(normalizeCustomerPhone("+91 80 7158 0870", null), "+918071580870");
+  });
+
+  test("already canonical numbers come back unchanged", () => {
+    for (const e164 of [CANONICAL, "+918071580870", "+14155550123", "+447911123456"]) {
+      assert.equal(normalizeCustomerPhone(e164, null), e164);
+    }
+  });
+
+  test("malformed numbers are rejected", () => {
+    for (const raw of [
+      "",
+      "   ",
+      "abc",
+      "+",
+      "+0919876543210", // country code can't start with 0
+      "+910987654321", // +91 then a trunk 0: not canonical
+      "+91 0 98765 43210",
+      "+9198765432", // +91 with too few digits
+      "+9198765432101", // +91 with too many digits
+      "98765 4321x",
+      "+1234567890123456", // longer than E.164 allows
+      "12345",
+    ]) {
+      assert.equal(
+        normalizeCustomerPhone(raw, "IN"),
+        null,
+        `should reject: ${JSON.stringify(raw)}`,
+      );
+    }
+  });
+
+  test("national-format numbers need a country: outbound call inputs (no country) must be international", () => {
+    assert.equal(normalizeCustomerPhone("9876543210", null), null);
+    assert.equal(normalizeCustomerPhone("09876543210", null), null);
+    assert.deepEqual(normalizePhoneNumber("9876543210", null), {
+      ok: false,
+      reason: "country_code_required",
+    });
+  });
+});

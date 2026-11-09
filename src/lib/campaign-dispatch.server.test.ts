@@ -19,10 +19,13 @@ const cronRoute = readFileSync(
   "utf8",
 );
 const campaignsFn = readFileSync(new URL("./campaigns.functions.ts", import.meta.url), "utf8");
-const webhookRoute = readFileSync(
-  new URL("../routes/api/public/webhooks/telephony.ts", import.meta.url),
-  "utf8",
-);
+const webhookRoute =
+  readFileSync(new URL("../routes/api/public/webhooks/telephony.ts", import.meta.url), "utf8") +
+  "\n" +
+  readFileSync(
+    new URL("./telephony/telephony-event-processing.server.ts", import.meta.url),
+    "utf8",
+  );
 
 describe("campaign dispatcher — architecture invariants", () => {
   test("reuses the existing telephony authorization gate, never a second one", () => {

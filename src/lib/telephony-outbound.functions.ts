@@ -1,7 +1,12 @@
 import { createServerFn } from "@tanstack/react-start";
+import { normalizeCustomerPhone } from "@/lib/phone-number";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { getTelephonyAdapter } from "@/lib/telephony.server";
 import { checkTelephonyAccess, walletCanAffordOutbound } from "@/lib/telephony-guard.server";
+import {
+  INVALID_DESTINATION_MESSAGE,
+  UNRESOLVED_CALL_MESSAGE,
+} from "@/lib/sarvam-outbound-call.server";
 
 /**
  * Outbound call initiation (spec §9). The client never calls the telephony
@@ -32,9 +37,11 @@ export const initiateOutboundCall = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: InitiateOutboundCallInput) => {
     if (!input?.phoneNumberId) throw new Error("phoneNumberId is required");
-    if (!input.toE164 || !/^\+\d{6,15}$/.test(input.toE164))
-      throw new Error("A valid E.164 destination number is required");
-    return input;
+    // Canonical E.164 (phone-number.ts): the exact string stored and reserved.
+    // No country is assumed here, so the number must include its country code.
+    const toE164 = normalizeCustomerPhone(input.toE164, null);
+    if (!toE164) throw new Error(INVALID_DESTINATION_MESSAGE);
+    return { ...input, toE164 };
   })
   .handler(async ({ data, context }) => {
     const { supabase, userId } = context;
@@ -77,6 +84,10 @@ export const initiateOutboundCall = createServerFn({ method: "POST" })
       })
       .select("id")
       .single();
+    // The only unique index this insert can hit is the Sarvam single-call
+    // reservation (idx_call_logs_sarvam_outbound_number_reservation): an earlier
+    // call to this number is unresolved. Nothing was dialled.
+    if (insertError?.code === "23505") throw new Error(UNRESOLVED_CALL_MESSAGE);
     if (insertError) throw insertError;
 
     try {

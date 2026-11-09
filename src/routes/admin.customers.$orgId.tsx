@@ -1132,7 +1132,13 @@ function CustomerDetail() {
               reason,
             },
           });
-          toast.success("Test call placed", { description: `Call ${result.callId}` });
+          if (result.outcome === "unknown") {
+            toast.warning("Call status unknown", {
+              description: `Sarvam didn't confirm call ${result.callId}. It may still have been placed — resolve it under Calls before retrying.`,
+            });
+          } else {
+            toast.success("Test call placed", { description: `Call ${result.callId}` });
+          }
           setOutboundTestOpen(false);
           setTestDestinationNumber("");
           await invalidate();

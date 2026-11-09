@@ -130,10 +130,12 @@ async function sarvamRequest<T>(
       signal: controller.signal,
     });
   } catch (err) {
+    // The request may have reached Sarvam before the timeout or connection
+    // failure, so whatever it asked for may have happened.
     if (err instanceof Error && err.name === "AbortError") {
-      throw new TelephonyAdapterError("Sarvam did not respond in time. Please retry.", 503);
+      throw new TelephonyAdapterError("Sarvam did not respond in time. Please retry.", 503, true);
     }
-    throw new TelephonyAdapterError("Could not reach Sarvam. Please retry.", 503);
+    throw new TelephonyAdapterError("Could not reach Sarvam. Please retry.", 503, true);
   } finally {
     clearTimeout(timer);
   }
@@ -146,9 +148,22 @@ async function sarvamRequest<T>(
     parsed = undefined;
   }
 
-  if (!res.ok) throw mapErrorResponse(res.status, parsed, rawText);
+  if (!res.ok) {
+    const error = mapErrorResponse(res.status, parsed, rawText);
+    error.outcomeUnknown = !DEFINITE_REJECTION_STATUSES.has(res.status);
+    throw error;
+  }
   return parsed as T;
 }
+
+/**
+ * Responses that prove Sarvam rejected the request without acting on it:
+ * malformed input, authentication/authorization, unknown resource,
+ * validation. Everything else — 5xx, 408, 409, and 429 (Sarvam doesn't
+ * document that a rate-limited outbound request was never placed) — leaves
+ * the outcome unknown.
+ */
+const DEFINITE_REJECTION_STATUSES = new Set([400, 401, 403, 404, 422]);
 
 /* ------------------------------------------------------------------ */
 /* 1 & 2. Inbound deployment create / update                            */

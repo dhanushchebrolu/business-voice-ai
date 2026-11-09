@@ -49,7 +49,7 @@ describe("createSarvamInstantOutboundCall — authorization and entitlement gate
   test("imports and calls sendSarvamInstantOutboundCall — no second implementation of connection/agent validation, call-log creation, or dial logic", () => {
     assert.match(
       src,
-      /import \{ sendSarvamInstantOutboundCall \} from "@\/lib\/sarvam-outbound-call\.server"/,
+      /import \{[^}]*\bsendSarvamInstantOutboundCall\b[^}]*\} from "@\/lib\/sarvam-outbound-call\.server"/,
     );
     assert.match(
       src,

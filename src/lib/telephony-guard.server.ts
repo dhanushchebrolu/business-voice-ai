@@ -163,7 +163,14 @@ export async function checkTelephonyAccess(
  * blanket "allow anything" change: every other illegal transition (e.g.
  * completed -> in_progress) is still rejected exactly as before.
  */
-const ALLOWED_TRANSITIONS: Record<NormalizedCallStatus, NormalizedCallStatus[]> = {
+/**
+ * Every value call_logs.status may hold: what providers report, plus
+ * `outcome_unknown` — set by Klyro itself when a start-call request failed
+ * ambiguously (see sarvam-outbound-call.server.ts). Providers never emit it.
+ */
+export type CallLogStatus = NormalizedCallStatus | "outcome_unknown";
+
+const ALLOWED_TRANSITIONS: Record<CallLogStatus, NormalizedCallStatus[]> = {
   initiated: [
     "ringing",
     "answered",
@@ -182,6 +189,8 @@ const ALLOWED_TRANSITIONS: Record<NormalizedCallStatus, NormalizedCallStatus[]> 
   busy: [],
   no_answer: [],
   cancelled: [],
+  // Only a final outcome (late webhook or operator resolution) may resolve it.
+  outcome_unknown: ["completed", "failed", "busy", "no_answer", "cancelled"],
 };
 
 export interface TransitionCheck {
@@ -193,7 +202,7 @@ export interface TransitionCheck {
 /** Server-side transition validation (spec §7). Same-state events are a no-op, never an error. */
 export function checkCallTransition(current: string, next: NormalizedCallStatus): TransitionCheck {
   if (current === next) return { ok: true, changed: false };
-  const from = current as NormalizedCallStatus;
+  const from = current as CallLogStatus;
   const allowed = ALLOWED_TRANSITIONS[from];
   if (!allowed) return { ok: true, changed: true }; // unknown legacy status value — do not block, just record
   if (!allowed.includes(next)) {

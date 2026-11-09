@@ -2,7 +2,12 @@ import { getTelephonyAdapter, sarvamWebhookUrl } from "@/lib/telephony.server";
 import { checkTelephonyAccess, walletCanAffordOutbound } from "@/lib/telephony-guard.server";
 import { SarvamTelephonyAdapter } from "@/lib/telephony/sarvam-provider.server";
 import { isWithinCallingWindow, type CampaignSchedule } from "@/lib/campaign-schedule";
+import { normalizeCustomerPhone } from "@/lib/phone-number";
 import { decideCampaignContactOutcome, type CallTerminalStatus } from "@/lib/campaign-outcome";
+import {
+  recordCampaignStartFailure,
+  releaseCampaignClaim,
+} from "@/lib/sarvam-outbound-call.server";
 
 /**
  * The outbound campaign dispatcher — Klyro's own pacing/retry engine
@@ -142,7 +147,7 @@ async function dispatchOneCampaign(
 
   const { data: due } = await supabaseAdmin
     .from("campaign_contacts")
-    .select("id, contact_id, attempts, variables")
+    .select("id, contact_id, status, attempts, variables")
     .eq("campaign_id", campaign.id)
     .in("status", ["pending", "retry_scheduled"])
     .or(`next_attempt_at.is.null,next_attempt_at.lte.${new Date().toISOString()}`)
@@ -163,6 +168,21 @@ async function dispatchOneCampaign(
         .from("campaign_contacts")
         .update({ status: "opted_out", next_attempt_at: null })
         .eq("id", cc.id);
+      skipped++;
+      continue;
+    }
+
+    // The canonical form every outbound path uses (phone-number.ts), so the
+    // number reservation sees a single call and this campaign call as the same
+    // number. A stored number that isn't canonical-valid is never dialled.
+    const destination = normalizeCustomerPhone(contact.phone, null);
+    if (!destination) {
+      await supabaseAdmin
+        .from("campaign_contacts")
+        .update({ status: "wrong_number", outcome: "invalid_number", next_attempt_at: null })
+        .eq("id", cc.id)
+        .in("status", ["pending", "retry_scheduled"]);
+      console.error("campaign_dispatch:invalid_number", campaign.id, cc.id);
       skipped++;
       continue;
     }
@@ -211,14 +231,32 @@ async function dispatchOneCampaign(
         provider: "sarvam",
         direction: "outbound",
         caller_number: gate.phoneNumber.e164,
-        destination_number: contact.phone,
+        destination_number: destination,
         status: "initiated",
         started_at: new Date().toISOString(),
         retry_attempt: attempts - 1,
       })
       .select("id")
       .single();
-    if (insertError) throw insertError;
+    if (insertError) {
+      // Nothing was dialled: give the contact back exactly as it was, so it is
+      // never stranded in `calling` without a call row.
+      await releaseCampaignClaim(supabaseAdmin, {
+        campaignId: campaign.id,
+        campaignContactId: cc.id,
+        previousStatus: cc.status,
+        previousAttempts: cc.attempts,
+      });
+      // 23505: an unresolved Sarvam call to this number (a single call or
+      // another campaign's) holds the number reservation. Defer this contact
+      // to a later run and keep dispatching the rest.
+      if (insertError.code === "23505") {
+        console.info("campaign_dispatch:number_reserved", campaign.id, cc.id);
+        skipped++;
+        continue;
+      }
+      throw insertError;
+    }
 
     const agentVariables: Record<string, unknown> = {
       ...((cc.variables as Record<string, unknown> | null) ?? {}),
@@ -233,7 +271,7 @@ async function dispatchOneCampaign(
         appVersion: agentConfig.sarvam_app_version,
         connectionId: connection.provider_connection_id,
         fromE164: gate.phoneNumber.e164,
-        toE164: contact.phone,
+        toE164: destination,
         agentVariables,
         webhookUrl,
         metadata: {
@@ -258,12 +296,18 @@ async function dispatchOneCampaign(
       }
       dialed++;
     } catch (err) {
-      const message = (err as Error).message;
-      await supabaseAdmin
-        .from("call_logs")
-        .update({ status: "failed", failure_reason: message, ended_at: new Date().toISOString() })
-        .eq("id", call.id);
-      await applyOutcomeToCampaignContact(cc.id, "failed", attempts, campaign, null);
+      // Race-safe: only a call still `initiated` is changed, and the contact
+      // only follows when that change happened. Ambiguous errors hold both in
+      // outcome_unknown (no retry); definite rejections fail and may retry.
+      const recorded = await recordCampaignStartFailure(
+        supabaseAdmin,
+        { callId: call.id, campaignContactId: cc.id },
+        err,
+        () => applyOutcomeToCampaignContact(cc.id, "failed", attempts, campaign, null),
+      );
+      if (recorded === "outcome_unknown") {
+        console.error("campaign_dispatch:outcome_unknown", call.id, (err as Error).message);
+      }
     }
   }
 
@@ -331,7 +375,8 @@ export async function maybeCompleteCampaign(campaignId: string): Promise<boolean
     .from("campaign_contacts")
     .select("id", { count: "exact", head: true })
     .eq("campaign_id", campaignId)
-    .in("status", ["pending", "retry_scheduled", "queued", "calling"]);
+    // outcome_unknown is unresolved, not finished: it keeps the campaign open.
+    .in("status", ["pending", "retry_scheduled", "queued", "calling", "outcome_unknown"]);
   if (count && count > 0) return false;
 
   const { data: campaign } = await supabaseAdmin
