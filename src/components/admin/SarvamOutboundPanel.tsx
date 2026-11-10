@@ -4,6 +4,7 @@ import { useServerFn } from "@tanstack/react-start";
 import { toast } from "sonner";
 import {
   getSarvamOutboundGates,
+  inspectSarvamAgent,
   listSarvamApplications,
   placeAdminSarvamOutboundCall,
   registerSarvamApplication,
@@ -100,6 +101,9 @@ export function SarvamOutboundPanel({ orgId, agent, numbers, connections, onChan
   const fetchApplications = useServerFn(listSarvamApplications);
   const registerApplication = useServerFn(registerSarvamApplication);
   const mapApplication = useServerFn(setSarvamApplicationMapping);
+  const inspectAgent = useServerFn(inspectSarvamAgent);
+  const [inspection, setInspection] = useState<string[] | null>(null);
+  const [inspecting, setInspecting] = useState(false);
 
   const [connectionOpen, setConnectionOpen] = useState(false);
   const [connectionId, setConnectionId] = useState("");
@@ -421,6 +425,65 @@ export function SarvamOutboundPanel({ orgId, agent, numbers, connections, onChan
                   value={appVersion}
                   onChange={(e) => setAppVersion(e.target.value)}
                 />
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="col-span-2"
+                  disabled={!appId.trim() || inspecting}
+                  onClick={async () => {
+                    setInspecting(true);
+                    try {
+                      const r = await inspectAgent({
+                        data: {
+                          appId: appId.trim(),
+                          appVersion: Number(appVersion) || undefined,
+                          agentPhoneNumber: sarvamNumbers[0]?.e164,
+                        },
+                      });
+                      setInspection([
+                        r.agentRecognized === true
+                          ? "Sarvam knows this agent ID."
+                          : r.agentRecognized === false
+                            ? "Sarvam does not know this agent ID (404)."
+                            : "No deployment or past call proves this agent ID; Sarvam will validate it when a call starts.",
+                        `Calls in the last 90 days: ${r.interactionsLast90Days ?? `unavailable (${r.interactionsError})`}`,
+                        r.deploymentsError
+                          ? `Deployments: unavailable (${r.deploymentsError})`
+                          : `Deployments of this agent: ${
+                              r.appDeployments
+                                .map(
+                                  (d) =>
+                                    `v${d.appVersion} ${d.channelDirection ?? ""} ${d.status ?? ""} [${d.phoneNumbers.length} number(s)]`,
+                                )
+                                .join("; ") || "none (not needed for instant outbound)"
+                            }`,
+                        ...(sarvamNumbers[0]
+                          ? [
+                              `Deployments using ${sarvamNumbers[0].e164}: ${
+                                r.numberDeployments
+                                  .map((d) => `${d.appId} v${d.appVersion}`)
+                                  .join("; ") || "none"
+                              }`,
+                            ]
+                          : []),
+                      ]);
+                    } catch (err) {
+                      setInspection([`Check failed: ${(err as Error).message}`]);
+                    } finally {
+                      setInspecting(false);
+                    }
+                  }}
+                >
+                  {inspecting ? "Checking…" : "Check in Sarvam (read-only)"}
+                </Button>
+                {inspection ? (
+                  <ul className="col-span-2 space-y-0.5 text-xs text-muted-foreground">
+                    {inspection.map((line) => (
+                      <li key={line}>{line}</li>
+                    ))}
+                  </ul>
+                ) : null}
               </div>
             )}
           </div>

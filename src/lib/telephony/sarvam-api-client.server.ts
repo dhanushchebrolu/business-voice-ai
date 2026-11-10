@@ -623,3 +623,71 @@ export async function uploadCohort(
     raw: obj,
   };
 }
+
+/* ------------------------------------------------------------------ */
+/* 6. Read-only agent checks (documented at docs.sarvam.ai/api-reference) */
+/*    GET /api/app-authoring/v1/orgs/{org}/workspaces/{ws}/deployments  */
+/*    GET /api/analytics/v1/{org}/{ws}/{app_id}/interactions            */
+/* ------------------------------------------------------------------ */
+
+export interface SarvamDeploymentSummary {
+  deploymentId: string;
+  name: string | null;
+  appId: string;
+  appVersion: number | null;
+  phoneNumbers: string[];
+  channelDirection: string | null;
+  status: string | null;
+}
+
+/** Deployments matching `search` (Sarvam's own search), up to 100. */
+export async function listDeployments(
+  config: SarvamApiClientConfig,
+  search: string,
+): Promise<SarvamDeploymentSummary[]> {
+  const query = new URLSearchParams({ search, limit: "100" });
+  const parsed = await sarvamRequest<unknown>(
+    config,
+    "GET",
+    `${scopedPath(config, "app-authoring", "deployments")}?${query.toString()}`,
+  );
+  const items = asPlainObject(parsed)?.["items"];
+  return (Array.isArray(items) ? items : []).map((raw) => {
+    const d = asPlainObject(raw) ?? {};
+    const numbers = d["phone_numbers"];
+    return {
+      deploymentId: String(d["deployment_id"] ?? ""),
+      name: typeof d["name"] === "string" ? d["name"] : null,
+      appId: String(d["app_id"] ?? ""),
+      appVersion: typeof d["app_version"] === "number" ? d["app_version"] : null,
+      phoneNumbers: Array.isArray(numbers) ? numbers.map(String) : [],
+      channelDirection: typeof d["channel_direction"] === "string" ? d["channel_direction"] : null,
+      status: typeof d["status"] === "string" ? d["status"] : null,
+    };
+  });
+}
+
+/**
+ * How many interactions Sarvam's analytics has for this agent ID in the
+ * window — proof that Sarvam recognizes the ID. Only the total is read;
+ * items (which carry callers' unmasked numbers) are never returned.
+ */
+export async function countAgentInteractions(
+  config: SarvamApiClientConfig,
+  appId: string,
+  since: Date,
+  until: Date,
+): Promise<number> {
+  const query = new URLSearchParams({
+    start_datetime: since.toISOString(),
+    end_datetime: until.toISOString(),
+    limit: "1",
+  });
+  const parsed = await sarvamRequest<unknown>(
+    config,
+    "GET",
+    `/api/analytics/v1/${encodeURIComponent(config.orgId)}/${encodeURIComponent(config.workspaceId)}/${encodeURIComponent(appId)}/interactions?${query.toString()}`,
+  );
+  const total = asPlainObject(parsed)?.["total"];
+  return typeof total === "number" ? total : 0;
+}

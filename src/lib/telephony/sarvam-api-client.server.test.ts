@@ -7,6 +7,8 @@ import {
   getCampaign,
   updateCampaign,
   createInstantOutbound,
+  listDeployments,
+  countAgentInteractions,
   type SarvamApiClientConfig,
 } from "./sarvam-api-client.server.ts";
 import { TelephonyAdapterError } from "./adapter.ts";
@@ -484,5 +486,77 @@ describe("response parsing — never fabricates an id the response didn't actual
     });
     assert.equal(result.attemptId, "att_777");
     assert.equal(result.interactionId, undefined);
+  });
+});
+
+describe("read-only agent checks", () => {
+  test("listDeployments: GETs the documented app-authoring path with search, no body, and keeps only summary fields", async () => {
+    const capture: { url?: string; init?: RequestInit } = {};
+    const config = {
+      ...baseConfig,
+      fetchImpl: mockFetch(
+        200,
+        {
+          items: [
+            {
+              deployment_id: "dep_1",
+              app_id: "Agent-1",
+              app_version: 2,
+              phone_numbers: ["+917900000001"],
+              channel_direction: "inbound_outbound",
+              status: "active",
+              created_by: "someone@example.com",
+            },
+          ],
+        },
+        capture,
+      ),
+    };
+    const out = await listDeployments(config, "Agent-1");
+    assert.equal(capture.init?.method, "GET");
+    assert.equal(capture.init?.body, undefined);
+    assert.equal(
+      capture.url,
+      "https://apps.sarvam.ai/api/app-authoring/v1/orgs/org_1/workspaces/ws_1/deployments?search=Agent-1&limit=100",
+    );
+    assert.deepEqual(out, [
+      {
+        deploymentId: "dep_1",
+        name: null,
+        appId: "Agent-1",
+        appVersion: 2,
+        phoneNumbers: ["+917900000001"],
+        channelDirection: "inbound_outbound",
+        status: "active",
+      },
+    ]);
+  });
+
+  test("countAgentInteractions: GETs the documented analytics path and returns only the total", async () => {
+    const capture: { url?: string; init?: RequestInit } = {};
+    const config = {
+      ...baseConfig,
+      fetchImpl: mockFetch(200, { items: [{ user_contact: "+919999999999" }], total: 7 }, capture),
+    };
+    const total = await countAgentInteractions(
+      config,
+      "Agent-1",
+      new Date("2026-08-01T00:00:00Z"),
+      new Date("2026-11-01T00:00:00Z"),
+    );
+    assert.equal(total, 7);
+    assert.equal(capture.init?.method, "GET");
+    assert.match(
+      capture.url ?? "",
+      /^https:\/\/apps\.sarvam\.ai\/api\/analytics\/v1\/org_1\/ws_1\/Agent-1\/interactions\?start_datetime=2026-08-01T00%3A00%3A00\.000Z&end_datetime=2026-11-01T00%3A00%3A00\.000Z&limit=1$/,
+    );
+  });
+
+  test("a 404 for an unknown agent is a definite TelephonyAdapterError", async () => {
+    const config = { ...baseConfig, fetchImpl: mockFetch(404, { detail: "not found" }) };
+    await assert.rejects(
+      countAgentInteractions(config, "nope", new Date(0), new Date()),
+      (err: unknown) => err instanceof TelephonyAdapterError && err.status === 404,
+    );
   });
 });

@@ -25,6 +25,9 @@ import {
   type UpdateDeploymentInput,
   type UploadCohortInput,
   type UploadCohortResult,
+  listDeployments as apiListDeployments,
+  countAgentInteractions as apiCountAgentInteractions,
+  type SarvamDeploymentSummary,
 } from "./sarvam-api-client.server.ts";
 import { constantTimeEquals } from "../constant-time-equals.server.ts";
 
@@ -509,6 +512,16 @@ export class SarvamTelephonyAdapter implements TelephonyProviderAdapter {
    * verified GET .../campaigns path family; updateCampaign's PATCH path and
    * body are the same convention, not independently confirmed.
    */
+  /** Read-only: deployments Sarvam finds for `search` (an agent ID or number). */
+  async listDeployments(search: string): Promise<SarvamDeploymentSummary[]> {
+    return apiListDeployments(this.managementApiConfig("outbound"), search);
+  }
+
+  /** Read-only: the agent's interaction count in the window (no caller data). */
+  async countAgentInteractions(appId: string, since: Date, until: Date): Promise<number> {
+    return apiCountAgentInteractions(this.managementApiConfig("outbound"), appId, since, until);
+  }
+
   async listCampaigns(): Promise<SarvamCampaign[]> {
     const result = await apiListCampaigns(this.managementApiConfig("outbound"));
     return result.campaigns;

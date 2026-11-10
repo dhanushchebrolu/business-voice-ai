@@ -658,6 +658,120 @@ export interface SarvamConnectivityTestResult {
  * separate "is this deployed" flag to invent; env-var presence already is
  * that signal here.
  */
+interface InspectSarvamAgentInput {
+  appId: string;
+  appVersion?: number | undefined;
+  agentPhoneNumber?: string | undefined;
+}
+
+type ProbeResult<T> =
+  { ok: true; value: T } | { ok: false; status: number | null; message: string };
+
+async function probe<T>(fn: () => Promise<T>): Promise<ProbeResult<T>> {
+  try {
+    return { ok: true, value: await fn() };
+  } catch (err) {
+    return {
+      ok: false,
+      status: err instanceof TelephonyAdapterError ? err.status : null,
+      message: (err as Error).message,
+    };
+  }
+}
+
+/**
+ * Read-only check of a Sarvam agent before it is mapped or called: whether
+ * Sarvam's analytics recognizes the agent ID, which deployments use it (app
+ * version, numbers, direction, status), and whether the agent's phone number
+ * is already in a deployment. Only documented GET endpoints; nothing in
+ * Sarvam changes. Instant outbound needs no deployment, so "no deployment"
+ * is not a failure. Sarvam has no public API that lists an agent's committed
+ * versions or a workspace's connections.
+ */
+export const inspectSarvamAgent = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: InspectSarvamAgentInput) => {
+    if (!input?.appId?.trim()) throw new Error("appId is required");
+    if (
+      input.appVersion !== undefined &&
+      (!Number.isInteger(input.appVersion) || input.appVersion < 1)
+    )
+      throw new Error("appVersion must be a positive integer");
+    const agentPhoneNumber = input.agentPhoneNumber?.trim()
+      ? normalizeCustomerPhone(input.agentPhoneNumber.trim(), null)
+      : undefined;
+    if (input.agentPhoneNumber?.trim() && !agentPhoneNumber)
+      throw new Error("agentPhoneNumber must include its country code, e.g. +91…");
+    return {
+      appId: input.appId.trim(),
+      appVersion: input.appVersion,
+      agentPhoneNumber: agentPhoneNumber ?? undefined,
+    };
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "agents.write");
+    const adapter = getTelephonyAdapter("sarvam");
+    if (!adapter || !(adapter instanceof SarvamTelephonyAdapter))
+      throw new Error("Sarvam is not connected. Configure SARVAM_API_KEY first.");
+
+    const until = new Date();
+    const since = new Date(until.getTime() - 90 * 24 * 60 * 60 * 1000);
+    const [interactions, byApp, byNumber] = await Promise.all([
+      probe(() => adapter.countAgentInteractions(data.appId, since, until)),
+      probe(() => adapter.listDeployments(data.appId)),
+      data.agentPhoneNumber
+        ? probe(() => adapter.listDeployments(data.agentPhoneNumber!))
+        : Promise.resolve(null),
+    ]);
+    const appDeployments = byApp.ok ? byApp.value.filter((d) => d.appId === data.appId) : [];
+    const numberDeployments =
+      byNumber && byNumber.ok && data.agentPhoneNumber
+        ? byNumber.value.filter((d) =>
+            d.phoneNumbers.some((n) => normalizeCustomerPhone(n, null) === data.agentPhoneNumber),
+          )
+        : [];
+
+    const result = {
+      appId: data.appId,
+      // Proven only by evidence: a deployment or a past call under this ID. An
+      // empty result may just be a new agent; a 404 means Sarvam doesn't know it.
+      agentRecognized:
+        appDeployments.length > 0 || (interactions.ok && interactions.value > 0)
+          ? true
+          : !interactions.ok && interactions.status === 404
+            ? false
+            : null,
+      interactionsLast90Days: interactions.ok ? interactions.value : null,
+      interactionsError: interactions.ok
+        ? null
+        : `${interactions.status ?? "?"}: ${interactions.message}`,
+      deploymentsError: byApp.ok ? null : `${byApp.status ?? "?"}: ${byApp.message}`,
+      appDeployments,
+      versionDeployed:
+        data.appVersion === undefined
+          ? null
+          : appDeployments.some((d) => d.appVersion === data.appVersion),
+      numberDeployments,
+      numberDeploymentsError:
+        byNumber && !byNumber.ok ? `${byNumber.status ?? "?"}: ${byNumber.message}` : null,
+    };
+
+    await writeAudit(admin, {
+      action: "SARVAM_AGENT_INSPECTED",
+      entityType: "platform",
+      entityId: null,
+      organizationId: null,
+      newValue: {
+        app_id: data.appId,
+        app_version: data.appVersion ?? null,
+        agent_recognized: result.agentRecognized,
+        deployments: appDeployments.length,
+      },
+      reason: "Read-only Sarvam agent check",
+    });
+    return result;
+  });
+
 export const testSarvamConnectivity = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .handler(async ({ context }): Promise<SarvamConnectivityTestResult> => {
