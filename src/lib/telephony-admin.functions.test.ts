@@ -137,12 +137,31 @@ describe("activatePhoneNumber — duplicate-activation cannot create an inconsis
 });
 
 describe("reassignPhoneNumber — the whole point is tenant safety on handoff", () => {
-  const fnSrc = extractFn("reassignPhoneNumber");
+  // The rules live in phone-number-assignment.server.ts (behaviour-tested in
+  // sarvam-admin-dashboard.server.test.ts); the admin function delegates to it.
+  const handlerSrc = extractFn("reassignPhoneNumber");
+  const fnSrc = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "phone-number-assignment.server.ts"),
+    "utf8",
+  ).replaceAll("params.toOrgId", "data.toOrgId");
 
-  test("moving a number to a new organization atomically clears business/agent linkage and forces it back to non-live", () => {
+  test("the admin function delegates to the shared assignment rules", () => {
+    assert.match(handlerSrc, /await assignNumberToOrganization\(supabaseAdmin, \{/);
+  });
+
+  test("moving a number to a new organization atomically resets business linkage, re-links agent/connection to the destination's own, and forces it back to non-live", () => {
     assert.match(fnSrc, /organization_id:\s*data\.toOrgId/);
     assert.match(fnSrc, /business_id:\s*null/);
-    assert.match(fnSrc, /agent_config_id:\s*null/);
+    assert.match(fnSrc, /agent_config_id:\s*agent\?\.id \?\? null/);
+    assert.match(fnSrc, /connection_id:\s*connection\?\.id \?\? null/);
+    assert.match(
+      fnSrc,
+      /from\("agent_configs"\)[\s\S]{0,60}\.eq\("organization_id", data\.toOrgId\)/,
+    );
+    assert.match(
+      fnSrc,
+      /from\("telephony_connections"\)[\s\S]{0,60}\.eq\("organization_id", data\.toOrgId\)/,
+    );
     assert.match(fnSrc, /status:\s*"provisioning"/);
     assert.match(fnSrc, /inbound_enabled:\s*false/);
     assert.match(fnSrc, /outbound_enabled:\s*false/);
@@ -163,8 +182,8 @@ describe("reassignPhoneNumber — the whole point is tenant safety on handoff", 
   });
 
   test("the reassignment is audited with both the prior and new organization_id, never silently applied", () => {
-    assert.match(fnSrc, /action:\s*"NUMBER_REASSIGNED"/);
-    assert.match(fnSrc, /oldValue:\s*\{\s*organization_id:\s*before\.organization_id/);
+    assert.match(handlerSrc, /action:\s*"NUMBER_REASSIGNED"/);
+    assert.match(handlerSrc, /oldValue:\s*\{\s*organization_id:\s*before\.organization_id/);
   });
 });
 

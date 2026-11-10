@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -32,6 +32,9 @@ export function ReasonDialog({
 }) {
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
+  // Synchronous guard: `busy` only disables the button after a re-render, so
+  // a fast double-click would otherwise submit twice (e.g. dial twice).
+  const inFlight = useRef(false);
 
   return (
     <AlertDialog
@@ -60,10 +63,12 @@ export function ReasonDialog({
             disabled={busy}
             onClick={async (e) => {
               e.preventDefault();
+              if (inFlight.current) return;
               if (!reason.trim()) {
                 toast.error("A reason is required");
                 return;
               }
+              inFlight.current = true;
               setBusy(true);
               try {
                 await onConfirm(reason.trim());
@@ -72,6 +77,7 @@ export function ReasonDialog({
               } catch (error) {
                 toast.error(error instanceof Error ? error.message : "Action failed");
               } finally {
+                inFlight.current = false;
                 setBusy(false);
               }
             }}

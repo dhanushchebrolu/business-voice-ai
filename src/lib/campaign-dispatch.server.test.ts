@@ -151,3 +151,49 @@ describe("webhook route — campaign hook never bypasses idempotency", () => {
     assert.match(webhookRoute, /event\.status === "completed" && contactId/);
   });
 });
+
+describe("Sarvam result webhook: both outbound paths use the authenticated URL", () => {
+  const single = readFileSync(new URL("./sarvam-outbound-call.server.ts", import.meta.url), "utf8");
+  const src = (s: string) => s.replace(/\r\n/g, "\n");
+
+  test("campaign dispatch uses sarvamOutboundWebhookUrl and dials nothing without it", () => {
+    const d = src(dispatch);
+    assert.match(
+      d,
+      /import \{ getTelephonyAdapter, sarvamOutboundWebhookUrl \} from "@\/lib\/telephony\.server";/,
+    );
+    assert.doesNotMatch(d, /sarvamWebhookUrl\(/);
+    const check = d.indexOf("const webhook = sarvamOutboundWebhookUrl();");
+    const refuse = d.indexOf("if (!webhook.ok) {", check);
+    const due = d.indexOf('.from("campaign_contacts")', check);
+    const dial = d.indexOf("adapter.createInstantOutbound({", check);
+    assert.ok(
+      check > -1 && refuse > check && refuse < due && due < dial,
+      "checked before any contact is read or claimed",
+    );
+    assert.match(d.slice(refuse, due), /return \{ dialed: 0, skipped: 0, completed: false \};/);
+    assert.match(d, /const webhookUrl = webhook\.url;/);
+    assert.match(d.slice(dial, dial + 600), /\n\s+webhookUrl,\n/);
+    // Only the reason is logged, never the URL (it contains the secret).
+    assert.match(
+      d,
+      /console\.error\("campaign_dispatch:webhook_not_configured", campaign\.id, webhook\.reason\);/,
+    );
+  });
+
+  test("the single-call path uses sarvamOutboundWebhookUrl before anything is written", () => {
+    const s = src(single);
+    assert.doesNotMatch(s, /sarvamWebhookUrl\(/);
+    const check = s.indexOf("const webhook = sarvamOutboundWebhookUrl();");
+    const insert = s.indexOf('.from("call_logs")\n    .insert(', check);
+    const dial = s.indexOf("adapter.createInstantOutbound({", check);
+    assert.ok(check > -1 && check < insert && insert < dial);
+    assert.match(s.slice(check, insert), /SARVAM_WEBHOOK_SECRET_MISSING_MESSAGE/);
+  });
+
+  test("neither path logs the webhook URL", () => {
+    for (const s of [src(dispatch), src(single)])
+      for (const line of s.split("\n").filter((l) => /console\.(log|info|warn|error)\(/.test(l)))
+        assert.doesNotMatch(line, /webhookUrl|webhook\.url/, line.trim());
+  });
+});

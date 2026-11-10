@@ -37,6 +37,7 @@ import { CustomerControlPanel } from "@/components/admin/CustomerControlPanel";
 import { EntitlementsPanel } from "@/components/admin/EntitlementsPanel";
 import { CrmPanel } from "@/components/admin/CrmPanel";
 import { PricingOverridePanel } from "@/components/admin/PricingOverridePanel";
+import { SarvamOutboundPanel } from "@/components/admin/SarvamOutboundPanel";
 import type { LifecycleStatus } from "@/lib/lifecycle";
 import type { ProvisioningCheckStatus } from "@/lib/provisioning-health.server";
 import type { ProvisioningState } from "@/lib/provisioning-state";
@@ -533,6 +534,14 @@ function CustomerDetail() {
           </div>
         </div>
       </SectionCard>
+
+      <SarvamOutboundPanel
+        orgId={org.id}
+        agent={data.agent}
+        numbers={data.numbers}
+        connections={data.connections}
+        onChanged={invalidate}
+      />
 
       <SectionCard
         title="Klyro runtime"

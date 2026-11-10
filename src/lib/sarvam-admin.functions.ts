@@ -10,6 +10,7 @@ import {
   INVALID_DESTINATION_MESSAGE,
   sendSarvamInstantOutboundCall,
 } from "@/lib/sarvam-outbound-call.server";
+import { loadCallDetail, placeSarvamCallForOrganization } from "@/lib/sarvam-admin-calls.server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/integrations/supabase/types";
 
@@ -92,6 +93,15 @@ export const setSarvamAppMapping = createServerFn({ method: "POST" })
         throw new Error("This Sarvam app is already mapped to a different agent.");
       throw error;
     }
+
+    // Numbers assigned before the agent existed get it now (same org only).
+    const { error: linkError } = await supabaseAdmin
+      .from("phone_numbers")
+      .update({ agent_config_id: data.agentConfigId })
+      .eq("organization_id", before.organization_id)
+      .is("agent_config_id", null)
+      .neq("status", "released");
+    if (linkError) throw linkError;
 
     await writeAudit(admin, {
       action: "SARVAM_APP_MAPPING_SET",
@@ -191,6 +201,16 @@ export const registerTelephonyConnection = createServerFn({ method: "POST" })
       }
       connectionRowId = row.id;
     }
+
+    // Sarvam numbers assigned before the connection existed get it now (same org only).
+    const { error: linkError } = await supabaseAdmin
+      .from("phone_numbers")
+      .update({ connection_id: connectionRowId })
+      .eq("organization_id", data.orgId)
+      .eq("provider", "sarvam")
+      .is("connection_id", null)
+      .neq("status", "released");
+    if (linkError) throw linkError;
 
     await writeAudit(admin, {
       action: "SARVAM_CONNECTION_REGISTERED",
@@ -765,4 +785,110 @@ export const retrySarvamCallFinalization = createServerFn({ method: "POST" })
     if (result.state === "skipped")
       throw new Error("Another finalization of this call is in progress. Try again in 2 minutes.");
     return result;
+  });
+
+/* ------------------------------------------------------------------ */
+/* Admin-initiated production outbound call                            */
+/* ------------------------------------------------------------------ */
+
+export interface PlaceAdminSarvamOutboundCallInput {
+  orgId: string;
+  phoneNumberId: string;
+  toE164: string;
+  /** Must be true: the admin explicitly approved dialling this one number. */
+  confirmCall: boolean;
+  reason: string;
+}
+
+/**
+ * One real outbound call placed by a platform admin on a customer's behalf.
+ * Unlike testSarvamOutboundCall (demo orgs only) this applies the customer's
+ * full production gates — number ownership, entitlement/lock, active number
+ * with outbound enabled, wallet balance — via placeSarvamCallForOrganization,
+ * then the shared sendSarvamInstantOutboundCall (no second calling engine).
+ * Billed to the customer's wallet by the normal finalization path. One
+ * destination per request, never retried, always audited.
+ */
+export const placeAdminSarvamOutboundCall = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: PlaceAdminSarvamOutboundCallInput) => {
+    if (!input?.orgId) throw new Error("orgId is required");
+    if (!input.phoneNumberId) throw new Error("phoneNumberId is required");
+    const toE164 = normalizeCustomerPhone(input.toE164, null);
+    if (!toE164) throw new Error(INVALID_DESTINATION_MESSAGE);
+    if (input.confirmCall !== true)
+      throw new Error("This places a real, billed call — explicit confirmation is required.");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return { ...input, toE164 };
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+
+    const audit = (entityId: string | null, outcome: string) =>
+      writeAudit(admin, {
+        action: "SARVAM_ADMIN_OUTBOUND_CALL",
+        entityType: "call_log",
+        entityId,
+        organizationId: data.orgId,
+        newValue: { phoneNumberId: data.phoneNumberId, toE164: data.toE164, outcome },
+        reason: data.reason,
+      });
+
+    let result;
+    try {
+      result = await placeSarvamCallForOrganization(supabaseAdmin, {
+        orgId: data.orgId,
+        phoneNumberId: data.phoneNumberId,
+        toE164: data.toE164,
+      });
+    } catch (err) {
+      // Refused or rejected attempts are audited too: who tried to call whom.
+      await audit(null, `error: ${(err as Error).message}`);
+      throw err;
+    }
+    await audit(result.callId, result.outcome);
+    return { callId: result.callId, outcome: result.outcome };
+  });
+
+/**
+ * Read-only preview of the customer-level gates a call must pass (phone
+ * entitlement, wallet balance), so the dashboard checklist never says
+ * "ready" for a customer whose calls would be refused. Also reports whether
+ * the BYPASS_BILLING_GATES testing bypass is on, which makes the entitlement
+ * gate pass for everyone. The real call re-checks everything server-side.
+ */
+export const getSarvamOutboundGates = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { orgId: string }) => {
+    if (!input?.orgId) throw new Error("orgId is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    await assertPlatformAdmin(context.supabase, context.userId, "customers.read");
+    const { checkFeatureAccess } = await import("@/lib/feature-gate.server");
+    const { walletCanAffordOutbound } = await import("@/lib/telephony-guard.server");
+    const [phone, walletOk] = await Promise.all([
+      checkFeatureAccess(data.orgId, "phone"),
+      walletCanAffordOutbound(data.orgId),
+    ]);
+    return {
+      phoneAllowed: phone.allowed,
+      phoneReason: phone.reason,
+      walletOk,
+      billingGatesBypassed: process.env["BYPASS_BILLING_GATES"] === "true",
+    };
+  });
+
+/** One call's full monitoring record (status, billing, finalization, webhooks, transcript). Read-only. */
+export const getAdminCallDetail = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { callId: string }) => {
+    if (!input?.callId) throw new Error("callId is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    await assertPlatformAdmin(context.supabase, context.userId, "billing.read");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    return loadCallDetail(supabaseAdmin, data.callId);
   });

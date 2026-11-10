@@ -7,6 +7,11 @@ import { TelephonyAdapterError } from "@/lib/telephony/adapter";
 import { VobizTelephonyAdapter } from "@/lib/telephony/vobiz-provider";
 import type { Json } from "@/integrations/supabase/types";
 import { UNRESOLVED_SARVAM_STATUSES } from "@/lib/sarvam-call-review";
+import {
+  assignNumberToOrganization,
+  findOtherE164Holder,
+  NUMBER_HELD_MESSAGE,
+} from "@/lib/phone-number-assignment.server";
 
 /**
  * Admin telephony control plane: phone-number lifecycle and the
@@ -93,6 +98,8 @@ export const importPhoneNumberToPool = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+
+    if (await findOtherE164Holder(supabaseAdmin, data.e164)) throw new Error(NUMBER_HELD_MESSAGE);
 
     const { data: row, error } = await supabaseAdmin
       .from("phone_numbers")
@@ -183,6 +190,8 @@ export const provisionPhoneNumber = createServerFn({ method: "POST" })
       monthlyPrice = provisioned.monthlyPrice;
     }
 
+    if (await findOtherE164Holder(supabaseAdmin, e164)) throw new Error(NUMBER_HELD_MESSAGE);
+
     const { data: row, error } = await supabaseAdmin
       .from("phone_numbers")
       .insert({
@@ -260,7 +269,7 @@ export const activatePhoneNumber = createServerFn({ method: "POST" })
     return { ok: true as const };
   });
 
-/** Moves a number to a different organization. Always lands "provisioning" and inbound/outbound off, so a mis-routed call can never reach the wrong workspace. */
+/** Moves a number to a different organization (or from the pool) — see assignNumberToOrganization for the rules. */
 export const reassignPhoneNumber = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: { numberId: string; toOrgId: string; reason: string }) => {
@@ -272,33 +281,10 @@ export const reassignPhoneNumber = createServerFn({ method: "POST" })
     const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
-    const { data: before } = await supabaseAdmin
-      .from("phone_numbers")
-      .select("*")
-      .eq("id", data.numberId)
-      .maybeSingle();
-    if (!before) throw new Error("Number not found");
-
-    const { data: destOrg } = await supabaseAdmin
-      .from("organizations")
-      .select("id")
-      .eq("id", data.toOrgId)
-      .maybeSingle();
-    if (!destOrg) throw new Error("Destination client not found");
-
-    const { error } = await supabaseAdmin
-      .from("phone_numbers")
-      .update({
-        organization_id: data.toOrgId,
-        business_id: null,
-        agent_config_id: null,
-        status: "provisioning",
-        inbound_enabled: false,
-        outbound_enabled: false,
-        suspended_reason: null,
-      })
-      .eq("id", data.numberId);
-    if (error) throw error;
+    const before = await assignNumberToOrganization(supabaseAdmin, {
+      numberId: data.numberId,
+      toOrgId: data.toOrgId,
+    });
 
     await writeAudit(admin, {
       action: "NUMBER_REASSIGNED",

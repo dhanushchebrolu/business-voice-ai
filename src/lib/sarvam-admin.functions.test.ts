@@ -227,3 +227,67 @@ describe("Sarvam campaigns — adapter/server boundary only, platform-admin-gate
     assert.match(getSrc, /toJson\(campaign\.raw\)/);
   });
 });
+
+describe("admin dashboard outbound call + call detail", () => {
+  test("placeAdminSarvamOutboundCall gates on numbers.write before any database access", () => {
+    const fnSrc = extractFn("placeAdminSarvamOutboundCall");
+    const adminIdx = fnSrc.indexOf(
+      'assertPlatformAdmin(context.supabase, context.userId, "numbers.write")',
+    );
+    assert.ok(adminIdx > -1);
+    assert.equal(fnSrc.slice(0, adminIdx).includes(".from("), false);
+  });
+
+  test("placeAdminSarvamOutboundCall requires explicit confirmation, a reason and a valid destination", () => {
+    const fnSrc = extractFn("placeAdminSarvamOutboundCall");
+    assert.match(fnSrc, /input\.confirmCall !== true/);
+    assert.match(fnSrc, /A reason is required/);
+    assert.match(fnSrc, /normalizeCustomerPhone\(input\.toE164, null\)/);
+  });
+
+  test("placeAdminSarvamOutboundCall uses the production gates (not the demo-only test path) and is audited", () => {
+    const fnSrc = extractFn("placeAdminSarvamOutboundCall");
+    assert.match(fnSrc, /await placeSarvamCallForOrganization\(supabaseAdmin, \{/);
+    assert.doesNotMatch(fnSrc, /assertDemoOrganization/);
+    assert.doesNotMatch(fnSrc, /createInstantOutbound|\.from\("call_logs"\)/);
+    assert.match(fnSrc, /action: "SARVAM_ADMIN_OUTBOUND_CALL"/);
+  });
+
+  test("the demo-only test call stays demo-only", () => {
+    assert.match(extractFn("testSarvamOutboundCall"), /assertDemoOrganization\(/);
+  });
+
+  test("getSarvamOutboundGates is admin-gated, read-only, and reports the billing bypass", () => {
+    const fnSrc = extractFn("getSarvamOutboundGates");
+    assert.match(
+      fnSrc,
+      /assertPlatformAdmin\(context\.supabase, context\.userId, "customers\.read"\)/,
+    );
+    assert.match(fnSrc, /checkFeatureAccess\(data\.orgId, "phone"\)/);
+    assert.match(fnSrc, /walletCanAffordOutbound\(data\.orgId\)/);
+    assert.match(fnSrc, /billingGatesBypassed: process\.env\["BYPASS_BILLING_GATES"\] === "true"/);
+    assert.doesNotMatch(fnSrc, /\.update\(|\.insert\(|writeAudit/);
+  });
+
+  test("getAdminCallDetail is admin-gated and read-only", () => {
+    const fnSrc = extractFn("getAdminCallDetail");
+    assert.match(
+      fnSrc,
+      /assertPlatformAdmin\(context\.supabase, context\.userId, "billing\.read"\)/,
+    );
+    assert.doesNotMatch(fnSrc, /\.update\(|\.insert\(|writeAudit/);
+  });
+
+  test("mapping and connection registration only link the same organization's unlinked numbers", () => {
+    const mapping = extractFn("setSarvamAppMapping");
+    assert.match(
+      mapping,
+      /\.eq\("organization_id", before\.organization_id\)\s*\.is\("agent_config_id", null\)/,
+    );
+    const connection = extractFn("registerTelephonyConnection");
+    assert.match(
+      connection,
+      /\.eq\("organization_id", data\.orgId\)\s*\.eq\("provider", "sarvam"\)\s*\.is\("connection_id", null\)/,
+    );
+  });
+});

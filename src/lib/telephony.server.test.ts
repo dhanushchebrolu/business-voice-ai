@@ -370,3 +370,126 @@ test("providerStatus: vobiz reports configured:true once all three secrets are s
     },
   );
 });
+
+// ---------------------------------------------------------------------------
+// Sarvam result webhook URL: authenticated with verify_token (the only thing
+// SarvamTelephonyAdapter.verifyWebhookSignature accepts).
+// ---------------------------------------------------------------------------
+
+/** `base: null` leaves TELEPHONY_WEBHOOK_BASE_URL unset. */
+const SARVAM_URL_ENV = (
+  secret: string | undefined,
+  base: string | null = "https://clickai.test",
+) => ({
+  TELEPHONY_WEBHOOK_BASE_URL: base ?? undefined,
+  SARVAM_WEBHOOK_SECRET: secret,
+  SARVAM_API_KEY: "sk_live_example",
+});
+
+test("sarvamOutboundWebhookUrl: with the secret configured, the URL keeps provider=sarvam and carries verify_token", async () => {
+  const { sarvamOutboundWebhookUrl, sarvamWebhookUrl } = await import("./telephony.server.ts");
+  withEnv(SARVAM_URL_ENV("sarvam-shared-secret"), () => {
+    const result = sarvamOutboundWebhookUrl();
+    assert.deepEqual(result, {
+      ok: true,
+      url: "https://clickai.test/api/public/webhooks/telephony?provider=sarvam&verify_token=sarvam-shared-secret",
+    });
+    assert.equal(sarvamWebhookUrl(), (result as { url: string }).url);
+  });
+});
+
+test("sarvamOutboundWebhookUrl: a secret with URL-special characters is encoded and round-trips exactly", async () => {
+  const { sarvamOutboundWebhookUrl } = await import("./telephony.server.ts");
+  const secret = "a b&c=d/e+f%g#h?i;j é";
+  withEnv(SARVAM_URL_ENV(secret), () => {
+    const result = sarvamOutboundWebhookUrl();
+    assert.equal(result.ok, true);
+    const url = new URL((result as { url: string }).url);
+    assert.equal(url.pathname, "/api/public/webhooks/telephony");
+    assert.equal(url.searchParams.get("provider"), "sarvam");
+    assert.equal(url.searchParams.get("verify_token"), secret);
+    assert.deepEqual([...url.searchParams.keys()], ["provider", "verify_token"]);
+    assert.equal(url.hash, "", "a '#' in the secret must not become a fragment");
+  });
+});
+
+test("sarvamOutboundWebhookUrl: without the secret it refuses explicitly; sarvamWebhookUrl keeps its previous unauthenticated URL", async () => {
+  const { sarvamOutboundWebhookUrl, sarvamWebhookUrl } = await import("./telephony.server.ts");
+  withEnv(SARVAM_URL_ENV(undefined), () => {
+    assert.deepEqual(sarvamOutboundWebhookUrl(), { ok: false, reason: "webhook_secret_missing" });
+    assert.equal(
+      sarvamWebhookUrl(),
+      "https://clickai.test/api/public/webhooks/telephony?provider=sarvam",
+    );
+  });
+  withEnv(SARVAM_URL_ENV("", "https://clickai.test"), () => {
+    assert.deepEqual(sarvamOutboundWebhookUrl(), { ok: false, reason: "webhook_secret_missing" });
+  });
+});
+
+test("sarvamOutboundWebhookUrl: base URL missing or invalid; a trailing slash or a path prefix is handled", async () => {
+  const { sarvamOutboundWebhookUrl, sarvamWebhookUrl } = await import("./telephony.server.ts");
+  withEnv(SARVAM_URL_ENV("s", null), () => {
+    assert.deepEqual(sarvamOutboundWebhookUrl(), { ok: false, reason: "base_url_missing" });
+    assert.equal(sarvamWebhookUrl(), null);
+  });
+  withEnv(SARVAM_URL_ENV("s", "not a url"), () => {
+    assert.deepEqual(sarvamOutboundWebhookUrl(), { ok: false, reason: "base_url_invalid" });
+    assert.equal(sarvamWebhookUrl(), null);
+  });
+  withEnv(SARVAM_URL_ENV("s", "https://clickai.test/"), () => {
+    assert.equal(
+      (sarvamOutboundWebhookUrl() as { url: string }).url,
+      "https://clickai.test/api/public/webhooks/telephony?provider=sarvam&verify_token=s",
+    );
+  });
+  withEnv(SARVAM_URL_ENV("s", "https://example.test/klyro"), () => {
+    assert.equal(
+      (sarvamOutboundWebhookUrl() as { url: string }).url,
+      "https://example.test/klyro/api/public/webhooks/telephony?provider=sarvam&verify_token=s",
+    );
+  });
+});
+
+test("the generated URL authenticates against the Sarvam adapter (plain and special-character secrets); another secret does not", async () => {
+  const { sarvamOutboundWebhookUrl } = await import("./telephony.server.ts");
+  for (const secret of ["sarvam-shared-secret", "a b&c=d/e+f%g#h?i;j é"]) {
+    let adapter!: SarvamTelephonyAdapter;
+    let url!: string;
+    withEnv(SARVAM_URL_ENV(secret), () => {
+      adapter = getTelephonyAdapter("sarvam") as SarvamTelephonyAdapter;
+      url = (sarvamOutboundWebhookUrl() as { url: string }).url;
+    });
+    assert.equal(adapter.verifyWebhookSignature("", {}, new URL(url)), true, secret);
+    let other!: SarvamTelephonyAdapter;
+    withEnv(SARVAM_URL_ENV("a-different-secret"), () => {
+      other = getTelephonyAdapter("sarvam") as SarvamTelephonyAdapter;
+    });
+    assert.equal(other.verifyWebhookSignature("", {}, new URL(url)), false);
+  }
+});
+
+test("inbound compatibility: a dashboard-configured Sarvam URL with verify_token is still accepted, and one without it still rejected", () => {
+  let adapter!: SarvamTelephonyAdapter;
+  withEnv(SARVAM_URL_ENV("sarvam-shared-secret"), () => {
+    adapter = getTelephonyAdapter("sarvam") as SarvamTelephonyAdapter;
+  });
+  assert.equal(
+    adapter.verifyWebhookSignature(
+      "",
+      {},
+      new URL(
+        "https://clickai.test/api/public/webhooks/telephony?verify_token=sarvam-shared-secret&provider=sarvam",
+      ),
+    ),
+    true,
+  );
+  assert.equal(
+    adapter.verifyWebhookSignature(
+      "",
+      {},
+      new URL("https://clickai.test/api/public/webhooks/telephony?provider=sarvam"),
+    ),
+    false,
+  );
+});

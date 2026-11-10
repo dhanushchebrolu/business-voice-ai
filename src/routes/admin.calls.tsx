@@ -15,6 +15,7 @@ import {
   retrySarvamCallFinalization,
 } from "@/lib/sarvam-admin.functions";
 import { ReasonDialog } from "@/components/admin/ReasonDialog";
+import { CallDetailDialog } from "@/components/admin/CallDetailDialog";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -63,6 +64,7 @@ function AdminCalls() {
   const resolveCall = useServerFn(resolveUnknownSarvamCall);
   const retryFinalization = useServerFn(retrySarvamCallFinalization);
   const [finalizing, setFinalizing] = useState<AdminCallRow | null>(null);
+  const [detailCallId, setDetailCallId] = useState<string | null>(null);
   const [orgId, setOrgId] = useState("");
   const [needsReview, setNeedsReview] = useState(false);
   const [resolving, setResolving] = useState<AdminCallRow | null>(null);
@@ -154,6 +156,9 @@ function AdminCalls() {
                   <th className="py-2 pr-4">Cost</th>
                   <th className="py-2 pr-4">Profit</th>
                   <th className="py-2 pr-4">Started</th>
+                  <th className="py-2 pr-4">
+                    <span className="sr-only">Details</span>
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
@@ -228,6 +233,16 @@ function AdminCalls() {
                     <td className="py-2.5 pr-4 whitespace-nowrap text-xs text-muted-foreground">
                       {new Date(c.startedAt).toLocaleString()}
                     </td>
+                    <td className="py-2.5 pr-4">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 text-xs"
+                        onClick={() => setDetailCallId(c.id)}
+                      >
+                        Details
+                      </Button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -235,6 +250,13 @@ function AdminCalls() {
           </div>
         )}
       </SectionCard>
+
+      <CallDetailDialog
+        callId={detailCallId}
+        onOpenChange={(open) => {
+          if (!open) setDetailCallId(null);
+        }}
+      />
 
       <ReasonDialog
         open={resolving !== null}

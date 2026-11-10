@@ -91,6 +91,7 @@ jobs:
             supabase/migrations/voice_agent_transcript_segments.pg.test.ts \
             supabase/migrations/outbound_call_outcome_unknown.pg.test.ts \
             supabase/migrations/sarvam_outbound_call_finalization.pg.test.ts \
+            supabase/migrations/wallet_service_role_balance.pg.test.ts \
             2>&1 | tee pg-test-output.log
           skipped=$(grep -oP '(?<=^# skipped )\d+' pg-test-output.log | tail -1)
           todo=$(grep -oP '(?<=^# todo )\d+' pg-test-output.log | tail -1)

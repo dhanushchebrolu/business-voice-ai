@@ -184,17 +184,58 @@ export function anyProviderConfigured(): boolean {
   return providerStatus().some((p) => p.configured);
 }
 
+export const SARVAM_WEBHOOK_SECRET_MISSING_MESSAGE =
+  "Sarvam outbound calling is disabled: SARVAM_WEBHOOK_SECRET isn't configured, so Klyro could not accept the call's result.";
+
+export type SarvamWebhookUrlResult =
+  | { ok: true; url: string }
+  | { ok: false; reason: "base_url_missing" | "base_url_invalid" | "webhook_secret_missing" };
+
 /**
- * The single public webhook route every Sarvam outbound request's
- * `webhook_config.url` must point at — same route the inbound path already
- * uses, disambiguated by the existing `?provider=sarvam` query param this
- * route already reads. Returns null when TELEPHONY_WEBHOOK_BASE_URL isn't
- * configured; callers must refuse to dial rather than send Sarvam a request
- * with no way to report the result back.
+ * The Sarvam result webhook: the same public route the inbound path uses,
+ * selected by `?provider=sarvam`, and authenticated by `verify_token` =
+ * SARVAM_WEBHOOK_SECRET — the only thing SarvamTelephonyAdapter's
+ * verifyWebhookSignature accepts (sarvam-provider.server.ts). Built with URL
+ * and URLSearchParams, so the secret is encoded safely. The URL contains the
+ * secret: never log it.
+ */
+function buildSarvamWebhookUrl(): SarvamWebhookUrlResult & { unauthenticatedUrl?: string } {
+  const base = process.env["TELEPHONY_WEBHOOK_BASE_URL"];
+  if (!base) return { ok: false, reason: "base_url_missing" };
+  let url: URL;
+  try {
+    url = new URL(`${base.replace(/\/+$/, "")}/api/public/webhooks/telephony`);
+  } catch {
+    return { ok: false, reason: "base_url_invalid" };
+  }
+  url.searchParams.set("provider", "sarvam");
+  const secret = process.env["SARVAM_WEBHOOK_SECRET"];
+  if (!secret)
+    return { ok: false, reason: "webhook_secret_missing", unauthenticatedUrl: url.toString() };
+  url.searchParams.set("verify_token", secret);
+  return { ok: true, url: url.toString() };
+}
+
+/**
+ * The URL every Sarvam outbound request's `webhook_config.url` must carry.
+ * Outbound callers must refuse to dial unless this is ok: without the secret,
+ * Sarvam's result would be rejected (401) and the call left unresolved.
+ */
+export function sarvamOutboundWebhookUrl(): SarvamWebhookUrlResult {
+  const built = buildSarvamWebhookUrl();
+  return built.ok ? { ok: true, url: built.url } : { ok: false, reason: built.reason };
+}
+
+/**
+ * The Sarvam webhook URL, or null when TELEPHONY_WEBHOOK_BASE_URL isn't
+ * usable. Includes `verify_token` when SARVAM_WEBHOOK_SECRET is configured;
+ * without it, the unauthenticated URL as before (the route will reject it).
+ * Outbound calls use sarvamOutboundWebhookUrl, which refuses that case.
  */
 export function sarvamWebhookUrl(): string | null {
-  const base = process.env["TELEPHONY_WEBHOOK_BASE_URL"];
-  return base ? `${base}/api/public/webhooks/telephony?provider=sarvam` : null;
+  const built = buildSarvamWebhookUrl();
+  if (built.ok) return built.url;
+  return built.unauthenticatedUrl ?? null;
 }
 
 /** Base REST URL for a generically-adapted provider's API. */

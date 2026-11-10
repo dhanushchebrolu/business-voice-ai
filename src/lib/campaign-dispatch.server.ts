@@ -1,4 +1,4 @@
-import { getTelephonyAdapter, sarvamWebhookUrl } from "@/lib/telephony.server";
+import { getTelephonyAdapter, sarvamOutboundWebhookUrl } from "@/lib/telephony.server";
 import { checkTelephonyAccess, walletCanAffordOutbound } from "@/lib/telephony-guard.server";
 import { SarvamTelephonyAdapter } from "@/lib/telephony/sarvam-provider.server";
 import { isWithinCallingWindow, type CampaignSchedule } from "@/lib/campaign-schedule";
@@ -122,12 +122,14 @@ async function dispatchOneCampaign(
           .from("telephony_connections")
           .select("provider, provider_connection_id")
           .eq("id", gate.phoneNumber.connection_id)
+          .eq("organization_id", campaign.organization_id)
           .maybeSingle()
       : Promise.resolve({ data: null }),
     supabaseAdmin
       .from("agent_configs")
       .select("sarvam_app_id, sarvam_app_version")
       .eq("id", campaign.agent_config_id)
+      .eq("organization_id", campaign.organization_id)
       .maybeSingle(),
   ]);
   if (
@@ -142,10 +144,14 @@ async function dispatchOneCampaign(
   if (!adapter || !(adapter instanceof SarvamTelephonyAdapter)) {
     return { dialed: 0, skipped: 0, completed: false };
   }
-  const webhookUrl = sarvamWebhookUrl();
-  if (!webhookUrl) {
+  // Authenticated result URL (verify_token). Without it Sarvam's results would
+  // be rejected, so nothing is dialled. Only the reason is logged, never the URL.
+  const webhook = sarvamOutboundWebhookUrl();
+  if (!webhook.ok) {
+    console.error("campaign_dispatch:webhook_not_configured", campaign.id, webhook.reason);
     return { dialed: 0, skipped: 0, completed: false };
   }
+  const webhookUrl = webhook.url;
 
   const { data: due } = await supabaseAdmin
     .from("campaign_contacts")
