@@ -20,6 +20,13 @@
  *       in order. --check-only stops before the CLI runs.
  *   node scripts/staging/staging.mjs migrate --ref <ref> --yes --expect <n>
  *       the same checks and dry run, then the real push and `migration list`.
+ *   node scripts/staging/staging.mjs backup --ref <ref> [--out <dir>] [--check-only]
+ *       the same project and session-pooler checks as migrate, then
+ *       pg_dump (custom format) of the public, auth and
+ *       supabase_migrations schemas to <dir> (default
+ *       ~/clickai-staging-backups, never inside the repo), and a
+ *       pg_restore --list check of the file. The password reaches pg_dump
+ *       only through PGPASSWORD.
  *   node scripts/staging/staging.mjs deploy --yes
  *       staging build, then `wrangler deploy --name clickai-staging
  *       --secrets-file <temp>`: the first deploy of a new Worker carries its
@@ -49,9 +56,18 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { createInterface } from "node:readline";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { deployStaging, pendingMigrationProblems, serverSecrets } from "./deploy-lib.mjs";
 
@@ -619,6 +635,94 @@ function compareDryRun(out, local) {
   return { seen };
 }
 
+/**
+ * Steps 1 and 2 of migrate and backup: the staging project verified through
+ * its own API, then a session-pooler connection string for exactly that
+ * project (from STAGING_DB_URL or a hidden prompt; never printed).
+ */
+async function stagingDbTarget(flags, ref) {
+  if (!existsSync(envFile)) fail(".env.staging.local is missing");
+  const verified = await verifySupabase(loadEnv(), ref, flags.includes("--offline"));
+  if (!verified) fail("the staging project couldn't be verified; nothing was run");
+  const dbUrl =
+    process.env.STAGING_DB_URL ||
+    (await ask(`Session pooler connection string for ${ref} (hidden): `, { hidden: true }));
+  const { problems, target } = sessionPoolerProblems(dbUrl, ref);
+  for (const p of problems) console.log(`  FAIL  ${p}`);
+  if (problems.length > 0) fail("wrong or unverifiable target; nothing was run");
+  console.log(`  PASS  connection target: ${target}`);
+  const password = decodeURIComponent(new URL(dbUrl).password);
+  return { dbUrl, password, redact: [dbUrl, password, encodeURIComponent(password)] };
+}
+
+/** pg_dump/pg_restore from PATH, or the newest PostgreSQL install on Windows. */
+function pgTool(name) {
+  const exe = process.platform === "win32" ? `${name}.exe` : name;
+  const onPath = spawnSync(exe, ["--version"], { encoding: "utf8", shell: false });
+  if (onPath.status === 0) return exe;
+  const root = "C:\\Program Files\\PostgreSQL";
+  if (process.platform === "win32" && existsSync(root)) {
+    for (const v of readdirSync(root).sort((a, b) => Number(b) - Number(a))) {
+      const candidate = join(root, v, "bin", exe);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  fail(`${name} isn't installed (PostgreSQL client tools 17 or newer are needed)`);
+}
+
+async function backup(flags, ref) {
+  if (!ref) fail("backup needs --ref <staging project ref>");
+  if (ref === PRODUCTION_SUPABASE_REF) fail("--ref is the production project");
+  const outIdx = flags.indexOf("--out");
+  const outDir = resolve(
+    outIdx >= 0 ? flags[outIdx + 1] : join(homedir(), "clickai-staging-backups"),
+  );
+  if (outDir === repo || outDir.startsWith(repo + (process.platform === "win32" ? "\\" : "/"))) {
+    fail("the backup folder must be outside the repository");
+  }
+  const { dbUrl, password } = await stagingDbTarget(flags, ref);
+  if (flags.includes("--check-only")) {
+    console.log("CHECK ONLY: target verified; pg_dump was not run");
+    process.exit(0);
+  }
+  const url = new URL(dbUrl);
+  url.password = "";
+  mkdirSync(outDir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const file = join(outDir, `${ref}-${stamp}.dump`);
+  console.log(`running: pg_dump --format=custom (public, auth, supabase_migrations) -> ${file}`);
+  const dump = spawnSync(
+    pgTool("pg_dump"),
+    [
+      "--format=custom",
+      "--schema=public",
+      "--schema=auth",
+      "--schema=supabase_migrations",
+      "--file",
+      file,
+      url.toString(),
+    ],
+    { encoding: "utf8", shell: false, env: { ...process.env, PGPASSWORD: password } },
+  );
+  const errText = `${dump.stderr ?? ""}`.split(password).join("<redacted>");
+  if (dump.status !== 0) {
+    console.log(errText.replace(/postgres(ql)?:\/\/[^\s"']+/g, "<redacted connection string>"));
+    fail(`pg_dump exited with ${dump.status}; no backup was made`);
+  }
+  const list = spawnSync(pgTool("pg_restore"), ["--list", file], { encoding: "utf8" });
+  if (list.status !== 0) fail("pg_restore can't read the backup file");
+  const entries = list.stdout.split("\n").filter((l) => /^\d+;/.test(l));
+  const data = entries.filter((l) => l.includes(" TABLE DATA "));
+  const migrations = data.some((l) => l.includes("supabase_migrations schema_migrations"));
+  console.log(
+    `  PASS  backup readable: ${entries.length} entries, ${data.length} tables with data, ${statSync(file).size} bytes`,
+  );
+  console.log(
+    `  ${migrations ? "PASS" : "NOTE"}  migration history ${migrations ? "included" : "not found"}`,
+  );
+  console.log(`BACKUP: ${file}`);
+}
+
 async function migrate(flags, ref) {
   if (!ref) fail("migrate needs --ref <staging project ref>");
   if (ref === PRODUCTION_SUPABASE_REF) fail("--ref is the production project");
@@ -633,25 +737,11 @@ async function migrate(flags, ref) {
     fail("a real push needs --expect N (the number of pending migrations you reviewed)");
   }
 
-  // 1. The staging project, verified independently through its own API.
-  if (!existsSync(envFile)) fail(".env.staging.local is missing");
-  const verified = await verifySupabase(loadEnv(), ref, flags.includes("--offline"));
-  if (!verified) fail("the staging project couldn't be verified; nothing was run");
-
-  // 2. The database connection: session pooler for exactly this project.
-  const dbUrl =
-    process.env.STAGING_DB_URL ||
-    (await ask(`Session pooler connection string for ${ref} (hidden): `, { hidden: true }));
-  const { problems, target } = sessionPoolerProblems(dbUrl, ref);
-  for (const p of problems) console.log(`  FAIL  ${p}`);
-  if (problems.length > 0) fail("wrong or unverifiable target; nothing was run");
-  console.log(`  PASS  connection target: ${target}`);
+  const { dbUrl, redact } = await stagingDbTarget(flags, ref);
   if (checkOnly) {
     console.log("CHECK ONLY: target verified; the Supabase CLI was not run");
     process.exit(0);
   }
-  const password = decodeURIComponent(new URL(dbUrl).password);
-  const redact = [dbUrl, password, encodeURIComponent(password)];
 
   // 3. Dry run (always, also before a real push): the pending migrations
   // must be exactly the newest local ones, in order (all of them for a new
@@ -752,6 +842,10 @@ if (action === "configure-supabase" || action === "verify-supabase") {
 
 if (action === "migrate") {
   await migrate(flags, expectedRef);
+}
+if (action === "backup") {
+  await backup(flags, expectedRef);
+  process.exit(0);
 }
 
 const env = loadEnv();

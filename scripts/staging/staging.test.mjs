@@ -471,7 +471,7 @@ const POOLER_PASSWORD = `pw-${SECRET_MARKER}`;
 const pooler = (user, host = "aws-0-ap-south-1.pooler.supabase.com", port = "5432") =>
   `postgresql://${user}:${POOLER_PASSWORD}@${host}:${port}/postgres`;
 
-function migrateWith(dbUrl, args) {
+function migrateWith(dbUrl, args, action = "migrate") {
   const dir = mkdtempSync(join(tmpdir(), "staging-helper-migrate-"));
   const file = join(dir, ".env.staging.local");
   writeFileSync(
@@ -481,7 +481,7 @@ function migrateWith(dbUrl, args) {
       .join("\n"),
   );
   try {
-    const r = spawnSync(process.execPath, [script, "migrate", ...args], {
+    const r = spawnSync(process.execPath, [script, action, ...args], {
       encoding: "utf8",
       env: { ...process.env, STAGING_ENV_FILE: file, STAGING_DB_URL: dbUrl },
       input: "",
@@ -540,5 +540,31 @@ test("migrate: a production --ref, a missing --ref, and a real push without the 
     const r = migrateWith(url, args);
     assert.equal(r.status, 1);
     assert.match(r.out, /a real push needs --expect N/);
+  }
+});
+
+test("backup: the same target checks as migrate, a folder outside the repo, no value printed", () => {
+  const ok = migrateWith(pooler(`postgres.${NEW_REF}`), checkOnly, "backup");
+  assert.equal(ok.status, 0, ok.out);
+  assert.match(ok.out, /CHECK ONLY: target verified; pg_dump was not run/);
+  assert.doesNotMatch(ok.out, new RegExp(SECRET_MARKER));
+  for (const [url, args, message] of [
+    [pooler("postgres.eorazvlmqwunmhwviocn"), checkOnly, /production project/],
+    [pooler(`postgres.${NEW_REF}`, undefined, "6543"), checkOnly, /transaction pooler/],
+    [
+      pooler(`postgres.${NEW_REF}`),
+      ["--ref", "eorazvlmqwunmhwviocn", "--check-only"],
+      /production project/,
+    ],
+    [
+      pooler(`postgres.${NEW_REF}`),
+      [...checkOnly, "--out", join(import.meta.dirname, "x")],
+      /outside the repository/,
+    ],
+  ]) {
+    const r = migrateWith(url, args, "backup");
+    assert.equal(r.status, 1, `${message}: ${r.out}`);
+    assert.match(r.out, message);
+    assert.doesNotMatch(r.out, new RegExp(SECRET_MARKER));
   }
 });
