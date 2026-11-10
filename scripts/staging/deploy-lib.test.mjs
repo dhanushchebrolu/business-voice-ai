@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import {
   deployStaging,
   generatedConfigProblems,
+  pendingMigrationProblems,
   serverSecrets,
   STAGING_WORKER,
   wranglerDeployArgs,
@@ -169,4 +170,24 @@ test("the deploy arguments always name clickai-staging", () => {
   const args = wranglerDeployArgs("/tmp/x/secrets.json");
   assert.equal(args[args.indexOf("--name") + 1], "clickai-staging");
   assert.ok(!args.includes("klyro"));
+});
+
+test("pending migrations: only the newest local ones, in order, and exactly the reviewed count", () => {
+  const local = ["20260101000000_a.sql", "20260102000000_b.sql", "20260103000000_c.sql"];
+  assert.deepEqual(pendingMigrationProblems(local, local, 3), []);
+  assert.deepEqual(pendingMigrationProblems(local.slice(1), local, 2), []);
+  assert.deepEqual(pendingMigrationProblems([], local, null), []);
+  assert.match(pendingMigrationProblems(local.slice(1), local, 3)[0], /2 pending, but --expect 3/);
+  assert.match(
+    pendingMigrationProblems([local[0], local[2]], local, null)[0],
+    /aren't the newest local ones/,
+  );
+  assert.match(
+    pendingMigrationProblems([local[2], local[1]], local, null)[0],
+    /aren't the newest local ones/,
+  );
+  assert.match(
+    pendingMigrationProblems(["20260104000000_x.sql"], local, null)[0],
+    /unexpected in the dry run/,
+  );
 });

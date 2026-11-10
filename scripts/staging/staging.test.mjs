@@ -496,10 +496,11 @@ test("migrate: a production --ref, a missing --ref, and a real push without the 
   assert.match(migrateWith(url, ["--check-only"]).out, /needs --ref/);
   for (const args of [
     ["--ref", NEW_REF, "--yes", "--offline"],
-    ["--ref", NEW_REF, "--yes", "--expect", "3", "--offline"],
+    ["--ref", NEW_REF, "--yes", "--expect", "0", "--offline"],
+    ["--ref", NEW_REF, "--yes", "--expect", "9999", "--offline"],
   ]) {
     const r = migrateWith(url, args);
     assert.equal(r.status, 1);
-    assert.match(r.out, /a real push needs --expect \d+/);
+    assert.match(r.out, /a real push needs --expect N/);
   }
 });

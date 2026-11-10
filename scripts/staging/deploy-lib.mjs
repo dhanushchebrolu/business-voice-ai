@@ -103,3 +103,24 @@ export function deployStaging({
   );
   return { secretNames: Object.keys(secrets) };
 }
+
+/**
+ * Checks the migrations a `db push --dry-run` would apply against the local
+ * ones: they must be exactly the newest `listed.length` local migrations, in
+ * order (a database that is behind, never one with gaps or unknown files),
+ * and, for a real push, exactly the count the operator reviewed. Returns the
+ * problems; empty means safe to push.
+ */
+export function pendingMigrationProblems(listed, local, expected) {
+  const problems = [];
+  const unexpected = listed.filter((f) => !local.includes(f));
+  for (const f of unexpected) problems.push(`unexpected in the dry run: ${f}`);
+  const tail = local.slice(local.length - listed.length);
+  if (unexpected.length === 0 && JSON.stringify(listed) !== JSON.stringify(tail)) {
+    problems.push("the pending migrations aren't the newest local ones, in order");
+  }
+  if (expected !== null && expected !== listed.length) {
+    problems.push(`${listed.length} pending, but --expect ${expected} was reviewed`);
+  }
+  return problems;
+}

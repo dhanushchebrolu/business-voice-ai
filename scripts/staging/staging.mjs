@@ -53,7 +53,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { createInterface } from "node:readline";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { deployStaging, serverSecrets } from "./deploy-lib.mjs";
+import { deployStaging, pendingMigrationProblems, serverSecrets } from "./deploy-lib.mjs";
 
 const WORKER = "clickai-staging";
 const PRODUCTION_WORKER = "klyro";
@@ -565,16 +565,11 @@ function supabaseCli(args, secretsToRedact) {
   return { status: r.status ?? 1, out };
 }
 
-/** Compares the migrations a dry run lists against the local ones (version and file name, in order). */
+/** The migration files a dry run lists, in its order (checked by pendingMigrationProblems). */
 function compareDryRun(out, local) {
   const listed = [...out.matchAll(/(\d{14}_[^\s/\\]+?\.sql)/g)].map((m) => m[1]);
   const seen = [...new Set(listed)];
-  const missing = local.filter((f) => !seen.includes(f));
-  const unexpected = seen.filter((f) => !local.includes(f));
-  const inOrder =
-    JSON.stringify(seen.filter((f) => local.includes(f))) ===
-    JSON.stringify(local.filter((f) => seen.includes(f)));
-  return { seen, missing, unexpected, inOrder };
+  return { seen };
 }
 
 async function migrate(flags, ref) {
@@ -587,10 +582,8 @@ async function migrate(flags, ref) {
 
   const local = localMigrations();
   console.log(`local migrations: ${local.length} (${local[0]} … ${local.at(-1)})`);
-  if (push && expected !== local.length) {
-    fail(
-      `a real push needs --expect ${local.length} (the number of local migrations you reviewed)`,
-    );
+  if (push && !(Number.isInteger(expected) && expected > 0 && expected <= local.length)) {
+    fail("a real push needs --expect N (the number of pending migrations you reviewed)");
   }
 
   // 1. The staging project, verified independently through its own API.
@@ -613,7 +606,9 @@ async function migrate(flags, ref) {
   const password = decodeURIComponent(new URL(dbUrl).password);
   const redact = [dbUrl, password, encodeURIComponent(password)];
 
-  // 3. Dry run (always, also before a real push): exactly the local set, in order.
+  // 3. Dry run (always, also before a real push): the pending migrations
+  // must be exactly the newest local ones, in order (all of them for a new
+  // project; the unapplied tail for one that is behind).
   console.log(`running: npx ${SUPABASE_CLI} db push --db-url <hidden> --dry-run`);
   const dry = supabaseCli(["db", "push", "--db-url", dbUrl, "--dry-run"], redact);
   const cmp = compareDryRun(dry.out, local);
@@ -621,12 +616,7 @@ async function migrate(flags, ref) {
   for (const f of cmp.seen) console.log(`  ${f}`);
   const discrepancies = [
     ...(dry.status !== 0 ? [`the dry run exited with ${dry.status}`] : []),
-    ...cmp.missing.map((f) => `not in the dry run: ${f}`),
-    ...cmp.unexpected.map((f) => `unexpected in the dry run: ${f}`),
-    ...(cmp.inOrder ? [] : ["the dry run's order differs from the local order"]),
-    ...(cmp.seen.length !== local.length
-      ? [`${cmp.seen.length} listed, ${local.length} expected`]
-      : []),
+    ...pendingMigrationProblems(cmp.seen, local, push ? expected : null),
   ];
   if (discrepancies.length > 0) {
     for (const d of discrepancies) console.log(`  FAIL  ${d}`);
@@ -634,7 +624,13 @@ async function migrate(flags, ref) {
     console.log(dry.out.trim());
     fail("the dry run doesn't match; nothing was applied");
   }
-  console.log(`  PASS  the dry run lists exactly the ${local.length} local migrations, in order`);
+  console.log(
+    `  PASS  the dry run lists exactly the newest ${cmp.seen.length} local migrations, in order`,
+  );
+  if (cmp.seen.length === 0) {
+    console.log("NOTHING TO APPLY: the database already has every local migration");
+    process.exit(0);
+  }
   if (!push) {
     console.log("DRY RUN ONLY: nothing was applied");
     process.exit(0);
