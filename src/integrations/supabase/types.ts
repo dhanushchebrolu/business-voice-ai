@@ -479,6 +479,18 @@ export type Database = {
           summary: string | null;
           transcript: Json | null;
           updated_at: string;
+          billing_applied_at: string | null;
+          campaign_applied_at: string | null;
+          final_agent_variables: Json | null;
+          finalization_attempts: number;
+          finalization_error: string | null;
+          finalization_lease_expires_at: string | null;
+          finalization_lease_token: string | null;
+          finalization_next_at: string | null;
+          finalization_state: string | null;
+          resolution_conflict: boolean;
+          resolution_source: string | null;
+          resolved_by: string | null;
         };
         Insert: {
           agent_version?: number | null;
@@ -514,6 +526,18 @@ export type Database = {
           summary?: string | null;
           transcript?: Json | null;
           updated_at?: string;
+          billing_applied_at?: string | null;
+          campaign_applied_at?: string | null;
+          final_agent_variables?: Json | null;
+          finalization_attempts?: number;
+          finalization_error?: string | null;
+          finalization_lease_expires_at?: string | null;
+          finalization_lease_token?: string | null;
+          finalization_next_at?: string | null;
+          finalization_state?: string | null;
+          resolution_conflict?: boolean;
+          resolution_source?: string | null;
+          resolved_by?: string | null;
         };
         Update: {
           agent_version?: number | null;
@@ -549,6 +573,18 @@ export type Database = {
           summary?: string | null;
           transcript?: Json | null;
           updated_at?: string;
+          billing_applied_at?: string | null;
+          campaign_applied_at?: string | null;
+          final_agent_variables?: Json | null;
+          finalization_attempts?: number;
+          finalization_error?: string | null;
+          finalization_lease_expires_at?: string | null;
+          finalization_lease_token?: string | null;
+          finalization_next_at?: string | null;
+          finalization_state?: string | null;
+          resolution_conflict?: boolean;
+          resolution_source?: string | null;
+          resolved_by?: string | null;
         };
         Relationships: [
           {
@@ -722,6 +758,7 @@ export type Database = {
           status: string;
           updated_at: string;
           variables: Json;
+          current_call_id: string | null;
         };
         Insert: {
           attempts?: number;
@@ -737,6 +774,7 @@ export type Database = {
           status?: string;
           updated_at?: string;
           variables?: Json;
+          current_call_id?: string | null;
         };
         Update: {
           attempts?: number;
@@ -752,6 +790,7 @@ export type Database = {
           status?: string;
           updated_at?: string;
           variables?: Json;
+          current_call_id?: string | null;
         };
         Relationships: [
           {

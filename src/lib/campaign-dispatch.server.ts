@@ -5,9 +5,11 @@ import { isWithinCallingWindow, type CampaignSchedule } from "@/lib/campaign-sch
 import { normalizeCustomerPhone } from "@/lib/phone-number";
 import { decideCampaignContactOutcome, type CallTerminalStatus } from "@/lib/campaign-outcome";
 import {
+  isSarvamOutboundDestinationAllowed,
   recordCampaignStartFailure,
   releaseCampaignClaim,
 } from "@/lib/sarvam-outbound-call.server";
+import { finalizeTerminalCallSafely } from "@/lib/telephony/call-finalization.server";
 
 /**
  * The outbound campaign dispatcher — Klyro's own pacing/retry engine
@@ -187,6 +189,14 @@ async function dispatchOneCampaign(
       continue;
     }
 
+    // Supervised-test allowlist (SARVAM_OUTBOUND_TEST_ALLOWLIST): any other
+    // number is left exactly as it is — not claimed, nothing written or dialled.
+    if (!isSarvamOutboundDestinationAllowed(destination)) {
+      console.error("campaign_dispatch:destination_not_allowlisted", campaign.id, cc.id);
+      skipped++;
+      continue;
+    }
+
     // Re-check affordability per contact, not once per campaign — a
     // campaign can run out of wallet balance mid-run, and every remaining
     // contact must simply stay "pending" (never marked failed) until
@@ -208,12 +218,20 @@ async function dispatchOneCampaign(
     // idx_call_logs_campaign_contact_inflight (a partial unique index) —
     // even a bug here could not produce two live call_logs rows for the
     // same campaign_contact.
+    //
+    // The claim also requires the attempt count this run read, so a run working
+    // from a stale read can't claim (and under-count) a contact another run
+    // has already dialled. It records the call id up front (current_call_id):
+    // finalization applies a call's outcome only while the contact still points
+    // at that exact call.
     const attempts = cc.attempts + 1;
+    const callId = crypto.randomUUID();
     const { data: claimed } = await supabaseAdmin
       .from("campaign_contacts")
-      .update({ status: "calling", attempts })
+      .update({ status: "calling", attempts, current_call_id: callId })
       .eq("id", cc.id)
       .in("status", ["pending", "retry_scheduled"])
+      .eq("attempts", cc.attempts)
       .select("id");
     if (!claimed || claimed.length === 0) {
       skipped++;
@@ -223,6 +241,7 @@ async function dispatchOneCampaign(
     const { data: call, error: insertError } = await supabaseAdmin
       .from("call_logs")
       .insert({
+        id: callId,
         organization_id: campaign.organization_id,
         campaign_id: campaign.id,
         campaign_contact_id: cc.id,
@@ -303,7 +322,11 @@ async function dispatchOneCampaign(
         supabaseAdmin,
         { callId: call.id, campaignContactId: cc.id },
         err,
-        () => applyOutcomeToCampaignContact(cc.id, "failed", attempts, campaign, null),
+        // The campaign's "failed" outcome (which may schedule a retry) is applied
+        // by finalization, exactly once, guarded by current_call_id.
+        async () => {
+          await finalizeTerminalCallSafely(supabaseAdmin, call.id);
+        },
       );
       if (recorded === "outcome_unknown") {
         console.error("campaign_dispatch:outcome_unknown", call.id, (err as Error).message);

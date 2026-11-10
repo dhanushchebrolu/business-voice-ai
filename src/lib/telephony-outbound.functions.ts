@@ -5,6 +5,7 @@ import { getTelephonyAdapter } from "@/lib/telephony.server";
 import { checkTelephonyAccess, walletCanAffordOutbound } from "@/lib/telephony-guard.server";
 import {
   INVALID_DESTINATION_MESSAGE,
+  SARVAM_USE_INSTANT_OUTBOUND_MESSAGE,
   UNRESOLVED_CALL_MESSAGE,
 } from "@/lib/sarvam-outbound-call.server";
 
@@ -59,6 +60,11 @@ export const initiateOutboundCall = createServerFn({ method: "POST" })
     const gate = await checkTelephonyAccess(orgId, data.phoneNumberId, "outbound");
     if (!gate.allowed || !gate.phoneNumber)
       throw new Error(gate.reason ?? "Outbound calling is not available.");
+    // Sarvam numbers have their own outbound path (allowlist, number
+    // reservation, finalization); this generic one can't dial them. Refused
+    // before anything is written or sent to a provider.
+    if (gate.phoneNumber.provider === "sarvam")
+      throw new Error(SARVAM_USE_INSTANT_OUTBOUND_MESSAGE);
 
     const affordable = await walletCanAffordOutbound(orgId);
     if (!affordable) throw new Error("Insufficient wallet balance to place this call.");

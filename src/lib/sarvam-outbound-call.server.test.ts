@@ -1,6 +1,9 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { sendSarvamInstantOutboundCall } from "./sarvam-outbound-call.server.ts";
+import {
+  isSarvamOutboundDestinationAllowed,
+  sendSarvamInstantOutboundCall,
+} from "./sarvam-outbound-call.server.ts";
 
 /**
  * Behavioral coverage for sendSarvamInstantOutboundCall — the logic
@@ -66,7 +69,14 @@ function makeFakeSupabase(script: Record<string, Partial<Record<OpType, QueryRes
     return builder;
   }
 
+  // Database functions (finalization): recorded; claim returns no lease, so
+  // finalization is a no-op here (its own tests cover what runs next).
+  const rpcs: { fn: string; args: Record<string, unknown> }[] = [];
   const client = {
+    async rpc(fn: string, args: Record<string, unknown>) {
+      rpcs.push({ fn, args });
+      return { data: null, error: null };
+    },
     from(table: string) {
       return {
         select() {
@@ -82,7 +92,7 @@ function makeFakeSupabase(script: Record<string, Partial<Record<OpType, QueryRes
     },
   };
 
-  return { client: client as never, calls };
+  return { client: client as never, calls, rpcs };
 }
 
 async function withSarvamEnvAndFetch<T>(
@@ -306,8 +316,13 @@ const dial = (client: never, status: number) =>
 
 describe("sendSarvamInstantOutboundCall — does not fake success", () => {
   test("a definite rejection (400) marks the row failed, only while still initiated, and rethrows", async () => {
-    const { client, calls } = scriptForStartFailure([{ id: "call_1" }]);
+    const { client, calls, rpcs } = scriptForStartFailure([{ id: "call_1" }]);
     await assert.rejects(dial(client, 400));
+    // Not placed: finalization runs for the call (zero charge, marked done).
+    assert.deepEqual(
+      rpcs.map((r) => [r.fn, r.args["_call"]]),
+      [["claim_call_finalization", "call_1"]],
+    );
 
     const updateCall = calls.find((c) => c.table === "call_logs" && c.type === "update")!;
     assert.equal((updateCall.payload as { status: string }).status, "failed");
@@ -454,5 +469,57 @@ describe("sendSarvamInstantOutboundCall — canonical destination numbers", () =
       (requestBody as { user_config: { user_phone_number: string } }).user_config.user_phone_number,
       "+919876543210",
     );
+  });
+});
+
+describe("supervised-test allowlist (SARVAM_OUTBOUND_TEST_ALLOWLIST)", () => {
+  async function withAllowlist<T>(value: string | undefined, fn: () => Promise<T> | T): Promise<T> {
+    const prior = process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"];
+    if (value === undefined) delete process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"];
+    else process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"] = value;
+    try {
+      return await fn();
+    } finally {
+      if (prior === undefined) delete process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"];
+      else process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"] = prior;
+    }
+  }
+
+  test("unset: no restriction", async () => {
+    await withAllowlist(undefined, () =>
+      assert.equal(isSarvamOutboundDestinationAllowed("+912222222222"), true),
+    );
+  });
+
+  test("set: only the listed numbers, compared in canonical form", async () => {
+    await withAllowlist("0091 99999 99999, +91-88888-88888", () => {
+      assert.equal(isSarvamOutboundDestinationAllowed("+919999999999"), true);
+      assert.equal(isSarvamOutboundDestinationAllowed("+918888888888"), true);
+      assert.equal(isSarvamOutboundDestinationAllowed("+912222222222"), false);
+    });
+  });
+
+  test("set but with no valid number: nothing is allowed (fails closed)", async () => {
+    await withAllowlist("not-a-number", () =>
+      assert.equal(isSarvamOutboundDestinationAllowed("+912222222222"), false),
+    );
+  });
+
+  test("a number outside the list is refused before any database access or Sarvam request", async () => {
+    const { client, calls, rpcs } = makeFakeSupabase({});
+    await withAllowlist("+919999999999", async () => {
+      const { requestBody } = await withSarvamEnvAndFetch({ status: 200, body: {} }, async () => {
+        await assert.rejects(
+          sendSarvamInstantOutboundCall(client, {
+            phoneNumberId: "num_1",
+            toE164: "+912222222222",
+          }),
+          /limited to approved test numbers/,
+        );
+      });
+      assert.equal(requestBody, undefined);
+    });
+    assert.deepEqual(calls, []);
+    assert.deepEqual(rpcs, []);
   });
 });

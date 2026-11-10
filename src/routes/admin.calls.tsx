@@ -5,8 +5,15 @@ import { useState } from "react";
 import { PhoneCall } from "lucide-react";
 import { toast } from "sonner";
 import { listAllCalls, type AdminCallRow } from "@/lib/telephony-admin.functions";
-import { isResolvableSarvamCall } from "@/lib/sarvam-call-review";
-import { resolveUnknownSarvamCall } from "@/lib/sarvam-admin.functions";
+import {
+  describeResolutionResult,
+  isResolvableSarvamCall,
+  needsFinalizationRetry,
+} from "@/lib/sarvam-call-review";
+import {
+  resolveUnknownSarvamCall,
+  retrySarvamCallFinalization,
+} from "@/lib/sarvam-admin.functions";
 import { ReasonDialog } from "@/components/admin/ReasonDialog";
 import { Button } from "@/components/ui/button";
 import {
@@ -54,6 +61,8 @@ type Resolution = "not_placed" | "completed" | "no_answer" | "busy" | "failed";
 function AdminCalls() {
   const fetchCalls = useServerFn(listAllCalls);
   const resolveCall = useServerFn(resolveUnknownSarvamCall);
+  const retryFinalization = useServerFn(retrySarvamCallFinalization);
+  const [finalizing, setFinalizing] = useState<AdminCallRow | null>(null);
   const [orgId, setOrgId] = useState("");
   const [needsReview, setNeedsReview] = useState(false);
   const [resolving, setResolving] = useState<AdminCallRow | null>(null);
@@ -175,6 +184,33 @@ function AdminCalls() {
                           Resolve
                         </Button>
                       )}
+                      {needsFinalizationRetry(c) && (
+                        <>
+                          <span className="ml-2 text-xs text-destructive">
+                            {c.finalizationState === "failed"
+                              ? "Billing/campaign update failed"
+                              : "Billing/campaign update pending"}
+                          </span>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="ml-2 h-7 text-xs"
+                            onClick={() => setFinalizing(c)}
+                          >
+                            Retry
+                          </Button>
+                          {c.finalizationError && (
+                            <p className="mt-1 max-w-xs text-xs text-muted-foreground">
+                              Error: {c.finalizationError}
+                            </p>
+                          )}
+                        </>
+                      )}
+                      {c.resolutionConflict && (
+                        <span className="ml-2 text-xs text-destructive">
+                          Sarvam reported a different outcome
+                        </span>
+                      )}
                     </td>
                     <td className="py-2.5 pr-4 tabular text-xs">
                       {Math.floor(c.durationSeconds / 60)}m{" "}
@@ -279,7 +315,7 @@ function AdminCalls() {
           if (!resolving) return;
           if (mayBeActive && !checkedInSarvam)
             throw new Error("Confirm you checked this call in Sarvam before resolving it.");
-          await resolveCall({
+          const result = await resolveCall({
             data: {
               callId: resolving.id,
               ...(mayBeActive ? { confirmedCheckedInSarvam: true } : {}),
@@ -294,11 +330,39 @@ function AdminCalls() {
               reason,
             },
           });
-          toast.success("Call resolved");
+          // A plain success only when billing and the campaign update finished too.
+          const message = describeResolutionResult(result);
+          if (message.tone === "success")
+            toast.success(message.title, { description: message.description });
+          else toast.warning(message.title, { description: message.description });
           setResolution("not_placed");
           setDuration("");
           setAttemptId("");
           setCheckedInSarvam(false);
+          await refetch();
+        }}
+      />
+
+      <ReasonDialog
+        open={finalizing !== null}
+        onOpenChange={(open) => {
+          if (!open) setFinalizing(null);
+        }}
+        title="Retry billing and campaign update"
+        description="This call's outcome is recorded, but its charge and/or campaign update didn't finish. Retrying is safe: each step runs at most once, so nothing is charged or applied twice."
+        confirmLabel="Retry"
+        extra={
+          finalizing?.finalizationError ? (
+            <p className="text-xs text-muted-foreground">
+              Last error: {finalizing.finalizationError}
+            </p>
+          ) : null
+        }
+        onConfirm={async (reason) => {
+          if (!finalizing) return;
+          const result = await retryFinalization({ data: { callId: finalizing.id, reason } });
+          if (result.state === "done") toast.success("Billing and campaign update finished");
+          else toast.error("It failed again — see the error on the call");
           await refetch();
         }}
       />

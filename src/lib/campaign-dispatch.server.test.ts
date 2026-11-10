@@ -68,10 +68,13 @@ describe("campaign dispatcher — architecture invariants", () => {
   });
 
   test("claims a contact atomically — the UPDATE re-checks status in its own WHERE clause, not just at SELECT time", () => {
-    assert.match(dispatch, /\.update\(\{ status: "calling", attempts \}\)/);
     assert.match(
       dispatch,
-      /\.in\("status", \["pending", "retry_scheduled"\]\)\s*\n\s*\.select\("id"\)/,
+      /\.update\(\{ status: "calling", attempts, current_call_id: callId \}\)/,
+    );
+    assert.match(
+      dispatch,
+      /\.in\("status", \["pending", "retry_scheduled"\]\)\s*\n\s*\.eq\("attempts", cc\.attempts\)\s*\n\s*\.select\("id"\)/,
     );
     assert.match(dispatch, /if \(!claimed \|\| claimed\.length === 0\)/);
   });

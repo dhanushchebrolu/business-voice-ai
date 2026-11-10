@@ -358,9 +358,13 @@ describe("operator resolution", () => {
   const deps = (env: ReturnType<typeof setup>, campaignFailures: string[] = []) => ({
     processEvent: (event: NormalizedCallEvent, options: { onlyCallId: string }) =>
       applyEvent(env, event, options),
-    applyCampaignFailure: async (call: { id: string }) => {
-      campaignFailures.push(call.id);
-      env.db.contact("cc_1")["status"] = "retry_scheduled";
+    // Stands in for finalizeTerminalCall (exercised in call-finalization tests
+    // and against PostgreSQL): records that finalization ran for the call.
+    finalize: async (callId: string) => {
+      campaignFailures.push(callId);
+      if (env.db.call(callId)["status"] === "failed")
+        env.db.contact("cc_1")["status"] = "retry_scheduled";
+      return { state: "done" as const };
     },
   });
 
@@ -484,8 +488,12 @@ describe("source checks", () => {
     const dispatch = read("campaign-dispatch.server.ts");
     assert.match(dispatch, /recordCampaignStartFailure\(/);
     assert.doesNotMatch(dispatch, /update\(\{ status: "failed"/);
-    // The claim query is unchanged: only pending/retry_scheduled can be claimed.
-    assert.match(dispatch, /\.update\(\{ status: "calling", attempts \}\)/);
+    // Only pending/retry_scheduled can be claimed, only at the attempt count this
+    // run read, and the claim records the call it is for.
+    assert.match(
+      dispatch,
+      /\.update\(\{ status: "calling", attempts, current_call_id: callId \}\)\s*\.eq\("id", cc\.id\)\s*\.in\("status", \["pending", "retry_scheduled"\]\)\s*\.eq\("attempts", cc\.attempts\)/,
+    );
   });
 
   test("a campaign with outcome_unknown contacts does not complete", () => {
@@ -518,8 +526,9 @@ describe("resolving an initiated call with a known attempt id (accepted, webhook
   const deps = (env: ReturnType<typeof setup>, failures: string[] = []) => ({
     processEvent: (event: NormalizedCallEvent, options: { onlyCallId: string }) =>
       applyEvent(env, event, options),
-    applyCampaignFailure: async (call: { id: string }) => {
-      failures.push(call.id);
+    finalize: async (callId: string) => {
+      if (env.db.call(callId)["status"] === "failed") failures.push(callId);
+      return { state: "done" as const };
     },
   });
 
@@ -639,7 +648,7 @@ describe("tenant safety of operator resolution", () => {
         { callId: CALL_ID, resolution: "placed", outcome: "completed", attemptId: "att_other" },
         {
           processEvent: (e, o) => applyEvent(env, e, o),
-          applyCampaignFailure: async () => {},
+          finalize: async () => ({ state: "done" as const }),
         },
       ),
       /belongs to a different call/,
@@ -662,7 +671,7 @@ describe("tenant safety of operator resolution", () => {
           seen.push(o);
           await applyEvent(env, e, o);
         },
-        applyCampaignFailure: async () => {},
+        finalize: async () => ({ state: "done" as const }),
       },
     );
     assert.deepEqual(seen, [{ onlyCallId: CALL_ID }]);
@@ -796,7 +805,7 @@ describe("operator dedupe row, webhook duplicate, then operator failure", () => 
             webhookResult = await deliverWebhook(env, connected("att_1"));
             throw new Error("processing failed");
           },
-          applyCampaignFailure: async () => {},
+          finalize: async () => ({ state: "done" as const }),
         }),
         /processing failed/,
       );
@@ -810,7 +819,7 @@ describe("operator dedupe row, webhook duplicate, then operator failure", () => 
       // A second resolution succeeds and bills once.
       await resolveUnknownSarvamCall(env.db as never, input, {
         processEvent: (e, o) => applyEvent(env, e, o),
-        applyCampaignFailure: async () => {},
+        finalize: async () => ({ state: "done" as const }),
       });
       assert.equal(env.db.call(CALL_ID)["status"], "completed");
       assert.deepEqual(env.charges, [{ callId: CALL_ID, seconds: 61 }]);
@@ -828,7 +837,7 @@ describe("resolving a call that may still be active", () => {
     env.db.call(CALL_ID)["provider_call_id"] = "att_1";
     return env;
   };
-  const noop = { applyCampaignFailure: async () => {} };
+  const noop = { finalize: async () => ({ state: "done" as const }) };
 
   test("an initiated call can't be resolved without confirming it was checked in Sarvam — nothing is written", async () => {
     const env = initiatedWithAttempt();
@@ -903,7 +912,11 @@ describe("one definition of 'needs resolving'", () => {
     assert.deepEqual([...UNRESOLVED_SARVAM_STATUSES], ["initiated", "outcome_unknown"]);
     const filter = '.in("status", [...UNRESOLVED_SARVAM_STATUSES])';
     assert.ok(read("sarvam-outbound-call.server.ts").includes(filter));
-    assert.ok(read("telephony-admin.functions.ts").includes(filter));
+    assert.ok(
+      read("telephony-admin.functions.ts").includes(
+        'status.in.(${UNRESOLVED_SARVAM_STATUSES.join(",")})',
+      ),
+    );
     assert.match(
       read("../../supabase/migrations/20261109090000_outbound_call_outcome_unknown.sql"),
       /idx_call_logs_sarvam_outbound_number_reservation[\s\S]*status IN \('initiated', 'outcome_unknown'\)/,
@@ -915,7 +928,7 @@ describe("one definition of 'needs resolving'", () => {
     const fn = admin.slice(admin.indexOf("export const resolveUnknownSarvamCall"));
     assert.match(
       fn,
-      /confirmedCheckedInSarvam: data\.confirmedCheckedInSarvam === true,\s*\},\s*\{/,
+      /confirmedCheckedInSarvam: data\.confirmedCheckedInSarvam === true,\s*resolvedBy: admin\.userId,\s*\},?\s*\);/,
     );
     assert.match(
       fn,
@@ -928,6 +941,42 @@ describe("one definition of 'needs resolving'", () => {
     assert.match(page, /This call may still be in progress/);
     assert.match(page, /if \(mayBeActive && !checkedInSarvam\)\s*throw new Error/);
     assert.match(page, /a campaign may call this contact again/);
+  });
+
+  test("after resolving, success is only shown when billing and the campaign update finished", async () => {
+    const { describeResolutionResult } = await import("./sarvam-call-review.ts");
+    assert.deepEqual(describeResolutionResult({ status: "failed", finalization: "done" }), {
+      tone: "success",
+      title: "Call resolved",
+      description: "Recorded as failed. Billing and campaign update finished.",
+    });
+    const failed = describeResolutionResult({ status: "no_answer", finalization: "failed" });
+    assert.equal(failed.tone, "warning");
+    assert.match(failed.title, /billing\/campaign update failed/);
+    assert.match(failed.description, /^Recorded as no answer\./);
+    assert.match(failed.description, /use Retry/);
+    const pending = describeResolutionResult({ status: "completed", finalization: "skipped" });
+    assert.equal(pending.tone, "warning");
+    assert.match(pending.title, /still pending/);
+
+    const page = read("../routes/admin.calls.tsx");
+    assert.doesNotMatch(page, /toast\.success\("Call resolved"\)/);
+    assert.match(page, /const result = await resolveCall\(/);
+    assert.match(
+      page,
+      /const message = describeResolutionResult\(result\);\s*if \(message\.tone === "success"\)\s*toast\.success\(message\.title, \{ description: message\.description \}\);\s*else toast\.warning\(message\.title, \{ description: message\.description \}\);/,
+    );
+  });
+
+  test("a call whose finalization is pending or failed shows its state, its error and Retry", () => {
+    const page = read("../routes/admin.calls.tsx");
+    const row = page.slice(page.indexOf("{needsFinalizationRetry(c) && ("));
+    const end = row.indexOf("{c.resolutionConflict && (");
+    const block = row.slice(0, end);
+    assert.match(block, /"Billing\/campaign update failed"/);
+    assert.match(block, /"Billing\/campaign update pending"/);
+    assert.match(block, /onClick=\{\(\) => setFinalizing\(c\)\}/);
+    assert.match(block, /Error: \{c\.finalizationError\}/);
   });
 });
 
@@ -1067,7 +1116,7 @@ describe("single-call number reservation (concurrent requests and crash recovery
       assert.equal(dials.count, 0);
 
       // Nothing resolves it automatically; the operator must confirm they checked Sarvam.
-      const noop = { applyCampaignFailure: async () => {} };
+      const noop = { finalize: async () => ({ state: "done" as const }) };
       await assert.rejects(
         resolveUnknownSarvamCall(
           env.db as never,
@@ -1114,7 +1163,10 @@ describe("single-call number reservation (concurrent requests and crash recovery
         attemptId: "att_seen_in_sarvam",
         confirmedCheckedInSarvam: true,
       },
-      { processEvent: (e, o) => applyEvent(env, e, o), applyCampaignFailure: async () => {} },
+      {
+        processEvent: (e, o) => applyEvent(env, e, o),
+        finalize: async () => ({ state: "done" as const }),
+      },
     );
     assert.equal(env.db.call(CALL_ID)["status"], "completed");
     assert.equal(env.db.call(CALL_ID)["provider_call_id"], "att_seen_in_sarvam");
@@ -1292,6 +1344,29 @@ describe("generic outbound path (telephony-outbound.functions.ts)", () => {
     assert.match(UNRESOLVED_CALL_MESSAGE, /earlier call to this number/);
     assert.doesNotMatch(UNRESOLVED_CALL_MESSAGE, /23505|duplicate key|idx_|constraint/i);
   });
+
+  test("a Sarvam number is refused before the wallet check, any call row or any provider request", async () => {
+    const gate = src.indexOf("if (!gate.allowed || !gate.phoneNumber)");
+    const refusal = src.indexOf(
+      'if (gate.phoneNumber.provider === "sarvam")\n      throw new Error(SARVAM_USE_INSTANT_OUTBOUND_MESSAGE);',
+    );
+    const wallet = src.indexOf("await walletCanAffordOutbound(");
+    const insert = src.indexOf('.from("call_logs")\n      .insert(');
+    const dial = src.indexOf("adapter.initiateOutboundCall(");
+    assert.ok(gate > -1 && refusal > gate, "right after the number is known");
+    assert.ok(refusal < wallet && wallet < insert && insert < dial);
+    assert.equal(src.split("SARVAM_USE_INSTANT_OUTBOUND_MESSAGE").length - 1, 2); // import + use
+
+    const { SARVAM_USE_INSTANT_OUTBOUND_MESSAGE } =
+      await import("./sarvam-outbound-call.server.ts");
+    assert.match(SARVAM_USE_INSTANT_OUTBOUND_MESSAGE, /createSarvamInstantOutboundCall/);
+  });
+
+  test("other providers keep the generic path unchanged", () => {
+    // Only Sarvam is refused; Exotel/Vobiz still insert and dial here.
+    assert.equal(src.split('provider === "sarvam"').length - 1, 1);
+    assert.match(src, /provider: gate\.phoneNumber\.provider,/);
+  });
 });
 
 describe("every outbound entry point canonicalizes the destination", () => {
@@ -1331,10 +1406,15 @@ describe("campaign dispatch vs the number reservation", () => {
    * error undo the claim with the real releaseCampaignClaim — deferring on
    * 23505, rethrowing otherwise.
    */
-  async function dispatchContact(env: ReturnType<typeof setup>, ccId: string) {
+  async function dispatchContact(
+    env: ReturnType<typeof setup>,
+    ccId: string,
+    /** The contact as this run read it (defaults to its current state). */
+    staleRead?: Record<string, unknown>,
+  ) {
     const { releaseCampaignClaim } = await import("./sarvam-outbound-call.server.ts");
     const { normalizeCustomerPhone } = await import("./phone-number.ts");
-    const cc = { ...env.db.contact(ccId) } as {
+    const cc = { ...(staleRead ?? env.db.contact(ccId)) } as {
       id: string;
       status: string;
       attempts: number;
@@ -1350,16 +1430,19 @@ describe("campaign dispatch vs the number reservation", () => {
       return "invalid_number";
     }
     const attempts = cc.attempts + 1;
+    const callId = randomUUID();
     const { data: claimed } = await env.db
       .from("campaign_contacts")
-      .update({ status: "calling", attempts })
+      .update({ status: "calling", attempts, current_call_id: callId })
       .eq("id", cc.id)
       .in("status", ["pending", "retry_scheduled"])
+      .eq("attempts", cc.attempts)
       .select("id");
     if (!claimed || (claimed as unknown[]).length === 0) return "skipped";
     const { error } = await env.db
       .from("call_logs")
       .insert({
+        id: callId,
         organization_id: ORG_ID,
         provider: "sarvam",
         direction: "outbound",
@@ -1555,6 +1638,40 @@ describe("campaign dispatch vs the number reservation", () => {
       { status: "wrong_number", attempts: 0, outcome: "invalid_number" },
     );
     assert.equal(env.db.tables["call_logs"]!.length, 0);
+  });
+
+  test("the claim records its call (current_call_id); a deferral clears it", async () => {
+    const env = contactsSetup();
+    assert.equal(await dispatchContact(env, "cc_b"), "dialled");
+    const call = env.db.tables["call_logs"]!.find((r) => r["campaign_contact_id"] === "cc_b")!;
+    assert.equal(env.db.contact("cc_b")["current_call_id"], call["id"]);
+
+    env.db.tables["call_logs"]!.push({
+      organization_id: ORG_ID,
+      provider: "sarvam",
+      direction: "outbound",
+      destination_number: TO,
+      status: "initiated",
+      campaign_contact_id: null,
+    });
+    assert.equal(await dispatchContact(env, "cc_a"), "deferred");
+    assert.equal(env.db.contact("cc_a")["current_call_id"], null);
+  });
+
+  test("a run working from a stale read can't claim a contact another run already dialled", async () => {
+    const env = contactsSetup();
+    const staleRead = { ...env.db.contact("cc_b") }; // retry_scheduled, attempts 1
+    assert.equal(await dispatchContact(env, "cc_b"), "dialled"); // attempts 2
+    // That call finished and the contact is due again (finalization's retry decision).
+    env.db.contact("cc_b")["status"] = "retry_scheduled";
+    // Without the attempts condition this claim would succeed and record a third
+    // dial as attempt 2 (an under-count): it must be refused instead.
+    assert.equal(await dispatchContact(env, "cc_b", staleRead), "skipped");
+    assert.equal(env.db.contact("cc_b")["attempts"], 2);
+    assert.equal(
+      env.db.tables["call_logs"]!.filter((r) => r["campaign_contact_id"] === "cc_b").length,
+      1,
+    );
   });
 
   test("a non-conflict insert error still undoes the claim, then propagates", async () => {

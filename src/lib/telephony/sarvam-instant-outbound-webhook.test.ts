@@ -257,7 +257,7 @@ describe("duplicate deliveries and mismatched organizations", () => {
     const process = route.indexOf("await processTelephonyEvent(");
     assert.ok(dedupe > -1 && dedupe < process);
     assert.match(route, /code === "23505"\) return new Response\("ok \(duplicate\)"\)/);
-    assert.match(route, /if \(!transition\.changed\) return; \/\/ idempotent replay/);
+    assert.match(route, /if \(!transition\.changed\) \{\s*\/\/ idempotent replay/);
   });
 });
 

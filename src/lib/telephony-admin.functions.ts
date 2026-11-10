@@ -517,6 +517,13 @@ export interface AdminCallRow {
   provider: string;
   /** Whether the provider's call/attempt id is known (the value itself isn't sent to the browser). */
   hasProviderCallId: boolean;
+  /** Sarvam outbound only: pending | done | failed (billing + campaign outcome). */
+  finalizationState: string | null;
+  finalizationError: string | null;
+  /** provider | operator | start_failure | legacy */
+  resolutionSource: string | null;
+  /** The provider reported a different outcome after an operator resolved the call. */
+  resolutionConflict: boolean;
 }
 
 export const listAllCalls = createServerFn({ method: "GET" })
@@ -542,12 +549,15 @@ export const listAllCalls = createServerFn({ method: "GET" })
     if (data.orgId) query = query.eq("organization_id", data.orgId);
     if (data.status) query = query.eq("status", data.status);
     if (data.direction) query = query.eq("direction", data.direction);
-    // Same rule as isResolvableSarvamCall (sarvam-call-review.ts), as a query.
+    // Same rules as needsSarvamReview (sarvam-call-review.ts), as a query:
+    // unresolved calls, unfinished finalization, or a provider/operator conflict.
     if (data.needsReview)
       query = query
         .eq("provider", "sarvam")
         .eq("direction", "outbound")
-        .in("status", [...UNRESOLVED_SARVAM_STATUSES]);
+        .or(
+          `status.in.(${UNRESOLVED_SARVAM_STATUSES.join(",")}),finalization_state.in.(pending,failed),resolution_conflict.eq.true`,
+        );
     const { data: calls, error } = await query;
     if (error) throw error;
 
@@ -576,6 +586,10 @@ export const listAllCalls = createServerFn({ method: "GET" })
       endedAt: c.ended_at,
       provider: c.provider,
       hasProviderCallId: Boolean(c.provider_call_id),
+      finalizationState: c.finalization_state,
+      finalizationError: c.finalization_error,
+      resolutionSource: c.resolution_source,
+      resolutionConflict: c.resolution_conflict,
     }));
   });
 

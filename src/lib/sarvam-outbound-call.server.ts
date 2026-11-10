@@ -5,6 +5,7 @@ import { SarvamTelephonyAdapter } from "./telephony/sarvam-provider.server.ts";
 import { TelephonyAdapterError } from "./telephony/adapter.ts";
 import { UNRESOLVED_SARVAM_STATUSES } from "./sarvam-call-review.ts";
 import { normalizeCustomerPhone } from "./phone-number.ts";
+import { finalizeTerminalCallSafely } from "./telephony/call-finalization.server.ts";
 
 export interface SendInstantOutboundCallResult {
   callId: string;
@@ -20,6 +21,31 @@ export const INVALID_DESTINATION_MESSAGE =
 
 export const UNRESOLVED_CALL_MESSAGE =
   "An earlier call to this number hasn't finished or has an unconfirmed outcome. Wait for it, or resolve it in call history, before calling again.";
+
+/** Returned by the generic initiateOutboundCall for a Sarvam number. */
+export const SARVAM_USE_INSTANT_OUTBOUND_MESSAGE =
+  "Sarvam numbers place outbound calls through createSarvamInstantOutboundCall, not initiateOutboundCall.";
+
+export const OUTBOUND_TEST_ALLOWLIST_MESSAGE =
+  "Sarvam outbound calling is limited to approved test numbers right now.";
+
+/**
+ * Supervised-test guard. When SARVAM_OUTBOUND_TEST_ALLOWLIST is set (comma-
+ * separated numbers, canonicalized like every outbound number), every Sarvam
+ * outbound path — single calls, the admin test call and the campaign
+ * dispatcher — refuses any other destination before anything is written or
+ * dialled. Unset means no restriction. Set but with no valid number means
+ * nothing is allowed (fails closed). Remove it at production rollout.
+ */
+export function isSarvamOutboundDestinationAllowed(toE164: string): boolean {
+  const raw = process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"];
+  if (!raw || !raw.trim()) return true;
+  const allowed = raw
+    .split(",")
+    .map((n) => normalizeCustomerPhone(n.trim(), null))
+    .filter((n): n is string => n !== null);
+  return allowed.includes(toE164);
+}
 
 /**
  * Records a failed Sarvam start-call request on its call_logs row, only while
@@ -43,7 +69,12 @@ export async function recordSarvamStartFailure(
   const message = err instanceof Error ? err.message : String(err);
   const patch = unknown
     ? { status: "outcome_unknown", failure_reason: message }
-    : { status: "failed", failure_reason: message, ended_at: new Date().toISOString() };
+    : {
+        status: "failed",
+        failure_reason: message,
+        ended_at: new Date().toISOString(),
+        resolution_source: "start_failure",
+      };
   const { data, error } = await supabaseAdmin
     .from("call_logs")
     .update(patch)
@@ -92,9 +123,15 @@ export async function releaseCampaignClaim(
   const { data, error } = await supabaseAdmin
     .from("campaign_contacts")
     .update(
+      // current_call_id: the claim's call was never inserted, so nothing points here.
       cancelled
-        ? { status: "cancelled", attempts: claim.previousAttempts, next_attempt_at: null }
-        : { status: claim.previousStatus, attempts: claim.previousAttempts },
+        ? {
+            status: "cancelled",
+            attempts: claim.previousAttempts,
+            next_attempt_at: null,
+            current_call_id: null,
+          }
+        : { status: claim.previousStatus, attempts: claim.previousAttempts, current_call_id: null },
     )
     .eq("id", claim.campaignContactId)
     .eq("status", "calling")
@@ -178,6 +215,7 @@ export async function sendSarvamInstantOutboundCall(
   // reserved destination_number is the same string a campaign would use.
   const toE164 = normalizeCustomerPhone(params.toE164, null);
   if (!toE164) throw new Error(INVALID_DESTINATION_MESSAGE);
+  if (!isSarvamOutboundDestinationAllowed(toE164)) throw new Error(OUTBOUND_TEST_ALLOWLIST_MESSAGE);
 
   const { data: phoneNumber } = await supabaseAdmin
     .from("phone_numbers")
@@ -286,7 +324,11 @@ export async function sendSarvamInstantOutboundCall(
     return { callId: call.id, interactionId: dialed.interactionId ?? null, outcome: "started" };
   } catch (err) {
     const recorded = await recordSarvamStartFailure(supabaseAdmin, call.id, err);
-    if (recorded === "failed") throw err;
+    if (recorded === "failed") {
+      // Not placed: finalization records a zero charge and marks it done.
+      await finalizeTerminalCallSafely(supabaseAdmin, call.id);
+      throw err;
+    }
     // outcome_unknown: held for a webhook or operator. superseded: a webhook
     // already recorded the real outcome, so Sarvam did place the call.
     return {

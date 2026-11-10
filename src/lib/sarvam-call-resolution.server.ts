@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import type { NormalizedCallEvent } from "./telephony/adapter.ts";
 import { isResolvableSarvamCall } from "./sarvam-call-review.ts";
+import type { FinalizationResult } from "./telephony/call-finalization.server.ts";
 
 /**
  * Operator resolution for a Sarvam outbound call whose outcome Klyro could
@@ -11,7 +12,8 @@ import { isResolvableSarvamCall } from "./sarvam-call-review.ts";
  * in Sarvam's dashboard.
  *
  * - "not_placed": the call is marked failed (only if it is still in the state
- *   the operator saw), then the normal campaign outcome runs, which may retry.
+ *   the operator saw), then finalization runs (call-finalization.server.ts):
+ *   no charge, and the campaign's normal "failed" outcome, which may retry.
  * - "placed": a synthetic event goes through the same webhook pipeline as a
  *   real Sarvam webhook (the shared processTelephonyEvent, pinned to this one
  *   call), so the transition rules, billing
@@ -34,6 +36,8 @@ export interface ResolveUnknownCallInput {
    * in progress, and recording an outcome can let the campaign dial again.
    */
   confirmedCheckedInSarvam?: boolean | undefined;
+  /** The admin who decided (call_logs.resolved_by). */
+  resolvedBy?: string | undefined;
 }
 
 export interface ResolvableCall {
@@ -52,8 +56,11 @@ export interface ResolutionDeps {
    * — the same service the public webhook route uses. Injectable for tests.
    */
   processEvent?: (event: NormalizedCallEvent, options: { onlyCallId: string }) => Promise<void>;
-  /** Runs the campaign's normal "failed" outcome for this call's contact. */
-  applyCampaignFailure: (call: ResolvableCall) => Promise<void>;
+  /**
+   * Finalizes a call once it is final (billing + campaign outcome, exactly
+   * once). Defaults to call-finalization.server.ts's finalizeTerminalCallSafely.
+   */
+  finalize?: (callId: string) => Promise<FinalizationResult>;
 }
 
 const sharedProcessEvent: NonNullable<ResolutionDeps["processEvent"]> = async (event, options) => {
@@ -65,9 +72,16 @@ const sharedProcessEvent: NonNullable<ResolutionDeps["processEvent"]> = async (e
 export async function resolveUnknownSarvamCall(
   supabaseAdmin: SupabaseClient<Database>,
   input: ResolveUnknownCallInput,
-  deps: ResolutionDeps,
-): Promise<{ status: string; organizationId: string }> {
+  deps: ResolutionDeps = {},
+): Promise<{ status: string; organizationId: string; finalization: FinalizationResult["state"] }> {
   const processEvent = deps.processEvent ?? sharedProcessEvent;
+  const finalize =
+    deps.finalize ??
+    (async (callId: string) => {
+      const { finalizeTerminalCallSafely } =
+        await import("./telephony/call-finalization.server.ts");
+      return finalizeTerminalCallSafely(supabaseAdmin, callId);
+    });
   const { data: call } = await supabaseAdmin
     .from("call_logs")
     .select(
@@ -93,6 +107,8 @@ export async function resolveUnknownSarvamCall(
         status: "failed",
         failure_reason: "Resolved by an operator: the call was not placed.",
         ended_at: new Date().toISOString(),
+        resolution_source: "operator",
+        resolved_by: input.resolvedBy ?? null,
       })
       .eq("id", call.id)
       .eq("status", call.status)
@@ -100,8 +116,12 @@ export async function resolveUnknownSarvamCall(
     if (error) throw error;
     if (!changed || changed.length === 0)
       throw new Error("This call changed while you were resolving it. Reload and check again.");
-    if (call.campaign_id && call.campaign_contact_id) await deps.applyCampaignFailure(call);
-    return { status: "failed", organizationId: call.organization_id };
+    const finalized = await finalize(call.id);
+    return {
+      status: "failed",
+      organizationId: call.organization_id,
+      finalization: finalized.state,
+    };
   }
 
   const outcome = input.outcome;
@@ -136,10 +156,23 @@ export async function resolveUnknownSarvamCall(
     throw dedupeError;
   }
 
-  // If nothing gets applied, drop our dedupe row so neither a retry nor the
-  // real webhook for this attempt is blocked by it.
-  const releaseDedupe = () =>
-    supabaseAdmin.from("webhook_events").delete().eq("provider", "sarvam").eq("event_id", eventKey);
+  // If the call's status was never written, drop our dedupe row so neither a
+  // retry nor the real webhook for this attempt is blocked by it. Once the
+  // status is written the decision stands and the row is kept: billing and
+  // the campaign outcome are finalization's job (retried from Needs review).
+  const releaseDedupeIfUnapplied = async () => {
+    const { data: now } = await supabaseAdmin
+      .from("call_logs")
+      .select("status")
+      .eq("id", call.id)
+      .maybeSingle();
+    if (now && isResolvableSarvamCall({ ...call, status: now.status }))
+      await supabaseAdmin
+        .from("webhook_events")
+        .delete()
+        .eq("provider", "sarvam")
+        .eq("event_id", eventKey);
+  };
 
   const event: NormalizedCallEvent = {
     eventId: eventKey,
@@ -158,17 +191,17 @@ export async function resolveUnknownSarvamCall(
   try {
     await processEvent(event, { onlyCallId: call.id });
   } catch (err) {
-    await releaseDedupe();
+    await releaseDedupeIfUnapplied();
     throw err;
   }
 
   const { data: after } = await supabaseAdmin
     .from("call_logs")
-    .select("status")
+    .select("status, resolution_source, finalization_state")
     .eq("id", call.id)
     .maybeSingle();
   if (!after || after.status !== outcome) {
-    await releaseDedupe();
+    await releaseDedupeIfUnapplied();
     throw new Error(
       `The call was not updated (now: ${after?.status ?? "missing"}). A webhook may have resolved it first.`,
     );
@@ -178,5 +211,16 @@ export async function resolveUnknownSarvamCall(
     .update({ processed_at: new Date().toISOString() })
     .eq("provider", "sarvam")
     .eq("event_id", eventKey);
-  return { status: outcome, organizationId: call.organization_id };
+  if (input.resolvedBy && after.resolution_source === "operator") {
+    await supabaseAdmin
+      .from("call_logs")
+      .update({ resolved_by: input.resolvedBy })
+      .eq("id", call.id)
+      .is("resolved_by", null);
+  }
+  // The pipeline already ran finalization; this only reports where it stands
+  // (and finishes it if that pass didn't).
+  const finalized =
+    after.finalization_state === "done" ? { state: "done" as const } : await finalize(call.id);
+  return { status: outcome, organizationId: call.organization_id, finalization: finalized.state };
 }

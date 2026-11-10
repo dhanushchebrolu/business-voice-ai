@@ -204,7 +204,7 @@ describe("telephony webhook route — duplicate/racing inbound callbacks never c
     assert.match(nearby, /\(insertError as \{ code\?: string \}\)\.code === "23505"/);
     assert.match(nearby, /\.eq\("provider", providerId\)/);
     assert.match(nearby, /\.eq\("provider_call_id", event\.providerCallId\)/);
-    assert.match(nearby, /await applyCallEvent\(existingRow, event\);/);
+    assert.match(nearby, /await applyCallEvent\(existingRow, event, source\);/);
   });
 
   test("both the insert path and the applyCallEvent update path log a success event carrying provider_call_id and call_id (never a raw payload/secret)", () => {
@@ -527,7 +527,7 @@ describe("telephony webhook route — runtime-handoff diagnostics (production in
       transitionIdx,
     );
     const illegalReturnIdx = routeSrc.indexOf("if (!transition.ok) {", transitionIdx);
-    const idempotentReturnIdx = routeSrc.indexOf("if (!transition.changed) return;", transitionIdx);
+    const idempotentReturnIdx = routeSrc.indexOf("if (!transition.changed) {", transitionIdx);
     assert.ok(
       transitionIdx > -1 && logIdx > -1 && illegalReturnIdx > -1 && idempotentReturnIdx > -1,
     );

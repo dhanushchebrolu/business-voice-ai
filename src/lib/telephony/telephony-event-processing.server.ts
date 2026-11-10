@@ -21,6 +21,14 @@ import {
   maybeCompleteCampaign,
 } from "@/lib/campaign-dispatch.server";
 import type { CallTerminalStatus } from "@/lib/campaign-outcome";
+import { finalizeTerminalCallSafely } from "@/lib/telephony/call-finalization.server";
+
+/** Who reported a final status: the provider's webhook, or an operator's resolution. */
+type EventSource = "provider" | "operator";
+
+// Phase 1 finalization (call-finalization.server.ts) covers Sarvam outbound only.
+const isSarvamOutbound = (call: { provider: string; direction: string }) =>
+  call.provider === "sarvam" && call.direction === "outbound";
 
 /**
  * Shared telephony event processing: turns one normalized provider event into
@@ -43,6 +51,7 @@ export async function processTelephonyEvent(
   /** Operator resolution: apply the event only if it lands on this exact call. */
   options: { onlyCallId?: string } = {},
 ) {
+  const source: EventSource = options.onlyCallId ? "operator" : "provider";
   const isTargetCall = (id: string) => {
     if (!options.onlyCallId || id === options.onlyCallId) return true;
     console.error("telephony:event_target_mismatch", id);
@@ -89,7 +98,7 @@ export async function processTelephonyEvent(
       console.error("telephony:webhook_organization_mismatch", existingCall.id);
       return;
     }
-    await applyCallEvent(existingCall, event);
+    await applyCallEvent(existingCall, event, source);
     return;
   }
 
@@ -127,7 +136,7 @@ export async function processTelephonyEvent(
         .is("provider_call_id", null); // never overwrite an id the call-start code saved meanwhile
       resolved.provider_call_id = event.providerCallId;
     }
-    await applyCallEvent(resolved, event);
+    await applyCallEvent(resolved, event, source);
     return;
   }
 
@@ -301,7 +310,7 @@ export async function processTelephonyEvent(
         .eq("provider_call_id", event.providerCallId)
         .maybeSingle();
       if (existingRow) {
-        await applyCallEvent(existingRow, event);
+        await applyCallEvent(existingRow, event, source);
         return;
       }
     }
@@ -500,6 +509,7 @@ async function applyCallEvent(
     retry_attempt?: number | null;
   },
   event: NormalizedCallEvent,
+  source: EventSource = "provider",
 ) {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
@@ -520,14 +530,25 @@ async function applyCallEvent(
   });
   if (!transition.ok) {
     console.error("telephony:illegal_transition", call.id, transition.reason);
+    await afterFinalCallEvent(call, event, source);
     return;
   }
-  if (!transition.changed) return; // idempotent replay of the same status
+  if (!transition.changed) {
+    // idempotent replay of the same status
+    await afterFinalCallEvent(call, event, source);
+    return;
+  }
 
   const patch: Record<string, unknown> = {
     status: event.status,
     provider_metadata: buildProviderMetadata(event),
   };
+  if (isSarvamOutbound(call) && TERMINAL_CALL_STATUSES.includes(event.status)) {
+    // What finalization (call-finalization.server.ts) needs later, written with
+    // the final status itself, so it never depends on this event again.
+    patch["final_agent_variables"] = event.agentVariables ?? null;
+    patch["resolution_source"] = source;
+  }
   if (event.status === "answered" && !call.answered_at) patch["answered_at"] = event.occurredAt;
   if (event.recordingUrl) patch["recording_url"] = event.recordingUrl;
   if (event.failureReason) patch["failure_reason"] = event.failureReason;
@@ -550,6 +571,7 @@ async function applyCallEvent(
   if (error) throw error;
   if (!updated || updated.length === 0) {
     console.error("telephony:call_already_final", call.id, event.status);
+    await afterFinalCallEvent(call, event, source);
     return;
   }
   console.info("telephony:call_log_updated", {
@@ -644,6 +666,15 @@ async function applyCallEvent(
     }
   }
 
+  if (TERMINAL_CALL_STATUSES.includes(event.status) && isSarvamOutbound(call)) {
+    await terminateAgentRuntime(call.id, `call ended: ${event.status}`, call.provider);
+    // Billing and campaign effects, exactly once and re-runnable. A failure
+    // leaves the call `pending`/`failed` for an admin retry; it never fails
+    // this event, whose status change is already saved.
+    await finalizeTerminalCallSafely(supabaseAdmin, call.id);
+    return;
+  }
+
   if (TERMINAL_CALL_STATUSES.includes(event.status)) {
     await terminateAgentRuntime(call.id, `call ended: ${event.status}`, call.provider);
     await finalizeCallBilling(
@@ -664,6 +695,61 @@ async function applyCallEvent(
       );
     }
   }
+}
+
+/**
+ * An event that changed nothing because the Sarvam outbound call it targets is
+ * already final. Two things may still be owed:
+ *   - an operator decided this call's outcome before the provider's report
+ *     arrived: the report is kept (provider_metadata.late_provider_report) and
+ *     a disagreement is flagged (resolution_conflict) for admin review — never
+ *     applied over the operator's decision;
+ *   - the call's finalization may still be pending or failed: run it (a no-op
+ *     when it's done, or while another holder has the lease).
+ * Other providers and Sarvam inbound calls are unaffected.
+ */
+async function afterFinalCallEvent(
+  call: { id: string; status: string; provider: string; direction: string },
+  event: NormalizedCallEvent,
+  source: EventSource,
+) {
+  if (!isSarvamOutbound(call) || !TERMINAL_CALL_STATUSES.includes(call.status as never)) return;
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+
+  if (source === "provider" && TERMINAL_CALL_STATUSES.includes(event.status)) {
+    const { data: row, error } = await supabaseAdmin
+      .from("call_logs")
+      .select("status, resolution_source, provider_metadata")
+      .eq("id", call.id)
+      .maybeSingle();
+    if (error) throw error;
+    if (row && row.resolution_source === "operator") {
+      const metadata =
+        row.provider_metadata && typeof row.provider_metadata === "object"
+          ? (row.provider_metadata as Record<string, unknown>)
+          : {};
+      const { error: updateError } = await supabaseAdmin
+        .from("call_logs")
+        .update({
+          provider_metadata: {
+            ...metadata,
+            late_provider_report: {
+              status: event.status,
+              durationSeconds: event.durationSeconds ?? null,
+              failureReason: event.failureReason ?? null,
+              attemptId: event.providerAttemptId ?? null,
+              receivedAt: new Date().toISOString(),
+            },
+          } as never,
+          resolution_conflict: row.status !== event.status,
+        })
+        .eq("id", call.id);
+      if (updateError) throw updateError;
+      console.error("telephony:late_provider_report", call.id, row.status, event.status);
+    }
+  }
+
+  await finalizeTerminalCallSafely(supabaseAdmin, call.id);
 }
 
 /**

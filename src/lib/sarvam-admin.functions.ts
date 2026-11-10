@@ -693,44 +693,15 @@ export const resolveUnknownSarvamCall = createServerFn({ method: "POST" })
     const { resolveUnknownSarvamCall: resolve } =
       await import("@/lib/sarvam-call-resolution.server");
 
-    const result = await resolve(
-      supabaseAdmin,
-      {
-        callId: data.callId,
-        resolution: data.resolution,
-        outcome: data.outcome,
-        durationSeconds: data.durationSeconds,
-        attemptId: data.attemptId?.trim() || undefined,
-        confirmedCheckedInSarvam: data.confirmedCheckedInSarvam === true,
-      },
-      {
-        applyCampaignFailure: async (call) => {
-          const { applyOutcomeToCampaignContact, maybeCompleteCampaign } =
-            await import("@/lib/campaign-dispatch.server");
-          const [{ data: campaign }, { data: cc }] = await Promise.all([
-            supabaseAdmin
-              .from("campaigns")
-              .select("max_attempts, retry_after_minutes, retry_statuses")
-              .eq("id", call.campaign_id!)
-              .maybeSingle(),
-            supabaseAdmin
-              .from("campaign_contacts")
-              .select("attempts")
-              .eq("id", call.campaign_contact_id!)
-              .maybeSingle(),
-          ]);
-          if (!campaign || !cc) return;
-          await applyOutcomeToCampaignContact(
-            call.campaign_contact_id!,
-            "failed",
-            cc.attempts,
-            campaign,
-            null,
-          );
-          await maybeCompleteCampaign(call.campaign_id!);
-        },
-      },
-    );
+    const result = await resolve(supabaseAdmin, {
+      callId: data.callId,
+      resolution: data.resolution,
+      outcome: data.outcome,
+      durationSeconds: data.durationSeconds,
+      attemptId: data.attemptId?.trim() || undefined,
+      confirmedCheckedInSarvam: data.confirmedCheckedInSarvam === true,
+      resolvedBy: admin.userId,
+    });
 
     await writeAudit(admin, {
       action: "SARVAM_CALL_OUTCOME_RESOLVED",
@@ -743,8 +714,55 @@ export const resolveUnknownSarvamCall = createServerFn({ method: "POST" })
         durationSeconds: data.durationSeconds ?? null,
         attemptId: data.attemptId ?? null,
         confirmedCheckedInSarvam: data.confirmedCheckedInSarvam === true,
+        finalization: result.finalization,
       },
       reason: data.reason,
     });
-    return { status: result.status };
+    return { status: result.status, finalization: result.finalization };
+  });
+
+/**
+ * Re-runs finalization (billing + campaign outcome) for a Sarvam outbound
+ * call whose finalization is pending or failed — the manual recovery in this
+ * phase, since nothing retries automatically. Safe to repeat: every step is
+ * exactly-once in the database (call-finalization.server.ts). Platform admins
+ * only, always audited.
+ */
+export const retrySarvamCallFinalization = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { callId: string; reason: string }) => {
+    if (!input?.callId) throw new Error("callId is required");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { data: call } = await supabaseAdmin
+      .from("call_logs")
+      .select("id, organization_id, provider, direction, finalization_state")
+      .eq("id", data.callId)
+      .maybeSingle();
+    if (!call || call.provider !== "sarvam" || call.direction !== "outbound")
+      throw new Error("Sarvam outbound call not found.");
+    if (call.finalization_state !== "pending" && call.finalization_state !== "failed")
+      throw new Error(
+        `This call doesn't need finalizing (state: ${call.finalization_state ?? "none"}).`,
+      );
+
+    const { finalizeTerminalCall } = await import("@/lib/telephony/call-finalization.server");
+    const result = await finalizeTerminalCall(supabaseAdmin, call.id);
+
+    await writeAudit(admin, {
+      action: "SARVAM_CALL_FINALIZATION_RETRIED",
+      entityType: "call_log",
+      entityId: call.id,
+      organizationId: call.organization_id,
+      oldValue: { finalizationState: call.finalization_state },
+      newValue: result,
+      reason: data.reason,
+    });
+    if (result.state === "skipped")
+      throw new Error("Another finalization of this call is in progress. Try again in 2 minutes.");
+    return result;
   });
