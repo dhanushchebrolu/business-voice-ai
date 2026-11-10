@@ -1,0 +1,27 @@
+-- History placeholder for production migration 20261025090000_whatsapp_vobiz_onboarding.
+--
+-- Production's migration history (supabase_migrations.schema_migrations)
+-- already contains version 20261025090000, name "whatsapp_vobiz_onboarding",
+-- with its `statements` column NULL: the SQL that was applied under this
+-- version was never stored, and no copy of it exists in this repository or
+-- any of its branches.
+--
+-- This file exists only so the repository's migration list matches
+-- production's history (the Supabase CLI expects a local file for every
+-- version recorded in production). It is NOT a reconstruction of the
+-- original migration:
+--   * Do not reconstruct the original SQL here, and never rerun it.
+--   * The schema it is believed to relate to (WhatsApp through Vobiz:
+--     whatsapp_connections.provider / vobiz_channel_id /
+--     number_onboarding_mode / vobiz_number_order_id and
+--     whatsapp_number_orders) is defined by
+--     20261027090000_whatsapp_vobiz_channels.sql, which was verified against
+--     production before being recorded there.
+--   * Production also has idx_whatsapp_number_orders_one_live_number, which
+--     no migration on this branch creates; it is preserved and handled by a
+--     separate, reviewed corrective migration.
+--
+-- In production this version is already recorded, so the CLI never runs this
+-- file there. Local and CI replays run it as a harmless no-op.
+
+SELECT 1;
