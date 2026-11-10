@@ -302,8 +302,8 @@ export function AppointmentSlotsSection({ businessId }: { businessId: string }) 
                 >
                   <span>
                     {c.conflict_type === "EXTERNALLY_DELETED"
-                      ? "A patient booking's Google Calendar event was deleted externally."
-                      : "A patient booking's time was changed externally in Google Calendar."}
+                      ? "A booking's Google Calendar event was deleted externally."
+                      : "A booking's time was changed externally in Google Calendar."}
                   </span>
                   {!readOnly ? (
                     <div className="flex gap-1.5">

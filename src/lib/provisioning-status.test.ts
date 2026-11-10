@@ -5,7 +5,7 @@ import { provisioningStatusLabel, type ProvisioningStatusInput } from "./provisi
 /**
  * Coverage for the six client-dashboard provisioning labels (Task #96):
  * "Setting up your phone agent", "Waiting for phone number", "Activating
- * inbound calling", "Outbound calling ready", "Active", "Setup needs admin
+ * inbound calling", "Inbound calling active", "Active", "Setup needs admin
  * attention". Every case here corresponds to a real, reachable combination
  * of provisioning-orchestrator.server.ts's own signals — never an invented
  * state.
@@ -29,10 +29,10 @@ describe("provisioningStatusLabel", () => {
     assert.deepEqual(provisioningStatusLabel(base()), { label: "Active", tone: "live" });
   });
 
-  test("number active, inbound on, outbound still off -> Outbound calling ready", () => {
+  test("number active, inbound on, outbound still off -> Inbound calling active", () => {
     assert.deepEqual(provisioningStatusLabel(base({ outboundEnabled: false })), {
-      label: "Outbound calling ready",
-      tone: "ready",
+      label: "Inbound calling active",
+      tone: "live",
     });
   });
 
@@ -84,7 +84,7 @@ describe("provisioningStatusLabel", () => {
       "Setting up your phone agent",
       "Waiting for phone number",
       "Activating inbound calling",
-      "Outbound calling ready",
+      "Inbound calling active",
       "Active",
       "Setup needs admin attention",
     ]);

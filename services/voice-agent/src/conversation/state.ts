@@ -2,7 +2,7 @@
  * The call's structured memory. Every value records where it came from:
  *
  *   explicit   the caller said it plainly ("3 PM", "cleaning")
- *   inferred   derived, not said ("4" on a clinic call -> 16:00; caller ID;
+ *   inferred   derived, not said ("4" on a business call -> 16:00; caller ID;
  *              Hindi "kal" -> tomorrow)
  *   uncertain  the caller said something with more than one reading
  *              ("12", "2 or 3 PM") — never acted on until resolved

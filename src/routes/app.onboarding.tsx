@@ -51,7 +51,7 @@ function Onboarding() {
   const [step, setStep] = useState(0);
   const [saving, setSaving] = useState(false);
 
-  const [typeId, setTypeId] = useState("dental_clinic");
+  const [typeId, setTypeId] = useState("");
   const type = useMemo(() => getBusinessType(typeId), [typeId]);
   const [info, setInfo] = useState({
     name: "",
@@ -81,6 +81,10 @@ function Onboarding() {
   const defaultGreeting = `Thank you for calling ${displayName || "our business"}. This is ${agentName}. How may I help you today?`;
 
   function next() {
+    if (step === 0 && !typeId) {
+      toast.error("Choose the type of business you run.");
+      return;
+    }
     if (step === 1 && (!info.name.trim() || info.description.trim().length < 40)) {
       toast.error("Add your business name and a description of at least 40 characters.");
       return;
@@ -285,7 +289,7 @@ function Onboarding() {
                 maxLength={3000}
                 value={info.description}
                 onChange={(e) => setInfo({ ...info, description: e.target.value })}
-                placeholder="We are a dental clinic in Banjara Hills specialising in cosmetic dentistry, implants, root canal treatment and preventive care."
+                placeholder={`Describe your ${type.label.toLowerCase()}: what you offer, who you serve and where you are.`}
               />
             </FieldBox>
             <Row>

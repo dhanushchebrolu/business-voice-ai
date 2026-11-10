@@ -154,13 +154,13 @@ function instructionFor(step: NextStep, s: ConversationState): string {
       return (
         {
           no_caller_id:
-            "Their caller ID is not available, so their appointment cannot be found or changed on this call. Say so briefly and suggest calling from the number it was booked with, or contacting the clinic. Do not say anything was changed.",
+            "Their caller ID is not available, so their appointment cannot be found or changed on this call. Say so briefly and suggest calling from the number it was booked with, or contacting the business. Do not say anything was changed.",
           not_found:
             "No upcoming appointment was found for the number they are calling from. Say so briefly and offer to book a new one instead. Do not say anything was changed.",
           lookup_failed:
             "Their appointments could not be looked up just now. Apologise briefly and suggest trying again in a little while. Do not say anything was changed.",
           not_allowed:
-            "Appointments cannot be changed on this line. Say so briefly and suggest contacting the clinic. Do not say anything was changed.",
+            "Appointments cannot be changed on this line. Say so briefly and suggest contacting the business. Do not say anything was changed.",
         }[step.why] +
         suggest(
           s,
@@ -174,12 +174,12 @@ function instructionFor(step: NextStep, s: ConversationState): string {
         )
       );
     case "reschedule_failed":
-      return `The appointment could not be moved (${s.reschedule.error ?? "error"}); it stays as it was. Say so plainly and suggest contacting the clinic. Do not say it was moved.${suggest(s, "rescheduleNotPossible")}`;
+      return `The appointment could not be moved (${s.reschedule.error ?? "error"}); it stays as it was. Say so plainly and suggest contacting the business. Do not say it was moved.${suggest(s, "rescheduleNotPossible")}`;
     case "rescheduled":
       if (s.bookingAnnounced)
         return "The change was already announced. Answer only what the caller just said; do not repeat it.";
       return step.pendingSync
-        ? "The appointment was moved in the system, but the clinic calendar is not updated yet: tell the caller it is changed and the clinic team will confirm it. Do not say it is fully confirmed."
+        ? "The appointment was moved in the system, but the business calendar is not updated yet: tell the caller it is changed and the team will confirm it. Do not say it is fully confirmed."
         : "The appointment was moved, confirmed by the system. Tell the caller the new day and time and ask if there is anything else.";
     case "confirm_leave":
       return "The caller sounds like they are finishing, but the booking is not done. Ask once, briefly: do they want to finish booking now, or leave it for now? Do not say anything is booked.";
@@ -195,12 +195,12 @@ function instructionFor(step: NextStep, s: ConversationState): string {
         return "The booking is confirmed by the system. Tell the caller it is booked and ask if there is anything else.";
       }
       if (s.booking.status === "held_pending_sync") {
-        return "The booking is saved and the slot is held, but it is not fully confirmed yet: tell the caller it is saved and the clinic team will confirm it. Do not say it is confirmed.";
+        return "The booking is saved and the slot is held, but it is not fully confirmed yet: tell the caller it is saved and the team will confirm it. Do not say it is confirmed.";
       }
       if (s.booking.status === "payment_pending") {
         return s.booking.paymentLinkSent
           ? "This service needs payment before the booking is confirmed. The slot is held for them and a payment link has been sent to them on WhatsApp. Explain that the booking is confirmed only once the payment is received. Do not say it is booked or confirmed."
-          : "This service needs payment before the booking is confirmed. The slot is held, but the payment link could not be sent just now; the clinic team will send it. Explain that the booking is confirmed only once the payment is received. Do not say it is booked or confirmed.";
+          : "This service needs payment before the booking is confirmed. The slot is held, but the payment link could not be sent just now; the team will send it. Explain that the booking is confirmed only once the payment is received. Do not say it is booked or confirmed.";
       }
       return "The booking request is recorded but not confirmed yet. Tell the caller the team will confirm it. Do not say it is booked.";
   }
@@ -339,7 +339,7 @@ export function buildTools(d: ReceptionistDeps, knownPrices: Set<number>) {
   return {
     check_availability: llm.tool({
       description:
-        "Ask the clinic calendar which times are free for the caller's service, day and time preference (all taken from the call state). The only way to know availability.",
+        "Ask the business calendar which times are free for the caller's service, day and time preference (all taken from the call state). The only way to know availability.",
       parameters: z.object({}),
       execute: async () => {
         if (!readyForAvailability(s))
@@ -465,11 +465,11 @@ export function buildTools(d: ReceptionistDeps, knownPrices: Set<number>) {
             s.booking.paymentLinkSent = res.payment?.linkSent === true;
             return s.booking.paymentLinkSent
               ? `PAYMENT_PENDING: ${spokenTime(sel.hhmm)} is held until the payment is received; the payment link was sent on WhatsApp. It is NOT confirmed yet. Do not say it is booked or confirmed.`
-              : `PAYMENT_PENDING: ${spokenTime(sel.hhmm)} is held until the payment is received, but the payment link could not be sent just now; the clinic team will send it. It is NOT confirmed. Do not say it is booked or confirmed.`;
+              : `PAYMENT_PENDING: ${spokenTime(sel.hhmm)} is held until the payment is received, but the payment link could not be sent just now; the team will send it. It is NOT confirmed. Do not say it is booked or confirmed.`;
           }
           if (res.outcome === "saved_calendar_sync_failed") {
             s.booking.status = "held_pending_sync";
-            return `SAVED_NOT_CONFIRMED: the booking for ${spokenTime(sel.hhmm)} is saved and the slot is held, but the calendar could not be updated; the clinic team will confirm it. Do not say it is confirmed.`;
+            return `SAVED_NOT_CONFIRMED: the booking for ${spokenTime(sel.hhmm)} is saved and the slot is held, but the calendar could not be updated; the team will confirm it. Do not say it is confirmed.`;
           }
           s.booking.status = "pending";
           return "PENDING: the request is recorded but not confirmed yet. Tell the caller the team will confirm it.";
@@ -489,7 +489,7 @@ export function buildTools(d: ReceptionistDeps, knownPrices: Set<number>) {
           return `FAILED: ${res.message} Nothing is booked yet. Offer to try again.`;
         }
         s.booking.status = "failed";
-        return `NOT_BOOKED: ${res.message} Nothing is booked. Offer to have the clinic call back.`;
+        return `NOT_BOOKED: ${res.message} Nothing is booked. Offer to have the team call back.`;
       },
     }),
     find_my_bookings: llm.tool({
@@ -583,7 +583,7 @@ export function buildTools(d: ReceptionistDeps, knownPrices: Set<number>) {
           s.currentTask = "done";
           return res.outcome === "confirmed"
             ? `MOVED: the appointment is now at ${spokenTime(sel.hhmm)}, confirmed by the system.`
-            : `MOVED_NOT_SYNCED: the appointment is moved to ${spokenTime(sel.hhmm)} in the system, but the clinic calendar is not updated yet; the team will confirm it. Do not say it is fully confirmed.`;
+            : `MOVED_NOT_SYNCED: the appointment is moved to ${spokenTime(sel.hhmm)} in the system, but the business calendar is not updated yet; the team will confirm it. Do not say it is fully confirmed.`;
         }
         if (res.error === "slot_taken") {
           s.booking.status = "none";
@@ -603,14 +603,14 @@ export function buildTools(d: ReceptionistDeps, knownPrices: Set<number>) {
     }),
     get_service_price: llm.tool({
       description:
-        "The clinic's price for the caller's service. Never state a price that this tool did not return.",
+        "The business's price for the caller's service. Never state a price that this tool did not return.",
       parameters: z.object({}),
       execute: async () => {
         if (!s.service || s.service.provenance === "uncertain")
           return "NOT_READY: the service is not known yet.";
         const price = s.service.value.priceInr ?? null;
         if (price === null)
-          return "UNKNOWN: the clinic has not published a price. Say a staff member can confirm it.";
+          return "UNKNOWN: the business has not published a price. Say a staff member can confirm it.";
         knownPrices.add(price);
         return `PRICE: ${s.service.value.name} costs ₹${price}.`;
       },

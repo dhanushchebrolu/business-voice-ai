@@ -58,7 +58,7 @@ describe("published prompts: calls never run the old transfer and callback promi
     assert.match(out, /You cannot transfer this call/);
     assert.match(out, /reach the team directly on \+919999999999/);
     assert.match(out, /Never say you have transferred the call/);
-    assert.match(out, /Do not diagnose or give medical or treatment advice/);
+    assert.match(out, /Do not give medical, legal, financial or other professional advice/);
     assert.ok(
       out.startsWith(
         "# BUSINESS CONTEXT\nYou are the receptionist for Smile Dental.\n\n# SERVICES AND PRICING\n- Cleaning: ₹800\n\n# ESCALATION\n",

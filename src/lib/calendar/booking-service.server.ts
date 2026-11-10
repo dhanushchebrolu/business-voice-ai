@@ -342,7 +342,7 @@ export async function createBooking(
     // this entry point. See this function's own doc comment.
     if (rpcError.message?.includes("SLOT_OUTSIDE_SCHEDULE")) {
       throw new BookingError(
-        "That time is outside the hospital's working schedule.",
+        "That time is outside the business's working schedule.",
         "SLOT_OUTSIDE_SCHEDULE",
       );
     }
@@ -519,7 +519,7 @@ export async function rescheduleBooking(
     }
     if (rpcError.message?.includes("SLOT_OUTSIDE_SCHEDULE")) {
       throw new BookingError(
-        "That time is outside the hospital's working schedule.",
+        "That time is outside the business's working schedule.",
         "SLOT_OUTSIDE_SCHEDULE",
       );
     }
@@ -754,7 +754,7 @@ export async function createPaymentRequiredBooking(
     }
     if (error.message?.includes("SLOT_OUTSIDE_SCHEDULE")) {
       throw new BookingError(
-        "That time is outside the hospital's working schedule.",
+        "That time is outside the business's working schedule.",
         "SLOT_OUTSIDE_SCHEDULE",
       );
     }

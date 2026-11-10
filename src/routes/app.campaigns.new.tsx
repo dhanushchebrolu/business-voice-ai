@@ -167,7 +167,7 @@ function NewCampaignPage() {
             <Textarea
               value={objective}
               onChange={(e) => setObjective(e.target.value)}
-              placeholder="Remind customers about their upcoming dental appointment."
+              placeholder="Remind customers about their upcoming appointment."
               rows={2}
             />
           </div>

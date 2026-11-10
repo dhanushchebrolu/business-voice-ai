@@ -100,7 +100,7 @@ describe("saveAgentConfiguration — save-only workflow activates the existing a
   test("looks up the existing agent_configs row by business_id and throws rather than creating a new one when missing", () => {
     assert.match(
       fnSrc,
-      /\.from\("agent_configs"\)\s*\n\s*\.select\("id, greetings, active_version"\)\s*\n\s*\.eq\("business_id", data\.businessId\)/,
+      /\.from\("agent_configs"\)\s*\n\s*\.select\("id, greetings, active_version, employee_type, sarvam_application_id"\)\s*\n\s*\.eq\("business_id", data\.businessId\)/,
     );
     assert.match(
       fnSrc,

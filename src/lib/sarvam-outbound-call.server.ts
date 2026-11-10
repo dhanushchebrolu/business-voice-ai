@@ -1,3 +1,4 @@
+import { TEMPLATE_AGENT_COLUMNS, templateCallVariables } from "./sarvam-tenant-variables.server.ts";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import {
@@ -264,13 +265,23 @@ export async function sendSarvamInstantOutboundCall(
 
   const { data: agentConfig } = await supabaseAdmin
     .from("agent_configs")
-    .select("id, organization_id, sarvam_app_id, sarvam_app_version")
+    .select(`id, organization_id, sarvam_app_id, sarvam_app_version, ${TEMPLATE_AGENT_COLUMNS}`)
     .eq("id", phoneNumber.agent_config_id)
     .maybeSingle();
   if (!agentConfig || agentConfig.organization_id !== phoneNumber.organization_id)
     throw new Error("This number's agent does not belong to this organization.");
   if (!agentConfig.sarvam_app_id || !agentConfig.sarvam_app_version)
     throw new Error("This number's agent has not been mapped to a Sarvam app yet.");
+  // Read before the call row is reserved, so a missing profile dials nothing.
+  const templateVariables = await templateCallVariables(
+    supabaseAdmin,
+    agentConfig,
+    phoneNumber.organization_id,
+  );
+  const agentVariables =
+    Object.keys(templateVariables).length > 0
+      ? { ...params.agentVariables, ...templateVariables }
+      : params.agentVariables;
 
   // An earlier Sarvam call to this number that is still unresolved —
   // `initiated` (in progress, or its start request never finished) or
@@ -317,7 +328,7 @@ export async function sendSarvamInstantOutboundCall(
       connectionId: connection.provider_connection_id,
       fromE164: phoneNumber.e164,
       toE164,
-      agentVariables: params.agentVariables,
+      agentVariables,
       webhookUrl,
       metadata: { organizationId: phoneNumber.organization_id, callId: call.id },
     });

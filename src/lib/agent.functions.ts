@@ -123,6 +123,8 @@ const saveAgentConfigurationInput = z.object({
    */
   multilingual: z.boolean().optional(),
   after_hours_behavior: z.enum(["take_message", "answer_normally", "transfer"]),
+  // Optional so a dashboard build without the selector keeps the stored value.
+  employee_type: z.enum(["receptionist", "sales_executive", "customer_care_executive"]).optional(),
   transfer_number: z.string().trim().max(20).nullable(),
   custom_personality: z.string().trim().max(2000).nullable(),
   greeting: z.string().trim().max(1000),
@@ -145,10 +147,16 @@ export const saveAgentConfiguration = createServerFn({ method: "POST" })
 
     const { data: agentRow } = await supabaseAdmin
       .from("agent_configs")
-      .select("id, greetings, active_version")
+      .select("id, greetings, active_version, employee_type, sarvam_application_id")
       .eq("business_id", data.businessId)
       .maybeSingle();
     if (!agentRow) throw new Error("Agent configuration not found for this business.");
+    if (
+      data.employee_type &&
+      agentRow.sarvam_application_id &&
+      data.employee_type !== agentRow.employee_type
+    )
+      throw new Error("Your AI employee type is set by the ClickAI team for this agent.");
 
     const greetings = {
       ...((agentRow.greetings as Record<string, string> | null) ?? {}),
@@ -164,6 +172,7 @@ export const saveAgentConfiguration = createServerFn({ method: "POST" })
         voice_id: data.voice_id,
         speaking_pace: data.speaking_pace,
         after_hours_behavior: data.after_hours_behavior,
+        ...(data.employee_type ? { employee_type: data.employee_type } : {}),
         transfer_number: data.transfer_number || null,
         custom_personality: data.custom_personality || null,
         // The dashboard's own capability ids (book_appointment,

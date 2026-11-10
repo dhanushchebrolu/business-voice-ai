@@ -84,11 +84,17 @@ export const setSarvamAppMapping = createServerFn({ method: "POST" })
 
     const { error } = await supabaseAdmin
       .from("agent_configs")
-      .update({ sarvam_app_id: data.sarvamAppId, sarvam_app_version: data.sarvamAppVersion })
+      // A direct mapping replaces any template mapping (the template's
+      // trigger would otherwise copy its own app id back over this one).
+      .update({
+        sarvam_app_id: data.sarvamAppId,
+        sarvam_app_version: data.sarvamAppVersion,
+        sarvam_application_id: null,
+      })
       .eq("id", data.agentConfigId);
     if (error) {
-      // idx_agent_configs_sarvam_app_id — this Sarvam app is already mapped
-      // to a different agent_configs row.
+      // idx_agent_configs_sarvam_app_id or the template guard trigger —
+      // this Sarvam app is already mapped to a different agent.
       if ((error as { code?: string }).code === "23505")
         throw new Error("This Sarvam app is already mapped to a different agent.");
       throw error;
@@ -116,6 +122,174 @@ export const setSarvamAppMapping = createServerFn({ method: "POST" })
       reason: data.reason,
     });
 
+    return { ok: true as const };
+  });
+
+/* ------------------------------------------------------------------ */
+/* 1b. Reusable Sarvam application templates                            */
+/* ------------------------------------------------------------------ */
+
+const EMPLOYEE_TYPE_IDS = ["receptionist", "sales_executive", "customer_care_executive"] as const;
+
+/**
+ * Shared templates (one Sarvam app used by several customers' agents) stay
+ * off until this server explicitly allows them: Sarvam's runtime isolation,
+ * versioning and concurrency for one app across many tenants are not yet
+ * verified against Sarvam's documentation or a live test. Dedicated
+ * templates (one agent each) are always allowed.
+ */
+export function sharedSarvamApplicationsEnabled(): boolean {
+  return process.env["SARVAM_SHARED_APPLICATIONS_ENABLED"] === "true";
+}
+
+export const listSarvamApplications = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    await assertPlatformAdmin(context.supabase, context.userId, "agents.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { data, error } = await supabaseAdmin
+      .from("sarvam_applications")
+      .select("id, name, employee_type, sarvam_app_id, sarvam_app_version, is_shared, notes")
+      .order("name")
+      .order("sarvam_app_version", { ascending: false });
+    if (error) throw error;
+    return { applications: data ?? [], sharedEnabled: sharedSarvamApplicationsEnabled() };
+  });
+
+interface RegisterSarvamApplicationInput {
+  name: string;
+  employeeType: (typeof EMPLOYEE_TYPE_IDS)[number];
+  sarvamAppId: string;
+  sarvamAppVersion: number;
+  isShared: boolean;
+  notes?: string;
+  reason: string;
+}
+
+export const registerSarvamApplication = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: RegisterSarvamApplicationInput) => {
+    if (!input?.name?.trim()) throw new Error("A name is required");
+    if (!EMPLOYEE_TYPE_IDS.includes(input.employeeType)) throw new Error("Unknown employee type");
+    if (!input.sarvamAppId?.trim()) throw new Error("sarvamAppId is required");
+    if (!Number.isInteger(input.sarvamAppVersion) || input.sarvamAppVersion < 1)
+      throw new Error("sarvamAppVersion must be a positive integer");
+    if (typeof input.isShared !== "boolean") throw new Error("isShared is required");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "agents.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { data: row, error } = await supabaseAdmin
+      .from("sarvam_applications")
+      .insert({
+        name: data.name.trim(),
+        employee_type: data.employeeType,
+        sarvam_app_id: data.sarvamAppId.trim(),
+        sarvam_app_version: data.sarvamAppVersion,
+        is_shared: data.isShared,
+        notes: data.notes?.trim() || null,
+        created_by: context.userId,
+      })
+      .select("id")
+      .single();
+    if (error) {
+      if ((error as { code?: string }).code === "23505")
+        throw new Error("This Sarvam app version is already registered.");
+      throw error;
+    }
+    await writeAudit(admin, {
+      action: "SARVAM_APPLICATION_REGISTERED",
+      entityType: "sarvam_application",
+      entityId: row.id,
+      newValue: {
+        name: data.name.trim(),
+        employee_type: data.employeeType,
+        sarvam_app_id: data.sarvamAppId.trim(),
+        sarvam_app_version: data.sarvamAppVersion,
+        is_shared: data.isShared,
+      },
+      reason: data.reason,
+    });
+    return { id: row.id };
+  });
+
+interface SetSarvamApplicationMappingInput {
+  agentConfigId: string;
+  applicationId: string;
+  reason: string;
+}
+
+export const setSarvamApplicationMapping = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: SetSarvamApplicationMappingInput) => {
+    if (!input?.agentConfigId) throw new Error("agentConfigId is required");
+    if (!input.applicationId) throw new Error("applicationId is required");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "agents.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+
+    const [{ data: before }, { data: app }] = await Promise.all([
+      supabaseAdmin
+        .from("agent_configs")
+        .select("id, organization_id, sarvam_app_id, sarvam_app_version, sarvam_application_id")
+        .eq("id", data.agentConfigId)
+        .maybeSingle(),
+      supabaseAdmin
+        .from("sarvam_applications")
+        .select("id, employee_type, sarvam_app_id, sarvam_app_version, is_shared")
+        .eq("id", data.applicationId)
+        .maybeSingle(),
+    ]);
+    if (!before) throw new Error("Agent not found");
+    if (!app) throw new Error("Sarvam application not found");
+    if (app.is_shared && !sharedSarvamApplicationsEnabled())
+      throw new Error(
+        "Shared Sarvam applications are not enabled on this server. Use a dedicated application.",
+      );
+
+    const { error } = await supabaseAdmin
+      .from("agent_configs")
+      // The template's employee type becomes the agent's, so the prompt and
+      // the Sarvam app's tools describe the same job.
+      .update({ sarvam_application_id: app.id, employee_type: app.employee_type })
+      .eq("id", data.agentConfigId);
+    if (error) {
+      if ((error as { code?: string }).code === "23505")
+        throw new Error("This Sarvam application is already mapped to a different agent.");
+      throw error;
+    }
+
+    const { error: linkError } = await supabaseAdmin
+      .from("phone_numbers")
+      .update({ agent_config_id: data.agentConfigId })
+      .eq("organization_id", before.organization_id)
+      .is("agent_config_id", null)
+      .neq("status", "released");
+    if (linkError) throw linkError;
+
+    await writeAudit(admin, {
+      action: "SARVAM_APPLICATION_MAPPED",
+      entityType: "agent_config",
+      entityId: data.agentConfigId,
+      organizationId: before.organization_id,
+      oldValue: {
+        sarvam_application_id: before.sarvam_application_id,
+        sarvam_app_id: before.sarvam_app_id,
+        sarvam_app_version: before.sarvam_app_version,
+      },
+      newValue: {
+        sarvam_application_id: app.id,
+        sarvam_app_id: app.sarvam_app_id,
+        sarvam_app_version: app.sarvam_app_version,
+        is_shared: app.is_shared,
+      },
+      reason: data.reason,
+    });
     return { ok: true as const };
   });
 

@@ -337,6 +337,57 @@ export function getBusinessType(id: string | null | undefined): BusinessTypeDef 
   return BUSINESS_TYPES.find((t) => t.id === id) ?? BUSINESS_TYPES[BUSINESS_TYPES.length - 1]!;
 }
 
+/** agent_configs.employee_type — kept in step with its CHECK constraint (migration 20261111090000). */
+export type EmployeeTypeId = "receptionist" | "sales_executive" | "customer_care_executive";
+
+export interface EmployeeTypeDef {
+  id: EmployeeTypeId;
+  label: string;
+  description: string;
+  /** How the agent describes its own job in the # PERSONA line. */
+  roleTitle: string;
+  /** The # ROLE prompt section; empty for the receptionist, whose behaviour is the base prompt. */
+  instructions: string;
+}
+
+export const EMPLOYEE_TYPES: EmployeeTypeDef[] = [
+  {
+    id: "receptionist",
+    label: "AI Receptionist",
+    description: "Answers calls, handles enquiries and books, moves or cancels appointments.",
+    roleTitle: "phone receptionist",
+    instructions: "",
+  },
+  {
+    id: "sales_executive",
+    label: "AI Sales Executive",
+    description: "Follows up with leads, explains offerings and books the next step.",
+    roleTitle: "sales executive",
+    instructions: [
+      "You speak with people who enquired about, or may be interested in, this business's offerings.",
+      "Find out what they need, explain only the offerings and prices listed below, and suggest the next step (a visit, a booking, or a call from the team).",
+      "Never pressure anyone, never invent discounts or offers, and stop politely as soon as someone says they are not interested or asks not to be called.",
+      "Capture their name, phone number and what they are interested in.",
+    ].join("\n"),
+  },
+  {
+    id: "customer_care_executive",
+    label: "AI Customer Care Executive",
+    description: "Helps existing customers with questions, issues and follow-ups.",
+    roleTitle: "customer care executive",
+    instructions: [
+      "You help existing customers of this business with questions, problems and follow-ups.",
+      "Listen to the issue, answer only from the information below, and stay calm and apologise when something went wrong.",
+      "Never promise refunds, compensation or fixes that are not in the policies below.",
+      "When you cannot resolve it, capture their name, phone number and a short summary of the issue so the team can follow up.",
+    ].join("\n"),
+  },
+];
+
+export function getEmployeeType(id: string | null | undefined): EmployeeTypeDef {
+  return EMPLOYEE_TYPES.find((t) => t.id === id) ?? EMPLOYEE_TYPES[0]!;
+}
+
 export const OBJECTIVES: { id: string; label: string; description: string }[] = [
   {
     id: "answer_questions",

@@ -4,10 +4,14 @@ import { useServerFn } from "@tanstack/react-start";
 import { toast } from "sonner";
 import {
   getSarvamOutboundGates,
+  listSarvamApplications,
   placeAdminSarvamOutboundCall,
+  registerSarvamApplication,
   registerTelephonyConnection,
   setSarvamAppMapping,
+  setSarvamApplicationMapping,
 } from "@/lib/sarvam-admin.functions";
+import { EMPLOYEE_TYPES, getEmployeeType, type EmployeeTypeId } from "@/lib/business-types";
 import {
   activatePhoneNumber,
   listAllCalls,
@@ -50,6 +54,8 @@ interface PanelProps {
     agent_name: string;
     sarvam_app_id: string | null;
     sarvam_app_version: number | null;
+    sarvam_application_id?: string | null;
+    employee_type?: string | null;
   } | null;
   numbers: PanelNumber[];
   connections: { id: string; provider: string; provider_connection_id: string | null }[];
@@ -91,12 +97,25 @@ export function SarvamOutboundPanel({ orgId, agent, numbers, connections, onChan
   const fetchPool = useServerFn(listPhoneNumbers);
   const fetchCalls = useServerFn(listAllCalls);
   const fetchGates = useServerFn(getSarvamOutboundGates);
+  const fetchApplications = useServerFn(listSarvamApplications);
+  const registerApplication = useServerFn(registerSarvamApplication);
+  const mapApplication = useServerFn(setSarvamApplicationMapping);
 
   const [connectionOpen, setConnectionOpen] = useState(false);
   const [connectionId, setConnectionId] = useState("");
   const [mappingOpen, setMappingOpen] = useState(false);
   const [appId, setAppId] = useState(agent?.sarvam_app_id ?? "");
   const [appVersion, setAppVersion] = useState(String(agent?.sarvam_app_version ?? ""));
+  // "" = enter an app id directly instead of using a registered template.
+  const [applicationId, setApplicationId] = useState(agent?.sarvam_application_id ?? "");
+  const [templateOpen, setTemplateOpen] = useState(false);
+  const [template, setTemplate] = useState({
+    name: "",
+    employeeType: "receptionist" as EmployeeTypeId,
+    appId: "",
+    version: "",
+    shared: false,
+  });
   const [assignOpen, setAssignOpen] = useState(false);
   const [poolNumberId, setPoolNumberId] = useState("");
   const [numberAction, setNumberAction] = useState<NumberAction | null>(null);
@@ -121,6 +140,13 @@ export function SarvamOutboundPanel({ orgId, agent, numbers, connections, onChan
     enabled: assignOpen,
   });
   const poolNumbers = (pool.data ?? []).filter((n) => n.provider === "sarvam");
+
+  const applications = useQuery({
+    queryKey: ["admin-sarvam-applications"],
+    queryFn: () => fetchApplications(),
+    enabled: mappingOpen,
+  });
+  const selectedApplication = applications.data?.applications.find((a) => a.id === applicationId);
 
   const gates = useQuery({
     queryKey: ["admin-sarvam-gates", orgId],
@@ -161,7 +187,7 @@ export function SarvamOutboundPanel({ orgId, agent, numbers, connections, onChan
             !agent
               ? "This customer has no agent yet."
               : agentMapped
-                ? `${agent.agent_name} → app ${agent.sarvam_app_id} v${agent.sarvam_app_version}`
+                ? `${agent.agent_name} (${getEmployeeType(agent.employee_type).label}) → app ${agent.sarvam_app_id} v${agent.sarvam_app_version}${agent.sarvam_application_id ? " via template" : ""}`
                 : `${agent.agent_name} is not mapped. Author the app in Sarvam's dashboard first.`
           }
         />
@@ -199,6 +225,9 @@ export function SarvamOutboundPanel({ orgId, agent, numbers, connections, onChan
         </Button>
         <Button size="sm" variant="outline" disabled={!agent} onClick={() => setMappingOpen(true)}>
           Map Sarvam app
+        </Button>
+        <Button size="sm" variant="outline" onClick={() => setTemplateOpen(true)}>
+          Register Sarvam template
         </Button>
         <Button size="sm" variant="outline" onClick={() => setAssignOpen(true)}>
           Assign number from pool
@@ -350,28 +379,60 @@ export function SarvamOutboundPanel({ orgId, agent, numbers, connections, onChan
         open={mappingOpen}
         onOpenChange={setMappingOpen}
         title="Map agent to Sarvam app"
-        description="Enter the app ID and published version from Sarvam's dashboard. Calls use exactly this app version."
+        description="Choose a registered template, or enter the app ID and published version from Sarvam's dashboard. Calls use exactly this app version."
         confirmLabel="Save mapping"
         extra={
-          <div className="grid grid-cols-2 gap-2">
-            <Input
-              aria-label="Sarvam app ID"
-              placeholder="Sarvam app ID"
-              value={appId}
-              onChange={(e) => setAppId(e.target.value)}
-            />
-            <Input
-              aria-label="Sarvam app version"
-              type="number"
-              min={1}
-              placeholder="Version"
-              value={appVersion}
-              onChange={(e) => setAppVersion(e.target.value)}
-            />
+          <div className="space-y-2">
+            <Select
+              value={applicationId || "direct"}
+              onValueChange={(v) => setApplicationId(v === "direct" ? "" : v)}
+            >
+              <SelectTrigger aria-label="Sarvam template">
+                <SelectValue placeholder="Template" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="direct">Enter app ID directly</SelectItem>
+                {(applications.data?.applications ?? []).map((a) => (
+                  <SelectItem key={a.id} value={a.id}>
+                    {a.name} · {getEmployeeType(a.employee_type).label} · v{a.sarvam_app_version}
+                    {a.is_shared ? " · shared" : ""}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {selectedApplication?.is_shared && !applications.data?.sharedEnabled ? (
+              <p className="text-xs text-destructive">
+                Shared templates are turned off on this server (SARVAM_SHARED_APPLICATIONS_ENABLED).
+              </p>
+            ) : null}
+            {applicationId ? null : (
+              <div className="grid grid-cols-2 gap-2">
+                <Input
+                  aria-label="Sarvam app ID"
+                  placeholder="Sarvam app ID"
+                  value={appId}
+                  onChange={(e) => setAppId(e.target.value)}
+                />
+                <Input
+                  aria-label="Sarvam app version"
+                  type="number"
+                  min={1}
+                  placeholder="Version"
+                  value={appVersion}
+                  onChange={(e) => setAppVersion(e.target.value)}
+                />
+              </div>
+            )}
           </div>
         }
         onConfirm={async (reason) => {
           if (!agent) throw new Error("This customer has no agent.");
+          if (applicationId) {
+            await mapApplication({ data: { agentConfigId: agent.id, applicationId, reason } });
+            toast.success("Agent mapped to Sarvam template");
+            refresh();
+            return;
+          }
           await mapAgent({
             data: {
               agentConfigId: agent.id,
@@ -382,6 +443,84 @@ export function SarvamOutboundPanel({ orgId, agent, numbers, connections, onChan
           });
           toast.success("Agent mapped to Sarvam app");
           refresh();
+        }}
+      />
+
+      <ReasonDialog
+        open={templateOpen}
+        onOpenChange={setTemplateOpen}
+        title="Register Sarvam template"
+        description="Record an app version authored in Sarvam's dashboard so agents can be mapped to it. A shared template can serve several customers; each call still carries only that customer's own business details."
+        confirmLabel="Register template"
+        extra={
+          <div className="space-y-2">
+            <Input
+              aria-label="Template name"
+              placeholder="Name, e.g. Booking"
+              value={template.name}
+              onChange={(e) => setTemplate({ ...template, name: e.target.value })}
+            />
+            <Select
+              value={template.employeeType}
+              onValueChange={(v) => setTemplate({ ...template, employeeType: v as EmployeeTypeId })}
+            >
+              <SelectTrigger aria-label="AI employee">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {EMPLOYEE_TYPES.map((t) => (
+                  <SelectItem key={t.id} value={t.id}>
+                    {t.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <div className="grid grid-cols-2 gap-2">
+              <Input
+                aria-label="Template Sarvam app ID"
+                placeholder="Sarvam app ID"
+                value={template.appId}
+                onChange={(e) => setTemplate({ ...template, appId: e.target.value })}
+              />
+              <Input
+                aria-label="Template Sarvam app version"
+                type="number"
+                min={1}
+                placeholder="Version"
+                value={template.version}
+                onChange={(e) => setTemplate({ ...template, version: e.target.value })}
+              />
+            </div>
+            <label className="flex items-start gap-2 text-sm">
+              <Checkbox
+                checked={template.shared}
+                onCheckedChange={(v) => setTemplate({ ...template, shared: Boolean(v) })}
+                className="mt-0.5"
+              />
+              <span>Shared: can be mapped to more than one customer</span>
+            </label>
+          </div>
+        }
+        onConfirm={async (reason) => {
+          await registerApplication({
+            data: {
+              name: template.name,
+              employeeType: template.employeeType,
+              sarvamAppId: template.appId.trim(),
+              sarvamAppVersion: Number(template.version),
+              isShared: template.shared,
+              reason,
+            },
+          });
+          toast.success("Sarvam template registered");
+          setTemplate({
+            name: "",
+            employeeType: "receptionist",
+            appId: "",
+            version: "",
+            shared: false,
+          });
+          void applications.refetch();
         }}
       />
 

@@ -1,6 +1,10 @@
 import { getTelephonyAdapter, sarvamOutboundWebhookUrl } from "@/lib/telephony.server";
 import { checkTelephonyAccess, walletCanAffordOutbound } from "@/lib/telephony-guard.server";
 import { SarvamTelephonyAdapter } from "@/lib/telephony/sarvam-provider.server";
+import {
+  TEMPLATE_AGENT_COLUMNS,
+  templateCallVariables,
+} from "@/lib/sarvam-tenant-variables.server";
 import { isWithinCallingWindow, type CampaignSchedule } from "@/lib/campaign-schedule";
 import { normalizeCustomerPhone } from "@/lib/phone-number";
 import { decideCampaignContactOutcome, type CallTerminalStatus } from "@/lib/campaign-outcome";
@@ -127,7 +131,7 @@ async function dispatchOneCampaign(
       : Promise.resolve({ data: null }),
     supabaseAdmin
       .from("agent_configs")
-      .select("sarvam_app_id, sarvam_app_version")
+      .select(`organization_id, sarvam_app_id, sarvam_app_version, ${TEMPLATE_AGENT_COLUMNS}`)
       .eq("id", campaign.agent_config_id)
       .eq("organization_id", campaign.organization_id)
       .maybeSingle(),
@@ -144,6 +148,11 @@ async function dispatchOneCampaign(
   if (!adapter || !(adapter instanceof SarvamTelephonyAdapter)) {
     return { dialed: 0, skipped: 0, completed: false };
   }
+  const templateVariables = await templateCallVariables(
+    supabaseAdmin,
+    agentConfig,
+    campaign.organization_id,
+  );
   // Authenticated result URL (verify_token). Without it Sarvam's results would
   // be rejected, so nothing is dialled. Only the reason is logged, never the URL.
   const webhook = sarvamOutboundWebhookUrl();
@@ -285,6 +294,8 @@ async function dispatchOneCampaign(
 
     const agentVariables: Record<string, unknown> = {
       ...((cc.variables as Record<string, unknown> | null) ?? {}),
+      // The customer's own business identity wins over contact columns.
+      ...templateVariables,
     };
     if (campaign.objective) agentVariables["campaign_objective"] = campaign.objective;
     if (campaign.call_instructions)

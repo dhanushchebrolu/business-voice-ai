@@ -484,7 +484,7 @@ function resolveClock(
   if (c.zeroPadded) return { hhmm: hhmm(hour, minute), certainty: "explicit", alt: null };
   // 12 with nothing else is genuinely ambiguous: ask, don't infer.
   if (hour === 12) return { hhmm: hhmm(12, minute), certainty: "uncertain", alt: hhmm(0, minute) };
-  // A bare hour on a clinic call: 1..6 is afternoon, 7..11 morning (inferred, other reading kept).
+  // A bare hour on a business call (typical opening hours): 1..6 is afternoon, 7..11 morning (inferred, other reading kept).
   if (hour <= 6)
     return { hhmm: hhmm(hour + 12, minute), certainty: "inferred", alt: hhmm(hour, minute) };
   return { hhmm: hhmm(hour, minute), certainty: "inferred", alt: hhmm(hour + 12, minute) };

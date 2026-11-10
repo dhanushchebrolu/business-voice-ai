@@ -79,6 +79,7 @@ export async function loadSnapshot(supabase: Client, businessId: string): Promis
       greetings: (a?.greetings as unknown as Record<string, string>) ?? {},
       transfer_number: a?.transfer_number ?? null,
       after_hours_behavior: a?.after_hours_behavior ?? "take_message",
+      employee_type: a?.employee_type ?? "receptionist",
     },
   };
 }

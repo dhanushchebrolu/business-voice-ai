@@ -326,10 +326,10 @@ describe("AgentSession: tools, failures, retries, concurrency, calendar", () => 
       [
         {
           input: out(
-            "SAVED_NOT_CONFIRMED: the booking for 4 PM is saved and the slot is held, but the calendar could not be updated; the clinic team will confirm it. Do not say it is confirmed.",
+            "SAVED_NOT_CONFIRMED: the booking for 4 PM is saved and the slot is held, but the calendar could not be updated; the team will confirm it. Do not say it is confirmed.",
           ),
           content:
-            "Your booking is confirmed! It's saved for 4 PM and the clinic team will confirm it shortly.",
+            "Your booking is confirmed! It's saved for 4 PM and the team will confirm it shortly.",
         },
       ],
       "call-1",

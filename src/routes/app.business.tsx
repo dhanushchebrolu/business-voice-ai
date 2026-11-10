@@ -385,7 +385,7 @@ function BusinessPage() {
               {
                 key: "rule",
                 label: "Rule",
-                placeholder: "Never give medical advice over the phone.",
+                placeholder: "Never quote a price that is not on the price list.",
               },
             ]}
             rows={(rules ?? []).map((r) => ({

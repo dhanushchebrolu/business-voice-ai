@@ -9,7 +9,14 @@ import { workspaceQuery, numbersQuery } from "@/lib/workspace";
 import { agentStatusLabel } from "@/lib/agent-status";
 import { normalizeSpeakingPace } from "@/lib/agent-form";
 import { LANGUAGES, VOICES, PACE_MIN, PACE_MAX } from "@/lib/voices";
-import { PERSONAS, CAPABILITIES, isCapabilityEnabled } from "@/lib/business-types";
+import {
+  PERSONAS,
+  CAPABILITIES,
+  EMPLOYEE_TYPES,
+  getEmployeeType,
+  isCapabilityEnabled,
+  type EmployeeTypeId,
+} from "@/lib/business-types";
 import {
   previewAgentConfig,
   saveAgentConfiguration,
@@ -100,6 +107,7 @@ function AgentPage() {
   const [form, setForm] = useState({
     agent_name: "",
     persona: "professional",
+    employee_type: "receptionist" as EmployeeTypeId,
     primary_language: "en-IN",
     voice_id: "simran",
     speaking_pace: 1,
@@ -120,6 +128,7 @@ function AgentPage() {
       setForm({
         agent_name: agent.agent_name,
         persona: agent.persona,
+        employee_type: getEmployeeType(agent.employee_type).id,
         primary_language: agent.primary_language,
         voice_id: agent.voice_id,
         speaking_pace: normalizeSpeakingPace(agent.speaking_pace),
@@ -185,6 +194,7 @@ function AgentPage() {
           businessId: business.id,
           agent_name: form.agent_name,
           persona: form.persona,
+          employee_type: form.employee_type,
           primary_language: form.primary_language,
           voice_id: form.voice_id,
           speaking_pace: form.speaking_pace,
@@ -282,6 +292,28 @@ function AgentPage() {
                   value={form.agent_name}
                   onChange={(e) => setForm({ ...form, agent_name: e.target.value })}
                 />
+              </FieldRow>
+              <FieldRow label="AI employee">
+                <Select
+                  value={form.employee_type}
+                  // A Sarvam template fixes the job; only the ClickAI team changes it.
+                  disabled={Boolean(agent?.sarvam_application_id)}
+                  onValueChange={(v) => setForm({ ...form, employee_type: v as EmployeeTypeId })}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {EMPLOYEE_TYPES.map((t) => (
+                      <SelectItem key={t.id} value={t.id}>
+                        {t.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {getEmployeeType(form.employee_type).description}
+                </p>
               </FieldRow>
               <FieldRow label="Persona">
                 <Select

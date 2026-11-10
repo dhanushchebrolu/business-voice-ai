@@ -68,6 +68,8 @@ export type Database = {
           capabilities: Json;
           created_at: string;
           custom_personality: string | null;
+          employee_type: string;
+          sarvam_application_id: string | null;
           extra_languages: string[];
           greetings: Json;
           id: string;
@@ -93,6 +95,8 @@ export type Database = {
           capabilities?: Json;
           created_at?: string;
           custom_personality?: string | null;
+          employee_type?: string;
+          sarvam_application_id?: string | null;
           extra_languages?: string[];
           greetings?: Json;
           id?: string;
@@ -118,6 +122,8 @@ export type Database = {
           capabilities?: Json;
           created_at?: string;
           custom_personality?: string | null;
+          employee_type?: string;
+          sarvam_application_id?: string | null;
           extra_languages?: string[];
           greetings?: Json;
           id?: string;
@@ -2222,6 +2228,45 @@ export type Database = {
           request_count?: number;
           updated_at?: string;
           window_start?: string;
+        };
+        Relationships: [];
+      };
+      sarvam_applications: {
+        Row: {
+          created_at: string;
+          created_by: string | null;
+          employee_type: string;
+          id: string;
+          is_shared: boolean;
+          name: string;
+          notes: string | null;
+          sarvam_app_id: string;
+          sarvam_app_version: number;
+          updated_at: string;
+        };
+        Insert: {
+          created_at?: string;
+          created_by?: string | null;
+          employee_type: string;
+          id?: string;
+          is_shared?: boolean;
+          name: string;
+          notes?: string | null;
+          sarvam_app_id: string;
+          sarvam_app_version: number;
+          updated_at?: string;
+        };
+        Update: {
+          created_at?: string;
+          created_by?: string | null;
+          employee_type?: string;
+          id?: string;
+          is_shared?: boolean;
+          name?: string;
+          notes?: string | null;
+          sarvam_app_id?: string;
+          sarvam_app_version?: number;
+          updated_at?: string;
         };
         Relationships: [];
       };

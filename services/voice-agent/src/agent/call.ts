@@ -236,7 +236,7 @@ export function developmentDecision(
     callId,
     state: newConversation({ callId, callerId: callerNumber, primaryLanguage: "en-IN" }),
     business: {
-      businessName: "Development Clinic",
+      businessName: "Development Business",
       timeZone: "Asia/Kolkata",
       services,
       now: () => new Date(),

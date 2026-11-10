@@ -8,7 +8,7 @@
  * or internal field name. The six labels this function returns are exactly
  * the ones specified for the client dashboard: "Setting up your phone
  * agent", "Waiting for phone number", "Activating inbound calling",
- * "Outbound calling ready", "Active", "Setup needs admin attention".
+ * "Inbound calling active", "Active", "Setup needs admin attention".
  *
  * Meant to be shown only while account_status is "setup_in_progress"
  * (lifecycle_status setup_paid/provisioning/ready — see the
@@ -60,7 +60,8 @@ export function provisioningStatusLabel(input: ProvisioningStatusInput): Provisi
     return { label: "Active", tone: "live" };
   }
   if (numberActive && inboundEnabled && !outboundEnabled) {
-    return { label: "Outbound calling ready", tone: "ready" };
+    // Outbound stays off until an admin enables it; never call that "ready".
+    return { label: "Inbound calling active", tone: "live" };
   }
 
   if (hasNumber) {
