@@ -104,11 +104,13 @@ async function withSarvamEnvAndFetch<T>(
     SARVAM_ORG_ID: process.env["SARVAM_ORG_ID"],
     SARVAM_WORKSPACE_ID: process.env["SARVAM_WORKSPACE_ID"],
     TELEPHONY_WEBHOOK_BASE_URL: process.env["TELEPHONY_WEBHOOK_BASE_URL"],
+    SARVAM_WEBHOOK_SECRET: process.env["SARVAM_WEBHOOK_SECRET"],
   };
   process.env["SARVAM_API_KEY"] = "sk_test_key";
   process.env["SARVAM_ORG_ID"] = "org_1";
   process.env["SARVAM_WORKSPACE_ID"] = "ws_1";
   process.env["TELEPHONY_WEBHOOK_BASE_URL"] = "https://clickai.test";
+  process.env["SARVAM_WEBHOOK_SECRET"] = "test-webhook-secret";
   const originalFetch = globalThis.fetch;
   let requestBody: unknown;
   globalThis.fetch = (async (_url: string | URL, init?: RequestInit) => {
@@ -521,5 +523,60 @@ describe("supervised-test allowlist (SARVAM_OUTBOUND_TEST_ALLOWLIST)", () => {
     });
     assert.deepEqual(calls, []);
     assert.deepEqual(rpcs, []);
+  });
+});
+
+describe("sendSarvamInstantOutboundCall — authenticated result webhook", () => {
+  test("Sarvam is given the result URL with provider=sarvam and verify_token", async () => {
+    const { client } = makeFakeSupabase({
+      phone_numbers: { select: [{ data: PHONE_NUMBER_ROW, error: null }] },
+      telephony_connections: { select: [{ data: CONNECTION_ROW, error: null }] },
+      agent_configs: { select: [{ data: AGENT_CONFIG_ROW, error: null }] },
+      call_logs: {
+        select: [{ data: null, error: null }],
+        insert: [{ data: { id: "call_1" }, error: null }],
+        update: [{ data: null, error: null }],
+      },
+    });
+    const { requestBody } = await withSarvamEnvAndFetch(
+      { status: 200, body: { attempt_id: "att_1" } },
+      () =>
+        sendSarvamInstantOutboundCall(client, { phoneNumberId: "num_1", toE164: "+912222222222" }),
+    );
+    const config = (requestBody as { webhook_config: { url: string; metadata: unknown } })
+      .webhook_config;
+    assert.equal(
+      config.url,
+      "https://clickai.test/api/public/webhooks/telephony?provider=sarvam&verify_token=test-webhook-secret",
+    );
+    const url = new URL(config.url);
+    assert.equal(url.searchParams.get("provider"), "sarvam");
+    assert.equal(url.searchParams.get("verify_token"), "test-webhook-secret");
+  });
+
+  test("without SARVAM_WEBHOOK_SECRET the call is refused: nothing written, nothing sent to Sarvam", async () => {
+    const { SARVAM_WEBHOOK_SECRET_MISSING_MESSAGE } = await import("./telephony.server.ts");
+    // Only the phone-number read is scripted: any later database call would fail the test.
+    const { client, calls } = makeFakeSupabase({
+      phone_numbers: { select: [{ data: PHONE_NUMBER_ROW, error: null }] },
+    });
+    const { requestBody } = await withSarvamEnvAndFetch({ status: 200, body: {} }, async () => {
+      delete process.env["SARVAM_WEBHOOK_SECRET"]; // restored by the helper
+      await assert.rejects(
+        sendSarvamInstantOutboundCall(client, { phoneNumberId: "num_1", toE164: "+912222222222" }),
+        (err: unknown) => (err as Error).message === SARVAM_WEBHOOK_SECRET_MISSING_MESSAGE,
+      );
+    });
+    assert.equal(requestBody, undefined, "nothing was sent to Sarvam");
+    assert.deepEqual(
+      calls.map((c) => `${c.table}.${c.type}`),
+      ["phone_numbers.select"],
+    );
+  });
+
+  test("the message names the missing setting without exposing any value", async () => {
+    const { SARVAM_WEBHOOK_SECRET_MISSING_MESSAGE } = await import("./telephony.server.ts");
+    assert.match(SARVAM_WEBHOOK_SECRET_MISSING_MESSAGE, /SARVAM_WEBHOOK_SECRET/);
+    assert.doesNotMatch(SARVAM_WEBHOOK_SECRET_MISSING_MESSAGE, /verify_token=|test-webhook-secret/);
   });
 });

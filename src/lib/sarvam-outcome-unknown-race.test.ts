@@ -1014,6 +1014,7 @@ describe("single-call number reservation (concurrent requests and crash recovery
       "SARVAM_ORG_ID",
       "SARVAM_WORKSPACE_ID",
       "TELEPHONY_WEBHOOK_BASE_URL",
+      "SARVAM_WEBHOOK_SECRET",
     ];
     const prior = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
     Object.assign(process.env, {
@@ -1021,6 +1022,7 @@ describe("single-call number reservation (concurrent requests and crash recovery
       SARVAM_ORG_ID: "o",
       SARVAM_WORKSPACE_ID: "w",
       TELEPHONY_WEBHOOK_BASE_URL: "https://clickai.test",
+      SARVAM_WEBHOOK_SECRET: "test-webhook-secret",
     });
     const originalFetch = globalThis.fetch;
     const dials = { count: 0 };
@@ -1246,6 +1248,7 @@ describe("equivalent number formats share one reservation (single call vs campai
       "SARVAM_ORG_ID",
       "SARVAM_WORKSPACE_ID",
       "TELEPHONY_WEBHOOK_BASE_URL",
+      "SARVAM_WEBHOOK_SECRET",
     ];
     const prior = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
     Object.assign(process.env, {
@@ -1253,6 +1256,7 @@ describe("equivalent number formats share one reservation (single call vs campai
       SARVAM_ORG_ID: "o",
       SARVAM_WORKSPACE_ID: "w",
       TELEPHONY_WEBHOOK_BASE_URL: "https://clickai.test",
+      SARVAM_WEBHOOK_SECRET: "test-webhook-secret",
     });
     const originalFetch = globalThis.fetch;
     const dials = { count: 0 };
@@ -1746,6 +1750,7 @@ describe("campaign dispatch vs the number reservation", () => {
       "SARVAM_ORG_ID",
       "SARVAM_WORKSPACE_ID",
       "TELEPHONY_WEBHOOK_BASE_URL",
+      "SARVAM_WEBHOOK_SECRET",
     ];
     const prior = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
     Object.assign(process.env, {
@@ -1753,6 +1758,7 @@ describe("campaign dispatch vs the number reservation", () => {
       SARVAM_ORG_ID: "o",
       SARVAM_WORKSPACE_ID: "w",
       TELEPHONY_WEBHOOK_BASE_URL: "https://clickai.test",
+      SARVAM_WEBHOOK_SECRET: "test-webhook-secret",
     });
     const originalFetch = globalThis.fetch;
     let dials = 0;

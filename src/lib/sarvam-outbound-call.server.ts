@@ -1,6 +1,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
-import { getTelephonyAdapter, sarvamWebhookUrl } from "./telephony.server.ts";
+import {
+  getTelephonyAdapter,
+  SARVAM_WEBHOOK_SECRET_MISSING_MESSAGE,
+  sarvamOutboundWebhookUrl,
+} from "./telephony.server.ts";
 import { SarvamTelephonyAdapter } from "./telephony/sarvam-provider.server.ts";
 import { TelephonyAdapterError } from "./telephony/adapter.ts";
 import { UNRESOLVED_SARVAM_STATUSES } from "./sarvam-call-review.ts";
@@ -231,8 +235,16 @@ export async function sendSarvamInstantOutboundCall(
     throw new Error("This number has no telephony connection configured.");
   if (!phoneNumber.agent_config_id) throw new Error("This number has no agent configured.");
 
-  const webhookUrl = sarvamWebhookUrl();
-  if (!webhookUrl) throw new Error("Outbound calling is not configured on this platform yet.");
+  // Authenticated result URL (verify_token); refuse rather than dial a call
+  // whose result Klyro would reject. Never logged: it contains the secret.
+  const webhook = sarvamOutboundWebhookUrl();
+  if (!webhook.ok)
+    throw new Error(
+      webhook.reason === "webhook_secret_missing"
+        ? SARVAM_WEBHOOK_SECRET_MISSING_MESSAGE
+        : "Outbound calling is not configured on this platform yet.",
+    );
+  const webhookUrl = webhook.url;
 
   const adapter = getTelephonyAdapter("sarvam");
   if (!adapter) throw new Error("Sarvam is not connected. Configure SARVAM_API_KEY first.");
