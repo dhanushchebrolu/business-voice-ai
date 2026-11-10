@@ -81,12 +81,13 @@ const SERVER_REQUIRED = [
  * sarvam.server.ts read SARVAM_API_KEY), and the Vobiz adapter, which
  * telephony.server.ts refuses to create without all three VOBIZ_ values.
  */
-const VOICE_REQUIRED = [
-  "SARVAM_API_KEY",
-  "VOBIZ_AUTH_ID",
-  "VOBIZ_AUTH_TOKEN",
-  "VOBIZ_WEBHOOK_VERIFY_TOKEN",
-];
+const VOICE_REQUIRED = ["SARVAM_API_KEY"];
+/**
+ * Vobiz carries inbound calls only when all three are set
+ * (telephony.server.ts refuses a partial adapter); a Sarvam-only staging
+ * leaves all three unset.
+ */
+const VOBIZ_SET = ["VOBIZ_AUTH_ID", "VOBIZ_AUTH_TOKEN", "VOBIZ_WEBHOOK_VERIFY_TOKEN"];
 /**
  * Uploaded when set, and validated when set. None is read on the inbound
  * Vobiz path: TELEPHONY_WEBHOOK_BASE_URL and VOBIZ_PHONE_NUMBER serve
@@ -96,6 +97,12 @@ const VOICE_REQUIRED = [
 const SERVER_OPTIONAL = [
   "ANTHROPIC_API_KEY",
   "VOICE_LLM_PROVIDER",
+  ...VOBIZ_SET,
+  "SARVAM_VOICE_AGENTS_API_KEY",
+  "SARVAM_INBOUND_VOICE_API_KEY",
+  "SARVAM_OUTBOUND_VOICE_API_KEY",
+  "SARVAM_OUTBOUND_TEST_ALLOWLIST",
+  "SARVAM_SHARED_APPLICATIONS_ENABLED",
   "SARVAM_ORG_ID",
   "SARVAM_WORKSPACE_ID",
   "SARVAM_CONTEXT_SECRET",
@@ -124,7 +131,9 @@ const GOOGLE_CALENDAR_SET = [
  * telephony adapter stays unreachable, and only Vobiz carries calls.
  */
 const PROHIBITED_PREFIXES = ["RAZORPAY_", "EXOTEL_", "TWILIO_"];
-const PROHIBITED_NAMES = ["TELEPHONY_ALLOW_MOCK"];
+// BYPASS_BILLING_GATES would let every call skip entitlement and wallet
+// checks; KLYRO_DISPATCH_MODE arms Sarvam-side campaign dispatch.
+const PROHIBITED_NAMES = ["TELEPHONY_ALLOW_MOCK", "BYPASS_BILLING_GATES", "KLYRO_DISPATCH_MODE"];
 /** URL settings that must point at the staging Worker's own host. */
 const STAGING_HOST_URLS = [
   "TELEPHONY_WEBHOOK_BASE_URL",
@@ -225,6 +234,44 @@ function stagingProblems(env) {
     problems.push(
       "TELEPHONY_WEBHOOK_BASE_URL must be the bare Worker origin, with no path or trailing slash",
     );
+  }
+  const vobizSet = VOBIZ_SET.filter((n) => env[n]);
+  if (vobizSet.length > 0 && vobizSet.length < VOBIZ_SET.length) {
+    const missing = VOBIZ_SET.filter((n) => !env[n]);
+    problems.push(
+      `Vobiz is half-configured: set all three or none (missing ${missing.join(", ")})`,
+    );
+  }
+  // Sarvam outbound dials real phones; an unset allowlist means "any number".
+  // Staging may only ever call exactly one test number.
+  const sarvamOutbound = ["SARVAM_ORG_ID", "SARVAM_WORKSPACE_ID", "SARVAM_WEBHOOK_SECRET"].some(
+    (n) => env[n],
+  );
+  const allowlist = (env.SARVAM_OUTBOUND_TEST_ALLOWLIST ?? "")
+    .split(",")
+    .map((n) => n.trim())
+    .filter(Boolean);
+  if (sarvamOutbound && allowlist.length !== 1) {
+    problems.push(
+      "SARVAM_OUTBOUND_TEST_ALLOWLIST must hold exactly one test number while Sarvam outbound is configured",
+    );
+  }
+  if (allowlist.some((n) => !/^\+\d{8,15}$/.test(n))) {
+    problems.push("SARVAM_OUTBOUND_TEST_ALLOWLIST isn't an E.164 number (+<digits>)");
+  }
+  if (env.SARVAM_WEBHOOK_SECRET && !/^[A-Za-z0-9_-]{32,}$/.test(env.SARVAM_WEBHOOK_SECRET)) {
+    problems.push(
+      "SARVAM_WEBHOOK_SECRET must be at least 32 URL-safe characters (letters, digits, - or _)",
+    );
+  }
+  if (env.SARVAM_WEBHOOK_SECRET && !env.TELEPHONY_WEBHOOK_BASE_URL) {
+    problems.push("SARVAM_WEBHOOK_SECRET is set but TELEPHONY_WEBHOOK_BASE_URL isn't");
+  }
+  if (
+    env.SARVAM_SHARED_APPLICATIONS_ENABLED &&
+    !["true", "false"].includes(env.SARVAM_SHARED_APPLICATIONS_ENABLED)
+  ) {
+    problems.push('SARVAM_SHARED_APPLICATIONS_ENABLED must be "true", "false" or unset');
   }
   const googleSet = GOOGLE_CALENDAR_SET.filter((n) => env[n]);
   if (googleSet.length > 0 && googleSet.length < GOOGLE_CALENDAR_SET.length) {

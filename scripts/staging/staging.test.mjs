@@ -80,15 +80,13 @@ test("a complete staging file is READY, shows only the project ref, and prints n
 });
 
 // --- voice, telephony, calendar and payment guards ---
-/** What an inbound Vobiz call needs: Sarvam plus the three values the Vobiz adapter requires. */
-const VOICE_REQUIRED = [
-  "SARVAM_API_KEY",
-  "VOBIZ_AUTH_ID",
-  "VOBIZ_AUTH_TOKEN",
-  "VOBIZ_WEBHOOK_VERIFY_TOKEN",
-];
+/** Required for any voice: Sarvam speech and the language model. */
+const VOICE_REQUIRED = ["SARVAM_API_KEY"];
+/** Vobiz inbound: all three or none. */
+const VOBIZ_SET = ["VOBIZ_AUTH_ID", "VOBIZ_AUTH_TOKEN", "VOBIZ_WEBHOOK_VERIFY_TOKEN"];
 /** Optional for a voice-only staging Worker: outbound-only, Exotel-only and Google Calendar settings. */
 const VOICE_OPTIONAL = [
+  ...VOBIZ_SET,
   "TELEPHONY_WEBHOOK_BASE_URL",
   "MEDIA_SESSION_TOKEN_SECRET",
   "VOBIZ_PHONE_NUMBER",
@@ -117,7 +115,47 @@ function assertRefused(overrides, message, extraProcessEnv = {}) {
   assert.doesNotMatch(deploy.out, new RegExp(SECRET_MARKER), label);
 }
 
-test("each of the four voice settings an inbound call needs is required", () => {
+test("Vobiz is all three settings or none", () => {
+  for (const name of VOBIZ_SET) {
+    assertRefused({ [name]: "" }, /Vobiz is half-configured: set all three or none/);
+  }
+});
+
+test("Sarvam outbound on staging: exactly one allowlisted number, no billing bypass, no campaign dispatch", () => {
+  const outbound = {
+    SARVAM_ORG_ID: "org-test",
+    SARVAM_WORKSPACE_ID: "ws-test",
+    SARVAM_WEBHOOK_SECRET: `sarvamhook_${"x".repeat(32)}`,
+  };
+  const ready = runWith(
+    complete({ ...outbound, SARVAM_OUTBOUND_TEST_ALLOWLIST: "+919000000001" }),
+    ["check"],
+  );
+  assert.equal(ready.status, 0, ready.out);
+  for (const allowlist of ["", "+919000000001,+919000000002"]) {
+    assertRefused(
+      { ...outbound, SARVAM_OUTBOUND_TEST_ALLOWLIST: allowlist },
+      /must hold exactly one test number/,
+    );
+  }
+  assertRefused(
+    { ...outbound, SARVAM_OUTBOUND_TEST_ALLOWLIST: "9000000001" },
+    /SARVAM_OUTBOUND_TEST_ALLOWLIST isn't an E\.164 number/,
+  );
+  assertRefused(
+    {
+      ...outbound,
+      SARVAM_OUTBOUND_TEST_ALLOWLIST: "+919000000001",
+      SARVAM_WEBHOOK_SECRET: "short",
+    },
+    /SARVAM_WEBHOOK_SECRET must be at least 32/,
+  );
+  for (const name of ["BYPASS_BILLING_GATES", "KLYRO_DISPATCH_MODE"]) {
+    assertRefused({ [name]: "true" }, new RegExp(`${name} must stay unset on staging`));
+  }
+});
+
+test("the Sarvam API key is required", () => {
   for (const name of VOICE_REQUIRED) {
     assertRefused({ [name]: "" }, new RegExp(`MISSING {2}${name}\\b`));
     // Also from the minimal voice-only file.
@@ -175,7 +213,7 @@ test("the Vobiz verify token must be long and URL-safe, since it travels in the 
     );
   }
   assert.equal(
-    runWith(voiceOnly({ VOBIZ_WEBHOOK_VERIFY_TOKEN: "A-z_0".repeat(8) }), ["check"]).status,
+    runWith(complete({ VOBIZ_WEBHOOK_VERIFY_TOKEN: "A-z_0".repeat(8) }), ["check"]).status,
     0,
   );
 });
