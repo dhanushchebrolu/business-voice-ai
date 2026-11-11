@@ -1,12 +1,13 @@
--- ROLLBACK for production migration 20261112090000_wallet_balance_ledger_cache.
+-- ROLLBACK for production migration 20261111090100_wallet_balance_ledger_cache.
 -- Function bodies captured read-only from production (eorazvlmqwunmhwviocn) on 2026-11-11T04:44:09.783Z, before it was applied.
 -- The migration changes no ledger row, so this restores the schema exactly. Run as one transaction.
 BEGIN;
 DROP TRIGGER IF EXISTS trg_wallet_tx_apply ON public.wallet_transactions;
 DROP TRIGGER IF EXISTS trg_wallet_tx_immutable ON public.wallet_transactions;
+DROP TRIGGER IF EXISTS trg_wallet_tx_no_truncate ON public.wallet_transactions;
 DROP FUNCTION IF EXISTS public.wallet_apply_ledger_entry();
 DROP FUNCTION IF EXISTS public.wallet_ledger_immutable();
-DROP INDEX IF EXISTS public.idx_wallet_tx_call_usage_once;
+-- idx_wallet_tx_call_usage_ref (20260904120000) is not touched by the migration and stays.
 
 CREATE OR REPLACE FUNCTION public.debit_wallet_for_call(_org uuid, _call_id uuid, _amount integer, _description text)
  RETURNS TABLE(applied boolean, already_applied boolean, balance integer)
@@ -69,5 +70,5 @@ REVOKE ALL ON FUNCTION public.debit_wallet_for_call(uuid, uuid, integer, text) F
 GRANT EXECUTE ON FUNCTION public.debit_wallet_for_call(uuid, uuid, integer, text) TO service_role;
 REVOKE ALL ON FUNCTION public.wallet_can_afford(uuid, integer) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.wallet_can_afford(uuid, integer) TO service_role;
-DELETE FROM supabase_migrations.schema_migrations WHERE version = '20261112090000';
+DELETE FROM supabase_migrations.schema_migrations WHERE version = '20261111090100';
 COMMIT;

@@ -14,7 +14,7 @@ import {
 } from "./pg-test-cluster.ts";
 
 /**
- * REAL-PostgreSQL coverage for 20261112090000_wallet_balance_ledger_cache.sql:
+ * REAL-PostgreSQL coverage for 20261111090100_wallet_balance_ledger_cache.sql:
  * the running balance follows every ledger insert and delete, the ledger is
  * append-only, a call is debited at most once, and balance reads keep their
  * access rules.
@@ -105,7 +105,7 @@ before(() => {
     }
   }
   const again = execSql(
-    readFileSync(join(migrationsDir, "20261112090000_wallet_balance_ledger_cache.sql"), "utf8"),
+    readFileSync(join(migrationsDir, "20261111090100_wallet_balance_ledger_cache.sql"), "utf8"),
   );
   if (again.status !== 0) {
     setupFailure = `re-applying the migration failed: ${again.stderr}`;
@@ -168,7 +168,7 @@ describe("running balance", () => {
     rows(insert);
     const again = execSql!(insert);
     assert.notEqual(again.status, 0);
-    assert.match(again.stderr, /idx_wallet_tx_call_usage_once/);
+    assert.match(again.stderr, /idx_wallet_tx_call_usage_ref/);
   });
 
   test("ledger rows cannot be edited; deletes keep the balance exact", (t) => {

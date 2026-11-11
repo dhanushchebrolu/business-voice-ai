@@ -1,4 +1,4 @@
--- O(1) wallet balances, an append-only ledger, and a once-per-call debit guard.
+-- O(1) wallet balances and an append-only wallet ledger.
 --
 -- Measured (scripts/loadtest/db-hotpaths.mjs, local PostgreSQL 17): every
 -- balance read summed the organization's whole ledger, so
@@ -11,12 +11,14 @@
 --    transaction as the ledger row, so it can never disagree with the
 --    ledger: an insert adds the amount, a delete (only ever an organization
 --    deletion's cascade) subtracts it.
--- 2. wallet_transactions rows can no longer be updated: corrections are new
---    entries (reversals), never edits.
--- 3. A unique index allows at most one call_usage debit per (organization,
---    call). debit_wallet_for_call already serializes on the organization row
---    and checks first; this is the database-level guarantee behind it, for
---    any other writer. Production had no duplicates when this was written.
+-- 2. wallet_transactions rows can no longer be updated or truncated:
+--    corrections are new entries (reversals), never edits. (TRUNCATE fires
+--    no row triggers, so allowing it would also desynchronize the balances.)
+--    Row deletes stay possible: an organization deletion cascades to its
+--    ledger and its balance row together.
+-- 3. One call_usage debit per (organization, call) is already enforced by
+--    idx_wallet_tx_call_usage_ref (20260904120000); this migration relies on
+--    it and adds no index.
 -- 4. wallet_balance / wallet_can_afford / debit_wallet_for_call read the
 --    running balance instead of summing. Same signatures, grants, locks,
 --    idempotency and SECURITY settings as before.
@@ -70,12 +72,12 @@ DROP TRIGGER IF EXISTS trg_wallet_tx_immutable ON public.wallet_transactions;
 CREATE TRIGGER trg_wallet_tx_immutable
   BEFORE UPDATE ON public.wallet_transactions
   FOR EACH ROW EXECUTE FUNCTION public.wallet_ledger_immutable();
+DROP TRIGGER IF EXISTS trg_wallet_tx_no_truncate ON public.wallet_transactions;
+CREATE TRIGGER trg_wallet_tx_no_truncate
+  BEFORE TRUNCATE ON public.wallet_transactions
+  FOR EACH STATEMENT EXECUTE FUNCTION public.wallet_ledger_immutable();
 
--- ============ 3. once-per-call debit guard ============
-CREATE UNIQUE INDEX IF NOT EXISTS idx_wallet_tx_call_usage_once
-  ON public.wallet_transactions (organization_id, reference)
-  WHERE kind = 'call_usage' AND reference IS NOT NULL;
-
+-- ============ 3. backfill ============
 -- Backfill (exact, under the lock above).
 INSERT INTO public.wallet_balances (organization_id, balance, updated_at)
 SELECT organization_id, COALESCE(SUM(amount), 0), now()
