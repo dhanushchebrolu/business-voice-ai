@@ -428,7 +428,11 @@ describe("call outcome, validation and audit", () => {
     assert.equal(leads.length, 1);
     assert.equal(leads[0]!["organization_id"], ORG_SMILE);
     assert.equal(leads[0]!["phone"], "+919000000002");
-    assert.equal(leads[0]!["source"], "voice", "leads.source CHECK allows voice, not phone");
+    assert.equal(
+      leads[0]!["source"],
+      "phone",
+      "same source as other call leads (leads.source default)",
+    );
   });
 
   test("bad input is rejected; every request is audited under its own tenant", async () => {

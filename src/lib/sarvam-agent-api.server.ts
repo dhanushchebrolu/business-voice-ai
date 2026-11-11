@@ -469,7 +469,7 @@ export async function handleSarvamAgentRequest(
         business_id: auth.businessId,
         name: outcome.customer_name ?? null,
         phone,
-        source: "voice",
+        source: "phone", // leads.source default; other call leads use it too
         asked_about: outcome.interest ?? outcome.outcome ?? null,
         notes: outcome.summary ?? null,
       });
