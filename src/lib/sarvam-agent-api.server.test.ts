@@ -392,11 +392,13 @@ describe("never invents business facts", () => {
     assert.equal(r.body["context_status"], "unavailable");
     assert.equal(r.body["business_name"], undefined);
     assert.match(String(r.body["guidance"]), /do not guess/);
-    // And the Sarvam configuration tells the agent to stay safe if on-start fails outright.
-    assert.match(
-      sarvamToolConfiguration("https://x").promptGuard,
-      /default value of context_status to "unavailable"/,
+    // If on-start fails outright, the variable's Sarvam default keeps the agent in safe mode.
+    const cfg = sarvamToolConfiguration("https://x");
+    assert.deepEqual(
+      cfg.inputVariables.find((v) => v.name === "context_status"),
+      { name: "context_status", defaultValue: "unavailable" },
     );
+    assert.match(cfg.promptGuard, /never guess/);
   });
 
   test("a customer without a business profile gets 'unavailable', not someone else's data", async () => {
@@ -426,6 +428,7 @@ describe("call outcome, validation and audit", () => {
     assert.equal(leads.length, 1);
     assert.equal(leads[0]!["organization_id"], ORG_SMILE);
     assert.equal(leads[0]!["phone"], "+919000000002");
+    assert.equal(leads[0]!["source"], "voice", "leads.source CHECK allows voice, not phone");
   });
 
   test("bad input is rejected; every request is audited under its own tenant", async () => {
@@ -443,6 +446,11 @@ describe("call outcome, validation and audit", () => {
       400,
     );
     assert.equal((await call("tools/delete_everything", tokens[ORG_SMILE]!)).status, 404);
+    const noCallId = await call("tools/book_appointment", tokens[ORG_SMILE]!, {
+      date: "2026-11-12",
+      time: "16:30",
+    });
+    assert.equal(noCallId.status, 400, "a booking needs interaction_id for idempotency");
     const res = await handleSarvamAgentRequest(
       new Request("https://x/api/public/sarvam/agent/context", {
         method: "POST",
@@ -496,5 +504,17 @@ describe("Sarvam configuration brief", () => {
       assert.match(t.auth, /Bearer token/);
     }
     assert.deepEqual(cfg.allowlistIps, ["4.213.167.70", "35.154.84.150"]);
+    // Sarvam's built-in current_date/current_time are read-only; never save into them.
+    const saved = cfg.tools[0]!.saveIntoVariables!;
+    for (const reserved of ["current_date", "current_time", "current_datetime", "current_day"])
+      assert.ok(!saved.includes(reserved), reserved);
+    assert.deepEqual(
+      saved,
+      cfg.inputVariables.map((v) => v.name),
+    );
+    const onEnd = cfg.tools.find((t) => t.lifecycle === "on_end")!;
+    const outputs = new Set(cfg.outputVariables.map((v) => `@${v.name}`));
+    for (const k of ["outcome", "summary", "customer_name", "interest"])
+      assert.ok(outputs.has(onEnd.body[k]!), k);
   });
 });

@@ -211,6 +211,25 @@ export function SarvamIntegrationPanel({ orgId }: { orgId: string }) {
                     </div>
                   ))}
                   <div className="border-t border-border pt-2">
+                    <p className="font-medium">
+                      Input variables (create before the tools; default value in brackets)
+                    </p>
+                    <p className="font-mono">
+                      {brief.data.toolConfiguration.inputVariables
+                        .map((v) => `${v.name} [${v.defaultValue}]`)
+                        .join(", ")}
+                    </p>
+                  </div>
+                  <div className="border-t border-border pt-2">
+                    <p className="font-medium">Output variables (used by record_call_outcome)</p>
+                    {brief.data.toolConfiguration.outputVariables.map((v) => (
+                      <p key={v.name}>
+                        <span className="font-mono">{v.name}</span> · {v.type} ·{" "}
+                        {v.extractionPrompt}
+                      </p>
+                    ))}
+                  </div>
+                  <div className="border-t border-border pt-2">
                     <p className="font-medium">Add to the agent's instructions</p>
                     <p className="rounded bg-muted p-2">
                       {brief.data.toolConfiguration.promptGuard}

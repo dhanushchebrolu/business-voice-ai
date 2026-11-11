@@ -221,8 +221,8 @@ export function flattenContext(ctx: SarvamClientContext, now: Date): Record<stri
     business_email: b.email ?? "",
     business_website: b.website ?? "",
     business_timezone: b.timezone,
-    current_date: today.date,
-    current_time: today.time,
+    business_date: today.date,
+    business_time: today.time,
     hours_today: hoursConfigured ? (dayText(today.weekday) ?? "not set") : "",
     opening_hours: cap(openingHours),
     services_and_prices: cap(services.join("; ")),
@@ -351,7 +351,7 @@ export async function handleSarvamAgentRequest(
   if (!body) return json({ error: "invalid_body" }, 400);
   const interactionId = str(body, "interaction_id", 200);
 
-  void deps.supabaseAdmin
+  await deps.supabaseAdmin
     .from("sarvam_agent_integrations")
     .update({ last_used_at: now.toISOString() })
     .eq("id", auth.integrationId)
@@ -421,6 +421,8 @@ export async function handleSarvamAgentRequest(
         });
       }
 
+      if (!interactionId)
+        return json({ ok: false, error: "interaction_id is required to book" }, 400);
       const time = str(body, "time", 5);
       if (!time || !/^\d{2}:\d{2}$/.test(time))
         return json({ ok: false, error: "time must be HH:mm" }, 400);
@@ -462,15 +464,19 @@ export async function handleSarvamAgentRequest(
     if (dupError) throw dupError;
     const phone = normalizeCustomerPhone(outcome.caller_number ?? "", null);
     if (phone && (outcome.customer_name || outcome.summary || outcome.interest)) {
-      await deps.supabaseAdmin.from("leads").insert({
+      const { error: leadError } = await deps.supabaseAdmin.from("leads").insert({
         organization_id: auth.organizationId,
         business_id: auth.businessId,
         name: outcome.customer_name ?? null,
         phone,
-        source: "phone",
+        source: "voice",
         asked_about: outcome.interest ?? outcome.outcome ?? null,
         notes: outcome.summary ?? null,
       });
+      if (leadError)
+        await audit(deps, auth, "lead", "error", interactionId, {
+          error: leadError.message.slice(0, 300),
+        });
     }
     return json({ ok: true, duplicate: false });
   } catch (err) {
@@ -510,6 +516,8 @@ export interface SarvamToolSpec {
  */
 export function sarvamToolConfiguration(baseUrl: string): {
   tools: SarvamToolSpec[];
+  inputVariables: { name: string; defaultValue: string }[];
+  outputVariables: { name: string; type: string; extractionPrompt: string }[];
   promptGuard: string;
   allowlistIps: string[];
 } {
@@ -527,8 +535,8 @@ export function sarvamToolConfiguration(baseUrl: string): {
     "business_email",
     "business_website",
     "business_timezone",
-    "current_date",
-    "current_time",
+    "business_date",
+    "business_time",
     "hours_today",
     "opening_hours",
     "services_and_prices",
@@ -599,16 +607,42 @@ export function sarvamToolConfiguration(baseUrl: string): {
         body: {
           interaction_id: "@Interaction ID",
           caller_number: "@User Identifier",
-          outcome: "@your outcome variable",
-          summary: "@your summary variable",
-          customer_name: "@your customer name variable",
-          interest: "@your interest variable",
+          outcome: "@call_outcome",
+          summary: "@call_summary",
+          customer_name: "@customer_name",
+          interest: "@caller_interest",
         },
         purpose:
           "Records the call's outcome once per call and saves a lead when the caller left details.",
       },
     ],
-    promptGuard: `Business facts come only from the ClickAI variables ({{business_name}}, {{opening_hours}}, {{hours_today}}, {{services_and_prices}}, {{staff}}, {{faqs}}, {{policies}}) or the get_business_info tool. If {{context_status}} is not "ok", or a value is empty, never guess: say the team will confirm and offer a callback. Set the default value of context_status to "unavailable" so a failed on-start leaves the agent in this safe mode.`,
+    inputVariables: contextVars.map((name) => ({
+      name,
+      defaultValue: name === "context_status" ? "unavailable" : "",
+    })),
+    outputVariables: [
+      {
+        name: "call_outcome",
+        type: "Enum: booked, enquiry_answered, callback_requested, not_interested, other",
+        extractionPrompt: "What the call achieved for the caller.",
+      },
+      {
+        name: "call_summary",
+        type: "String",
+        extractionPrompt: "Two sentences: what the caller wanted and what was agreed.",
+      },
+      {
+        name: "customer_name",
+        type: "String",
+        extractionPrompt: "The caller's name if they gave it, otherwise empty.",
+      },
+      {
+        name: "caller_interest",
+        type: "String",
+        extractionPrompt: "The service the caller asked about, otherwise empty.",
+      },
+    ],
+    promptGuard: `Business facts come only from the ClickAI variables (business_name, opening_hours, hours_today, services_and_prices, staff, faqs, policies; insert them with @) or the get_business_info tool. If context_status is not "ok", or a value is empty, never guess: say the team will confirm and offer a callback. Only offer times check_availability returned, and say an appointment is booked only when book_appointment returns bookingOutcome "confirmed".`,
     allowlistIps: ["4.213.167.70", "35.154.84.150"],
   };
 }
