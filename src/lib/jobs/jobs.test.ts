@@ -209,3 +209,74 @@ describe("handlers", () => {
     assert.equal(job.organization_id, "o1");
   });
 });
+
+describe("crash after the effect, before the acknowledgement", () => {
+  test("a reconcile job re-run after a crash sees the call final and resolves nothing", async () => {
+    const call = {
+      id: "call-1",
+      organization_id: "org-1",
+      provider: "sarvam",
+      direction: "outbound",
+      status: "initiated",
+      provider_call_id: "att-1",
+      phone_number_id: "num-1",
+      started_at: "2026-11-11T10:00:00Z",
+    };
+    const rows: Record<string, unknown> = {
+      call_logs: call,
+      phone_numbers: { organization_id: "org-1", agent_config_id: "agent-1" },
+      agent_configs: { organization_id: "org-1", sarvam_app_id: "app-x" },
+    };
+    const supabaseAdmin = {
+      from(table: string) {
+        const q = {
+          select: () => q,
+          eq: () => q,
+          maybeSingle: async () => ({ data: rows[table] ?? null, error: null }),
+        };
+        return q;
+      },
+    } as never;
+    let resolutions = 0;
+    const store = new FakeStore();
+    const handlers = buildJobHandlers({
+      supabaseAdmin,
+      store,
+      reconcile: {
+        findAttempt: async () => ({
+          attemptId: "att-1",
+          interactionId: "20261111/x",
+          connectivityStatus: "connected",
+          durationSeconds: 30,
+          nextActionStatus: "UNKNOWN",
+          failureReason: null,
+          appVersion: 2,
+          attemptedAt: null,
+        }),
+        resolve: async () => {
+          resolutions++;
+          call.status = "completed"; // the effect commits
+        },
+        now: () => new Date("2026-11-11T11:00:00Z"),
+      },
+    });
+    const { id } = await store.enqueue({
+      kind: "sarvam.reconcile_call",
+      idempotencyKey: "r1",
+      payload: { callId: "call-1" },
+    });
+
+    // Run 1: claim and execute, then the runner dies before complete_job.
+    const [claimed] = await store.claim("runner-1", 10);
+    const first = await handlers["sarvam.reconcile_call"]!(claimed!);
+    assert.equal((first as { state: string }).state, "resolved");
+    // Lease expiry makes it claimable again (the SQL does this; the fake models it).
+    store.jobs.get(id)!.status = "queued";
+
+    // Run 2 by another runner.
+    const summary = await runDueJobs(store, { worker: "runner-2", budgetMs: 5_000, handlers });
+    assert.equal(summary.succeeded, 1);
+    assert.equal(resolutions, 1, "resolved exactly once across the crash");
+    assert.equal(store.jobs.get(id)!.status, "succeeded");
+  });
+});

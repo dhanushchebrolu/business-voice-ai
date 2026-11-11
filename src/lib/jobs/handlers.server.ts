@@ -94,7 +94,7 @@ export function buildJobHandlers(deps: HandlerDeps): Record<string, JobHandler> 
     "sarvam.reconcile_call": async (job) => {
       const callId = (job.payload as { callId?: unknown })?.callId;
       if (typeof callId !== "string") throw new PermanentJobError("payload.callId is required");
-      const { reconcileSarvamCall } = await import("@/lib/sarvam-reconciliation.server");
+      const { reconcileSarvamCall } = await import("../sarvam-reconciliation.server.ts");
       const reconcileDeps = deps.reconcile ?? (await defaultReconcileDeps(supabaseAdmin));
       const result = await reconcileSarvamCall(supabaseAdmin, callId, reconcileDeps);
       if (result.state === "resolved")
