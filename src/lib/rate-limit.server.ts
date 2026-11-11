@@ -118,3 +118,12 @@ export const checkSarvamContextRateLimit = createRateLimiter(
   CONTEXT_LIMIT,
   CONTEXT_WINDOW_SECONDS,
 );
+
+// A customer's Sarvam agent API (on-start context, mid-call tools, on-end
+// outcome), keyed by the authenticated integration: generous enough for
+// several concurrent calls of one customer, bounded against a leaked token.
+export const checkSarvamAgentRateLimit = createRateLimiter(
+  new SupabaseRateLimitStore("sarvam_agent"),
+  300,
+  60,
+);

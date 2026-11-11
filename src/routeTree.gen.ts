@@ -93,7 +93,9 @@ import { Route as ApiPublicWebhooksWhatsappRouteImport } from './routes/api/publ
 import { Route as ApiPublicIntegrationsGoogleCalendarCallbackRouteImport } from './routes/api/public/integrations/google-calendar/callback'
 import { Route as ApiPublicIntegrationsInstagramCallbackRouteImport } from './routes/api/public/integrations/instagram/callback'
 import { Route as ApiPublicIntegrationsRazorpayCallbackRouteImport } from './routes/api/public/integrations/razorpay/callback'
+import { Route as ApiPublicSarvamAgentContextRouteImport } from './routes/api/public/sarvam/agent/context'
 import { Route as ApiPublicWebhooksExotelMediaTokenRouteImport } from './routes/api/public/webhooks/exotel.media-token'
+import { Route as ApiPublicSarvamAgentToolsToolRouteImport } from './routes/api/public/sarvam/agent/tools.$tool'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -539,10 +541,22 @@ const ApiPublicIntegrationsRazorpayCallbackRoute =
     path: '/api/public/integrations/razorpay/callback',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicSarvamAgentContextRoute =
+  ApiPublicSarvamAgentContextRouteImport.update({
+    id: '/api/public/sarvam/agent/context',
+    path: '/api/public/sarvam/agent/context',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicWebhooksExotelMediaTokenRoute =
   ApiPublicWebhooksExotelMediaTokenRouteImport.update({
     id: '/api/public/webhooks/exotel/media-token',
     path: '/api/public/webhooks/exotel/media-token',
+    getParentRoute: () => rootRouteImport,
+  } as any)
+const ApiPublicSarvamAgentToolsToolRoute =
+  ApiPublicSarvamAgentToolsToolRouteImport.update({
+    id: '/api/public/sarvam/agent/tools/$tool',
+    path: '/api/public/sarvam/agent/tools/$tool',
     getParentRoute: () => rootRouteImport,
   } as any)
 
@@ -631,7 +645,9 @@ export interface FileRoutesByFullPath {
   '/api/public/integrations/google-calendar/callback': typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
   '/api/public/integrations/instagram/callback': typeof ApiPublicIntegrationsInstagramCallbackRoute
   '/api/public/integrations/razorpay/callback': typeof ApiPublicIntegrationsRazorpayCallbackRoute
+  '/api/public/sarvam/agent/context': typeof ApiPublicSarvamAgentContextRoute
   '/api/public/webhooks/exotel/media-token': typeof ApiPublicWebhooksExotelMediaTokenRoute
+  '/api/public/sarvam/agent/tools/$tool': typeof ApiPublicSarvamAgentToolsToolRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -714,7 +730,9 @@ export interface FileRoutesByTo {
   '/api/public/integrations/google-calendar/callback': typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
   '/api/public/integrations/instagram/callback': typeof ApiPublicIntegrationsInstagramCallbackRoute
   '/api/public/integrations/razorpay/callback': typeof ApiPublicIntegrationsRazorpayCallbackRoute
+  '/api/public/sarvam/agent/context': typeof ApiPublicSarvamAgentContextRoute
   '/api/public/webhooks/exotel/media-token': typeof ApiPublicWebhooksExotelMediaTokenRoute
+  '/api/public/sarvam/agent/tools/$tool': typeof ApiPublicSarvamAgentToolsToolRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -802,7 +820,9 @@ export interface FileRoutesById {
   '/api/public/integrations/google-calendar/callback': typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
   '/api/public/integrations/instagram/callback': typeof ApiPublicIntegrationsInstagramCallbackRoute
   '/api/public/integrations/razorpay/callback': typeof ApiPublicIntegrationsRazorpayCallbackRoute
+  '/api/public/sarvam/agent/context': typeof ApiPublicSarvamAgentContextRoute
   '/api/public/webhooks/exotel/media-token': typeof ApiPublicWebhooksExotelMediaTokenRoute
+  '/api/public/sarvam/agent/tools/$tool': typeof ApiPublicSarvamAgentToolsToolRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -891,7 +911,9 @@ export interface FileRouteTypes {
     | '/api/public/integrations/google-calendar/callback'
     | '/api/public/integrations/instagram/callback'
     | '/api/public/integrations/razorpay/callback'
+    | '/api/public/sarvam/agent/context'
     | '/api/public/webhooks/exotel/media-token'
+    | '/api/public/sarvam/agent/tools/$tool'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -974,7 +996,9 @@ export interface FileRouteTypes {
     | '/api/public/integrations/google-calendar/callback'
     | '/api/public/integrations/instagram/callback'
     | '/api/public/integrations/razorpay/callback'
+    | '/api/public/sarvam/agent/context'
     | '/api/public/webhooks/exotel/media-token'
+    | '/api/public/sarvam/agent/tools/$tool'
   id:
     | '__root__'
     | '/'
@@ -1061,7 +1085,9 @@ export interface FileRouteTypes {
     | '/api/public/integrations/google-calendar/callback'
     | '/api/public/integrations/instagram/callback'
     | '/api/public/integrations/razorpay/callback'
+    | '/api/public/sarvam/agent/context'
     | '/api/public/webhooks/exotel/media-token'
+    | '/api/public/sarvam/agent/tools/$tool'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -1110,7 +1136,9 @@ export interface RootRouteChildren {
   ApiPublicIntegrationsGoogleCalendarCallbackRoute: typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
   ApiPublicIntegrationsInstagramCallbackRoute: typeof ApiPublicIntegrationsInstagramCallbackRoute
   ApiPublicIntegrationsRazorpayCallbackRoute: typeof ApiPublicIntegrationsRazorpayCallbackRoute
+  ApiPublicSarvamAgentContextRoute: typeof ApiPublicSarvamAgentContextRoute
   ApiPublicWebhooksExotelMediaTokenRoute: typeof ApiPublicWebhooksExotelMediaTokenRoute
+  ApiPublicSarvamAgentToolsToolRoute: typeof ApiPublicSarvamAgentToolsToolRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -1703,11 +1731,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicIntegrationsRazorpayCallbackRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/sarvam/agent/context': {
+      id: '/api/public/sarvam/agent/context'
+      path: '/api/public/sarvam/agent/context'
+      fullPath: '/api/public/sarvam/agent/context'
+      preLoaderRoute: typeof ApiPublicSarvamAgentContextRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/webhooks/exotel/media-token': {
       id: '/api/public/webhooks/exotel/media-token'
       path: '/api/public/webhooks/exotel/media-token'
       fullPath: '/api/public/webhooks/exotel/media-token'
       preLoaderRoute: typeof ApiPublicWebhooksExotelMediaTokenRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/sarvam/agent/tools/$tool': {
+      id: '/api/public/sarvam/agent/tools/$tool'
+      path: '/api/public/sarvam/agent/tools/$tool'
+      fullPath: '/api/public/sarvam/agent/tools/$tool'
+      preLoaderRoute: typeof ApiPublicSarvamAgentToolsToolRouteImport
       parentRoute: typeof rootRouteImport
     }
   }
@@ -1895,8 +1937,10 @@ const rootRouteChildren: RootRouteChildren = {
     ApiPublicIntegrationsInstagramCallbackRoute,
   ApiPublicIntegrationsRazorpayCallbackRoute:
     ApiPublicIntegrationsRazorpayCallbackRoute,
+  ApiPublicSarvamAgentContextRoute: ApiPublicSarvamAgentContextRoute,
   ApiPublicWebhooksExotelMediaTokenRoute:
     ApiPublicWebhooksExotelMediaTokenRoute,
+  ApiPublicSarvamAgentToolsToolRoute: ApiPublicSarvamAgentToolsToolRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

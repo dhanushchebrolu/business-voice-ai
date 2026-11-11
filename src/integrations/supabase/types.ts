@@ -2294,6 +2294,90 @@ export type Database = {
         };
         Relationships: [];
       };
+      sarvam_agent_events: {
+        Row: {
+          created_at: string;
+          detail: Json | null;
+          id: string;
+          integration_id: string;
+          interaction_id: string | null;
+          kind: string;
+          organization_id: string;
+          status: string;
+        };
+        Insert: {
+          created_at?: string;
+          detail?: Json | null;
+          id?: string;
+          integration_id: string;
+          interaction_id?: string | null;
+          kind: string;
+          organization_id: string;
+          status: string;
+        };
+        Update: {
+          created_at?: string;
+          detail?: Json | null;
+          id?: string;
+          integration_id?: string;
+          interaction_id?: string | null;
+          kind?: string;
+          organization_id?: string;
+          status?: string;
+        };
+        Relationships: [];
+      };
+      sarvam_agent_integrations: {
+        Row: {
+          agent_config_id: string;
+          created_at: string;
+          created_by: string | null;
+          disabled_at: string | null;
+          disabled_reason: string | null;
+          expires_at: string | null;
+          id: string;
+          last_used_at: string | null;
+          organization_id: string;
+          rotated_at: string | null;
+          status: string;
+          token_hash: string;
+          token_prefix: string;
+          updated_at: string;
+        };
+        Insert: {
+          agent_config_id: string;
+          created_at?: string;
+          created_by?: string | null;
+          disabled_at?: string | null;
+          disabled_reason?: string | null;
+          expires_at?: string | null;
+          id?: string;
+          last_used_at?: string | null;
+          organization_id: string;
+          rotated_at?: string | null;
+          status?: string;
+          token_hash: string;
+          token_prefix: string;
+          updated_at?: string;
+        };
+        Update: {
+          agent_config_id?: string;
+          created_at?: string;
+          created_by?: string | null;
+          disabled_at?: string | null;
+          disabled_reason?: string | null;
+          expires_at?: string | null;
+          id?: string;
+          last_used_at?: string | null;
+          organization_id?: string;
+          rotated_at?: string | null;
+          status?: string;
+          token_hash?: string;
+          token_prefix?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
       sarvam_applications: {
         Row: {
           created_at: string;

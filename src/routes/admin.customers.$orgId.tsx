@@ -38,6 +38,7 @@ import { EntitlementsPanel } from "@/components/admin/EntitlementsPanel";
 import { CrmPanel } from "@/components/admin/CrmPanel";
 import { PricingOverridePanel } from "@/components/admin/PricingOverridePanel";
 import { SarvamOutboundPanel } from "@/components/admin/SarvamOutboundPanel";
+import { SarvamIntegrationPanel } from "@/components/admin/SarvamIntegrationPanel";
 import type { LifecycleStatus } from "@/lib/lifecycle";
 import type { ProvisioningCheckStatus } from "@/lib/provisioning-health.server";
 import type { ProvisioningState } from "@/lib/provisioning-state";
@@ -542,6 +543,8 @@ function CustomerDetail() {
         connections={data.connections}
         onChanged={invalidate}
       />
+
+      <SarvamIntegrationPanel orgId={org.id} />
 
       <SectionCard
         title="Klyro runtime"

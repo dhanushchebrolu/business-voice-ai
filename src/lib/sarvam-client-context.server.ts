@@ -64,6 +64,8 @@ export interface SarvamClientContext {
     price: number | null;
     currency: string;
     durationMinutes: number | null;
+    /** Per-vertical extras (e.g. doctor, specialty, stylist), as entered in the dashboard. */
+    attributes: Record<string, string>;
   }>;
   faqs: Array<{ question: string; answer: string; category: string | null }>;
   rules: Array<{ rule: string; priority: number }>;
@@ -171,7 +173,7 @@ export async function buildSarvamClientContext(
       .order("day_of_week", { ascending: true }),
     supabaseAdmin
       .from("services")
-      .select("name, description, category, price, currency, duration_minutes")
+      .select("name, description, category, price, currency, duration_minutes, attributes")
       .eq("business_id", business.id)
       .eq("is_active", true)
       .order("sort_order", { ascending: true }),
@@ -232,6 +234,11 @@ export async function buildSarvamClientContext(
       price: s.price,
       currency: s.currency,
       durationMinutes: s.duration_minutes,
+      attributes: Object.fromEntries(
+        Object.entries((s.attributes ?? {}) as Record<string, unknown>).filter(
+          (e): e is [string, string] => typeof e[1] === "string" && e[1].trim() !== "",
+        ),
+      ),
     })),
     faqs: (faqs ?? []).map((f) => ({
       question: f.question,

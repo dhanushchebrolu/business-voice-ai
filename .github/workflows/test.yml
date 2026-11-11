@@ -96,6 +96,7 @@ jobs:
             supabase/migrations/wallet_balance_ledger_cache.pg.test.ts \
             supabase/migrations/job_queue.pg.test.ts \
             supabase/migrations/job_crash_recovery.pg.test.ts \
+            supabase/migrations/sarvam_agent_integrations.pg.test.ts \
             2>&1 | tee pg-test-output.log
           skipped=$(grep -oP '(?<=^# skipped )\d+' pg-test-output.log | tail -1)
           todo=$(grep -oP '(?<=^# todo )\d+' pg-test-output.log | tail -1)

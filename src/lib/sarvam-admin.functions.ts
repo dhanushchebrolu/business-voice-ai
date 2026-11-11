@@ -347,6 +347,10 @@ export const getSarvamAgentBrief = createServerFn({ method: "POST" })
       instructions: buildAgentInstructions(snapshot),
       clientContextUrl: base ? `${base}/api/public/sarvam/client-context` : null,
       clientContextSecretConfigured: Boolean(process.env["SARVAM_CONTEXT_SECRET"]),
+      // HTTP API tools to create on the agent (per-customer bearer credential).
+      toolConfiguration: base
+        ? (await import("@/lib/sarvam-agent-api.server")).sarvamToolConfiguration(base)
+        : null,
     };
   });
 
