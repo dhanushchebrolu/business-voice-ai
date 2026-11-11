@@ -699,6 +699,8 @@ export async function countAgentInteractions(
  */
 export interface SarvamAttemptSummary {
   attemptId: string;
+  /** `<YYYYMMDD>/<id>`; null when the attempt never connected. */
+  interactionId: string | null;
   connectivityStatus: string | null;
   durationSeconds: number;
   nextActionStatus: string | null;
@@ -736,6 +738,7 @@ export async function listAttempts(
       const a = asPlainObject(raw) ?? {};
       return {
         attemptId: String(a["attempt_id"] ?? ""),
+        interactionId: str(a["interaction_id"]),
         connectivityStatus: str(a["connectivity_status"]),
         durationSeconds:
           typeof a["duration_in_seconds"] === "number" ? a["duration_in_seconds"] : 0,
@@ -747,4 +750,54 @@ export async function listAttempts(
     }),
     hasMore: typeof obj["next_page_uri"] === "string" && obj["next_page_uri"] !== "",
   };
+}
+
+/**
+ * A call's recording as audio bytes (GET /api/analytics/v1/{org}/{ws}/
+ * {app_id}/recordings/{interaction_id}, documented to return a WAV stream,
+ * not JSON). null when Sarvam has no recording (404). Larger than maxBytes
+ * is refused rather than buffered.
+ */
+export async function getRecording(
+  config: SarvamApiClientConfig,
+  appId: string,
+  interactionId: string,
+  maxBytes: number,
+): Promise<{ contentType: string; bytes: ArrayBuffer } | null> {
+  const fetchImpl = config.fetchImpl ?? fetch;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), config.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const path = `/api/analytics/v1/${encodeURIComponent(config.orgId)}/${encodeURIComponent(config.workspaceId)}/${encodeURIComponent(appId)}/recordings/${interactionId.split("/").map(encodeURIComponent).join("/")}`;
+  try {
+    const res = await fetchImpl(`${SARVAM_APPS_BASE_URL}${path}`, {
+      method: "GET",
+      headers: { "X-API-Key": config.apiKey },
+      signal: controller.signal,
+    });
+    if (res.status === 404) return null;
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      let parsed: unknown;
+      try {
+        parsed = text ? JSON.parse(text) : undefined;
+      } catch {
+        parsed = undefined;
+      }
+      throw mapErrorResponse(res.status, parsed, text);
+    }
+    const declared = Number(res.headers.get("content-length") ?? "0");
+    if (declared > maxBytes)
+      throw new TelephonyAdapterError("The recording is too large to load here.", 413);
+    const bytes = await res.arrayBuffer();
+    if (bytes.byteLength > maxBytes)
+      throw new TelephonyAdapterError("The recording is too large to load here.", 413);
+    return { contentType: res.headers.get("content-type") ?? "audio/wav", bytes };
+  } catch (err) {
+    if (err instanceof TelephonyAdapterError) throw err;
+    if (err instanceof Error && err.name === "AbortError")
+      throw new TelephonyAdapterError("Sarvam did not respond in time. Please retry.", 503, true);
+    throw new TelephonyAdapterError("Could not reach Sarvam. Please retry.", 503, true);
+  } finally {
+    clearTimeout(timer);
+  }
 }

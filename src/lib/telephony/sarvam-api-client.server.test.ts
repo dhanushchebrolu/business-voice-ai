@@ -9,6 +9,8 @@ import {
   createInstantOutbound,
   listDeployments,
   countAgentInteractions,
+  listAttempts,
+  getRecording,
   type SarvamApiClientConfig,
 } from "./sarvam-api-client.server.ts";
 import { TelephonyAdapterError } from "./adapter.ts";
@@ -557,6 +559,98 @@ describe("read-only agent checks", () => {
     await assert.rejects(
       countAgentInteractions(config, "nope", new Date(0), new Date()),
       (err: unknown) => err instanceof TelephonyAdapterError && err.status === 404,
+    );
+  });
+});
+
+describe("attempts and recordings", () => {
+  test("listAttempts: documented path, oldest first, keeps outcome fields and drops caller contact", async () => {
+    const capture: { url?: string; init?: RequestInit } = {};
+    const config = {
+      ...baseConfig,
+      fetchImpl: mockFetch(
+        200,
+        {
+          items: [
+            {
+              attempt_id: "att-1",
+              interaction_id: "20261111/abc",
+              connectivity_status: "connected",
+              duration_in_seconds: 42.5,
+              next_action_status: "UNKNOWN",
+              user_contact: "+919999999999",
+            },
+          ],
+          next_page_uri: "",
+        },
+        capture,
+      ),
+    };
+    const page = await listAttempts(
+      config,
+      "app-1",
+      new Date("2026-11-11T00:00:00Z"),
+      new Date("2026-11-11T06:00:00Z"),
+    );
+    assert.equal(capture.init?.method, "GET");
+    assert.match(
+      capture.url ?? "",
+      /^https:\/\/apps\.sarvam\.ai\/api\/analytics\/v1\/org_1\/ws_1\/app-1\/attempts\?/,
+    );
+    assert.match(capture.url ?? "", /sort_by=attempted_at&sort_order=asc&limit=1000&offset=0/);
+    assert.equal(page.hasMore, false);
+    assert.equal(page.attempts[0]!.interactionId, "20261111/abc");
+    assert.equal(page.attempts[0]!.durationSeconds, 42.5);
+    assert.ok(
+      !JSON.stringify(page).includes("9999999999"),
+      "caller contact never leaves the client",
+    );
+  });
+
+  test("getRecording: bytes for a recording, null for 404, refuses oversized audio", async () => {
+    const capture: { url?: string } = {};
+    const ok = await getRecording(
+      {
+        ...baseConfig,
+        fetchImpl: (async (url: string | URL) => {
+          capture.url = String(url);
+          return new Response(new Uint8Array([82, 73, 70, 70]), {
+            status: 200,
+            headers: { "content-type": "audio/wav" },
+          });
+        }) as typeof fetch,
+      },
+      "app-1",
+      "20261111/abc",
+      1024,
+    );
+    assert.equal(
+      capture.url,
+      "https://apps.sarvam.ai/api/analytics/v1/org_1/ws_1/app-1/recordings/20261111/abc",
+    );
+    assert.equal(ok?.contentType, "audio/wav");
+    assert.equal(ok?.bytes.byteLength, 4);
+    assert.equal(
+      await getRecording(
+        { ...baseConfig, fetchImpl: mockFetch(404, { detail: "no" }) },
+        "a",
+        "b/c",
+        1024,
+      ),
+      null,
+    );
+    await assert.rejects(
+      getRecording(
+        {
+          ...baseConfig,
+          fetchImpl: (async () =>
+            new Response(new Uint8Array(2048), { status: 200 })) as typeof fetch,
+        },
+        "a",
+        "b/c",
+        1024,
+      ),
+      /too large/,
     );
   });
 });

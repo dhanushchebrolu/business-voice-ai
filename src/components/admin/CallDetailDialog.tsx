@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { getAdminCallDetail } from "@/lib/sarvam-admin.functions";
+import { getCallRecording } from "@/lib/call-recording.functions";
 import { formatMoney } from "@/lib/pricing";
 import { describeQueryError } from "@/lib/query-error";
 import {
@@ -13,8 +14,6 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { StatusPill } from "@/components/app/primitives";
-
-const NOT_SENT = "Not sent by provider";
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -36,6 +35,14 @@ export function CallDetailDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const fetchDetail = useServerFn(getAdminCallDetail);
+  const fetchRecording = useServerFn(getCallRecording);
+  const [recording, setRecording] = useState<{
+    callId: string;
+    src?: string;
+    note?: string;
+  } | null>(null);
+  const [loadingRecording, setLoadingRecording] = useState(false);
+  const recordingForThisCall = recording?.callId === callId ? recording : null;
   const { data, isLoading, error, refetch, isFetching } = useQuery({
     queryKey: ["admin-call-detail", callId],
     queryFn: () => fetchDetail({ data: { callId: callId! } }),
@@ -183,12 +190,40 @@ export function CallDetailDialog({
                 >
                   Open recording
                 </a>
+              ) : data.provider === "sarvam" && callId ? (
+                recordingForThisCall?.src ? (
+                  <audio controls src={recordingForThisCall.src} className="w-full" />
+                ) : (
+                  <div className="space-y-1">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={loadingRecording}
+                      onClick={async () => {
+                        setLoadingRecording(true);
+                        try {
+                          const r = await fetchRecording({ data: { callId } });
+                          setRecording(
+                            r.available
+                              ? { callId, src: `data:${r.contentType};base64,${r.base64}` }
+                              : { callId, note: r.reason },
+                          );
+                        } catch (err) {
+                          setRecording({ callId, note: describeQueryError(err) });
+                        } finally {
+                          setLoadingRecording(false);
+                        }
+                      }}
+                    >
+                      {loadingRecording ? "Loading…" : "Load recording from Sarvam"}
+                    </Button>
+                    {recordingForThisCall?.note ? (
+                      <p className="text-xs text-muted-foreground">{recordingForThisCall.note}</p>
+                    ) : null}
+                  </div>
+                )
               ) : (
-                <p className="text-xs text-muted-foreground">
-                  {data.provider === "sarvam"
-                    ? `${NOT_SENT} — Sarvam's call webhook has no recording URL.`
-                    : "No recording stored."}
-                </p>
+                <p className="text-xs text-muted-foreground">No recording stored.</p>
               )}
             </section>
 

@@ -294,6 +294,51 @@ export const setSarvamApplicationMapping = createServerFn({ method: "POST" })
   });
 
 /* ------------------------------------------------------------------ */
+/* 1c. Customer agent brief for authoring a dedicated Sarvam app        */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Sarvam's production REST API cannot create or configure an agent (only
+ * the dashboard and the interactive MCP server can), so a customer's
+ * dedicated Sarvam app is authored by an admin. This returns exactly what to
+ * author, generated from that customer's own ClickAI data with the same
+ * prompt builder ClickAI's own runtime uses: instructions, greeting,
+ * languages, voice and the on-start context endpoint. Read-only.
+ */
+export const getSarvamAgentBrief = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { orgId: string }) => {
+    if (!input?.orgId) throw new Error("orgId is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    await assertPlatformAdmin(context.supabase, context.userId, "agents.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { data: business } = await supabaseAdmin
+      .from("businesses")
+      .select("id, name")
+      .eq("organization_id", data.orgId)
+      .maybeSingle();
+    if (!business) throw new Error("This customer has no business profile yet.");
+    const { loadSnapshot } = await import("@/lib/agent-service.server");
+    const { buildAgentInstructions } = await import("@/lib/agent-instructions");
+    const { getEmployeeType } = await import("@/lib/business-types");
+    const snapshot = await loadSnapshot(supabaseAdmin, business.id);
+    const base = process.env["TELEPHONY_WEBHOOK_BASE_URL"]?.replace(/\/+$/, "") ?? null;
+    return {
+      businessName: business.name,
+      employeeType: getEmployeeType(snapshot.agent.employee_type).label,
+      agentName: snapshot.agent.agent_name,
+      primaryLanguage: snapshot.agent.primary_language,
+      voiceId: snapshot.agent.voice_id,
+      greeting: snapshot.agent.greetings[snapshot.agent.primary_language] ?? "",
+      instructions: buildAgentInstructions(snapshot),
+      clientContextUrl: base ? `${base}/api/public/sarvam/client-context` : null,
+      clientContextSecretConfigured: Boolean(process.env["SARVAM_CONTEXT_SECRET"]),
+    };
+  });
+
+/* ------------------------------------------------------------------ */
 /* 2. Klyro connection -> Sarvam connection mapping                     */
 /* ------------------------------------------------------------------ */
 

@@ -28,6 +28,7 @@ import {
   listDeployments as apiListDeployments,
   countAgentInteractions as apiCountAgentInteractions,
   listAttempts as apiListAttempts,
+  getRecording as apiGetRecording,
   type SarvamAttemptSummary,
   type SarvamDeploymentSummary,
 } from "./sarvam-api-client.server.ts";
@@ -544,6 +545,11 @@ export class SarvamTelephonyAdapter implements TelephonyProviderAdapter {
   /** Read-only: the agent's interaction count in the window (no caller data). */
   async countAgentInteractions(appId: string, since: Date, until: Date): Promise<number> {
     return apiCountAgentInteractions(this.managementApiConfig("outbound"), appId, since, until);
+  }
+
+  /** Read-only: a call's recording bytes, or null when Sarvam has none. */
+  async getRecording(appId: string, interactionId: string, maxBytes: number) {
+    return apiGetRecording(this.managementApiConfig("outbound"), appId, interactionId, maxBytes);
   }
 
   async listCampaigns(): Promise<SarvamCampaign[]> {

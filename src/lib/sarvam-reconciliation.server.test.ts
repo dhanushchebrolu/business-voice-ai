@@ -5,6 +5,7 @@ import type { SarvamAttemptSummary } from "./telephony/sarvam-api-client.server.
 
 const attempt = (over: Partial<SarvamAttemptSummary> = {}): SarvamAttemptSummary => ({
   attemptId: "att-1",
+  interactionId: "20261111/abc",
   connectivityStatus: "connected",
   durationSeconds: 61.4,
   nextActionStatus: "UNKNOWN",

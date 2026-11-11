@@ -3,6 +3,8 @@ import { useQuery } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { toast } from "sonner";
 import {
+  createSarvamInboundDeployment,
+  getSarvamAgentBrief,
   getSarvamOutboundGates,
   inspectSarvamAgent,
   listSarvamApplications,
@@ -15,6 +17,7 @@ import {
 import { EMPLOYEE_TYPES, getEmployeeType, type EmployeeTypeId } from "@/lib/business-types";
 import {
   activatePhoneNumber,
+  importPhoneNumberToPool,
   listAllCalls,
   listPhoneNumbers,
   reassignPhoneNumber,
@@ -121,6 +124,18 @@ export function SarvamOutboundPanel({ orgId, agent, numbers, connections, onChan
     shared: false,
   });
   const [assignOpen, setAssignOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importE164, setImportE164] = useState("");
+  const [briefOpen, setBriefOpen] = useState(false);
+  const [deploymentOpen, setDeploymentOpen] = useState(false);
+  const importNumber = useServerFn(importPhoneNumberToPool);
+  const fetchBrief = useServerFn(getSarvamAgentBrief);
+  const createDeployment = useServerFn(createSarvamInboundDeployment);
+  const brief = useQuery({
+    queryKey: ["admin-sarvam-brief", orgId],
+    queryFn: () => fetchBrief({ data: { orgId } }),
+    enabled: briefOpen,
+  });
   const [poolNumberId, setPoolNumberId] = useState("");
   const [numberAction, setNumberAction] = useState<NumberAction | null>(null);
   const [callOpen, setCallOpen] = useState(false);
@@ -236,7 +251,89 @@ export function SarvamOutboundPanel({ orgId, agent, numbers, connections, onChan
         <Button size="sm" variant="outline" onClick={() => setAssignOpen(true)}>
           Assign number from pool
         </Button>
+        <Button size="sm" variant="outline" onClick={() => setImportOpen(true)}>
+          Import Sarvam number
+        </Button>
+        <Button size="sm" variant="outline" disabled={!agent} onClick={() => setBriefOpen(true)}>
+          Agent brief for Sarvam
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={callable.length === 0 || !agentMapped}
+          onClick={() => setDeploymentOpen(true)}
+        >
+          Create inbound deployment
+        </Button>
       </div>
+      {briefOpen ? (
+        <div className="mt-3 space-y-2 rounded-md border border-border p-3 text-sm">
+          <div className="flex items-center justify-between gap-2">
+            <p className="font-medium">Sarvam agent brief</p>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 text-xs"
+              onClick={() => setBriefOpen(false)}
+            >
+              Close
+            </Button>
+          </div>
+          {brief.isLoading ? (
+            <p className="text-xs text-muted-foreground">Building from this customer's data…</p>
+          ) : brief.error ? (
+            <p className="text-xs text-destructive">{(brief.error as Error).message}</p>
+          ) : brief.data ? (
+            <>
+              <p className="text-xs text-muted-foreground">
+                Sarvam's API cannot create agents. Author this customer's dedicated app in Sarvam's
+                dashboard (or Sarvam MCP) with exactly this, commit a version, then map it above.
+              </p>
+              <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                <dt className="text-muted-foreground">Business</dt>
+                <dd>{brief.data.businessName}</dd>
+                <dt className="text-muted-foreground">AI employee</dt>
+                <dd>{brief.data.employeeType}</dd>
+                <dt className="text-muted-foreground">Agent name</dt>
+                <dd>{brief.data.agentName}</dd>
+                <dt className="text-muted-foreground">Language / voice</dt>
+                <dd>
+                  {brief.data.primaryLanguage} / {brief.data.voiceId}
+                </dd>
+                <dt className="text-muted-foreground">On-start context URL</dt>
+                <dd className="break-all font-mono">
+                  {brief.data.clientContextUrl
+                    ? `${brief.data.clientContextUrl}?verify_token=<SARVAM_CONTEXT_SECRET>`
+                    : "TELEPHONY_WEBHOOK_BASE_URL is not set"}
+                  {brief.data.clientContextSecretConfigured ? "" : " (secret not configured)"}
+                </dd>
+              </dl>
+              <p className="text-xs font-medium">Greeting</p>
+              <p className="rounded bg-muted p-2 text-xs">{brief.data.greeting || "—"}</p>
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-medium">Instructions</p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-xs"
+                  onClick={() => {
+                    void navigator.clipboard.writeText(brief.data!.instructions);
+                    toast.success("Instructions copied");
+                  }}
+                >
+                  Copy
+                </Button>
+              </div>
+              <textarea
+                readOnly
+                aria-label="Agent instructions for Sarvam"
+                value={brief.data.instructions}
+                className="h-48 w-full rounded border border-input bg-background p-2 font-mono text-xs"
+              />
+            </>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="mt-4 border-t border-border pt-3">
         <p className="text-sm font-medium">Sarvam numbers</p>
@@ -584,6 +681,50 @@ export function SarvamOutboundPanel({ orgId, agent, numbers, connections, onChan
             shared: false,
           });
           void applications.refetch();
+        }}
+      />
+
+      <ReasonDialog
+        open={importOpen}
+        onOpenChange={setImportOpen}
+        title="Import a Sarvam number for this customer"
+        description="Records a number you rented in Sarvam (Deploy → Phone Numbers) and assigns it to this customer. It arrives inactive with calling off."
+        confirmLabel="Import and assign"
+        extra={
+          <Input
+            aria-label="Sarvam number"
+            placeholder="+91…"
+            value={importE164}
+            onChange={(e) => setImportE164(e.target.value)}
+          />
+        }
+        onConfirm={async (reason) => {
+          const e164 = normalizeCustomerPhone(importE164.trim(), null);
+          if (!e164) throw new Error("Enter the number with its country code, e.g. +91…");
+          const imported = await importNumber({ data: { provider: "sarvam", e164, reason } });
+          await assign({ data: { numberId: imported.id, toOrgId: orgId, reason } });
+          toast.success("Number imported and assigned");
+          setImportE164("");
+          refresh();
+        }}
+      />
+
+      <ReasonDialog
+        open={deploymentOpen}
+        onOpenChange={setDeploymentOpen}
+        title="Create Sarvam inbound deployment"
+        description="Creates a deployment in Sarvam so calls to this customer's active Sarvam numbers are answered by their mapped app. This changes Sarvam's routing for these numbers; it does not place any call."
+        confirmLabel="Create deployment"
+        onConfirm={async (reason) => {
+          await createDeployment({
+            data: {
+              phoneNumberIds: callable.map((n) => n.id),
+              name: `ClickAI ${orgId.slice(0, 8)} inbound`,
+              reason,
+            },
+          });
+          toast.success("Inbound deployment created");
+          refresh();
         }}
       />
 
