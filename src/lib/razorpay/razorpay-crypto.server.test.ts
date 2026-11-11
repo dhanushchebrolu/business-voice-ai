@@ -138,15 +138,31 @@ describe("key handling", () => {
   });
 
   test("no key material or plaintext ever appears in a thrown error message", () => {
-    const key = process.env[ENV_KEY]!;
-    delete process.env[ENV_KEY];
-    try {
-      encryptCredential("super-secret-value-should-never-appear-in-errors");
-      assert.fail("expected encryptCredential to throw");
-    } catch (err) {
-      const message = (err as Error).message;
-      assert.doesNotMatch(message, /super-secret-value-should-never-appear-in-errors/);
-      assert.doesNotMatch(message, new RegExp(key));
+    // The random key, plus a fixed one whose base64 starts with "+" and contains "/":
+    // the key must be compared literally, never compiled as a regular expression.
+    for (const key of [process.env[ENV_KEY]!, Buffer.alloc(32, 0xfb).toString("base64")]) {
+      assert.ok(key.startsWith("+") || key === process.env[ENV_KEY]);
+      process.env[ENV_KEY] = key;
+      const stored = encryptCredential("token");
+      process.env[ENV_KEY] = randomBytes(32).toString("base64");
+      for (const fail of [
+        () => decryptCredential(stored),
+        () => {
+          delete process.env[ENV_KEY];
+          encryptCredential("super-secret-value-should-never-appear-in-errors");
+        },
+      ]) {
+        try {
+          fail();
+          assert.fail("expected a CredentialCryptoError");
+        } catch (err) {
+          assert.ok(err instanceof CredentialCryptoError, String(err));
+          const message = err.message;
+          assert.ok(!message.includes("super-secret-value-should-never-appear-in-errors"));
+          assert.ok(!message.includes(key), "the key leaked into an error message");
+        }
+      }
+      process.env[ENV_KEY] = key;
     }
   });
 });
