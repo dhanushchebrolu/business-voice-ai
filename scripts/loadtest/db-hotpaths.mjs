@@ -200,6 +200,50 @@ const webhookRows = Number(
   psql(DB, `SELECT count(*) FROM public.webhook_events WHERE provider = 'sarvam';`),
 );
 
+// Durable job queue (when the migration is present): concurrent runners
+// claim and complete a backlog; every job must run exactly once.
+const hasQueue =
+  psql(DB, "SELECT to_regprocedure('public.claim_jobs(text, integer, integer)') IS NOT NULL;") ===
+  "t";
+let queue = null;
+if (hasQueue) {
+  const BACKLOG = 20_000;
+  psql(
+    DB,
+    `INSERT INTO public.jobs (kind, idempotency_key, payload)
+    SELECT 'lt.job', 'lt-' || g, '{}'::jsonb FROM generate_series(1, ${BACKLOG}) g; ANALYZE public.jobs;`,
+  );
+  const drain = pgbench(
+    "job_claim_complete",
+    "SELECT public.complete_job(id, 'w' || :client_id, NULL) FROM public.claim_jobs('w' || :client_id, 10, 60);\n",
+    { seconds: 15 },
+  );
+  results.push(drain);
+  const [done, multi, stuck] = psql(
+    DB,
+    `SELECT count(*) FILTER (WHERE status = 'succeeded'),
+      count(*) FILTER (WHERE attempts > 1), count(*) FILTER (WHERE status IN ('running', 'queued'))
+    FROM public.jobs WHERE kind = 'lt.job';`,
+  )
+    .split("|")
+    .map(Number);
+  results.push(
+    pgbench(
+      "job_enqueue_idempotent",
+      "\\set k random(1, 50000)\nSELECT * FROM public.enqueue_job('lt.enqueue', '{}', 'e-' || :k);\n",
+      { seconds: 5 },
+    ),
+  );
+  const enqueued = Number(psql(DB, "SELECT count(*) FROM public.jobs WHERE kind = 'lt.enqueue';"));
+  queue = {
+    backlog: BACKLOG,
+    succeeded: done,
+    ran_more_than_once: multi,
+    left_unfinished: stuck,
+    distinct_enqueue_keys_max_50000: enqueued,
+  };
+}
+
 // Affordability latency as one tenant's ledger grows (single client = pure latency).
 const ledger = [];
 let have = 1;
@@ -267,6 +311,7 @@ const summary = {
     webhook_rows_for_1000_event_ids: webhookRows,
     rls_other_tenant_rows_visible_over_total_visible: leak,
     wallet_balance_cache_mismatches: balanceMismatches,
+    job_queue: queue,
   },
 };
 console.log(JSON.stringify(summary, null, 2));

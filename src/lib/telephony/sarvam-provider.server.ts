@@ -27,6 +27,8 @@ import {
   type UploadCohortResult,
   listDeployments as apiListDeployments,
   countAgentInteractions as apiCountAgentInteractions,
+  listAttempts as apiListAttempts,
+  type SarvamAttemptSummary,
   type SarvamDeploymentSummary,
 } from "./sarvam-api-client.server.ts";
 import { constantTimeEquals } from "../constant-time-equals.server.ts";
@@ -515,6 +517,28 @@ export class SarvamTelephonyAdapter implements TelephonyProviderAdapter {
   /** Read-only: deployments Sarvam finds for `search` (an agent ID or number). */
   async listDeployments(search: string): Promise<SarvamDeploymentSummary[]> {
     return apiListDeployments(this.managementApiConfig("outbound"), search);
+  }
+
+  /**
+   * Read-only: finds one attempt by id among the agent's attempts in the
+   * window (the API cannot filter by attempt_id). Pages are capped so a
+   * busy agent cannot turn one lookup into an unbounded scan.
+   */
+  async findAttempt(
+    appId: string,
+    attemptId: string,
+    since: Date,
+    until: Date,
+    maxPages = 5,
+  ): Promise<SarvamAttemptSummary | null> {
+    const config = this.managementApiConfig("outbound");
+    for (let page = 0; page < maxPages; page++) {
+      const { attempts, hasMore } = await apiListAttempts(config, appId, since, until, page * 1000);
+      const hit = attempts.find((a) => a.attemptId === attemptId);
+      if (hit) return hit;
+      if (!hasMore) return null;
+    }
+    return null;
   }
 
   /** Read-only: the agent's interaction count in the window (no caller data). */

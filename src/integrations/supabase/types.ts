@@ -1112,6 +1112,69 @@ export type Database = {
           },
         ];
       };
+      jobs: {
+        Row: {
+          attempts: number;
+          completed_at: string | null;
+          created_at: string;
+          dead_at: string | null;
+          id: string;
+          idempotency_key: string;
+          kind: string;
+          last_error: string | null;
+          locked_by: string | null;
+          locked_until: string | null;
+          max_attempts: number;
+          organization_id: string | null;
+          payload: Json;
+          result: Json | null;
+          run_at: string;
+          started_at: string | null;
+          status: string;
+          updated_at: string;
+        };
+        Insert: {
+          attempts?: number;
+          completed_at?: string | null;
+          created_at?: string;
+          dead_at?: string | null;
+          id?: string;
+          idempotency_key: string;
+          kind: string;
+          last_error?: string | null;
+          locked_by?: string | null;
+          locked_until?: string | null;
+          max_attempts?: number;
+          organization_id?: string | null;
+          payload?: Json;
+          result?: Json | null;
+          run_at?: string;
+          started_at?: string | null;
+          status?: string;
+          updated_at?: string;
+        };
+        Update: {
+          attempts?: number;
+          completed_at?: string | null;
+          created_at?: string;
+          dead_at?: string | null;
+          id?: string;
+          idempotency_key?: string;
+          kind?: string;
+          last_error?: string | null;
+          locked_by?: string | null;
+          locked_until?: string | null;
+          max_attempts?: number;
+          organization_id?: string | null;
+          payload?: Json;
+          result?: Json | null;
+          run_at?: string;
+          started_at?: string | null;
+          status?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
       knowledge_documents: {
         Row: {
           business_id: string;
@@ -4678,6 +4741,46 @@ export type Database = {
         Returns: { range_end: string; range_start: string }[];
       };
       customer_rate: { Args: { _key: string; _org: string }; Returns: number };
+      claim_jobs: {
+        Args: { _lease_seconds: number; _limit: number; _worker: string };
+        Returns: Database["public"]["Tables"]["jobs"]["Row"][];
+      };
+      complete_job: {
+        Args: { _id: string; _result?: Json; _worker: string };
+        Returns: boolean;
+      };
+      enqueue_job: {
+        Args: {
+          _idempotency_key: string;
+          _kind: string;
+          _max_attempts?: number;
+          _organization_id?: string;
+          _payload: Json;
+          _run_at?: string;
+        };
+        Returns: { created: boolean; id: string }[];
+      };
+      fail_job: {
+        Args: { _error: string; _id: string; _retryable?: boolean; _worker: string };
+        Returns: string;
+      };
+      job_queue_stats: {
+        Args: Record<PropertyKey, never>;
+        Returns: {
+          jobs: number;
+          kind: string;
+          oldest_due_seconds: number | null;
+          status: string;
+        }[];
+      };
+      prune_jobs: {
+        Args: { _older_than?: unknown };
+        Returns: number;
+      };
+      requeue_dead_job: {
+        Args: { _id: string };
+        Returns: boolean;
+      };
       debit_wallet_for_call: {
         Args: {
           _amount: number;

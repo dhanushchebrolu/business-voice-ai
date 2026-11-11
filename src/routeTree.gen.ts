@@ -39,6 +39,7 @@ import { Route as AdminBillingRouteImport } from './routes/admin.billing'
 import { Route as AdminCallsRouteImport } from './routes/admin.calls'
 import { Route as AdminCustomersRouteImport } from './routes/admin.customers'
 import { Route as AdminDemoRequestsRouteImport } from './routes/admin.demo-requests'
+import { Route as AdminJobsRouteImport } from './routes/admin.jobs'
 import { Route as AdminMarginsRouteImport } from './routes/admin.margins'
 import { Route as AdminNumbersRouteImport } from './routes/admin.numbers'
 import { Route as AdminPricingRouteImport } from './routes/admin.pricing'
@@ -243,6 +244,11 @@ const AdminCustomersRoute = AdminCustomersRouteImport.update({
 const AdminDemoRequestsRoute = AdminDemoRequestsRouteImport.update({
   id: '/demo-requests',
   path: '/demo-requests',
+  getParentRoute: () => AdminRoute,
+} as any)
+const AdminJobsRoute = AdminJobsRouteImport.update({
+  id: '/jobs',
+  path: '/jobs',
   getParentRoute: () => AdminRoute,
 } as any)
 const AdminMarginsRoute = AdminMarginsRouteImport.update({
@@ -569,6 +575,7 @@ export interface FileRoutesByFullPath {
   '/admin/calls': typeof AdminCallsRoute
   '/admin/customers': typeof AdminCustomersRouteWithChildren
   '/admin/demo-requests': typeof AdminDemoRequestsRoute
+  '/admin/jobs': typeof AdminJobsRoute
   '/admin/margins': typeof AdminMarginsRoute
   '/admin/numbers': typeof AdminNumbersRoute
   '/admin/pricing': typeof AdminPricingRoute
@@ -651,6 +658,7 @@ export interface FileRoutesByTo {
   '/admin/billing': typeof AdminBillingRoute
   '/admin/calls': typeof AdminCallsRoute
   '/admin/demo-requests': typeof AdminDemoRequestsRoute
+  '/admin/jobs': typeof AdminJobsRoute
   '/admin/margins': typeof AdminMarginsRoute
   '/admin/numbers': typeof AdminNumbersRoute
   '/admin/pricing': typeof AdminPricingRoute
@@ -738,6 +746,7 @@ export interface FileRoutesById {
   '/admin/calls': typeof AdminCallsRoute
   '/admin/customers': typeof AdminCustomersRouteWithChildren
   '/admin/demo-requests': typeof AdminDemoRequestsRoute
+  '/admin/jobs': typeof AdminJobsRoute
   '/admin/margins': typeof AdminMarginsRoute
   '/admin/numbers': typeof AdminNumbersRoute
   '/admin/pricing': typeof AdminPricingRoute
@@ -826,6 +835,7 @@ export interface FileRouteTypes {
     | '/admin/calls'
     | '/admin/customers'
     | '/admin/demo-requests'
+    | '/admin/jobs'
     | '/admin/margins'
     | '/admin/numbers'
     | '/admin/pricing'
@@ -908,6 +918,7 @@ export interface FileRouteTypes {
     | '/admin/billing'
     | '/admin/calls'
     | '/admin/demo-requests'
+    | '/admin/jobs'
     | '/admin/margins'
     | '/admin/numbers'
     | '/admin/pricing'
@@ -994,6 +1005,7 @@ export interface FileRouteTypes {
     | '/admin/calls'
     | '/admin/customers'
     | '/admin/demo-requests'
+    | '/admin/jobs'
     | '/admin/margins'
     | '/admin/numbers'
     | '/admin/pricing'
@@ -1311,6 +1323,13 @@ declare module '@tanstack/react-router' {
       path: '/demo-requests'
       fullPath: '/admin/demo-requests'
       preLoaderRoute: typeof AdminDemoRequestsRouteImport
+      parentRoute: typeof AdminRoute
+    }
+    '/admin/jobs': {
+      id: '/admin/jobs'
+      path: '/jobs'
+      fullPath: '/admin/jobs'
+      preLoaderRoute: typeof AdminJobsRouteImport
       parentRoute: typeof AdminRoute
     }
     '/admin/margins': {
@@ -1727,6 +1746,7 @@ interface AdminRouteChildren {
   AdminCallsRoute: typeof AdminCallsRoute
   AdminCustomersRoute: typeof AdminCustomersRouteWithChildren
   AdminDemoRequestsRoute: typeof AdminDemoRequestsRoute
+  AdminJobsRoute: typeof AdminJobsRoute
   AdminMarginsRoute: typeof AdminMarginsRoute
   AdminNumbersRoute: typeof AdminNumbersRoute
   AdminPricingRoute: typeof AdminPricingRoute
@@ -1745,6 +1765,7 @@ const AdminRouteChildren: AdminRouteChildren = {
   AdminCallsRoute: AdminCallsRoute,
   AdminCustomersRoute: AdminCustomersRouteWithChildren,
   AdminDemoRequestsRoute: AdminDemoRequestsRoute,
+  AdminJobsRoute: AdminJobsRoute,
   AdminMarginsRoute: AdminMarginsRoute,
   AdminNumbersRoute: AdminNumbersRoute,
   AdminPricingRoute: AdminPricingRoute,

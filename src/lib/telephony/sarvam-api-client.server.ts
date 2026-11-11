@@ -691,3 +691,60 @@ export async function countAgentInteractions(
   const total = asPlainObject(parsed)?.["total"];
   return typeof total === "number" ? total : 0;
 }
+
+/**
+ * One instant-outbound / campaign attempt as Sarvam's analytics reports it
+ * (GET /api/analytics/v1/{org}/{ws}/{app_id}/attempts). Only outcome fields
+ * are kept; user_contact (unmasked personal data) is never read out.
+ */
+export interface SarvamAttemptSummary {
+  attemptId: string;
+  connectivityStatus: string | null;
+  durationSeconds: number;
+  nextActionStatus: string | null;
+  failureReason: string | null;
+  appVersion: number | null;
+  attemptedAt: string | null;
+}
+
+/** A page of an agent's attempts in a time window, oldest first (up to 1,000). */
+export async function listAttempts(
+  config: SarvamApiClientConfig,
+  appId: string,
+  since: Date,
+  until: Date,
+  offset = 0,
+): Promise<{ attempts: SarvamAttemptSummary[]; hasMore: boolean }> {
+  const query = new URLSearchParams({
+    start_datetime: since.toISOString(),
+    end_datetime: until.toISOString(),
+    sort_by: "attempted_at",
+    sort_order: "asc",
+    limit: "1000",
+    offset: String(offset),
+  });
+  const parsed = await sarvamRequest<unknown>(
+    config,
+    "GET",
+    `/api/analytics/v1/${encodeURIComponent(config.orgId)}/${encodeURIComponent(config.workspaceId)}/${encodeURIComponent(appId)}/attempts?${query.toString()}`,
+  );
+  const obj = asPlainObject(parsed) ?? {};
+  const items = Array.isArray(obj["items"]) ? obj["items"] : [];
+  const str = (v: unknown) => (typeof v === "string" && v ? v : null);
+  return {
+    attempts: items.map((raw) => {
+      const a = asPlainObject(raw) ?? {};
+      return {
+        attemptId: String(a["attempt_id"] ?? ""),
+        connectivityStatus: str(a["connectivity_status"]),
+        durationSeconds:
+          typeof a["duration_in_seconds"] === "number" ? a["duration_in_seconds"] : 0,
+        nextActionStatus: str(a["next_action_status"]),
+        failureReason: str(a["failure_reason"]),
+        appVersion: typeof a["app_version"] === "number" ? a["app_version"] : null,
+        attemptedAt: str(a["attempted_at"]),
+      };
+    }),
+    hasMore: typeof obj["next_page_uri"] === "string" && obj["next_page_uri"] !== "",
+  };
+}

@@ -151,6 +151,8 @@ export default defineConfig({
   // hence the cast.
   nitro: {
     compatibilityDate: "2026-09-16",
+    // Durable job queue on the Worker's cron trigger (server/plugins/scheduled-jobs.ts).
+    plugins: ["./server/plugins/scheduled-jobs.ts"],
     ...(workerOverride ? { cloudflare: workerOverride } : {}),
   } as NonNullable<LovableViteTanstackOptions["nitro"]>,
 });

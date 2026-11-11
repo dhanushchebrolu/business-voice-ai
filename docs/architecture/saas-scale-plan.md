@@ -86,7 +86,7 @@ Modular services **inside the existing Worker + Supabase** (no microservices, Re
 | 0     | `employee_type`, `sarvam_applications`, `sarvam_application_id` (+ guards)                                                                                                                                                                                                                                | **In production** (`20261111090000`)                            |
 | 0     | Wallet functions read the real balance for `service_role`                                                                                                                                                                                                                                                 | **In production** (`20261110100000`)                            |
 | 1     | `wallet_balances` running balance (trigger-maintained, same transaction), append-only ledger (UPDATE and TRUNCATE blocked); one debit per call stays enforced by the existing `idx_wallet_tx_call_usage_ref`                                                                                              | **In production** since 2026-11-11 05:26 UTC (`20261111090100`) |
-| 2     | `jobs` table + dispatcher; webhook ingest writes the provider event row first, then enqueues settlement                                                                                                                                                                                                   | Planned                                                         |
+| 2     | `jobs` queue (`20261111090200`): idempotent enqueue, leased claims with SKIP LOCKED, fenced complete/fail, exponential backoff, dead-letter, stats, prune; Worker cron trigger every minute; Sarvam call reconciliation and finalization sweeps; admin "Background jobs" page                             | **Implemented, tested, awaiting production approval**           |
 | 3     | Agents many-per-organization: drop `agent_configs.business_id UNIQUE` in favour of `(organization_id, id)` ownership; `agent_templates`; `provider_app_mappings`                                                                                                                                          | Planned (touches 37 `businesses` call sites)                    |
 | 4     | Number lifecycle: extend `phone_numbers.status` to the C-list (`purchasing`, `purchased`, `synchronizing`, `assigned`, `inbound_active`, `outbound_enabled`, `suspended`, `releasing`, `released`, `failed`), `number_assignments` history with a unique active assignment, rental cost/reference columns | Planned                                                         |
 | 4     | Call lifecycle: add `queued`, `submitting`, `accepted`, `reconciliation_required`; billing state (`pending`, `settled`, `reversed`, `disputed`) on usage instead of overloading call status                                                                                                               | Planned                                                         |
@@ -131,6 +131,17 @@ node scripts/loadtest/db-hotpaths.mjs --port 55432 --tenants 2000 --clients 16 -
 
 \* The RLS row includes three extra statements per transaction (role switch,
 claim set, reset), so it overstates pure policy overhead.
+
+### Phase 2 measurements (same harness, same machine, 16 clients)
+
+| Scenario                                                                  | Result                                                     |
+| ------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| 20,000-job backlog drained by 16 concurrent runners (claim 10 + complete) | every job ran exactly once, 0 left unfinished, 0 ran twice |
+| Idempotent enqueue, 50,000 possible keys, 16 clients for 5 s              | 28,003/s, 40,894 rows (one per distinct key)               |
+
+Not yet measured: queue behaviour on Supabase over the network, and Worker CPU per
+scheduled tick (Workers' CPU limit depends on the account plan; the tick is mostly
+I/O wait, but this must be confirmed from Workers metrics after deploy).
 
 **Unknown, and how to measure them** (none may be claimed until measured):
 

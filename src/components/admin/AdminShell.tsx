@@ -18,6 +18,7 @@ import {
   PhoneCall,
   Bot,
   Inbox,
+  ListChecks,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -39,7 +40,8 @@ const NAV: {
     | "/admin/settings"
     | "/admin/website-ai"
     | "/admin/team"
-    | "/admin/audit";
+    | "/admin/audit"
+    | "/admin/jobs";
   label: string;
   icon: typeof Users;
   exact?: boolean;
@@ -49,6 +51,7 @@ const NAV: {
   { to: "/admin/demo-requests", label: "Demo requests", icon: Inbox },
   { to: "/admin/numbers", label: "Phone numbers", icon: Phone },
   { to: "/admin/calls", label: "Calls", icon: PhoneCall },
+  { to: "/admin/jobs", label: "Background jobs", icon: ListChecks },
   { to: "/admin/billing", label: "Billing", icon: Receipt },
   { to: "/admin/wallets", label: "Wallets", icon: Wallet },
   { to: "/admin/refunds", label: "Refunds", icon: RotateCcw },
