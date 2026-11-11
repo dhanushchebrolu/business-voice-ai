@@ -93,10 +93,14 @@ async function withSarvamEnvAndFetch<T>(
     SARVAM_API_KEY: process.env["SARVAM_API_KEY"],
     SARVAM_ORG_ID: process.env["SARVAM_ORG_ID"],
     SARVAM_WORKSPACE_ID: process.env["SARVAM_WORKSPACE_ID"],
+    TELEPHONY_WEBHOOK_BASE_URL: process.env["TELEPHONY_WEBHOOK_BASE_URL"],
+    SARVAM_WEBHOOK_SECRET: process.env["SARVAM_WEBHOOK_SECRET"],
   };
   process.env["SARVAM_API_KEY"] = "sk_test_key";
   process.env["SARVAM_ORG_ID"] = "org_1";
   process.env["SARVAM_WORKSPACE_ID"] = "ws_1";
+  process.env["TELEPHONY_WEBHOOK_BASE_URL"] = "https://clickai.example";
+  process.env["SARVAM_WEBHOOK_SECRET"] = "whsec_test_0123456789abcdef0123456789";
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () =>
     new Response(JSON.stringify(fetchResponse.body), {

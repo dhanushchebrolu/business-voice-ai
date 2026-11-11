@@ -110,7 +110,7 @@ function mapErrorResponse(status: number, parsed: unknown, rawText: string): Tel
 
 async function sarvamRequest<T>(
   config: SarvamApiClientConfig,
-  method: "GET" | "POST" | "PATCH",
+  method: "GET" | "POST" | "PATCH" | "PUT",
   path: string,
   body?: Record<string, unknown>,
 ): Promise<T> {
@@ -171,7 +171,14 @@ const DEFINITE_REJECTION_STATUSES = new Set([400, 401, 403, 404, 422]);
 /*    PATCH  .../deployments/{deployment_id}                            */
 /* ------------------------------------------------------------------ */
 
+/** Where Sarvam sends call-completion events for a deployment (documented `webhook_config`). */
+export interface DeploymentWebhookConfig {
+  url: string;
+  metadata?: Record<string, string> | undefined;
+}
+
 export interface DeploymentRequestShape {
+  webhookConfig?: DeploymentWebhookConfig | undefined;
   name: string;
   description?: string | undefined;
   appId: string;
@@ -211,7 +218,12 @@ function toDeploymentRequestBody(input: DeploymentRequestShape): Record<string, 
       timezone: input.inboundConfig.timezone,
     };
   }
+  if (input.webhookConfig) body["webhook_config"] = toWebhookConfig(input.webhookConfig);
   return body;
+}
+
+function toWebhookConfig(w: DeploymentWebhookConfig): Record<string, unknown> {
+  return { url: w.url, ...(w.metadata ? { metadata: w.metadata } : {}) };
 }
 
 function parseDeploymentResponse(parsed: unknown): DeploymentResult {
@@ -242,6 +254,9 @@ export async function createDeployment(
 export interface UpdateDeploymentInput {
   name?: string | undefined;
   description?: string | undefined;
+  /** A newly committed version of the same agent (documented as updatable; app_id is not). */
+  appVersion?: number | undefined;
+  webhookConfig?: DeploymentWebhookConfig | undefined;
   phoneNumbers?: string[] | undefined;
   inboundConfig?:
     { startTime: string; endTime: string; allowedDays: string[]; timezone: string } | undefined;
@@ -255,6 +270,8 @@ export async function updateDeployment(
   const body: Record<string, unknown> = {};
   if (input.name !== undefined) body["name"] = input.name;
   if (input.description !== undefined) body["description"] = input.description;
+  if (input.appVersion !== undefined) body["app_version"] = input.appVersion;
+  if (input.webhookConfig) body["webhook_config"] = toWebhookConfig(input.webhookConfig);
   if (input.phoneNumbers !== undefined) body["phone_numbers"] = input.phoneNumbers;
   if (input.inboundConfig) {
     body["inbound_config"] = {
@@ -800,4 +817,77 @@ export async function getRecording(
   } finally {
     clearTimeout(timer);
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* 7. Deployment state                                                  */
+/*    GET .../deployments/{deployment_id}                               */
+/*    PUT .../deployments/{deployment_id}/status  {"action": ...}       */
+/* ------------------------------------------------------------------ */
+
+export interface SarvamDeploymentDetail extends SarvamDeploymentSummary {
+  connectionIds: string[];
+  webhookUrlConfigured: boolean;
+}
+
+/**
+ * Numbers from either documented shape of a connection config: the schema's
+ * `agent_phone_number` (one string) or the examples' `phone_numbers` (array).
+ */
+function connectionNumbers(cfg: Record<string, unknown>): string[] {
+  const one = cfg["agent_phone_number"];
+  const many = cfg["phone_numbers"];
+  return [
+    ...(typeof one === "string" && one ? [one] : []),
+    ...(Array.isArray(many) ? many.map(String) : []),
+  ];
+}
+
+function parseDeploymentDetail(parsed: unknown): SarvamDeploymentDetail {
+  const d = asPlainObject(parsed) ?? {};
+  const configs = (Array.isArray(d["connection_configs"]) ? d["connection_configs"] : []).map(
+    (c) => asPlainObject(c) ?? {},
+  );
+  const topLevel = Array.isArray(d["phone_numbers"]) ? d["phone_numbers"].map(String) : [];
+  const deploymentId = d["deployment_id"];
+  if (typeof deploymentId !== "string" || !deploymentId)
+    throw new TelephonyAdapterError("Sarvam's deployment response had no deployment_id.", 502);
+  return {
+    deploymentId,
+    name: typeof d["name"] === "string" ? d["name"] : null,
+    appId: String(d["app_id"] ?? ""),
+    appVersion: typeof d["app_version"] === "number" ? d["app_version"] : null,
+    phoneNumbers: [...new Set([...topLevel, ...configs.flatMap(connectionNumbers)])],
+    channelDirection: typeof d["channel_direction"] === "string" ? d["channel_direction"] : null,
+    status: typeof d["status"] === "string" ? d["status"] : null,
+    connectionIds: configs.map((c) => String(c["connection_id"] ?? "")).filter(Boolean),
+    webhookUrlConfigured: typeof asPlainObject(d["webhook_config"])?.["url"] === "string",
+  };
+}
+
+export async function getDeployment(
+  config: SarvamApiClientConfig,
+  deploymentId: string,
+): Promise<SarvamDeploymentDetail> {
+  const parsed = await sarvamRequest<unknown>(
+    config,
+    "GET",
+    scopedPath(config, "app-authoring", `deployments/${encodeURIComponent(deploymentId)}`),
+  );
+  return parseDeploymentDetail(parsed);
+}
+
+/** Pause (stop accepting inbound calls) or resume a deployment. */
+export async function setDeploymentStatus(
+  config: SarvamApiClientConfig,
+  deploymentId: string,
+  action: "pause" | "resume",
+): Promise<SarvamDeploymentDetail> {
+  const parsed = await sarvamRequest<unknown>(
+    config,
+    "PUT",
+    scopedPath(config, "app-authoring", `deployments/${encodeURIComponent(deploymentId)}/status`),
+    { action },
+  );
+  return parseDeploymentDetail(parsed);
 }

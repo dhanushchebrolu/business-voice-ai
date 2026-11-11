@@ -11,6 +11,8 @@ import {
   countAgentInteractions,
   listAttempts,
   getRecording,
+  getDeployment,
+  setDeploymentStatus,
   type SarvamApiClientConfig,
 } from "./sarvam-api-client.server.ts";
 import { TelephonyAdapterError } from "./adapter.ts";
@@ -652,5 +654,62 @@ describe("attempts and recordings", () => {
       ),
       /too large/,
     );
+  });
+});
+
+describe("deployment state", () => {
+  test("getDeployment reads either documented connection shape and the webhook", async () => {
+    const capture: { url?: string; init?: RequestInit } = {};
+    const d = await getDeployment(
+      {
+        ...baseConfig,
+        fetchImpl: mockFetch(
+          200,
+          {
+            deployment_id: "dep_1",
+            app_id: "app_1",
+            app_version: 2,
+            status: "paused",
+            channel_direction: "inbound",
+            connection_configs: [
+              { connection_id: "c1", agent_phone_number: "+911111111111" },
+              { connection_id: "c1", phone_numbers: ["+912222222222"] },
+            ],
+            webhook_config: { url: "https://x" },
+          },
+          capture,
+        ),
+      },
+      "dep_1",
+    );
+    assert.equal(capture.init?.method, "GET");
+    assert.equal(
+      capture.url,
+      "https://apps.sarvam.ai/api/app-authoring/v1/orgs/org_1/workspaces/ws_1/deployments/dep_1",
+    );
+    assert.deepEqual(d.phoneNumbers, ["+911111111111", "+912222222222"]);
+    assert.deepEqual([d.status, d.appVersion, d.webhookUrlConfigured], ["paused", 2, true]);
+  });
+
+  test("setDeploymentStatus PUTs the documented action to /status", async () => {
+    const capture: { url?: string; init?: RequestInit } = {};
+    await setDeploymentStatus(
+      {
+        ...baseConfig,
+        fetchImpl: mockFetch(
+          200,
+          { deployment_id: "dep_1", app_id: "a", status: "paused" },
+          capture,
+        ),
+      },
+      "dep_1",
+      "pause",
+    );
+    assert.equal(capture.init?.method, "PUT");
+    assert.equal(
+      capture.url,
+      "https://apps.sarvam.ai/api/app-authoring/v1/orgs/org_1/workspaces/ws_1/deployments/dep_1/status",
+    );
+    assert.deepEqual(JSON.parse(capture.init!.body as string), { action: "pause" });
   });
 });

@@ -31,6 +31,10 @@ import {
   getRecording as apiGetRecording,
   type SarvamAttemptSummary,
   type SarvamDeploymentSummary,
+  getDeployment as apiGetDeployment,
+  setDeploymentStatus as apiSetDeploymentStatus,
+  type SarvamDeploymentDetail,
+  type DeploymentWebhookConfig,
 } from "./sarvam-api-client.server.ts";
 import { constantTimeEquals } from "../constant-time-equals.server.ts";
 
@@ -172,6 +176,8 @@ export interface SarvamTelephonyConfig {
  * succeeds against it.
  */
 export interface CreateInboundDeploymentInput {
+  /** Where Sarvam sends each inbound call's completion event. */
+  webhookConfig?: DeploymentWebhookConfig | undefined;
   name: string;
   description?: string | undefined;
   appId: string;
@@ -516,6 +522,19 @@ export class SarvamTelephonyAdapter implements TelephonyProviderAdapter {
    * body are the same convention, not independently confirmed.
    */
   /** Read-only: deployments Sarvam finds for `search` (an agent ID or number). */
+  /** Read-only: one deployment as Sarvam has it (app, version, numbers, status, webhook). */
+  async getDeployment(deploymentId: string): Promise<SarvamDeploymentDetail> {
+    return apiGetDeployment(this.managementApiConfig("inbound"), deploymentId);
+  }
+
+  /** Pause or resume inbound calls on a deployment. */
+  async setDeploymentStatus(
+    deploymentId: string,
+    action: "pause" | "resume",
+  ): Promise<SarvamDeploymentDetail> {
+    return apiSetDeploymentStatus(this.managementApiConfig("inbound"), deploymentId, action);
+  }
+
   async listDeployments(search: string): Promise<SarvamDeploymentSummary[]> {
     return apiListDeployments(this.managementApiConfig("outbound"), search);
   }

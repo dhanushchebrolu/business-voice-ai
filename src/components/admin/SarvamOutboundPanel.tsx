@@ -5,6 +5,9 @@ import { toast } from "sonner";
 import {
   createSarvamInboundDeployment,
   getSarvamAgentBrief,
+  getSarvamDeployments,
+  setSarvamDeploymentStatus,
+  syncSarvamDeployments,
   getSarvamOutboundGates,
   inspectSarvamAgent,
   listSarvamApplications,
@@ -49,6 +52,7 @@ interface PanelNumber {
   outbound_enabled: boolean;
   connection_id: string | null;
   agent_config_id: string | null;
+  provider_deployment_id?: string | null;
 }
 
 interface PanelProps {
@@ -131,6 +135,29 @@ export function SarvamOutboundPanel({ orgId, agent, numbers, connections, onChan
   const importNumber = useServerFn(importPhoneNumberToPool);
   const fetchBrief = useServerFn(getSarvamAgentBrief);
   const createDeployment = useServerFn(createSarvamInboundDeployment);
+  const fetchDeployments = useServerFn(getSarvamDeployments);
+  const changeDeploymentStatus = useServerFn(setSarvamDeploymentStatus);
+  const syncDeployments = useServerFn(syncSarvamDeployments);
+  const [deploymentAction, setDeploymentAction] = useState<{
+    deploymentId: string;
+    action: "pause" | "resume";
+  } | null>(null);
+  const [syncOpen, setSyncOpen] = useState(false);
+  const hasDeployments = numbers.some((n) => n.provider === "sarvam" && n.provider_deployment_id);
+  const deployments = useQuery({
+    queryKey: ["admin-sarvam-deployments", orgId],
+    queryFn: () => fetchDeployments({ data: { orgId } }),
+    enabled: hasDeployments,
+  });
+  const reportSync = (sync: { items: { action: string }[]; error?: string } | undefined) => {
+    if (!sync) return;
+    if ("error" in sync && sync.error)
+      toast.warning("Deployments not synced", { description: sync.error });
+    else if (sync.items.length > 0)
+      toast.message("Deployments", {
+        description: sync.items.map((i) => i.action.replace("_", " ")).join(", "),
+      });
+  };
   const brief = useQuery({
     queryKey: ["admin-sarvam-brief", orgId],
     queryFn: () => fetchBrief({ data: { orgId } }),
@@ -332,6 +359,69 @@ export function SarvamOutboundPanel({ orgId, agent, numbers, connections, onChan
               />
             </>
           ) : null}
+        </div>
+      ) : null}
+
+      {hasDeployments ? (
+        <div className="mt-4 border-t border-border pt-3">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-sm font-medium">Sarvam deployments</p>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 text-xs"
+              onClick={() => setSyncOpen(true)}
+            >
+              Sync to mapped version
+            </Button>
+          </div>
+          {deployments.isLoading ? (
+            <p className="mt-1 text-xs text-muted-foreground">Reading from Sarvam…</p>
+          ) : deployments.error ? (
+            <p className="mt-1 text-xs text-destructive">{(deployments.error as Error).message}</p>
+          ) : (
+            <ul className="mt-1 divide-y divide-border">
+              {(deployments.data?.deployments ?? []).map((d) =>
+                d.ok ? (
+                  <li
+                    key={d.deploymentId}
+                    className="flex flex-wrap items-center gap-2 py-2 text-xs"
+                  >
+                    <span className="font-mono">{d.deploymentId}</span>
+                    <StatusPill tone={d.status === "paused" ? "idle" : "live"}>
+                      {d.status ?? "unknown"}
+                    </StatusPill>
+                    <span className="text-muted-foreground">
+                      {d.appId} v{d.appVersion ?? "?"} · {d.phoneNumbers.length} number(s) ·{" "}
+                      {d.webhookUrlConfigured ? "result webhook set" : "NO result webhook"}
+                      {agent?.sarvam_app_id && d.appId !== agent.sarvam_app_id
+                        ? " · different agent than mapped"
+                        : agent?.sarvam_app_version && d.appVersion !== agent.sarvam_app_version
+                          ? ` · mapped version is v${agent.sarvam_app_version}`
+                          : ""}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="ml-auto h-7 text-xs"
+                      onClick={() =>
+                        setDeploymentAction({
+                          deploymentId: d.deploymentId,
+                          action: d.status === "paused" ? "resume" : "pause",
+                        })
+                      }
+                    >
+                      {d.status === "paused" ? "Resume" : "Pause"}
+                    </Button>
+                  </li>
+                ) : (
+                  <li key={d.deploymentId} className="py-2 text-xs text-destructive">
+                    {d.deploymentId}: {d.error}
+                  </li>
+                ),
+              )}
+            </ul>
+          )}
         </div>
       ) : null}
 
@@ -588,12 +678,15 @@ export function SarvamOutboundPanel({ orgId, agent, numbers, connections, onChan
         onConfirm={async (reason) => {
           if (!agent) throw new Error("This customer has no agent.");
           if (applicationId) {
-            await mapApplication({ data: { agentConfigId: agent.id, applicationId, reason } });
+            const mapped = await mapApplication({
+              data: { agentConfigId: agent.id, applicationId, reason },
+            });
             toast.success("Agent mapped to Sarvam template");
+            reportSync(mapped.deploymentSync);
             refresh();
             return;
           }
-          await mapAgent({
+          const mapped = await mapAgent({
             data: {
               agentConfigId: agent.id,
               sarvamAppId: appId.trim(),
@@ -602,6 +695,7 @@ export function SarvamOutboundPanel({ orgId, agent, numbers, connections, onChan
             },
           });
           toast.success("Agent mapped to Sarvam app");
+          reportSync(mapped.deploymentSync);
           refresh();
         }}
       />
@@ -706,6 +800,44 @@ export function SarvamOutboundPanel({ orgId, agent, numbers, connections, onChan
           toast.success("Number imported and assigned");
           setImportE164("");
           refresh();
+        }}
+      />
+
+      <ReasonDialog
+        open={deploymentAction !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeploymentAction(null);
+        }}
+        title={
+          deploymentAction?.action === "pause"
+            ? "Pause Sarvam deployment"
+            : "Resume Sarvam deployment"
+        }
+        description={
+          deploymentAction?.action === "pause"
+            ? "Sarvam stops answering inbound calls on this deployment's numbers until it is resumed."
+            : "Sarvam starts answering inbound calls on this deployment's numbers again."
+        }
+        onConfirm={async (reason) => {
+          if (!deploymentAction) return;
+          await changeDeploymentStatus({ data: { orgId, ...deploymentAction, reason } });
+          toast.success(
+            deploymentAction.action === "pause" ? "Deployment paused" : "Deployment resumed",
+          );
+          void deployments.refetch();
+        }}
+      />
+
+      <ReasonDialog
+        open={syncOpen}
+        onOpenChange={setSyncOpen}
+        title="Sync deployments to the mapped agent version"
+        description="Points this customer's Sarvam deployments at the agent's mapped version and adds the result webhook where it is missing. A deployment on a different agent is reported, not replaced."
+        confirmLabel="Sync"
+        onConfirm={async (reason) => {
+          const result = await syncDeployments({ data: { orgId, reason } });
+          reportSync(result);
+          void deployments.refetch();
         }}
       />
 

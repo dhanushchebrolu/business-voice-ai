@@ -1,6 +1,9 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { createInboundDeploymentForNumbers } from "./sarvam-inbound-deployment.server.ts";
+import {
+  createInboundDeploymentForNumbers,
+  syncAgentDeployments,
+} from "./sarvam-inbound-deployment.server.ts";
 
 /**
  * Behavioral coverage for createInboundDeploymentForNumbers — the logic
@@ -81,10 +84,14 @@ async function withSarvamEnvAndFetch<T>(
     SARVAM_API_KEY: process.env["SARVAM_API_KEY"],
     SARVAM_ORG_ID: process.env["SARVAM_ORG_ID"],
     SARVAM_WORKSPACE_ID: process.env["SARVAM_WORKSPACE_ID"],
+    TELEPHONY_WEBHOOK_BASE_URL: process.env["TELEPHONY_WEBHOOK_BASE_URL"],
+    SARVAM_WEBHOOK_SECRET: process.env["SARVAM_WEBHOOK_SECRET"],
   };
   process.env["SARVAM_API_KEY"] = "sk_test_key";
   process.env["SARVAM_ORG_ID"] = "org_1";
   process.env["SARVAM_WORKSPACE_ID"] = "ws_1";
+  process.env["TELEPHONY_WEBHOOK_BASE_URL"] = "https://clickai.example";
+  process.env["SARVAM_WEBHOOK_SECRET"] = "whsec_test_0123456789abcdef0123456789";
 
   const originalFetch = globalThis.fetch;
   let requestedUrl: string | undefined;
@@ -146,7 +153,18 @@ describe("createInboundDeploymentForNumbers — happy path", () => {
         }),
     );
 
-    assert.deepEqual(result, { deploymentId: "dep_123", organizationId: "org_1" });
+    assert.deepEqual(result, {
+      deploymentId: "dep_123",
+      organizationId: "org_1",
+      outcome: "created",
+    });
+    const webhookConfig = (requestBody as { webhook_config: { url: string; metadata: unknown } })
+      .webhook_config;
+    assert.match(
+      webhookConfig.url,
+      /^https:\/\/clickai\.example\/api\/public\/webhooks\/telephony\?provider=sarvam&verify_token=/,
+    );
+    assert.deepEqual(webhookConfig.metadata, { organization_id: "org_1" });
     assert.equal(
       requestedUrl,
       "https://apps.sarvam.ai/api/app-authoring/v1/orgs/org_1/workspaces/ws_1/deployments",
@@ -316,5 +334,254 @@ describe("createInboundDeploymentForNumbers — does not fake success", () => {
       false,
       "provider_deployment_id must not be written when the Sarvam call failed",
     );
+  });
+});
+
+/** fetch stub answering by method + path suffix; records every request. */
+async function withRoutedFetch<T>(
+  routes: { method: string; suffix: string; status: number; body: unknown }[],
+  fn: () => Promise<T>,
+): Promise<{
+  result?: T;
+  error?: Error;
+  requests: { method: string; url: string; body: unknown }[];
+}> {
+  const prior: Record<string, string | undefined> = {};
+  const env = {
+    SARVAM_API_KEY: "sk_test_key",
+    SARVAM_ORG_ID: "org_1",
+    SARVAM_WORKSPACE_ID: "ws_1",
+    TELEPHONY_WEBHOOK_BASE_URL: "https://clickai.example",
+    SARVAM_WEBHOOK_SECRET: "whsec_test_0123456789abcdef0123456789",
+  };
+  for (const [k, v] of Object.entries(env)) {
+    prior[k] = process.env[k];
+    process.env[k] = v;
+  }
+  const requests: { method: string; url: string; body: unknown }[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+    const method = init?.method ?? "GET";
+    requests.push({
+      method,
+      url: String(url),
+      body: init?.body ? JSON.parse(init.body as string) : undefined,
+    });
+    const route = routes.find(
+      (r) => r.method === method && String(url).split("?")[0]!.endsWith(r.suffix),
+    );
+    if (!route) return new Response(JSON.stringify({ detail: "unrouted" }), { status: 500 });
+    return new Response(JSON.stringify(route.body), { status: route.status });
+  }) as typeof fetch;
+  try {
+    return { result: await fn(), requests };
+  } catch (err) {
+    return { error: err as Error, requests };
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const [k, v] of Object.entries(prior)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+describe("createInboundDeploymentForNumbers — never a duplicate deployment", () => {
+  test("a number Klyro already has a deployment for returns it; nothing is sent to Sarvam", async () => {
+    const { client } = makeFakeSupabase({
+      phone_numbers: {
+        select: [{ data: [{ ...NUMBER_ROW, provider_deployment_id: "dep_known" }], error: null }],
+      },
+    });
+    const { result, requests } = await withRoutedFetch([], () =>
+      createInboundDeploymentForNumbers(client, { phoneNumberIds: ["num_1"], name: "x" }),
+    );
+    assert.deepEqual(result, {
+      deploymentId: "dep_known",
+      organizationId: "org_1",
+      outcome: "already_recorded",
+    });
+    assert.equal(requests.length, 0);
+  });
+
+  test("a deployment Sarvam already has for the number and agent is adopted, not created again", async () => {
+    const { client, calls } = makeFakeSupabase({
+      phone_numbers: {
+        select: [{ data: [NUMBER_ROW], error: null }],
+        update: [{ data: [{}], error: null }],
+      },
+      telephony_connections: { select: [{ data: CONNECTION_ROW, error: null }] },
+      agent_configs: { select: [{ data: AGENT_CONFIG_ROW, error: null }] },
+    });
+    const { result, requests } = await withRoutedFetch(
+      [
+        {
+          method: "GET",
+          suffix: "/deployments",
+          status: 200,
+          body: {
+            items: [
+              {
+                deployment_id: "dep_lost",
+                app_id: "app_1",
+                app_version: 3,
+                phone_numbers: ["+911111111111"],
+              },
+            ],
+          },
+        },
+      ],
+      () => createInboundDeploymentForNumbers(client, { phoneNumberIds: ["num_1"], name: "x" }),
+    );
+    assert.deepEqual(result, {
+      deploymentId: "dep_lost",
+      organizationId: "org_1",
+      outcome: "adopted",
+    });
+    assert.ok(!requests.some((r) => r.method === "POST"), "no create request");
+    const update = calls.find((c) => c.table === "phone_numbers" && c.type === "update");
+    assert.equal(
+      (update!.payload as { provider_deployment_id: string }).provider_deployment_id,
+      "dep_lost",
+    );
+  });
+
+  test("a number Sarvam routes to a different agent is a conflict: nothing created, nothing recorded", async () => {
+    const { client, calls } = makeFakeSupabase({
+      phone_numbers: { select: [{ data: [NUMBER_ROW], error: null }] },
+      telephony_connections: { select: [{ data: CONNECTION_ROW, error: null }] },
+      agent_configs: { select: [{ data: AGENT_CONFIG_ROW, error: null }] },
+    });
+    const { error, requests } = await withRoutedFetch(
+      [
+        {
+          method: "GET",
+          suffix: "/deployments",
+          status: 200,
+          body: {
+            items: [
+              {
+                deployment_id: "dep_other",
+                app_id: "someone_else",
+                phone_numbers: ["+91 11111 11111"],
+              },
+            ],
+          },
+        },
+      ],
+      () => createInboundDeploymentForNumbers(client, { phoneNumberIds: ["num_1"], name: "x" }),
+    );
+    assert.match(error?.message ?? "", /already routes .* dep_other .* no duplicate was created/);
+    assert.ok(!requests.some((r) => r.method === "POST"));
+    assert.ok(!calls.some((c) => c.type === "update"));
+  });
+
+  test("without the result webhook configured, no deployment is created", async () => {
+    const { client } = makeFakeSupabase({
+      phone_numbers: { select: [{ data: [NUMBER_ROW], error: null }] },
+      telephony_connections: { select: [{ data: CONNECTION_ROW, error: null }] },
+      agent_configs: { select: [{ data: AGENT_CONFIG_ROW, error: null }] },
+    });
+    const saved = process.env["SARVAM_WEBHOOK_SECRET"];
+    const { error, requests } = await withRoutedFetch([], async () => {
+      delete process.env["SARVAM_WEBHOOK_SECRET"];
+      return createInboundDeploymentForNumbers(client, { phoneNumberIds: ["num_1"], name: "x" });
+    });
+    if (saved !== undefined) process.env["SARVAM_WEBHOOK_SECRET"] = saved;
+    assert.match(error?.message ?? "", /result webhook is not configured/);
+    assert.equal(requests.length, 0);
+  });
+});
+
+describe("syncAgentDeployments", () => {
+  const agent = {
+    id: "agent_1",
+    organization_id: "org_1",
+    sarvam_app_id: "app_1",
+    sarvam_app_version: 4,
+  };
+  const numbersFor = (ids: string[]) =>
+    ids.map((d) => ({ organization_id: "org_1", provider: "sarvam", provider_deployment_id: d }));
+
+  test("moves a deployment to the newly mapped version and adds a missing webhook, via PATCH only", async () => {
+    const { client } = makeFakeSupabase({
+      agent_configs: { select: [{ data: agent, error: null }] },
+      phone_numbers: { select: [{ data: numbersFor(["dep_1"]), error: null }] },
+    });
+    const { result, requests } = await withRoutedFetch(
+      [
+        {
+          method: "GET",
+          suffix: "/deployments/dep_1",
+          status: 200,
+          body: {
+            deployment_id: "dep_1",
+            app_id: "app_1",
+            app_version: 3,
+            connection_configs: [{ connection_id: "c", agent_phone_number: "+911111111111" }],
+          },
+        },
+        {
+          method: "PATCH",
+          suffix: "/deployments/dep_1",
+          status: 200,
+          body: { deployment_id: "dep_1" },
+        },
+      ],
+      () => syncAgentDeployments(client, "agent_1"),
+    );
+    assert.deepEqual(result!.items, [
+      {
+        deploymentId: "dep_1",
+        action: "updated",
+        fromVersion: 3,
+        toVersion: 4,
+        webhookAdded: true,
+      },
+    ]);
+    const patch = requests.find((r) => r.method === "PATCH")!;
+    assert.equal((patch.body as { app_version: number }).app_version, 4);
+    assert.match(
+      (patch.body as { webhook_config: { url: string } }).webhook_config.url,
+      /verify_token=/,
+    );
+    assert.ok(!requests.some((r) => r.method === "POST"), "never creates");
+  });
+
+  test("an in-line deployment is untouched; one on a different agent is reported, not replaced", async () => {
+    const { client } = makeFakeSupabase({
+      agent_configs: { select: [{ data: agent, error: null }] },
+      phone_numbers: { select: [{ data: numbersFor(["dep_ok", "dep_other"]), error: null }] },
+    });
+    const { result, requests } = await withRoutedFetch(
+      [
+        {
+          method: "GET",
+          suffix: "/deployments/dep_ok",
+          status: 200,
+          body: {
+            deployment_id: "dep_ok",
+            app_id: "app_1",
+            app_version: 4,
+            webhook_config: { url: "https://clickai.example/x" },
+          },
+        },
+        {
+          method: "GET",
+          suffix: "/deployments/dep_other",
+          status: 200,
+          body: { deployment_id: "dep_other", app_id: "app_9", app_version: 1 },
+        },
+      ],
+      () => syncAgentDeployments(client, "agent_1"),
+    );
+    assert.deepEqual(
+      result!.items.map((i) => [i.deploymentId, i.action]),
+      [
+        ["dep_ok", "in_sync"],
+        ["dep_other", "app_mismatch"],
+      ],
+    );
+    assert.ok(!requests.some((r) => r.method !== "GET"), "read-only when nothing needs changing");
   });
 });

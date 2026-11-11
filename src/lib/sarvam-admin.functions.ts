@@ -122,7 +122,13 @@ export const setSarvamAppMapping = createServerFn({ method: "POST" })
       reason: data.reason,
     });
 
-    return { ok: true as const };
+    // Existing deployments follow the new mapping (version + result webhook);
+    // a failure here never undoes the mapping, it is reported for a retry.
+    const { syncAgentDeployments } = await import("@/lib/sarvam-inbound-deployment.server");
+    const deploymentSync = await syncAgentDeployments(supabaseAdmin, data.agentConfigId).catch(
+      (err: Error) => ({ items: [], error: err.message }),
+    );
+    return { ok: true as const, deploymentSync };
   });
 
 /* ------------------------------------------------------------------ */
@@ -290,7 +296,13 @@ export const setSarvamApplicationMapping = createServerFn({ method: "POST" })
       },
       reason: data.reason,
     });
-    return { ok: true as const };
+    // Existing deployments follow the new mapping (version + result webhook);
+    // a failure here never undoes the mapping, it is reported for a retry.
+    const { syncAgentDeployments } = await import("@/lib/sarvam-inbound-deployment.server");
+    const deploymentSync = await syncAgentDeployments(supabaseAdmin, data.agentConfigId).catch(
+      (err: Error) => ({ items: [], error: err.message }),
+    );
+    return { ok: true as const, deploymentSync };
   });
 
 /* ------------------------------------------------------------------ */
@@ -466,6 +478,119 @@ interface CreateSarvamInboundDeploymentInput {
  * (see SarvamTelephonyAdapter.createInboundDeployment's doc for that call's
  * verification status).
  */
+/** The Sarvam deployment ids recorded on this organization's own numbers. */
+async function organizationDeploymentIds(
+  supabaseAdmin: SupabaseClient<Database>,
+  orgId: string,
+): Promise<string[]> {
+  const { data } = await supabaseAdmin
+    .from("phone_numbers")
+    .select("provider_deployment_id")
+    .eq("organization_id", orgId)
+    .eq("provider", "sarvam")
+    .not("provider_deployment_id", "is", null);
+  return [...new Set((data ?? []).map((n) => n.provider_deployment_id as string))];
+}
+
+async function requireSarvamAdapter(): Promise<SarvamTelephonyAdapter> {
+  const adapter = getTelephonyAdapter("sarvam");
+  if (!adapter || !(adapter instanceof SarvamTelephonyAdapter))
+    throw new Error("Sarvam is not connected. Configure SARVAM_API_KEY first.");
+  return adapter;
+}
+
+/** This customer's Sarvam deployments, read live from Sarvam (read-only). */
+export const getSarvamDeployments = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { orgId: string }) => {
+    if (!input?.orgId) throw new Error("orgId is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    await assertPlatformAdmin(context.supabase, context.userId, "customers.read");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const ids = await organizationDeploymentIds(supabaseAdmin, data.orgId);
+    if (ids.length === 0) return { deployments: [] };
+    const adapter = await requireSarvamAdapter();
+    const deployments = await Promise.all(
+      ids.map(async (id) => {
+        try {
+          return { ok: true as const, ...(await adapter.getDeployment(id)) };
+        } catch (err) {
+          return { ok: false as const, deploymentId: id, error: (err as Error).message };
+        }
+      }),
+    );
+    return { deployments };
+  });
+
+interface SetSarvamDeploymentStatusInput {
+  orgId: string;
+  deploymentId: string;
+  action: "pause" | "resume";
+  reason: string;
+}
+
+/** Pause or resume inbound calls on one of this customer's own deployments. */
+export const setSarvamDeploymentStatus = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: SetSarvamDeploymentStatusInput) => {
+    if (!input?.orgId || !input.deploymentId)
+      throw new Error("orgId and deploymentId are required");
+    if (input.action !== "pause" && input.action !== "resume")
+      throw new Error('action must be "pause" or "resume"');
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    // Only a deployment recorded on this customer's own numbers, never a raw id.
+    if (!(await organizationDeploymentIds(supabaseAdmin, data.orgId)).includes(data.deploymentId))
+      throw new Error("That deployment does not belong to this customer.");
+    const adapter = await requireSarvamAdapter();
+    const after = await adapter.setDeploymentStatus(data.deploymentId, data.action);
+    await writeAudit(admin, {
+      action: data.action === "pause" ? "SARVAM_DEPLOYMENT_PAUSED" : "SARVAM_DEPLOYMENT_RESUMED",
+      entityType: "sarvam_deployment",
+      entityId: data.deploymentId,
+      organizationId: data.orgId,
+      newValue: { status: after.status },
+      reason: data.reason,
+    });
+    return { status: after.status };
+  });
+
+/** Brings this customer's deployments in line with its agent's mapping (version, webhook). */
+export const syncSarvamDeployments = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { orgId: string; reason: string }) => {
+    if (!input?.orgId) throw new Error("orgId is required");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "agents.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { data: agent } = await supabaseAdmin
+      .from("agent_configs")
+      .select("id")
+      .eq("organization_id", data.orgId)
+      .maybeSingle();
+    if (!agent) throw new Error("This customer has no agent.");
+    const { syncAgentDeployments } = await import("@/lib/sarvam-inbound-deployment.server");
+    const result = await syncAgentDeployments(supabaseAdmin, agent.id);
+    await writeAudit(admin, {
+      action: "SARVAM_DEPLOYMENTS_SYNCED",
+      entityType: "agent_config",
+      entityId: agent.id,
+      organizationId: data.orgId,
+      newValue: result as unknown as Json,
+      reason: data.reason,
+    });
+    return result;
+  });
+
 export const createSarvamInboundDeployment = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: CreateSarvamInboundDeploymentInput) => {
