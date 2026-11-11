@@ -104,8 +104,11 @@ before(() => {
       return;
     }
   }
+  // In a transaction, as Supabase applies every migration (LOCK TABLE needs one).
   const again = execSql(
-    readFileSync(join(migrationsDir, "20261111090100_wallet_balance_ledger_cache.sql"), "utf8"),
+    `BEGIN;
+${readFileSync(join(migrationsDir, "20261111090100_wallet_balance_ledger_cache.sql"), "utf8")}
+COMMIT;`,
   );
   if (again.status !== 0) {
     setupFailure = `re-applying the migration failed: ${again.stderr}`;
