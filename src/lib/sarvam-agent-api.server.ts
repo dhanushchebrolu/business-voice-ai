@@ -414,10 +414,24 @@ export async function handleSarvamAgentRequest(
         await audit(deps, auth, "check_availability", out.isError ? "error" : "ok", interactionId, {
           date,
         });
+        // Keep the UTC slots and add the business's wall-clock HH:mm, so the agent never
+        // converts time zones itself (Intl applies the zone's DST rules for each instant).
+        const result = JSON.parse(out.content) as {
+          success?: boolean;
+          data?: { slots?: { start: string; end: string }[] };
+        };
+        if (result.success && Array.isArray(result.data?.slots)) {
+          result.data.slots = result.data.slots.map((s) => ({
+            ...s,
+            start_local: localNow(new Date(s.start), business.timezone).time,
+            end_local: localNow(new Date(s.end), business.timezone).time,
+          }));
+        }
         return json({
           ok: !out.isError,
           duration_minutes: duration,
-          result: JSON.parse(out.content),
+          timezone: business.timezone,
+          result,
         });
       }
 

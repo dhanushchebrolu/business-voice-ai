@@ -411,6 +411,103 @@ describe("never invents business facts", () => {
   });
 });
 
+describe("check_availability returns local wall-clock times", () => {
+  /** Availability as ClickAI's calendar tool returns it (UTC slots), for the token's business. */
+  const availability = async (
+    timezone: string,
+    toolResult: unknown,
+    org: string = ORG_SMILE,
+  ): Promise<Record<string, unknown>> => {
+    db.tables["businesses"]!.find((b) => b["organization_id"] === org)!["timezone"] = timezone;
+    const res = await handleSarvamAgentRequest(
+      sarvamRequest("tools/check_availability", tokens[org]!, { date: "2026-11-12" }),
+      "check_availability",
+      { ...deps(), executeTool: async () => ({ content: JSON.stringify(toolResult) }) },
+    );
+    assert.equal(res.status, 200);
+    return (await res.json()) as Record<string, unknown>;
+  };
+  const slotsOf = (body: Record<string, unknown>) =>
+    (body["result"] as { data: { slots: Record<string, string>[] } }).data.slots;
+
+  test("keeps the UTC slots and adds start_local/end_local in the business timezone", async () => {
+    const body = await availability("Asia/Kolkata", {
+      success: true,
+      data: {
+        slots: [
+          { start: "2026-11-12T04:30:00.000Z", end: "2026-11-12T05:00:00.000Z" },
+          { start: "2026-11-12T18:30:00.000Z", end: "2026-11-12T19:00:00.000Z" },
+        ],
+      },
+    });
+    assert.equal(body["timezone"], "Asia/Kolkata");
+    assert.equal(body["ok"], true);
+    assert.deepEqual(slotsOf(body), [
+      {
+        start: "2026-11-12T04:30:00.000Z",
+        end: "2026-11-12T05:00:00.000Z",
+        start_local: "10:00",
+        end_local: "10:30",
+      },
+      // Midnight is 00:00, never 24:00.
+      {
+        start: "2026-11-12T18:30:00.000Z",
+        end: "2026-11-12T19:00:00.000Z",
+        start_local: "00:00",
+        end_local: "00:30",
+      },
+    ]);
+  });
+
+  test("no free slots: an empty list and the timezone, nothing invented", async () => {
+    const body = await availability("Asia/Kolkata", { success: true, data: { slots: [] } });
+    assert.deepEqual(slotsOf(body), []);
+    assert.equal(body["timezone"], "Asia/Kolkata");
+  });
+
+  test("uses each business's own timezone, including daylight-saving changes", async () => {
+    const local = async (timezone: string, startIso: string) =>
+      slotsOf(
+        await availability(timezone, {
+          success: true,
+          data: { slots: [{ start: startIso, end: startIso }] },
+        }),
+      )[0]!["start_local"];
+    // New York: 10:00 is 15:00 UTC in winter (EST) and 14:00 UTC after the
+    // 2026-03-08 switch to EDT, and again 15:00 UTC after 2026-11-01.
+    assert.equal(await local("America/New_York", "2026-03-07T15:00:00.000Z"), "10:00");
+    assert.equal(await local("America/New_York", "2026-03-09T14:00:00.000Z"), "10:00");
+    assert.equal(await local("America/New_York", "2026-11-02T15:00:00.000Z"), "10:00");
+    // London: BST in summer, GMT in winter.
+    assert.equal(await local("Europe/London", "2026-07-01T09:00:00.000Z"), "10:00");
+    assert.equal(await local("Europe/London", "2026-12-01T10:00:00.000Z"), "10:00");
+    // Sydney: daylight saving in the southern summer (AEDT, UTC+11), not in June (AEST, UTC+10).
+    assert.equal(await local("Australia/Sydney", "2026-01-15T23:00:00.000Z"), "10:00");
+    assert.equal(await local("Australia/Sydney", "2026-06-15T00:00:00.000Z"), "10:00");
+    // Two customers in different zones get their own wall clock for the same instant.
+    const abc = await availability(
+      "Asia/Dubai",
+      {
+        success: true,
+        data: { slots: [{ start: "2026-11-12T06:00:00.000Z", end: "2026-11-12T06:30:00.000Z" }] },
+      },
+      ORG_ABC,
+    );
+    assert.equal(abc["timezone"], "Asia/Dubai");
+    assert.equal(slotsOf(abc)[0]!["start_local"], "10:00");
+  });
+
+  test("a failed availability check is passed through unchanged, with the timezone", async () => {
+    const failure = {
+      success: false,
+      error: { code: "TOOL_NOT_PERMITTED", message: "not permitted" },
+    };
+    const body = await availability("Asia/Kolkata", failure);
+    assert.deepEqual(body["result"], failure);
+    assert.equal(body["timezone"], "Asia/Kolkata");
+  });
+});
+
 describe("call outcome, validation and audit", () => {
   test("the on-end outcome is recorded once per call and creates one lead", async () => {
     const body = {
