@@ -256,7 +256,12 @@ describe("duplicate deliveries and mismatched organizations", () => {
     const dedupe = route.indexOf('from("webhook_events").insert(');
     const process = route.indexOf("await processTelephonyEvent(");
     assert.ok(dedupe > -1 && dedupe < process);
-    assert.match(route, /code === "23505"\) return new Response\("ok \(duplicate\)"\)/);
+    // A replay is a no-op unless the earlier attempt failed and was never processed.
+    assert.match(route, /code !== "23505"/);
+    assert.match(
+      route,
+      /\.is\("processed_at", null\)[\s\S]*?if \(!claimed\?\.length\) return new Response\("ok \(duplicate\)"\)/,
+    );
     assert.match(route, /if \(!transition\.changed\) \{\s*\/\/ idempotent replay/);
   });
 });

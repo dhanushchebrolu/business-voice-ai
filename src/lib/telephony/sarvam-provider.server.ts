@@ -262,7 +262,8 @@ function toIsoOrNow(...candidates: unknown[]): string {
 
 function toDurationSeconds(v: unknown): number | undefined {
   const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
-  return Number.isFinite(n) && n >= 0 ? n : undefined;
+  // Sarvam reports fractional seconds (e.g. 201.077…); call_logs.duration_seconds is an integer.
+  return Number.isFinite(n) && n >= 0 ? Math.ceil(n) : undefined;
 }
 
 /** Never throws — a malformed turn is dropped, not fatal to the whole transcript. */

@@ -50,8 +50,20 @@ describe("telephony webhook route — signature verification and idempotency (un
 
   test("dedupes via the existing webhook_events (provider, event_id) unique index before any side effect", () => {
     assert.match(routeSrc, /from\("webhook_events"\)\s*\.insert\(/);
-    assert.match(routeSrc, /code.*===\s*"23505"/);
+    assert.match(routeSrc, /code.*!==\s*"23505"/);
     assert.match(routeSrc, /"ok \(duplicate\)"/);
+  });
+
+  test("a re-delivered event whose earlier processing failed is claimed and retried; a processed one stays a duplicate", () => {
+    const dup = routeSrc.slice(routeSrc.indexOf('!== "23505"'), routeSrc.indexOf("try {"));
+    assert.match(dup, /\.update\(\{ error: null \}\)/, "clearing error claims the retry");
+    assert.match(dup, /\.is\("processed_at", null\)/, "never reprocesses a processed event");
+    assert.match(
+      dup,
+      /\.not\("error", "is", null\)/,
+      "only events that actually failed are retried",
+    );
+    assert.match(dup, /if \(!claimed\?\.length\) return new Response\("ok \(duplicate\)"\)/);
   });
 });
 

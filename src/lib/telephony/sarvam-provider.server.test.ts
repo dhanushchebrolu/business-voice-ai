@@ -101,6 +101,17 @@ test("normalizeWebhookEvent: outbound campaign attempt (connected/completed) map
   });
 });
 
+test("normalizeWebhookEvent: Sarvam's fractional inbound duration becomes whole seconds (rounded up)", () => {
+  const adapter = new SarvamTelephonyAdapter(config);
+  // Real value from the first live inbound call; storing it raw failed the integer column.
+  const event = adapter.normalizeWebhookEvent(
+    JSON.stringify({ ...INBOUND_SAMPLE, duration: 201.07791383219956 }),
+  );
+  assert.ok(event);
+  assert.equal(event.durationSeconds, 202);
+  assert.ok(Number.isInteger(event.durationSeconds));
+});
+
 test("normalizeWebhookEvent: outbound busy attempt classifies as busy, never crashes, never billed as completed", () => {
   const adapter = new SarvamTelephonyAdapter(config);
   const payload = {

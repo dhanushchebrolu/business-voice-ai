@@ -116,9 +116,26 @@ async function handleTelephonyWebhook(request: Request): Promise<Response> {
     payload: event.raw as never,
   });
   if (dedupeError) {
-    if ((dedupeError as { code?: string }).code === "23505") return new Response("ok (duplicate)");
-    console.error("telephony:webhook_store_failed", dedupeError.message);
-    return new Response("Storage error", { status: 500 });
+    if ((dedupeError as { code?: string }).code !== "23505") {
+      console.error("telephony:webhook_store_failed", dedupeError.message);
+      return new Response("Storage error", { status: 500 });
+    }
+    // A replay of an event that already failed processing is retried, not dropped: otherwise a
+    // provider re-delivery after a transient error could never record the call. Clearing `error`
+    // claims the retry, so two concurrent re-deliveries cannot both process it.
+    const { data: claimed } = await supabaseAdmin
+      .from("webhook_events")
+      .update({ error: null })
+      .eq("provider", providerId)
+      .eq("event_id", eventId)
+      .is("processed_at", null)
+      .not("error", "is", null)
+      .select("id");
+    if (!claimed?.length) return new Response("ok (duplicate)");
+    console.info("telephony:webhook_retrying_failed_event", {
+      provider: providerId,
+      event_id: eventId,
+    });
   }
 
   try {
