@@ -142,6 +142,9 @@ function logSarvamFailure(
         .split(/[\s"'`]+/)
         .filter(Boolean)
         .map((p) => p.length),
+      // Segment lengths between underscores, and whether each is letters-only: compares the key's
+      // layout with Sarvam's `xx_xxxxxxx_…` keys without revealing a character.
+      segments: apiKey.split("_").map((s) => `${s.length}${/^[A-Za-z]*$/.test(s) ? "a" : "x"}`),
       punctuation: [...new Set(apiKey.replace(/[A-Za-z0-9]/g, ""))].map((c) =>
         c.charCodeAt(0) < 32 ? `0x${c.charCodeAt(0).toString(16)}` : c,
       ),

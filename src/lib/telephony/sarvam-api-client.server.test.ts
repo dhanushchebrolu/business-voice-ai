@@ -367,7 +367,7 @@ describe("HTTP status handling — 400/401/403/429/500/503", () => {
     assert.match(text, /verify_token=\[redacted\]/);
     assert.match(
       text,
-      /"keyShape":\{"length":20,"whitespace":false,"quotes":false,"safeCharsOnly":true,"parts":\[20\],"punctuation":\["_"\]\}/,
+      /"keyShape":\{"length":20,"whitespace":false,"quotes":false,"safeCharsOnly":true,"parts":\[20\],"segments":\["2a","4a","6a","5a"\],"punctuation":\["_"\]\}/,
     );
     assert.ok(!text.includes("shh-secret"), "webhook token must not be logged");
     assert.ok(!text.includes(baseConfig.apiKey), "API key must not be logged");
