@@ -137,6 +137,14 @@ function logSarvamFailure(
       whitespace: /\s/.test(apiKey),
       quotes: /["'`]/.test(apiKey),
       safeCharsOnly: /^[A-Za-z0-9_.-]+$/.test(apiKey),
+      // Lengths of the whitespace/quote-separated parts and which punctuation appears: structure, no content.
+      parts: apiKey
+        .split(/[\s"'`]+/)
+        .filter(Boolean)
+        .map((p) => p.length),
+      punctuation: [...new Set(apiKey.replace(/[A-Za-z0-9]/g, ""))].map((c) =>
+        c.charCodeAt(0) < 32 ? `0x${c.charCodeAt(0).toString(16)}` : c,
+      ),
     },
     method,
     path: redactSecrets(path),

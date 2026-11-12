@@ -5,6 +5,7 @@ import {
   providerStatus,
   getTelephonyAdapter,
   resolveSarvamKeys,
+  normalizePastedKey,
 } from "./telephony.server.ts";
 import { SarvamTelephonyAdapter } from "./telephony/sarvam-provider.server.ts";
 import { VobizTelephonyAdapter } from "./telephony/vobiz-provider.ts";
@@ -104,6 +105,22 @@ test("resolveSarvamKeys: trims a pasted key, and a whitespace-only key falls bac
       });
     },
   );
+});
+
+test("normalizePastedKey: pulls the single key out of pasted text, leaves anything ambiguous alone", () => {
+  const key = "sarvam_test_" + "a".repeat(30);
+  assert.equal(normalizePastedKey(key), key);
+  assert.equal(normalizePastedKey('  "' + key + '"\n'), key);
+  assert.equal(normalizePastedKey('X-API-Key: "' + key + '"'), key);
+  assert.equal(normalizePastedKey('{"api_key": "' + key + '"}'), key);
+  const two = key + " " + key.replace("a", "b");
+  assert.equal(normalizePastedKey(two), two, "two candidate keys: keep as typed");
+  assert.equal(
+    normalizePastedKey("\u0016"),
+    "\u0016",
+    "a stray control character is not invented into a key",
+  );
+  assert.equal(normalizePastedKey("   "), undefined);
 });
 
 test("providerStatus: only the outbound key set still reports configured:false — inbound remains missing", () => {

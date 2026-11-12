@@ -97,12 +97,25 @@ export const TELEPHONY_PROVIDERS: TelephonyProviderDef[] = [
  * callers decide whether that's fatal for the specific operation they need
  * (see SarvamTelephonyAdapter.managementApiConfig).
  */
+/**
+ * A key pasted into a secret can arrive wrapped in text, e.g. `X-API-Key: "sk_…"` or with a
+ * trailing newline; Sarvam rejects that as "Invalid API key format". When the value holds
+ * exactly one key-like token, that token is the key. Anything ambiguous is returned trimmed,
+ * so Sarvam's own error still surfaces.
+ */
+export function normalizePastedKey(raw: string | undefined): string | undefined {
+  const trimmed = raw?.trim();
+  if (!trimmed) return undefined;
+  if (/^[A-Za-z0-9_.-]+$/.test(trimmed)) return trimmed;
+  const tokens = trimmed.split(/[\s"'`:=,;]+/).filter((t) => /^[A-Za-z0-9_.-]{20,}$/.test(t));
+  return tokens.length === 1 ? tokens[0] : trimmed;
+}
+
 export function resolveSarvamKeys(): {
   inboundApiKey: string | null;
   outboundApiKey: string | null;
 } {
-  // Pasted secrets can carry stray whitespace or newlines; an untrimmed key is rejected by Sarvam.
-  const env = (name: string) => process.env[name]?.trim() || undefined;
+  const env = (name: string) => normalizePastedKey(process.env[name]);
   const legacy = env("SARVAM_API_KEY");
   const single = env("SARVAM_VOICE_AGENTS_API_KEY") ?? legacy;
   return {
