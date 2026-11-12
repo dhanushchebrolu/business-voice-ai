@@ -257,17 +257,25 @@ export async function syncAgentDeployments(
         });
         continue;
       }
-      await adapter.updateInboundDeployment(deploymentId, {
-        ...(needsVersion ? { appVersion: agent.sarvam_app_version } : {}),
-        ...(needsWebhook && webhook.ok
-          ? {
-              webhookConfig: {
-                url: webhook.url,
-                metadata: { organization_id: agent.organization_id },
-              },
-            }
-          : {}),
-      });
+      // Sarvam edits only paused deployments (422 "Only paused deployments can be edited"):
+      // pause, edit, and always resume one we paused, so a failed edit never leaves calls unanswered.
+      const wasActive = current.status === "active";
+      if (wasActive) await adapter.setDeploymentStatus(deploymentId, "pause");
+      try {
+        await adapter.updateInboundDeployment(deploymentId, {
+          ...(needsVersion ? { appVersion: agent.sarvam_app_version } : {}),
+          ...(needsWebhook && webhook.ok
+            ? {
+                webhookConfig: {
+                  url: webhook.url,
+                  metadata: { organization_id: agent.organization_id },
+                },
+              }
+            : {}),
+        });
+      } finally {
+        if (wasActive) await adapter.setDeploymentStatus(deploymentId, "resume");
+      }
       items.push({
         deploymentId,
         action: "updated",

@@ -548,6 +548,88 @@ describe("syncAgentDeployments", () => {
     assert.ok(!requests.some((r) => r.method === "POST"), "never creates");
   });
 
+  test("an active deployment is paused, moved to the new version, then resumed (Sarvam edits only paused ones)", async () => {
+    const { client } = makeFakeSupabase({
+      agent_configs: { select: [{ data: agent, error: null }] },
+      phone_numbers: { select: [{ data: numbersFor(["dep_1"]), error: null }] },
+    });
+    const { result, requests } = await withRoutedFetch(
+      [
+        {
+          method: "GET",
+          suffix: "/deployments/dep_1",
+          status: 200,
+          body: {
+            deployment_id: "dep_1",
+            app_id: "app_1",
+            app_version: 3,
+            status: "active",
+            webhook_config: { url: "https://clickai.example/x" },
+          },
+        },
+        {
+          method: "PUT",
+          suffix: "/deployments/dep_1/status",
+          status: 200,
+          body: { deployment_id: "dep_1" },
+        },
+        {
+          method: "PATCH",
+          suffix: "/deployments/dep_1",
+          status: 200,
+          body: { deployment_id: "dep_1" },
+        },
+      ],
+      () => syncAgentDeployments(client, "agent_1"),
+    );
+    assert.equal(result!.items[0]!.action, "updated");
+    const calls = requests.filter((r) => r.method !== "GET");
+    assert.deepEqual(
+      calls.map((r) => [r.method, (r.body as { action?: string })?.action ?? null]),
+      [
+        ["PUT", "pause"],
+        ["PATCH", null],
+        ["PUT", "resume"],
+      ],
+    );
+    assert.equal((calls[1]!.body as { app_version: number }).app_version, 4);
+  });
+
+  test("a failed edit still resumes the paused deployment and reports the error", async () => {
+    const { client } = makeFakeSupabase({
+      agent_configs: { select: [{ data: agent, error: null }] },
+      phone_numbers: { select: [{ data: numbersFor(["dep_1"]), error: null }] },
+    });
+    const { result, requests } = await withRoutedFetch(
+      [
+        {
+          method: "GET",
+          suffix: "/deployments/dep_1",
+          status: 200,
+          body: { deployment_id: "dep_1", app_id: "app_1", app_version: 3, status: "active" },
+        },
+        {
+          method: "PUT",
+          suffix: "/deployments/dep_1/status",
+          status: 200,
+          body: { deployment_id: "dep_1" },
+        },
+        {
+          method: "PATCH",
+          suffix: "/deployments/dep_1",
+          status: 422,
+          body: { error: { message: "bad" } },
+        },
+      ],
+      () => syncAgentDeployments(client, "agent_1"),
+    );
+    assert.equal(result!.items[0]!.action, "error");
+    const actions = requests
+      .filter((r) => r.method === "PUT")
+      .map((r) => (r.body as { action: string }).action);
+    assert.deepEqual(actions, ["pause", "resume"]);
+  });
+
   test("an in-line deployment is untouched; one on a different agent is reported, not replaced", async () => {
     const { client } = makeFakeSupabase({
       agent_configs: { select: [{ data: agent, error: null }] },
