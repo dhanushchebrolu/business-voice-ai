@@ -306,6 +306,69 @@ describe("HTTP status handling — 400/401/403/429/500/503", () => {
     });
   }
 
+  test("Sarvam's documented { error: { code, message } } and FastAPI detail[] reach the error message", async () => {
+    const nested = {
+      ...baseConfig,
+      fetchImpl: mockFetch(400, {
+        error: { code: "INVALID_PHONE", message: "number not onboarded" },
+      }),
+    };
+    await assert.rejects(
+      () => listCampaigns(nested),
+      /Sarvam rejected the request as invalid\. INVALID_PHONE: number not onboarded/,
+    );
+    const fastapi = {
+      ...baseConfig,
+      fetchImpl: mockFetch(422, {
+        detail: [
+          { loc: ["body", "connection_configs", 0, "phone_numbers"], msg: "field required" },
+        ],
+      }),
+    };
+    await assert.rejects(
+      () => listCampaigns(fastapi),
+      /body\.connection_configs\.0\.phone_numbers: field required/,
+    );
+  });
+
+  test("a failed call logs status, request id and body, never the API key or webhook verify_token", async () => {
+    const logged: unknown[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => void logged.push(args);
+    try {
+      const fetchImpl = (async () =>
+        new Response("", {
+          status: 400,
+          headers: { "x-request-id": "req-123", "content-type": "text/plain" },
+        })) as typeof fetch;
+      await assert.rejects(
+        () =>
+          createDeployment(
+            { ...baseConfig, fetchImpl },
+            {
+              name: "n",
+              appId: "app_1",
+              appVersion: 3,
+              connectionId: "conn_1",
+              phoneNumbers: ["+911111111111"],
+              webhookConfig: { url: "https://x.test/hook?provider=sarvam&verify_token=shh-secret" },
+            },
+          ),
+        /\(Sarvam request req-123\)$/,
+      );
+    } finally {
+      console.error = original;
+    }
+    const text = JSON.stringify(logged);
+    assert.match(text, /sarvam_api:error/);
+    assert.match(text, /"status":400/);
+    assert.match(text, /req-123/);
+    assert.match(text, /workspaces\/ws_1\/deployments/);
+    assert.match(text, /verify_token=\[redacted\]/);
+    assert.ok(!text.includes("shh-secret"), "webhook token must not be logged");
+    assert.ok(!text.includes(baseConfig.apiKey), "API key must not be logged");
+  });
+
   test("a non-JSON error body does not crash — falls back to a truncated raw-text snippet", async () => {
     const fetchImpl = (async () =>
       new Response("<html>Internal Server Error</html>", { status: 500 })) as typeof fetch;

@@ -69,8 +69,75 @@ function extractSafeErrorMessage(parsed: unknown): string | undefined {
   for (const key of ["message", "error", "detail", "error_description"]) {
     const v = obj[key];
     if (typeof v === "string" && v) return v.slice(0, 300);
+    // Sarvam's documented shape: { error: { code, message } }.
+    const nested = asPlainObject(v);
+    if (nested) {
+      const text = [nested["code"], nested["message"]].filter((x) => typeof x === "string" && x);
+      if (text.length) return text.join(": ").slice(0, 300);
+    }
+    // FastAPI validation shape: { detail: [{ loc, msg }] }.
+    if (Array.isArray(v) && v.length) {
+      const text = v
+        .map((d) => {
+          const item = asPlainObject(d);
+          const loc = Array.isArray(item?.["loc"]) ? (item["loc"] as unknown[]).join(".") : "";
+          return [loc, item?.["msg"]].filter((x) => typeof x === "string" && x).join(": ");
+        })
+        .filter(Boolean)
+        .join("; ");
+      if (text) return text.slice(0, 300);
+    }
   }
   return undefined;
+}
+
+// Values that must never reach a log line: our webhook verify_token and any key-like field.
+const redactSecrets = (s: string): string =>
+  s
+    .replace(/(verify_token=)[^&"'\s]+/gi, "$1[redacted]")
+    .replace(/("(?:api[_-]?key|token|secret|authorization)"\s*:\s*")[^"]*/gi, "$1[redacted]");
+
+const DIAGNOSTIC_HEADERS = [
+  "content-type",
+  "content-length",
+  "x-request-id",
+  "x-correlation-id",
+  "x-trace-id",
+  "x-amzn-requestid",
+  "x-amzn-errortype",
+  "cf-ray",
+  "server",
+  "via",
+];
+
+/** Sanitized facts about a failed Sarvam call: enough to diagnose it or quote to Sarvam support. */
+function logSarvamFailure(
+  method: string,
+  path: string,
+  res: Response,
+  rawText: string,
+  body?: Record<string, unknown>,
+): string | undefined {
+  const headers: Record<string, string> = {};
+  for (const name of DIAGNOSTIC_HEADERS) {
+    const v = res.headers.get(name);
+    if (v) headers[name] = v.slice(0, 120);
+  }
+  const requestId =
+    headers["x-request-id"] ??
+    headers["x-correlation-id"] ??
+    headers["x-trace-id"] ??
+    headers["x-amzn-requestid"] ??
+    headers["cf-ray"];
+  console.error("sarvam_api:error", {
+    method,
+    path: redactSecrets(path),
+    status: res.status,
+    headers,
+    body: redactSecrets(rawText.slice(0, 800)),
+    request: body ? redactSecrets(JSON.stringify(body)).slice(0, 1500) : undefined,
+  });
+  return requestId;
 }
 
 /**
@@ -149,7 +216,9 @@ async function sarvamRequest<T>(
   }
 
   if (!res.ok) {
+    const requestId = logSarvamFailure(method, path, res, rawText, body);
     const error = mapErrorResponse(res.status, parsed, rawText);
+    if (requestId) error.message += ` (Sarvam request ${requestId})`;
     error.outcomeUnknown = !DEFINITE_REJECTION_STATUSES.has(res.status);
     throw error;
   }
