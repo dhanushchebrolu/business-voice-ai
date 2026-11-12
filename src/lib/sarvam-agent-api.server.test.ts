@@ -617,6 +617,88 @@ describe("call outcome, validation and audit", () => {
   });
 });
 
+describe("test callers never create bookings or leads", () => {
+  const TEST_PHONE = "+919000000009";
+  const markTestCaller = () => {
+    const row = db.tables["sarvam_agent_integrations"]!.find(
+      (r) => r["organization_id"] === ORG_SMILE,
+    )!;
+    row["test_caller_numbers"] = [TEST_PHONE];
+  };
+  const bookWith = (phone: string) => {
+    const calls: string[] = [];
+    return handleSarvamAgentRequest(
+      sarvamRequest("tools/book_appointment", tokens[ORG_SMILE]!, {
+        interaction_id: "20261113/test-1",
+        date: "2026-11-14",
+        time: "13:00",
+        customer_name: "Tester",
+        customer_phone: phone,
+      }),
+      "book_appointment",
+      {
+        ...deps(),
+        executeTool: async (_ctx, name) => {
+          calls.push(name);
+          return {
+            content: JSON.stringify(
+              name === "check_calendar_availability"
+                ? {
+                    success: true,
+                    data: { slots: [{ start: "2026-11-14T07:30:00.000Z", end: "x" }] },
+                  }
+                : { success: true, bookingOutcome: "confirmed" },
+            ),
+          };
+        },
+      },
+    ).then(async (res) => ({ body: (await res.json()) as Record<string, unknown>, calls }));
+  };
+
+  test("a booking from a test number checks the slot but never books, and the reply is not CONFIRMED", async () => {
+    markTestCaller();
+    const { body, calls } = await bookWith(TEST_PHONE);
+    assert.deepEqual(calls, ["check_calendar_availability"], "the booking tool is never called");
+    const result = body["result"] as {
+      success: boolean;
+      bookingOutcome?: string;
+      error: { code: string; message: string };
+    };
+    assert.equal(result.success, false);
+    assert.equal(result.bookingOutcome, undefined);
+    assert.equal(result.error.code, "TEST_CALL_NOT_SAVED");
+    assert.match(result.error.message, /13:00 on 2026-11-14 is free/);
+    const event = (db.tables["sarvam_agent_events"] ?? []).find(
+      (e) => e["kind"] === "book_appointment",
+    )!;
+    assert.equal((event["detail"] as { test_call: boolean }).test_call, true);
+  });
+
+  test("other callers still book normally", async () => {
+    markTestCaller();
+    const { body, calls } = await bookWith("+919000000001");
+    assert.deepEqual(calls, ["book_appointment"]);
+    assert.equal((body["result"] as { bookingOutcome: string }).bookingOutcome, "confirmed");
+  });
+
+  test("a test caller's callback request is logged as a test call and creates no lead", async () => {
+    markTestCaller();
+    const leadsBefore = (db.tables["leads"] ?? []).length;
+    const res = await call("tools/record_call_outcome", tokens[ORG_SMILE]!, {
+      interaction_id: "20261113/test-2",
+      caller_number: TEST_PHONE,
+      outcome: "callback_requested",
+      customer_name: "Tester",
+    });
+    assert.deepEqual(res.body, { ok: true, duplicate: false });
+    assert.equal((db.tables["leads"] ?? []).length, leadsBefore);
+    const event = (db.tables["sarvam_agent_events"] ?? []).find(
+      (e) => e["kind"] === "call_outcome",
+    )!;
+    assert.equal((event["detail"] as { test_call: boolean }).test_call, true);
+  });
+});
+
 describe("Sarvam configuration brief", () => {
   test("every configured tool targets a real endpoint and uses bearer auth", () => {
     const cfg = sarvamToolConfiguration("https://clickai.in/");

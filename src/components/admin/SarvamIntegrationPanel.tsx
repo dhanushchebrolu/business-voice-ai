@@ -6,6 +6,7 @@ import {
   disableSarvamIntegration,
   getSarvamIntegration,
   issueSarvamIntegrationCredential,
+  setSarvamTestCallers,
   testSarvamIntegration,
 } from "@/lib/sarvam-integration.functions";
 import { getSarvamAgentBrief } from "@/lib/sarvam-admin.functions";
@@ -27,6 +28,9 @@ export function SarvamIntegrationPanel({ orgId }: { orgId: string }) {
   const disable = useServerFn(disableSarvamIntegration);
   const runTest = useServerFn(testSarvamIntegration);
   const fetchBrief = useServerFn(getSarvamAgentBrief);
+  const saveTestCallers = useServerFn(setSarvamTestCallers);
+  const [testCallersOpen, setTestCallersOpen] = useState(false);
+  const [testCallersText, setTestCallersText] = useState("");
 
   const [issueOpen, setIssueOpen] = useState(false);
   const [disableOpen, setDisableOpen] = useState(false);
@@ -88,6 +92,14 @@ export function SarvamIntegrationPanel({ orgId }: { orgId: string }) {
             Sarvam app: {state.data.agent.sarvamAppId ?? "not mapped"}
             {state.data.agent.sarvamAppVersion ? ` v${state.data.agent.sarvamAppVersion}` : ""}
           </p>
+          {integration ? (
+            <p className="mt-1 text-xs text-muted-foreground">
+              Test callers (bookings not saved, no leads):{" "}
+              {integration.test_caller_numbers.length
+                ? integration.test_caller_numbers.join(", ")
+                : "none"}
+            </p>
+          ) : null}
 
           {newToken ? (
             <div className="mt-3 space-y-2 rounded-md border border-amber-500/60 p-3">
@@ -121,6 +133,18 @@ export function SarvamIntegrationPanel({ orgId }: { orgId: string }) {
             <Button size="sm" variant="outline" onClick={() => setIssueOpen(true)}>
               {integration?.status === "active" ? "Rotate credential" : "Generate credential"}
             </Button>
+            {integration?.status === "active" ? (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  setTestCallersText(integration.test_caller_numbers.join(", "));
+                  setTestCallersOpen(true);
+                }}
+              >
+                Test callers
+              </Button>
+            ) : null}
             <Button
               size="sm"
               variant="outline"
@@ -269,6 +293,31 @@ export function SarvamIntegrationPanel({ orgId }: { orgId: string }) {
         onConfirm={async (reason) => {
           const r = await issue({ data: { orgId, reason } });
           setNewToken(r.token);
+          void state.refetch();
+        }}
+      />
+      <ReasonDialog
+        open={testCallersOpen}
+        onOpenChange={setTestCallersOpen}
+        title="Test callers"
+        description="Calls from these numbers are tests: the agent checks the slot but never saves a booking, and no lead is created. Use the country code, e.g. +919876543210. Separate numbers with commas; leave empty to remove all."
+        confirmLabel="Save"
+        extra={
+          <input
+            aria-label="Test caller numbers"
+            className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+            value={testCallersText}
+            onChange={(e) => setTestCallersText(e.target.value)}
+            placeholder="+919876543210, +919812345678"
+          />
+        }
+        onConfirm={async (reason) => {
+          const numbers = testCallersText
+            .split(",")
+            .map((n) => n.trim())
+            .filter(Boolean);
+          const r = await saveTestCallers({ data: { orgId, numbers, reason } });
+          toast.success(`Test callers saved (${r.numbers.length})`);
           void state.refetch();
         }}
       />

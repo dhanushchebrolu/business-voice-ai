@@ -73,6 +73,8 @@ export interface AuthenticatedIntegration {
   organizationId: string;
   agentConfigId: string;
   businessId: string;
+  /** E.164 caller numbers whose calls are tests: no booking is written and no lead is created. */
+  testCallerNumbers: string[];
 }
 
 type Client = SupabaseClient<Database>;
@@ -92,7 +94,7 @@ export async function authenticateIntegration(
     return { ok: false, status: 401 };
   const { data: row } = await supabaseAdmin
     .from("sarvam_agent_integrations")
-    .select("id, organization_id, agent_config_id, status, expires_at")
+    .select("id, organization_id, agent_config_id, status, expires_at, test_caller_numbers")
     .eq("token_hash", await hashIntegrationToken(token))
     .maybeSingle();
   if (!row || row.status !== "active") return { ok: false, status: 401 };
@@ -112,6 +114,7 @@ export async function authenticateIntegration(
       organizationId: row.organization_id,
       agentConfigId: row.agent_config_id,
       businessId: agent.business_id,
+      testCallerNumbers: row.test_caller_numbers ?? [],
     },
   };
 }
@@ -443,6 +446,34 @@ export async function handleSarvamAgentRequest(
       const phone = normalizeCustomerPhone(str(body, "customer_phone", 40) ?? "", null);
       const start = zonedWallTimeToUtc(date, time, business.timezone);
       const end = new Date(start.getTime() + duration * 60_000);
+      if (phone && auth.testCallerNumbers.includes(phone)) {
+        // Test call: check the slot exactly as a booking would, but never write a booking.
+        const avail = await execute(toolCtx, "check_calendar_availability", {
+          dateIso: date,
+          durationMinutes: duration,
+        });
+        const slots =
+          (JSON.parse(avail.content) as { data?: { slots?: { start: string }[] } }).data?.slots ??
+          [];
+        const free = slots.some((s) => new Date(s.start).getTime() === start.getTime());
+        await audit(deps, auth, "book_appointment", "ok", interactionId, {
+          date,
+          time,
+          test_call: true,
+          slot_free: free,
+        });
+        return json({
+          ok: true,
+          test_call: true,
+          result: {
+            success: false,
+            error: {
+              code: "TEST_CALL_NOT_SAVED",
+              message: `Test call: ${time} on ${date} is ${free ? "free" : "not free"}, and test calls are never booked`,
+            },
+          },
+        });
+      }
       const out = await execute(toolCtx, "book_appointment", {
         customerName: str(body, "customer_name", 200),
         ...(phone ? { customerPhone: phone } : {}),
@@ -465,13 +496,15 @@ export async function handleSarvamAgentRequest(
       caller_number: str(body, "caller_number", 40),
       interest: str(body, "interest", 200),
     };
+    const callerPhone = normalizeCustomerPhone(outcome.caller_number ?? "", null);
+    const testCall = Boolean(callerPhone && auth.testCallerNumbers.includes(callerPhone));
     const { error: dupError } = await deps.supabaseAdmin.from("sarvam_agent_events").insert({
       integration_id: auth.integrationId,
       organization_id: auth.organizationId,
       kind: "call_outcome",
       status: "ok",
       interaction_id: interactionId ?? null,
-      detail: outcome as Json,
+      detail: (testCall ? { ...outcome, test_call: true } : outcome) as Json,
     });
     if (dupError && (dupError as { code?: string }).code === "23505")
       return json({ ok: true, duplicate: true });
@@ -482,7 +515,7 @@ export async function handleSarvamAgentRequest(
     const qualifies =
       kind === "callback_requested" ||
       (kind === "enquiry_answered" && Boolean(outcome.customer_name || outcome.interest));
-    const phone = qualifies ? normalizeCustomerPhone(outcome.caller_number ?? "", null) : null;
+    const phone = qualifies && !testCall ? callerPhone : null;
     if (phone) {
       const { error: leadError } = await deps.supabaseAdmin.from("leads").insert({
         organization_id: auth.organizationId,

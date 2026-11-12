@@ -33,7 +33,7 @@ export const getSarvamIntegration = createServerFn({ method: "POST" })
       supabaseAdmin
         .from("sarvam_agent_integrations")
         .select(
-          "id, status, token_prefix, created_at, rotated_at, last_used_at, expires_at, disabled_at, disabled_reason",
+          "id, status, token_prefix, created_at, rotated_at, last_used_at, expires_at, disabled_at, disabled_reason, test_caller_numbers",
         )
         .eq("agent_config_id", agent.id)
         .order("created_at", { ascending: false })
@@ -163,6 +163,56 @@ export const disableSarvamIntegration = createServerFn({ method: "POST" })
       reason: data.reason,
     });
     return { ok: true as const };
+  });
+
+/**
+ * Sets the numbers whose calls to this customer's agent are tests: bookings are checked but
+ * never written, and no lead is created. Numbers must include the country code.
+ */
+export const setSarvamTestCallers = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { orgId: string; numbers: string[]; reason: string }) => {
+    if (!input?.orgId) throw new Error("orgId is required");
+    if (!Array.isArray(input.numbers)) throw new Error("numbers must be a list");
+    if (input.numbers.length > 20) throw new Error("At most 20 test numbers");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "agents.write");
+    const { normalizeCustomerPhone } = await import("@/lib/phone-number");
+    const numbers = [
+      ...new Set(
+        data.numbers.map((raw) => {
+          const e164 = raw.trim().startsWith("+") ? normalizeCustomerPhone(raw.trim(), null) : null;
+          if (!e164) throw new Error(`Not a phone number with country code: ${raw}`);
+          return e164;
+        }),
+      ),
+    ];
+    const { supabaseAdmin } = await customerAgent(data.orgId);
+    const { data: before } = await supabaseAdmin
+      .from("sarvam_agent_integrations")
+      .select("id, test_caller_numbers")
+      .eq("organization_id", data.orgId)
+      .eq("status", "active")
+      .maybeSingle();
+    if (!before) throw new Error("No active integration for this customer.");
+    const { error } = await supabaseAdmin
+      .from("sarvam_agent_integrations")
+      .update({ test_caller_numbers: numbers })
+      .eq("id", before.id);
+    if (error) throw error;
+    await writeAudit(admin, {
+      action: "SARVAM_TEST_CALLERS_SET",
+      entityType: "sarvam_agent_integration",
+      entityId: before.id,
+      organizationId: data.orgId,
+      oldValue: { test_caller_numbers: before.test_caller_numbers },
+      newValue: { test_caller_numbers: numbers },
+      reason: data.reason,
+    });
+    return { ok: true as const, numbers };
   });
 
 /**

@@ -2342,6 +2342,7 @@ export type Database = {
           status: string;
           token_hash: string;
           token_prefix: string;
+          test_caller_numbers: string[];
           updated_at: string;
         };
         Insert: {
@@ -2358,6 +2359,7 @@ export type Database = {
           status?: string;
           token_hash: string;
           token_prefix: string;
+          test_caller_numbers?: string[];
           updated_at?: string;
         };
         Update: {
@@ -2374,6 +2376,7 @@ export type Database = {
           status?: string;
           token_hash?: string;
           token_prefix?: string;
+          test_caller_numbers?: string[];
           updated_at?: string;
         };
         Relationships: [];
