@@ -513,7 +513,7 @@ describe("call outcome, validation and audit", () => {
     const body = {
       interaction_id: "20261111/out1",
       caller_number: "+919000000002",
-      outcome: "booked",
+      outcome: "callback_requested",
       summary: "Wants a cleaning next week",
       customer_name: "Asha",
     };
@@ -530,6 +530,36 @@ describe("call outcome, validation and audit", () => {
       "phone",
       "same source as other call leads (leads.source default)",
     );
+  });
+
+  test("only callback requests and named enquiries become leads; every outcome is still logged", async () => {
+    const cases: [Record<string, string>, boolean][] = [
+      [{ outcome: "callback_requested" }, true],
+      [{ outcome: "enquiry_answered", interest: "root canal" }, true],
+      [{ outcome: "enquiry_answered", customer_name: "Ravi" }, true],
+      [{ outcome: "enquiry_answered" }, false],
+      [{ outcome: "booked", customer_name: "Ravi" }, false],
+      [{ outcome: "not_interested", customer_name: "Ravi" }, false],
+      [{ outcome: "other", interest: "reminder" }, false],
+      [{ outcome: "callback_requested", caller_number: "someone@example.com" }, false],
+    ];
+    for (const [i, [extra, expectLead]] of cases.entries()) {
+      const leadsBefore = (db.tables["leads"] ?? []).length;
+      const eventsBefore = (db.tables["sarvam_agent_events"] ?? []).length;
+      const res = await call("tools/record_call_outcome", tokens[ORG_SMILE]!, {
+        interaction_id: `20261112/lead${i}`,
+        caller_number: "+919000000003",
+        summary: "Caller spoke to the agent",
+        ...extra,
+      });
+      assert.deepEqual(res.body, { ok: true, duplicate: false });
+      assert.equal(
+        (db.tables["leads"] ?? []).length - leadsBefore,
+        expectLead ? 1 : 0,
+        JSON.stringify(extra),
+      );
+      assert.ok((db.tables["sarvam_agent_events"] ?? []).length > eventsBefore, "outcome logged");
+    }
   });
 
   test("bad input is rejected; every request is audited under its own tenant", async () => {

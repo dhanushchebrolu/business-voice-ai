@@ -457,7 +457,7 @@ export async function handleSarvamAgentRequest(
       return json({ ok: !out.isError, result: JSON.parse(out.content) });
     }
 
-    // record_call_outcome (on_end): once per interaction; a lead when the caller left contact details.
+    // record_call_outcome (on_end): once per interaction; a lead only for a qualified follow-up (below).
     const outcome = {
       outcome: str(body, "outcome", 100),
       summary: str(body, "summary", 2000),
@@ -476,8 +476,14 @@ export async function handleSarvamAgentRequest(
     if (dupError && (dupError as { code?: string }).code === "23505")
       return json({ ok: true, duplicate: true });
     if (dupError) throw dupError;
-    const phone = normalizeCustomerPhone(outcome.caller_number ?? "", null);
-    if (phone && (outcome.customer_name || outcome.summary || outcome.interest)) {
+    // A lead is a follow-up for the team: callback requests, and enquiries where the caller
+    // named themself or a service. Booked calls already have a booking; a summary alone never qualifies.
+    const kind = outcome.outcome?.toLowerCase();
+    const qualifies =
+      kind === "callback_requested" ||
+      (kind === "enquiry_answered" && Boolean(outcome.customer_name || outcome.interest));
+    const phone = qualifies ? normalizeCustomerPhone(outcome.caller_number ?? "", null) : null;
+    if (phone) {
       const { error: leadError } = await deps.supabaseAdmin.from("leads").insert({
         organization_id: auth.organizationId,
         business_id: auth.businessId,
@@ -627,7 +633,7 @@ export function sarvamToolConfiguration(baseUrl: string): {
           interest: "@caller_interest",
         },
         purpose:
-          "Records the call's outcome once per call and saves a lead when the caller left details.",
+          "Records the call's outcome once per call and saves a lead for callback requests and named enquiries.",
       },
     ],
     inputVariables: contextVars.map((name) => ({
