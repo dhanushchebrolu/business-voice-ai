@@ -112,6 +112,7 @@ const DIAGNOSTIC_HEADERS = [
 
 /** Sanitized facts about a failed Sarvam call: enough to diagnose it or quote to Sarvam support. */
 function logSarvamFailure(
+  apiKey: string,
   method: string,
   path: string,
   res: Response,
@@ -130,6 +131,13 @@ function logSarvamFailure(
     headers["x-amzn-requestid"] ??
     headers["cf-ray"];
   console.error("sarvam_api:error", {
+    // Shape only, never the value: tells a malformed pasted key from a rejected one.
+    keyShape: {
+      length: apiKey.length,
+      whitespace: /\s/.test(apiKey),
+      quotes: /["'`]/.test(apiKey),
+      safeCharsOnly: /^[A-Za-z0-9_.-]+$/.test(apiKey),
+    },
     method,
     path: redactSecrets(path),
     status: res.status,
@@ -216,7 +224,7 @@ async function sarvamRequest<T>(
   }
 
   if (!res.ok) {
-    const requestId = logSarvamFailure(method, path, res, rawText, body);
+    const requestId = logSarvamFailure(config.apiKey, method, path, res, rawText, body);
     const error = mapErrorResponse(res.status, parsed, rawText);
     if (requestId) error.message += ` (Sarvam request ${requestId})`;
     error.outcomeUnknown = !DEFINITE_REJECTION_STATUSES.has(res.status);

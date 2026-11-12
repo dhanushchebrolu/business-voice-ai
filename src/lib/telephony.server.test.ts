@@ -1,6 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { TELEPHONY_PROVIDERS, providerStatus, getTelephonyAdapter } from "./telephony.server.ts";
+import {
+  TELEPHONY_PROVIDERS,
+  providerStatus,
+  getTelephonyAdapter,
+  resolveSarvamKeys,
+} from "./telephony.server.ts";
 import { SarvamTelephonyAdapter } from "./telephony/sarvam-provider.server.ts";
 import { VobizTelephonyAdapter } from "./telephony/vobiz-provider.ts";
 
@@ -84,6 +89,21 @@ test("providerStatus: SARVAM_VOICE_AGENTS_API_KEY alone configures both directio
     const status = providerStatus().find((p) => p.id === "sarvam");
     assert.equal(status?.configured, true);
   });
+});
+
+test("resolveSarvamKeys: trims a pasted key, and a whitespace-only key falls back", () => {
+  withEnv(
+    clearAllSarvamKeys({
+      SARVAM_VOICE_AGENTS_API_KEY: "  sk_live_single\r\n",
+      SARVAM_INBOUND_VOICE_API_KEY: "   ",
+    }),
+    () => {
+      assert.deepEqual(resolveSarvamKeys(), {
+        inboundApiKey: "sk_live_single",
+        outboundApiKey: "sk_live_single",
+      });
+    },
+  );
 });
 
 test("providerStatus: only the outbound key set still reports configured:false — inbound remains missing", () => {

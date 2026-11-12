@@ -101,11 +101,13 @@ export function resolveSarvamKeys(): {
   inboundApiKey: string | null;
   outboundApiKey: string | null;
 } {
-  const legacy = process.env["SARVAM_API_KEY"];
-  const single = process.env["SARVAM_VOICE_AGENTS_API_KEY"] ?? legacy;
+  // Pasted secrets can carry stray whitespace or newlines; an untrimmed key is rejected by Sarvam.
+  const env = (name: string) => process.env[name]?.trim() || undefined;
+  const legacy = env("SARVAM_API_KEY");
+  const single = env("SARVAM_VOICE_AGENTS_API_KEY") ?? legacy;
   return {
-    inboundApiKey: process.env["SARVAM_INBOUND_VOICE_API_KEY"] ?? single ?? null,
-    outboundApiKey: process.env["SARVAM_OUTBOUND_VOICE_API_KEY"] ?? single ?? null,
+    inboundApiKey: env("SARVAM_INBOUND_VOICE_API_KEY") ?? single ?? null,
+    outboundApiKey: env("SARVAM_OUTBOUND_VOICE_API_KEY") ?? single ?? null,
   };
 }
 
