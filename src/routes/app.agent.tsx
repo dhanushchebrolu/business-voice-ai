@@ -8,6 +8,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { workspaceQuery, numbersQuery } from "@/lib/workspace";
 import { agentStatusLabel } from "@/lib/agent-status";
 import { normalizeSpeakingPace } from "@/lib/agent-form";
+import { GREETING_MAX_LENGTH, customGreetingFor, renderGreeting } from "@/lib/agent-greeting";
 import { LANGUAGES, VOICES, PACE_MIN, PACE_MAX } from "@/lib/voices";
 import {
   PERSONAS,
@@ -115,6 +116,7 @@ function AgentPage() {
     transfer_number: "",
     custom_personality: "",
     greeting: "",
+    custom_greeting: false,
     capabilities: {} as Record<string, boolean>,
   });
   const [saving, setSaving] = useState(false);
@@ -136,6 +138,7 @@ function AgentPage() {
         transfer_number: agent.transfer_number ?? "",
         custom_personality: agent.custom_personality ?? "",
         greeting: greetings[agent.primary_language] ?? "",
+        custom_greeting: Boolean(customGreetingFor(greetings, agent.primary_language)),
         // Reads either the UI's own capability id or the backend permission
         // key it maps to (CAPABILITY_PERMISSION_KEYS) — so a toggle set
         // directly on the row (e.g. before this reconciliation existed)
@@ -201,7 +204,8 @@ function AgentPage() {
           after_hours_behavior: form.after_hours_behavior,
           transfer_number: form.transfer_number || null,
           custom_personality: form.custom_personality || null,
-          greeting: form.greeting,
+          // Off = automatic greeting (an empty stored greeting).
+          greeting: form.custom_greeting ? form.greeting : "",
           capabilities: form.capabilities,
         },
       });
@@ -332,13 +336,69 @@ function AgentPage() {
                   </SelectContent>
                 </Select>
               </FieldRow>
-              <FieldRow label="Greeting">
-                <Textarea
-                  rows={3}
-                  value={form.greeting}
-                  onChange={(e) => setForm({ ...form, greeting: e.target.value })}
-                />
-              </FieldRow>
+              <div className="space-y-3 rounded-md border p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-medium">Greeting &amp; first impression</p>
+                    <p className="text-xs text-muted-foreground">
+                      Off: a short automatic welcome with your business name.
+                    </p>
+                  </div>
+                  <Switch
+                    aria-label="Use a custom greeting"
+                    checked={form.custom_greeting}
+                    onCheckedChange={(v) => setForm({ ...form, custom_greeting: v })}
+                  />
+                </div>
+                {form.custom_greeting && (
+                  <>
+                    <FieldRow label="Greeting text">
+                      <Textarea
+                        rows={2}
+                        maxLength={GREETING_MAX_LENGTH}
+                        value={form.greeting}
+                        onChange={(e) => setForm({ ...form, greeting: e.target.value })}
+                        placeholder="Welcome to {business_name}. How can I help you today?"
+                      />
+                    </FieldRow>
+                    <FieldRow label="Greeting language">
+                      <Select
+                        value={form.primary_language}
+                        onValueChange={(v) =>
+                          setForm({
+                            ...form,
+                            primary_language: v,
+                            greeting: customGreetingFor(agent?.greetings, v) || form.greeting,
+                          })
+                        }
+                      >
+                        <SelectTrigger aria-label="Greeting language">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {LANGUAGES.map((l) => (
+                            <SelectItem key={l.code} value={l.code}>
+                              {l.label} — {l.native}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </FieldRow>
+                    <p className="text-xs text-muted-foreground">
+                      Spoken exactly as written. You can use {"{business_name}"} and{" "}
+                      {"{agent_name}"}. After the caller answers, the agent continues in the
+                      caller's language.
+                    </p>
+                  </>
+                )}
+                <div className="rounded bg-muted px-3 py-2 text-sm" aria-live="polite">
+                  <span className="text-xs text-muted-foreground">Preview: </span>
+                  {renderGreeting(form.custom_greeting ? form.greeting : "", {
+                    businessName: business?.name ?? "",
+                    agentName: form.agent_name,
+                  })}
+                </div>
+              </div>
               <FieldRow label="Extra personality notes">
                 <Textarea
                   rows={3}

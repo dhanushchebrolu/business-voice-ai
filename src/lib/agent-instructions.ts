@@ -444,8 +444,7 @@ export function validateAgentConfig(s: AgentSnapshot): { field: string; message:
       field: "Language",
       message: "Choose one of the supported languages as the primary language.",
     });
-  if (!s.agent.greetings?.[s.agent.primary_language]?.trim())
-    issues.push({ field: "Greeting", message: "Write a call greeting for your primary language." });
+  // No greeting check: an empty greeting means the automatic one (agent-greeting.ts).
   if (!s.hours.length)
     issues.push({ field: "Business hours", message: "Configure your weekly hours." });
   if (!s.services.filter((x) => x.is_active).length && !s.faqs.filter((f) => f.is_active).length)

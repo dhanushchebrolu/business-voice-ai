@@ -3883,7 +3883,8 @@ describe("G6: the published agent configuration, resolved as the Worker runtime 
     );
     assert.equal(c.ok, false);
     assert.ok(!c.ok && c.reason === "agent_config_incomplete");
-    assert.ok(!c.ok && c.fields.includes("Voice") && c.fields.includes("Greeting"));
+    // An empty greeting is valid (the automatic one is used); only Voice is missing.
+    assert.ok(!c.ok && c.fields.includes("Voice") && !c.fields.includes("Greeting"));
   });
   test("PRODUCTION: nothing published -> refused, even with a valid draft (the draft is never read)", async () => {
     const db = fakeDb({ businesses: [BUSINESS_ROW], services: SERVICE_ROWS, agent_versions: [] });

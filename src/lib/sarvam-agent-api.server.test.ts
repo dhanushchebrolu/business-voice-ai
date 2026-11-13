@@ -2,6 +2,9 @@ import { test, describe, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import {
   AGENT_TOOLS,
+  callFacts,
+  matchService,
+  requestedTimeAnswer,
   generateIntegrationToken,
   handleSarvamAgentRequest,
   sarvamToolConfiguration,
@@ -35,6 +38,7 @@ class FakeDb {
       if (this.delayMs) await new Promise((r) => setTimeout(r, Math.random() * this.delayMs));
       if (this.failOn === table) throw new Error(`simulated failure reading ${table}`);
       if (op.kind === "insert") {
+        const inserted: Row[] = [];
         for (const r of op.rows) {
           if (
             table === "sarvam_agent_events" &&
@@ -48,9 +52,11 @@ class FakeDb {
             )
           )
             return { data: null, error: { code: "23505", message: "duplicate key" } };
-          rows().push({ id: crypto.randomUUID(), ...r });
+          const row = { id: crypto.randomUUID(), ...r };
+          rows().push(row);
+          inserted.push({ ...row });
         }
-        return { data: op.rows, error: null };
+        return { data: inserted, error: null };
       }
       const matched = rows().filter((r) => filters.every((f) => f(r)));
       if (op.kind === "update") {
@@ -138,6 +144,7 @@ async function seed() {
       })),
     );
     (db.tables["services"] ??= []).push({
+      id: `svc-${org}`,
       business_id: biz,
       is_active: true,
       name: "Consultation",
@@ -710,7 +717,7 @@ describe("Sarvam configuration brief", () => {
     const cfg = sarvamToolConfiguration("https://clickai.in/");
     assert.deepEqual(
       cfg.tools.map((t) => t.lifecycle),
-      ["on_start", "run", "run", "run", "on_end"],
+      ["on_start", "run", "run", "run", "run", "on_end"],
     );
     for (const t of cfg.tools) {
       assert.match(
@@ -735,5 +742,213 @@ describe("Sarvam configuration brief", () => {
     const outputs = new Set(cfg.outputVariables.map((v) => `@${v.name}`));
     for (const k of ["outcome", "summary", "customer_name", "interest"])
       assert.ok(outputs.has(onEnd.body[k]!), k);
+  });
+});
+
+describe("service validation, requested times and honest callbacks", () => {
+  const slotsReply = (slots: string[]): AgentApiDeps => ({
+    ...deps(),
+    executeTool: async (_ctx, name) => ({
+      content: JSON.stringify(
+        name === "check_calendar_availability"
+          ? { success: true, data: { slots: slots.map((start) => ({ start, end: start })) } }
+          : { success: true, bookingOutcome: "confirmed", data: { id: "booking-1" } },
+      ),
+    }),
+  });
+  const run = async (tool: string, body: Record<string, unknown>, d = deps()) => {
+    const res = await handleSarvamAgentRequest(
+      sarvamRequest(`tools/${tool}`, tokens[ORG_SMILE]!, body),
+      tool,
+      d,
+    );
+    return (await res.json()) as Record<string, unknown>;
+  };
+
+  test("matchService maps caller wording to one configured service and never substitutes", () => {
+    const services = [
+      { name: "Root Canal Treatment" },
+      { name: "Tooth Removal" },
+      { name: "Tooth Whitening" },
+    ];
+    assert.deepEqual(matchService(services, "root canal"), {
+      kind: "match",
+      service: { name: "Root Canal Treatment" },
+    });
+    assert.equal(matchService(services, "General checkup").kind, "none");
+    assert.equal(matchService(services, "tooth").kind, "ambiguous");
+    assert.equal(matchService(services, "tooth removal").kind, "match");
+  });
+
+  test("with require_service, an unoffered service is refused before availability is checked", async () => {
+    const body = await run("check_availability", {
+      interaction_id: "i-1",
+      date: "2026-11-14",
+      service_name: "General checkup",
+      require_service: true,
+    });
+    const result = body["result"] as {
+      success: boolean;
+      error: { code: string; options: string[] };
+    };
+    assert.equal(result.success, false);
+    assert.equal(result.error.code, "SERVICE_NOT_OFFERED");
+    assert.deepEqual(result.error.options, ["Consultation"]);
+    assert.equal(toolCalls.length, 0, "no availability lookup and no booking");
+  });
+
+  test("without require_service (live v4 agents) the old lenient behaviour is unchanged", async () => {
+    const body = await run("check_availability", {
+      interaction_id: "i-2",
+      date: "2026-11-14",
+      service_name: "General checkup",
+    });
+    assert.equal(body["ok"], true);
+    assert.equal(toolCalls.length, 1);
+  });
+
+  test("a matched service books with its canonical id", async () => {
+    const calls: Record<string, unknown>[] = [];
+    const d: AgentApiDeps = {
+      ...deps(),
+      executeTool: async (_c, name, input) => {
+        calls.push({ name, ...input });
+        return {
+          content: JSON.stringify({
+            success: true,
+            bookingOutcome: "confirmed",
+            data: { id: "b-9" },
+          }),
+        };
+      },
+    };
+    const body = await run(
+      "book_appointment",
+      {
+        interaction_id: "i-3",
+        date: "2026-11-14",
+        time: "10:00",
+        service_name: "consultation",
+        customer_name: "Ravi",
+        customer_phone: "+919000000001",
+        require_service: true,
+      },
+      d,
+    );
+    assert.deepEqual(body["service"], { id: `svc-${ORG_SMILE}`, name: "Consultation" });
+    assert.equal(calls[0]!["serviceId"], `svc-${ORG_SMILE}`);
+    const event = db.tables["sarvam_agent_events"]!.find((e) => e["kind"] === "book_appointment")!;
+    assert.equal((event["detail"] as { booking_id: string }).booking_id, "b-9");
+  });
+
+  test("the server, not the agent, says whether the caller's time is free", async () => {
+    // 10:30, 11:00 and 16:30 IST.
+    const d = slotsReply([
+      "2026-11-14T05:00:00.000Z",
+      "2026-11-14T05:30:00.000Z",
+      "2026-11-14T11:00:00.000Z",
+    ]);
+    const free = await run(
+      "check_availability",
+      { interaction_id: "i-4", date: "2026-11-14", time: "16:30" },
+      d,
+    );
+    assert.deepEqual(free["requested_time"], { time: "16:30", available: true, alternatives: [] });
+    const taken = await run(
+      "check_availability",
+      { interaction_id: "i-4", date: "2026-11-14", time: "10:00" },
+      d,
+    );
+    assert.deepEqual(taken["requested_time"], {
+      time: "10:00",
+      available: false,
+      alternatives: ["10:30", "11:00", "16:30"],
+    });
+    assert.deepEqual(requestedTimeAnswer("12:00", []), {
+      time: "12:00",
+      available: false,
+      alternatives: [],
+    });
+  });
+
+  test("request_callback saves the lead before the agent may promise a callback, once per call", async () => {
+    const body = await run("request_callback", {
+      interaction_id: "i-5",
+      caller_number: "+919000000001",
+      customer_name: "Meena",
+      reason: "insurance question",
+    });
+    assert.deepEqual(body, { ok: true, recorded: true });
+    assert.equal(db.tables["leads"]!.length, 1);
+    const again = await run("request_callback", {
+      interaction_id: "i-5",
+      caller_number: "+919000000001",
+    });
+    assert.equal(again["duplicate"], true);
+    // The end-of-call record knows the callback is saved and does not add a second lead.
+    await run("record_call_outcome", {
+      interaction_id: "i-5",
+      caller_number: "+919000000001",
+      outcome: "callback_requested",
+      customer_name: "Meena",
+    });
+    assert.equal(db.tables["leads"]!.length, 1);
+    const outcome = db.tables["sarvam_agent_events"]!.find((e) => e["kind"] === "call_outcome")!;
+    const facts = (outcome["detail"] as { facts: { callback_recorded: boolean; lead_id: string } })
+      .facts;
+    assert.equal(facts.callback_recorded, true);
+    assert.equal(facts.lead_id, db.tables["leads"]![0]!["id"]);
+  });
+
+  test("request_callback without a caller number reports not recorded", async () => {
+    const body = await run("request_callback", { interaction_id: "i-6", caller_number: "" });
+    assert.deepEqual(body, { ok: true, recorded: false, error: { code: "NO_CALLER_NUMBER" } });
+    assert.equal((db.tables["leads"] ?? []).length, 0);
+  });
+
+  test("test callers get the recorded path but no lead is saved", async () => {
+    const body = await run("request_callback", {
+      interaction_id: "i-7",
+      caller_number: "evals@sarvam.ai",
+    });
+    assert.deepEqual(body, { ok: true, recorded: true, test_call: true });
+    assert.equal((db.tables["leads"] ?? []).length, 0);
+  });
+
+  test("callFacts reports what the tools actually did", () => {
+    assert.deepEqual(
+      callFacts([
+        {
+          kind: "check_availability",
+          status: "ok",
+          detail: { service_id: "s1", available: false },
+        },
+        {
+          kind: "book_appointment",
+          status: "ok",
+          detail: { outcome: "not_booked", error_code: "TEST_CALL_NOT_SAVED" },
+        },
+      ]),
+      {
+        availability_checked: true,
+        requested_time_available: false,
+        service_id: "s1",
+        booking_outcome: "not_booked",
+        booking_id: null,
+        booking_error: "TEST_CALL_NOT_SAVED",
+        callback_recorded: false,
+        lead_id: null,
+      },
+    );
+  });
+
+  test("the context carries each tenant's own greeting", async () => {
+    db.tables["agent_configs"]!.find((a) => a["organization_id"] === ORG_ABC)!["greetings"] = {
+      "en-IN": "Thank you for calling {business_name}. How can I help you?",
+    };
+    const smile = await call("context", tokens[ORG_SMILE]!, { interaction_id: "g-1" });
+    const abc = await call("context", tokens[ORG_ABC]!, { interaction_id: "g-2" });
+    assert.equal(smile.body["greeting"], "Welcome to Smile Dental. How can I help you today?");
+    assert.equal(abc.body["greeting"], "Thank you for calling ABC Dental. How can I help you?");
   });
 });

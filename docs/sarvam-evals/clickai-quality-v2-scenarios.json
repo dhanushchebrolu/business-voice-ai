@@ -1,0 +1,165 @@
+{
+  "app_id": "Conversatio-9c6a04cd-3334",
+  "note": "Added to suite 01M22ETHF4SMEDY6F089GSGM43 with the prefix 'ClickAI: '. Text simulations: the caller is evals@sarvam.ai, which ClickAI treats as a test caller (bookings never saved, no leads). Speech-level language detection is not exercised by text runs.",
+  "test_cases": [
+    {
+      "name": "Greeting has no self-introduction",
+      "category": "greeting",
+      "user_scenario": "Say hello and ask whether the clinic is open today. Then say thanks, bye.",
+      "expected_behaviors": [
+        { "name": "No self-introduction", "description": "The opening greeting and replies never give the agent a personal name and never describe itself as a virtual assistant unless asked." },
+        { "name": "Short welcome", "description": "The first message is a short welcome with the business name and asks how it can help." }
+      ],
+      "max_turns": 6
+    },
+    {
+      "name": "Booking intent with date and latest time",
+      "category": "booking",
+      "user_scenario": "Say: I want to book an appointment today by 8 PM. When asked which service, say root canal. Accept the first time offered that is before 8 PM, give the name Anil, confirm, then say bye.",
+      "expected_behaviors": [
+        { "name": "Retains date and time limit", "description": "Never asks again for the date; offers only times at or before 8 PM today." },
+        { "name": "Asks only what is missing", "description": "Asks for the service and name, not for anything already given." },
+        { "name": "Canonical service", "description": "Treats root canal as the configured Root Canal Treatment." }
+      ],
+      "max_turns": 14
+    },
+    {
+      "name": "Unsupported service is refused",
+      "category": "service",
+      "user_scenario": "Ask to book a general checkup tomorrow morning. If told it is not offered, ask what is offered, then say you will think about it and end.",
+      "expected_behaviors": [
+        { "name": "Refuses unoffered service", "description": "Says general checkup is not offered and names only the configured services." },
+        { "name": "No substitution", "description": "Does not check availability or book any other service unless the caller picks one." }
+      ],
+      "max_turns": 8
+    },
+    {
+      "name": "Ambiguous service is clarified",
+      "category": "service",
+      "user_scenario": "Say you need something done for your tooth tomorrow. Answer the clarifying question by choosing tooth removal. Then say you will call back later.",
+      "expected_behaviors": [
+        { "name": "Clarifies", "description": "Asks which of the configured services the caller means instead of guessing." }
+      ],
+      "max_turns": 8
+    },
+    {
+      "name": "Hindi service name maps to configured service",
+      "category": "language",
+      "user_scenario": "Write only in Hindi (Devanagari): मुझे कल दाँत निकलवाना है, शाम को। Accept a time offered, give the name Meena, confirm.",
+      "expected_behaviors": [
+        { "name": "Maps service", "description": "Understands the request as the configured Tooth Removal service." },
+        { "name": "Replies in Hindi", "description": "Replies in Hindi." },
+        { "name": "Honest result", "description": "Does not say the appointment is booked unless the booking tool replied CONFIRMED." }
+      ],
+      "max_turns": 12
+    },
+    {
+      "name": "Telugu service name maps to configured service",
+      "category": "language",
+      "user_scenario": "Write only in Telugu: నాకు రేపు పన్ను తీయించుకోవాలి. Give the name Ravi when asked. Then say you will call back later.",
+      "expected_behaviors": [
+        { "name": "Maps service", "description": "Understands the request as the configured Tooth Removal service." },
+        { "name": "Replies in Telugu", "description": "Replies in Telugu." }
+      ],
+      "max_turns": 10
+    },
+    {
+      "name": "Telugu-English mixed request",
+      "category": "language",
+      "user_scenario": "Write Telugu with English words: నాకు tomorrow evening root canal appointment కావాలి. Then answer naturally in the same mix and end politely.",
+      "expected_behaviors": [
+        { "name": "Understands code-mixing", "description": "Keeps date tomorrow, evening and Root Canal Treatment without asking again." },
+        { "name": "Natural reply", "description": "Replies in Telugu (English business words allowed), not in pure English." }
+      ],
+      "max_turns": 10
+    },
+    {
+      "name": "Hinglish request",
+      "category": "language",
+      "user_scenario": "Write Hinglish in Latin script: kal subah 10 baje root canal ka appointment chahiye, naam Suresh. Confirm when asked.",
+      "expected_behaviors": [
+        { "name": "Understands", "description": "Keeps tomorrow, 10 AM, Root Canal Treatment and the name Suresh without asking again." },
+        { "name": "Natural reply", "description": "Replies in Hindi or Hinglish." }
+      ],
+      "max_turns": 10
+    },
+    {
+      "name": "English to Telugu switch keeps context",
+      "category": "language",
+      "user_scenario": "Start in English: I need a tooth removal tomorrow. After the agent's first reply, switch to Telugu for the rest: సాయంత్రం 5 గంటలకు కుదురుతుందా? Then give the name Lakshmi.",
+      "expected_behaviors": [
+        { "name": "Switches language", "description": "After the caller switches to Telugu, replies in Telugu." },
+        { "name": "Keeps context", "description": "Keeps the service and date; does not restart." }
+      ],
+      "max_turns": 12
+    },
+    {
+      "name": "Gujarati caller",
+      "category": "language",
+      "user_scenario": "Write only in Gujarati: મારે કાલે દાંત કઢાવવો છે. Then ask the clinic timings.",
+      "expected_behaviors": [
+        { "name": "Understands", "description": "Understands the tooth removal request and the timings question." },
+        { "name": "No wrong language", "description": "Does not reply in Telugu to a Gujarati caller." }
+      ],
+      "max_turns": 8
+    },
+    {
+      "name": "Requested time not free",
+      "category": "booking",
+      "user_scenario": "Ask for a root canal tomorrow at 1 PM. If 1 PM is not free, accept the nearest time offered, name Kiran, confirm.",
+      "expected_behaviors": [
+        { "name": "Honest availability", "description": "Says whether 1 PM is free based on the availability reply; never invents a time." },
+        { "name": "Offers real alternatives", "description": "If not free, offers only nearby times from the availability reply." }
+      ],
+      "max_turns": 12
+    },
+    {
+      "name": "Time correction",
+      "category": "booking",
+      "user_scenario": "Ask for tooth removal tomorrow at 10 in the morning, then immediately correct: no, 11. Give the name Asha and confirm.",
+      "expected_behaviors": [
+        { "name": "Updates only the time", "description": "Switches to 11 without restarting or asking for the service again." }
+      ],
+      "max_turns": 12
+    },
+    {
+      "name": "Phone agreement is not booking consent",
+      "category": "booking",
+      "user_scenario": "Ask for a root canal tomorrow evening, pick a time, give the name Vijay. When the agent mentions your phone number, say 'yes that number is fine, but don't book yet, I need to check with my wife'. Then end.",
+      "expected_behaviors": [
+        { "name": "No booking without consent", "description": "Does not call the booking tool after the caller said not to book yet." }
+      ],
+      "max_turns": 12
+    },
+    {
+      "name": "Failed booking and callback wording",
+      "category": "booking",
+      "user_scenario": "Book a tooth removal tomorrow at the first time offered, name Prakash, confirm. If it is not booked and a callback is offered, accept it. Then say bye.",
+      "expected_behaviors": [
+        { "name": "No false success", "description": "Says the appointment could not be booked; never says booked, saved or that a request was recorded unless a tool said so." },
+        { "name": "Callback only when recorded", "description": "Promises that the team will call only if the callback tool replied RECORDED; otherwise gives the clinic phone number." },
+        { "name": "No repeated explanation", "description": "Does not repeat the same limitation twice." }
+      ],
+      "max_turns": 14
+    },
+    {
+      "name": "Enquiry without booking push",
+      "category": "conversation",
+      "user_scenario": "Ask the price of a root canal. Then say thanks, that's all.",
+      "expected_behaviors": [
+        { "name": "Price from facts", "description": "Gives the configured root canal price." },
+        { "name": "No push", "description": "Does not push the caller to book; closes briefly when the caller is done." }
+      ],
+      "max_turns": 6
+    },
+    {
+      "name": "Names and times preserved",
+      "category": "booking",
+      "user_scenario": "Ask for a tooth removal tomorrow at 4:30 PM, name Venkata Ramana. Confirm when asked.",
+      "expected_behaviors": [
+        { "name": "Exact details", "description": "Repeats the name Venkata Ramana and 4:30 PM (or an offered alternative) exactly, with the correct date." }
+      ],
+      "max_turns": 10
+    }
+  ]
+}

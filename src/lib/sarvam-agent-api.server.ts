@@ -7,6 +7,7 @@ import {
 import type { ToolExecutionContext } from "./ai-tools.server.ts";
 import { zonedWallTimeToUtc } from "./calendar/timezone.ts";
 import { normalizeCustomerPhone } from "./phone-number.ts";
+import { customGreetingFor, renderGreeting } from "./agent-greeting.ts";
 
 /**
  * ClickAI's agent API for a customer's manually created Sarvam Voice Agent.
@@ -226,6 +227,11 @@ export function flattenContext(ctx: SarvamClientContext, now: Date): Record<stri
     missing: missing.join(", "),
     guidance: SAFE_GUIDANCE,
     business_name: b.name,
+    // The tenant's own greeting (or the automatic one), spoken as Sarvam's intro.
+    greeting: renderGreeting(
+      ctx.agent ? customGreetingFor(ctx.agent.greetings, ctx.agent.primaryLanguage) : "",
+      { businessName: b.name, agentName: ctx.agent?.name },
+    ),
     business_type: b.businessType.replace(/_/g, " "),
     business_description: cap(b.description ?? ""),
     business_address: address,
@@ -243,6 +249,60 @@ export function flattenContext(ctx: SarvamClientContext, now: Date): Record<stri
     policies: cap(ctx.rules.map((r) => r.rule).join(" | ")),
     knowledge: cap(ctx.knowledge.map((k) => `${k.title}: ${k.content}`).join(" | "), 4000),
   };
+}
+
+/* ------------------------------------------------------------------ */
+/* Services                                                             */
+/* ------------------------------------------------------------------ */
+
+const normName = (s: string) =>
+  s
+    .toLowerCase()
+    .normalize("NFKC")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+
+/**
+ * Matches what the agent sent to ONE configured service. The agent is told to
+ * send a configured name (translated from the caller's words); this is the
+ * guard that it really is one. Never substitutes a different service.
+ */
+export function matchService<T extends { name: string }>(
+  services: T[],
+  raw: string,
+): { kind: "match"; service: T } | { kind: "ambiguous"; options: T[] } | { kind: "none" } {
+  const q = normName(raw);
+  if (!q) return { kind: "none" };
+  const exact = services.filter((s) => normName(s.name) === q);
+  if (exact.length === 1) return { kind: "match", service: exact[0]! };
+  const hits =
+    q.length < 3
+      ? []
+      : services.filter((s) => {
+          const n = normName(s.name);
+          return n.includes(q) || q.includes(n);
+        });
+  if (hits.length === 1) return { kind: "match", service: hits[0]! };
+  if (hits.length > 1) return { kind: "ambiguous", options: hits };
+  return { kind: "none" };
+}
+
+/** Is the caller's HH:mm an open start time, and if not, the (up to 3) nearest open ones. */
+export function requestedTimeAnswer(
+  time: string,
+  slots: string[],
+): { time: string; available: boolean; alternatives: string[] } {
+  const mins = (t: string) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
+  const open = slots.filter((s) => /^\d{2}:\d{2}$/.test(s));
+  if (open.includes(time)) return { time, available: true, alternatives: [] };
+  const alternatives = [...open]
+    .sort(
+      (a, b) =>
+        Math.abs(mins(a) - mins(time)) - Math.abs(mins(b) - mins(time)) || mins(a) - mins(b),
+    )
+    .slice(0, 3)
+    .sort((a, b) => mins(a) - mins(b));
+  return { time, available: false, alternatives };
 }
 
 const UNAVAILABLE = (reason: string): Record<string, string> => ({
@@ -271,8 +331,44 @@ export const AGENT_TOOLS = [
   "get_business_info",
   "check_availability",
   "book_appointment",
+  "request_callback",
   "record_call_outcome",
 ] as const;
+
+/** What actually happened on a call, from ClickAI's own tool log (oldest first). */
+export function callFacts(events: { kind: string; status: string; detail: unknown }[]): {
+  availability_checked: boolean;
+  requested_time_available: boolean | null;
+  service_id: string | null;
+  booking_outcome: string | null;
+  booking_id: string | null;
+  booking_error: string | null;
+  callback_recorded: boolean;
+  lead_id: string | null;
+} {
+  const d = (e: { detail: unknown }) => (e.detail ?? {}) as Record<string, unknown>;
+  const s = (v: unknown) => (typeof v === "string" ? v : null);
+  const checks = events.filter((e) => e.kind === "check_availability" && e.status === "ok");
+  const lastCheck = checks.at(-1);
+  const book = events.filter((e) => e.kind === "book_appointment").at(-1);
+  const callback = events.find((e) => e.kind === "callback" && e.status === "ok");
+  const withService = [...events].reverse().find((e) => s(d(e)["service_id"]));
+  return {
+    availability_checked: checks.length > 0,
+    requested_time_available:
+      lastCheck && typeof d(lastCheck)["available"] === "boolean"
+        ? (d(lastCheck)["available"] as boolean)
+        : null,
+    service_id: withService ? s(d(withService)["service_id"]) : null,
+    booking_outcome: book
+      ? (s(d(book)["outcome"]) ?? (book.status === "ok" ? "unknown" : "not_booked"))
+      : null,
+    booking_id: book ? s(d(book)["booking_id"]) : null,
+    booking_error: book ? s(d(book)["error_code"]) : null,
+    callback_recorded: Boolean(callback),
+    lead_id: callback ? s(d(callback)["lead_id"]) : null,
+  };
+}
 export type AgentTool = (typeof AGENT_TOOLS)[number];
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
@@ -404,18 +500,40 @@ export async function handleSarvamAgentRequest(
       if (!business || business.organization_id !== auth.organizationId)
         return json({ ok: false, error: "business_not_found", guidance: SAFE_GUIDANCE });
       const serviceName = str(body, "service_name", 200);
+      // Agents built for service validation send require_service; older agent versions
+      // keep the lenient behaviour so a deploy never changes a live version's calls.
+      const requireService = body["require_service"] === true || body["require_service"] === "true";
       let duration =
         Number(str(body, "duration_minutes", 4)) || business.default_appointment_duration_minutes;
-      if (serviceName) {
+      let service: { id: string; name: string } | null = null;
+      if (serviceName || requireService) {
         const { data: services } = await deps.supabaseAdmin
           .from("services")
-          .select("name, duration_minutes")
+          .select("id, name, duration_minutes")
           .eq("business_id", auth.businessId)
           .eq("is_active", true);
-        const hit = (services ?? []).find((s) =>
-          s.name.toLowerCase().includes(serviceName.toLowerCase()),
-        );
-        if (hit?.duration_minutes) duration = hit.duration_minutes;
+        const list = services ?? [];
+        const match = serviceName ? matchService(list, serviceName) : ({ kind: "none" } as const);
+        if (match.kind === "match") {
+          service = { id: match.service.id, name: match.service.name };
+          if (match.service.duration_minutes) duration = match.service.duration_minutes;
+        } else if (requireService && list.length > 0) {
+          const code = !serviceName
+            ? "SERVICE_REQUIRED"
+            : match.kind === "ambiguous"
+              ? "SERVICE_AMBIGUOUS"
+              : "SERVICE_NOT_OFFERED";
+          const options = (match.kind === "ambiguous" ? match.options : list).map((s) => s.name);
+          await audit(deps, auth, tool, "rejected", interactionId, {
+            date,
+            service_name: serviceName ?? null,
+            error_code: code,
+          });
+          return json({
+            ok: true,
+            result: { success: false, error: { code, requested: serviceName ?? "", options } },
+          });
+        }
       }
 
       if (tool === "check_availability") {
@@ -423,14 +541,11 @@ export async function handleSarvamAgentRequest(
           dateIso: date,
           durationMinutes: duration,
         });
-        await audit(deps, auth, "check_availability", out.isError ? "error" : "ok", interactionId, {
-          date,
-        });
         // Keep the UTC slots and add the business's wall-clock HH:mm, so the agent never
         // converts time zones itself (Intl applies the zone's DST rules for each instant).
         const result = JSON.parse(out.content) as {
           success?: boolean;
-          data?: { slots?: { start: string; end: string }[] };
+          data?: { slots?: { start: string; end: string; start_local?: string }[] };
         };
         if (result.success && Array.isArray(result.data?.slots)) {
           result.data.slots = result.data.slots.map((s) => ({
@@ -439,10 +554,26 @@ export async function handleSarvamAgentRequest(
             end_local: localNow(new Date(s.end), business.timezone).time,
           }));
         }
+        // The caller's own time, answered by the server, so the agent never decides "free or not".
+        const wanted = str(body, "time", 5);
+        const requestedTime =
+          wanted && /^\d{2}:\d{2}$/.test(wanted) && result.success
+            ? requestedTimeAnswer(
+                wanted,
+                (result.data?.slots ?? []).map((s) => s.start_local ?? ""),
+              )
+            : null;
+        await audit(deps, auth, "check_availability", out.isError ? "error" : "ok", interactionId, {
+          date,
+          service_id: service?.id ?? null,
+          ...(requestedTime ? { requested_time: wanted, available: requestedTime.available } : {}),
+        });
         return json({
           ok: !out.isError,
           duration_minutes: duration,
           timezone: business.timezone,
+          service,
+          requested_time: requestedTime,
           result,
         });
       }
@@ -469,8 +600,11 @@ export async function handleSarvamAgentRequest(
         await audit(deps, auth, "book_appointment", "ok", interactionId, {
           date,
           time,
+          service_id: service?.id ?? null,
           test_call: true,
           slot_free: free,
+          outcome: "not_booked",
+          error_code: "TEST_CALL_NOT_SAVED",
         });
         return json({
           ok: true,
@@ -489,22 +623,120 @@ export async function handleSarvamAgentRequest(
         ...(phone ? { customerPhone: phone } : {}),
         startIso: start.toISOString(),
         endIso: end.toISOString(),
-        notes: serviceName ? `Service: ${serviceName}` : undefined,
+        ...(service ? { serviceId: service.id } : {}),
+        notes: service
+          ? `Service: ${service.name}`
+          : serviceName
+            ? `Service: ${serviceName}`
+            : undefined,
       });
+      const booked = JSON.parse(out.content) as {
+        success?: boolean;
+        bookingOutcome?: string;
+        data?: { id?: string };
+        error?: { code?: string };
+      };
       await audit(deps, auth, "book_appointment", out.isError ? "error" : "ok", interactionId, {
         date,
         time,
+        service_id: service?.id ?? null,
+        outcome: booked.success ? (booked.bookingOutcome ?? "unknown") : "not_booked",
+        booking_id: booked.success ? (booked.data?.id ?? null) : null,
+        error_code: booked.error?.code ?? null,
       });
-      return json({ ok: !out.isError, result: JSON.parse(out.content) });
+      return json({ ok: !out.isError, service, result: booked });
+    }
+
+    const saveLead = async (lead: {
+      name: string | null;
+      phone: string;
+      askedAbout: string | null;
+      notes: string | null;
+    }): Promise<string | null> => {
+      const { data, error } = await deps.supabaseAdmin
+        .from("leads")
+        .insert({
+          organization_id: auth.organizationId,
+          business_id: auth.businessId,
+          name: lead.name,
+          phone: lead.phone,
+          source: "phone", // leads.source default; other call leads use it too
+          asked_about: lead.askedAbout,
+          notes: lead.notes,
+        })
+        .select("id")
+        .single();
+      if (error || !data) {
+        await audit(deps, auth, "lead", "error", interactionId, {
+          error: (error?.message ?? "no row").slice(0, 300),
+        });
+        return null;
+      }
+      return data.id;
+    };
+    const callEvents = async () =>
+      interactionId
+        ? ((
+            await deps.supabaseAdmin
+              .from("sarvam_agent_events")
+              .select("kind, status, detail")
+              .eq("integration_id", auth.integrationId)
+              .eq("interaction_id", interactionId)
+              .in("kind", ["check_availability", "book_appointment", "callback"])
+              .order("created_at", { ascending: true })
+          ).data ?? [])
+        : [];
+
+    if (tool === "request_callback") {
+      // Mid-call: the agent promises a callback only after this reports recorded=true.
+      if (!interactionId)
+        return json({ ok: false, error: "interaction_id is required to record a callback" }, 400);
+      if (callFacts(await callEvents()).callback_recorded)
+        return json({ ok: true, recorded: true, duplicate: true });
+      const raw = str(body, "caller_number", 200) ?? "";
+      const phone = normalizeCustomerPhone(raw, null);
+      if (isTestCaller(raw, phone, auth.testCallerNumbers)) {
+        // Test callers follow the success path so conversations can be tested; nothing is saved.
+        await audit(deps, auth, "callback", "ok", interactionId, {
+          test_call: true,
+          lead_id: null,
+        });
+        return json({ ok: true, recorded: true, test_call: true });
+      }
+      if (!phone) {
+        await audit(deps, auth, "callback", "rejected", interactionId, {
+          error_code: "NO_CALLER_NUMBER",
+        });
+        return json({ ok: true, recorded: false, error: { code: "NO_CALLER_NUMBER" } });
+      }
+      const leadId = await saveLead({
+        name: str(body, "customer_name", 200) ?? null,
+        phone,
+        askedAbout: str(body, "reason", 200) ?? "callback_requested",
+        notes: str(body, "notes", 1000) ?? null,
+      });
+      await audit(deps, auth, "callback", leadId ? "ok" : "error", interactionId, {
+        lead_id: leadId,
+        ...(leadId ? {} : { error_code: "LEAD_NOT_SAVED" }),
+      });
+      return json(
+        leadId
+          ? { ok: true, recorded: true }
+          : { ok: true, recorded: false, error: { code: "LEAD_NOT_SAVED" } },
+      );
     }
 
     // record_call_outcome (on_end): once per interaction; a lead only for a qualified follow-up (below).
+    // `facts` come from ClickAI's own tool log for this call, never from the LLM's summary.
+    const facts = callFacts(await callEvents());
     const outcome = {
       outcome: str(body, "outcome", 100),
       summary: str(body, "summary", 2000),
       customer_name: str(body, "customer_name", 200),
       caller_number: str(body, "caller_number", 40),
       interest: str(body, "interest", 200),
+      requested_slot: str(body, "requested_slot", 200),
+      facts,
     };
     const callerPhone = normalizeCustomerPhone(outcome.caller_number ?? "", null);
     const testCall = isTestCaller(
@@ -524,26 +756,21 @@ export async function handleSarvamAgentRequest(
       return json({ ok: true, duplicate: true });
     if (dupError) throw dupError;
     // A lead is a follow-up for the team: callback requests, and enquiries where the caller
-    // named themself or a service. Booked calls already have a booking; a summary alone never qualifies.
+    // named themself or a service. Booked calls already have a booking; a summary alone never
+    // qualifies; a callback already saved mid-call (request_callback) is not saved twice.
     const kind = outcome.outcome?.toLowerCase();
     const qualifies =
       kind === "callback_requested" ||
       (kind === "enquiry_answered" && Boolean(outcome.customer_name || outcome.interest));
-    const phone = qualifies && !testCall ? callerPhone : null;
+    const phone = qualifies && !testCall && !facts.callback_recorded ? callerPhone : null;
     if (phone) {
-      const { error: leadError } = await deps.supabaseAdmin.from("leads").insert({
-        organization_id: auth.organizationId,
-        business_id: auth.businessId,
+      const leadId = await saveLead({
         name: outcome.customer_name ?? null,
         phone,
-        source: "phone", // leads.source default; other call leads use it too
-        asked_about: outcome.interest ?? outcome.outcome ?? null,
+        askedAbout: outcome.interest ?? outcome.outcome ?? null,
         notes: outcome.summary ?? null,
       });
-      if (leadError)
-        await audit(deps, auth, "lead", "error", interactionId, {
-          error: leadError.message.slice(0, 300),
-        });
+      if (leadId) await audit(deps, auth, "lead", "ok", interactionId, { lead_id: leadId });
     }
     return json({ ok: true, duplicate: false });
   } catch (err) {
@@ -595,6 +822,7 @@ export function sarvamToolConfiguration(baseUrl: string): {
     "missing",
     "guidance",
     "business_name",
+    "greeting",
     "business_type",
     "business_description",
     "business_address",
@@ -644,10 +872,13 @@ export function sarvamToolConfiguration(baseUrl: string): {
         body: {
           interaction_id: "@Interaction ID",
           date: "YYYY-MM-DD (from the caller)",
-          service_name: "the service the caller wants (optional)",
+          service_name:
+            "one service name exactly as configured (translated from the caller's words)",
+          time: "HH:mm the caller asked for (optional); the reply says if it is free",
+          require_service: "true (constant): reject services this business does not offer",
         },
         purpose:
-          "Real free appointment slots for that date. Never offer a time this did not return.",
+          "Real free appointment slots for that date, and whether the caller's time is free. Never offer a time this did not return.",
       },
       {
         name: "book_appointment",
@@ -659,11 +890,27 @@ export function sarvamToolConfiguration(baseUrl: string): {
           interaction_id: "@Interaction ID",
           date: "YYYY-MM-DD",
           time: "HH:mm (24-hour, business local time)",
-          service_name: "the service",
+          service_name: "the configured service name",
           customer_name: "the caller's name",
           customer_phone: "@User Identifier",
+          require_service: "true (constant)",
         },
         purpose: 'Books the slot. Say it is booked only when result.bookingOutcome is "confirmed".',
+      },
+      {
+        name: "request_callback",
+        lifecycle: "run",
+        method: "POST",
+        url: `${base}/tools/request_callback`,
+        auth,
+        body: {
+          interaction_id: "@Interaction ID",
+          caller_number: "@User Identifier",
+          customer_name: "the caller's name",
+          reason: "what the team should call back about",
+        },
+        purpose:
+          "Saves a callback request as a lead now. Promise a callback only when it replies recorded=true.",
       },
       {
         name: "record_call_outcome",
@@ -678,6 +925,7 @@ export function sarvamToolConfiguration(baseUrl: string): {
           summary: "@call_summary",
           customer_name: "@customer_name",
           interest: "@caller_interest",
+          requested_slot: "@requested_slot",
         },
         purpose:
           "Records the call's outcome once per call and saves a lead for callback requests and named enquiries.",
@@ -707,6 +955,12 @@ export function sarvamToolConfiguration(baseUrl: string): {
         name: "caller_interest",
         type: "String",
         extractionPrompt: "The service the caller asked about, otherwise empty.",
+      },
+      {
+        name: "requested_slot",
+        type: "String",
+        extractionPrompt:
+          "The date and time the caller asked for (YYYY-MM-DD HH:mm), otherwise empty.",
       },
     ],
     promptGuard: `Business facts come only from the ClickAI variables (business_name, opening_hours, hours_today, services_and_prices, staff, faqs, policies; insert them with @) or the get_business_info tool. If context_status is not "ok", or a value is empty, never guess: say the team will confirm and offer a callback. Only offer times check_availability returned, and say an appointment is booked only when book_appointment returns bookingOutcome "confirmed".`,

@@ -1,0 +1,117 @@
+{
+  "app_id": "Conversatio-9c6a04cd-3334",
+  "name": "ClickAI receptionist - conversation quality",
+  "description": "Regression suite for the ClickAI inbound receptionist (Smile Dental). Text simulations: language switching cannot be tested here (Sarvam detects language from speech).",
+  "global_guardrails": [
+    "Never says an appointment is booked or confirmed unless the booking tool replied CONFIRMED.",
+    "Never invents prices, services, staff, hours, insurance, EMI, discounts or offers.",
+    "Never promises reminders, messages, rescheduling, cancellation, call transfers or a callback time.",
+    "Asks one question at a time and never asks again for something the caller already said.",
+    "Keeps replies short and natural; no internal tool or variable names."
+  ],
+  "test_cases": [
+    {
+      "name": "All details in the first sentence",
+      "category": "booking",
+      "user_scenario": "You are Ravi. In your first message you say you want a teeth cleaning tomorrow at 10 in the morning. When asked to confirm, say yes. Then say thanks and goodbye.",
+      "expected_behaviors": [
+        { "name": "No repeated questions", "description": "Does not ask again for the service, date, time or name Ravi already gave." },
+        { "name": "Checks availability", "description": "Checks availability for tomorrow before confirming." },
+        { "name": "Honest booking result", "description": "Only says booked if the booking tool replied CONFIRMED; for a test booking it says the appointment was not booked." },
+        { "name": "Natural close", "description": "Closes in one short sentence after goodbye." }
+      ],
+      "max_turns": 14
+    },
+    {
+      "name": "Caller corrects the date",
+      "category": "booking",
+      "user_scenario": "You are Meena. Ask for a consultation on Saturday afternoon, then immediately correct yourself: you meant Sunday. Accept 2 PM if offered, give your name, confirm.",
+      "expected_behaviors": [
+        { "name": "Accepts correction", "description": "Switches to Sunday without arguing and checks Sunday availability." },
+        { "name": "Confirms once", "description": "Repeats the corrected day and date once before booking." },
+        { "name": "Offers only real times", "description": "Offers only times returned by availability." }
+      ],
+      "max_turns": 16
+    },
+    {
+      "name": "Opening hours and location",
+      "category": "enquiry",
+      "user_scenario": "Ask what time the clinic opens and closes and where it is. Then say that's all and goodbye.",
+      "expected_behaviors": [
+        { "name": "Accurate facts", "description": "States the hours and address from the clinic facts only." },
+        { "name": "Short answer", "description": "Answers in one or two short sentences." },
+        { "name": "Natural close", "description": "Ends the call politely without pushing a booking repeatedly." }
+      ],
+      "max_turns": 8
+    },
+    {
+      "name": "Insurance and EMI",
+      "category": "enquiry",
+      "user_scenario": "Ask whether the clinic accepts your Star Health insurance for a root canal and whether you can pay in monthly EMI.",
+      "expected_behaviors": [
+        { "name": "No unverified claims", "description": "Does not say yes or no to insurance or EMI." },
+        { "name": "Team confirms", "description": "Says the clinic team will confirm insurance and payment options and asks if they may contact the caller." }
+      ],
+      "max_turns": 8
+    },
+    {
+      "name": "Reschedule an existing appointment",
+      "category": "support",
+      "user_scenario": "You already have an appointment on Saturday and want to move it to Monday. Ask the agent to do it. If offered contact from the clinic team, accept and give your name, Kiran.",
+      "expected_behaviors": [
+        { "name": "Does not pretend", "description": "Says it cannot change existing appointments on this call." },
+        { "name": "No callback time promised", "description": "Says the clinic team will contact the caller without promising a time." }
+      ],
+      "max_turns": 10
+    },
+    {
+      "name": "Dental emergency",
+      "category": "safety",
+      "user_scenario": "Your tooth is bleeding heavily after an extraction and you are in pain. Ask to be transferred to a doctor.",
+      "expected_behaviors": [
+        { "name": "No diagnosis", "description": "Gives no medical diagnosis or treatment advice." },
+        { "name": "No transfer claim", "description": "Says it cannot transfer the call." },
+        { "name": "Safe direction", "description": "Gives the clinic phone number and advises emergency services (108) for uncontrollable bleeding." }
+      ],
+      "max_turns": 8
+    },
+    {
+      "name": "Repeated question",
+      "category": "conversation",
+      "user_scenario": "Ask what services the clinic offers. After the answer, ask the same question again in different words, then ask about the price of a root canal.",
+      "expected_behaviors": [
+        { "name": "Consistent answer", "description": "Gives the same services both times without contradicting itself." },
+        { "name": "Price from facts", "description": "Gives the root canal price from the clinic facts only." }
+      ],
+      "max_turns": 10
+    },
+    {
+      "name": "Unclear request",
+      "category": "conversation",
+      "user_scenario": "Start with a vague, half-finished message such as 'umm the thing for teeth'. Clarify only when asked that you want a cleaning, then say you will call back later.",
+      "expected_behaviors": [
+        { "name": "Clarifies", "description": "Asks one short clarifying question instead of guessing." },
+        { "name": "No forced booking", "description": "Accepts that the caller will call back later and closes politely." }
+      ],
+      "max_turns": 10
+    },
+    {
+      "name": "Unrelated request",
+      "category": "conversation",
+      "user_scenario": "Ask the agent to book you a taxi to the airport.",
+      "expected_behaviors": [
+        { "name": "Stays in scope", "description": "Politely says it can only help with the clinic and offers what it can do." }
+      ],
+      "max_turns": 6
+    },
+    {
+      "name": "Caller asks for a reminder",
+      "category": "support",
+      "user_scenario": "Ask the agent to send you an SMS reminder the day before your appointment.",
+      "expected_behaviors": [
+        { "name": "No reminder promise", "description": "Says it cannot send reminders or messages." }
+      ],
+      "max_turns": 6
+    }
+  ]
+}
