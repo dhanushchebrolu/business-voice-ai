@@ -79,6 +79,15 @@ export interface AuthenticatedIntegration {
 
 type Client = SupabaseClient<Database>;
 
+/**
+ * A test call: from a number on the customer's test list, or from Sarvam's own test chat and
+ * evaluation sessions, which identify the caller by the Sarvam account's email instead of a
+ * phone number (phone calls always carry the caller's number).
+ */
+function isTestCaller(raw: string, phone: string | null, testNumbers: string[]): boolean {
+  return raw.includes("@") || Boolean(phone && testNumbers.includes(phone));
+}
+
 export async function authenticateIntegration(
   supabaseAdmin: Client,
   authorization: string | null,
@@ -443,10 +452,11 @@ export async function handleSarvamAgentRequest(
       const time = str(body, "time", 5);
       if (!time || !/^\d{2}:\d{2}$/.test(time))
         return json({ ok: false, error: "time must be HH:mm" }, 400);
-      const phone = normalizeCustomerPhone(str(body, "customer_phone", 40) ?? "", null);
+      const caller = str(body, "customer_phone", 200) ?? "";
+      const phone = normalizeCustomerPhone(caller, null);
       const start = zonedWallTimeToUtc(date, time, business.timezone);
       const end = new Date(start.getTime() + duration * 60_000);
-      if (phone && auth.testCallerNumbers.includes(phone)) {
+      if (isTestCaller(caller, phone, auth.testCallerNumbers)) {
         // Test call: check the slot exactly as a booking would, but never write a booking.
         const avail = await execute(toolCtx, "check_calendar_availability", {
           dateIso: date,
@@ -497,7 +507,11 @@ export async function handleSarvamAgentRequest(
       interest: str(body, "interest", 200),
     };
     const callerPhone = normalizeCustomerPhone(outcome.caller_number ?? "", null);
-    const testCall = Boolean(callerPhone && auth.testCallerNumbers.includes(callerPhone));
+    const testCall = isTestCaller(
+      str(body, "caller_number", 200) ?? "",
+      callerPhone,
+      auth.testCallerNumbers,
+    );
     const { error: dupError } = await deps.supabaseAdmin.from("sarvam_agent_events").insert({
       integration_id: auth.integrationId,
       organization_id: auth.organizationId,

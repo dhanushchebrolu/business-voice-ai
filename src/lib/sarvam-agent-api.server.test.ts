@@ -674,6 +674,12 @@ describe("test callers never create bookings or leads", () => {
     assert.equal((event["detail"] as { test_call: boolean }).test_call, true);
   });
 
+  test("Sarvam test chats and evals (caller identified by email) never book", async () => {
+    const { body, calls } = await bookWith("owner@example.com");
+    assert.deepEqual(calls, ["check_calendar_availability"]);
+    assert.equal((body["result"] as { error: { code: string } }).error.code, "TEST_CALL_NOT_SAVED");
+  });
+
   test("other callers still book normally", async () => {
     markTestCaller();
     const { body, calls } = await bookWith("+919000000001");
