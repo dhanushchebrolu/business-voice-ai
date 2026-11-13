@@ -1,0 +1,67 @@
+{
+  "app_id": "Conversatio-9c6a04cd-3334",
+  "note": "Text-run scenarios only. Per Sarvam's eval playbook a text run has no speech, so language detection never runs; language changes are requested in words. Voice behaviour (detection, short audio, interruptions, pauses, latency) is in v5-voice-language-test-plan.md.",
+  "test_cases": [
+    {
+      "name": "Lang: short English yes after a confirmation question",
+      "category": "language",
+      "user_scenario": "Ask for a root canal tomorrow evening. Pick the first time offered and give the name Ravi. When asked to confirm the booking, answer only: Yes. Then say: No, nothing else.",
+      "expected_behaviors": [
+        { "name": "Short yes understood", "description": "Treats the one-word Yes as confirmation of the booking question just asked and proceeds; does not ask again." },
+        { "name": "Short no understood", "description": "Treats No as nothing else needed and closes briefly." }
+      ],
+      "max_turns": 12
+    },
+    {
+      "name": "Lang: short Hindi haan and nahi keep context",
+      "category": "language",
+      "user_scenario": "In English, ask for a tooth removal tomorrow morning and give the name Meena. When asked to confirm the booking, answer only: haan. When asked if you need anything else, answer only: nahi.",
+      "expected_behaviors": [
+        { "name": "Understands haan", "description": "Treats haan as yes to the booking question and proceeds without asking again." },
+        { "name": "Understands nahi", "description": "Treats nahi as no and closes briefly." },
+        { "name": "Keeps context", "description": "Keeps the service, date and name." }
+      ],
+      "max_turns": 12
+    },
+    {
+      "name": "Lang: short Telugu avunu and kaadu keep context",
+      "category": "language",
+      "user_scenario": "In English, ask for a root canal tomorrow at 5 PM and give the name Lakshmi. When asked to confirm the booking, answer only: అవును. When asked if you need anything else, answer only: కాదు.",
+      "expected_behaviors": [
+        { "name": "Understands avunu", "description": "Treats అవును as yes to the booking question and proceeds without asking again." },
+        { "name": "Understands kaadu", "description": "Treats కాదు as no and closes briefly." }
+      ],
+      "max_turns": 12
+    },
+    {
+      "name": "Lang: caller asks for Hindi mid-booking",
+      "category": "language",
+      "user_scenario": "In English, ask for a tooth removal tomorrow. After the agent replies, say: Hindi mein baat kijiye. Continue in Hindi, pick a time, give the name Suresh, confirm.",
+      "expected_behaviors": [
+        { "name": "Switches to Hindi", "description": "Replies in Hindi after the request." },
+        { "name": "Keeps context", "description": "Keeps tooth removal and tomorrow; does not restart or ask again." }
+      ],
+      "max_turns": 12
+    },
+    {
+      "name": "Lang: caller asks for Telugu mid-booking",
+      "category": "language",
+      "user_scenario": "In English, ask for a root canal tomorrow evening. After the agent replies, say: Please speak in Telugu. Continue in Telugu, pick a time, give the name Ravi, confirm.",
+      "expected_behaviors": [
+        { "name": "Switches to Telugu", "description": "Replies in Telugu after the request." },
+        { "name": "Keeps context", "description": "Keeps root canal and tomorrow evening; does not restart." }
+      ],
+      "max_turns": 12
+    },
+    {
+      "name": "Lang: caller asks for Gujarati",
+      "category": "language",
+      "user_scenario": "In English, ask the clinic timings. Then say: Please speak in Gujarati. Continue in Gujarati and ask whether tooth removal is available tomorrow.",
+      "expected_behaviors": [
+        { "name": "Switches to Gujarati", "description": "Replies in Gujarati, not Telugu or Hindi, after the request." },
+        { "name": "Correct facts", "description": "Gives the configured hours and offers only real availability." }
+      ],
+      "max_turns": 10
+    }
+  ]
+}
