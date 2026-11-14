@@ -312,6 +312,8 @@ export function getTelephonyAdapter(providerId: string): TelephonyProviderAdapte
       orgId: process.env["SARVAM_ORG_ID"],
       workspaceId: process.env["SARVAM_WORKSPACE_ID"],
       webhookSecret: process.env["SARVAM_WEBHOOK_SECRET"],
+      // Rotation grace period only; unset outside a rotation (see docs/sarvam-webhook-token-rotation.md).
+      previousWebhookSecret: process.env["SARVAM_WEBHOOK_SECRET_PREVIOUS"]?.trim() || undefined,
     });
   }
 

@@ -8,6 +8,8 @@ import {
   clearAdmissionBlock,
   confirmSarvamNumber,
   reverifyLiveDeployment,
+  updateSarvamWebhookToken,
+  resumeSarvamDeploymentAfterTokenUpdate,
   getProvisioningDetail,
   registerCustomerSarvamAgent,
 } from "@/lib/provisioning-admin.functions";
@@ -73,6 +75,11 @@ function ProvisioningDetail() {
   const [clearOpen, setClearOpen] = useState(false);
   const [reverifyOpen, setReverifyOpen] = useState(false);
   const reverifyLive = useServerFn(reverifyLiveDeployment);
+  const updateWebhookToken = useServerFn(updateSarvamWebhookToken);
+  const [webhookOpen, setWebhookOpen] = useState(false);
+  const [confirmPause, setConfirmPause] = useState(false);
+  const resumeAfterUpdate = useServerFn(resumeSarvamDeploymentAfterTokenUpdate);
+  const [resumeOpen, setResumeOpen] = useState(false);
   const [appId, setAppId] = useState("");
   const [appVersion, setAppVersion] = useState("");
 
@@ -231,7 +238,41 @@ function ProvisioningDetail() {
               Re-verify live deployment
             </Button>
           ) : null}
+          {data.numbers.some((n) => n.provider === "sarvam" && n.provider_deployment_id) ? (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                setConfirmPause(false);
+                setWebhookOpen(true);
+              }}
+            >
+              Update webhook token in Sarvam
+            </Button>
+          ) : null}
         </div>
+        {data.webhookRecovery ? (
+          <div
+            role="alert"
+            data-testid="webhook-recovery"
+            className="mt-2 rounded-md border border-destructive/40 p-2 text-xs text-destructive"
+          >
+            <p>
+              Recovery required: a webhook-token update left deployment{" "}
+              {data.webhookRecovery.deploymentId} out of its original state (
+              {data.webhookRecovery.originalStatus}). It may not be answering calls. No further
+              token update is allowed until it is resumed.
+            </p>
+            <Button
+              size="sm"
+              variant="destructive"
+              className="mt-2"
+              onClick={() => setResumeOpen(true)}
+            >
+              Resume deployment
+            </Button>
+          </div>
+        ) : null}
         <p className="mt-2 text-xs text-muted-foreground">
           Sarvam connection:{" "}
           {data.connection?.registered
@@ -581,6 +622,45 @@ function ProvisioningDetail() {
         onConfirm={async (reason) => {
           const r = await reverifyLive({ data: { orgId, reason } });
           if (r.outcome === "verified") toast.success(r.detail);
+          else toast.error(r.detail);
+          await refresh();
+        }}
+      />
+      <ReasonDialog
+        open={webhookOpen}
+        onOpenChange={setWebhookOpen}
+        title="Update the webhook token in Sarvam"
+        description="For rotating the Sarvam webhook secret only (see docs/sarvam-webhook-token-rotation.md). Replaces this customer's deployment webhook with one carrying the current token, then reads it back. Sarvam edits only paused deployments, so an active deployment is paused for a few seconds and resumed: calls to this number are not answered during that time."
+        extra={
+          <label className="flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="mt-1"
+              checked={confirmPause}
+              onChange={(e) => setConfirmPause(e.target.checked)}
+              aria-label="I understand the deployment may be paused for a few seconds"
+            />
+            <span>
+              I understand an active deployment will be paused for a few seconds and resumed.
+            </span>
+          </label>
+        }
+        onConfirm={async (reason) => {
+          const r = await updateWebhookToken({ data: { orgId, reason, confirmPause } });
+          // Only a verified read-back counts as success; recovery_required is an error.
+          if (r.outcome === "rotated" || r.outcome === "already_current") toast.success(r.detail);
+          else toast.error(r.detail);
+          await refresh();
+        }}
+      />
+      <ReasonDialog
+        open={resumeOpen}
+        onOpenChange={setResumeOpen}
+        title="Resume the deployment"
+        description="Recovery after a failed webhook-token update: resumes this customer's deployment back to active, its original state, only if Sarvam still shows the same agent, version and number. Nothing else is changed."
+        onConfirm={async (reason) => {
+          const r = await resumeAfterUpdate({ data: { orgId, reason } });
+          if (r.outcome === "resumed" || r.outcome === "already_resumed") toast.success(r.detail);
           else toast.error(r.detail);
           await refresh();
         }}

@@ -244,6 +244,9 @@ async function loadDetail(orgId: string) {
     config,
     runs,
     audit: auditRes.data ?? [],
+    webhookRecovery: await (
+      await import("@/lib/sarvam-webhook-rotation.server")
+    ).loadRecoveryMarker(supabaseAdmin, orgId),
     masterAgentConfigured: Boolean(gateInput.masterAgentAppId),
     gateInput: { ...gateInput, now: gateInput.now.toISOString(), masterAgentAppId: null },
     _gate: gateInput,
@@ -539,4 +542,141 @@ export const reverifyLiveDeployment = createServerFn({ method: "POST" })
       reason: data.reason,
     });
     return { outcome: result.outcome, detail: result.detail };
+  });
+
+async function sarvamRotationDeps() {
+  const [telephony, sarvam] = await Promise.all([
+    import("@/lib/telephony.server"),
+    import("@/lib/telephony/sarvam-provider.server"),
+  ]);
+  const adapter = () => {
+    const a = telephony.getTelephonyAdapter("sarvam");
+    if (!a || !(a instanceof sarvam.SarvamTelephonyAdapter))
+      throw new Error("Sarvam is not connected.");
+    return a;
+  };
+  return {
+    getDeployment: (id: string) => adapter().getDeployment(id),
+    setDeploymentStatus: (id: string, action: "pause" | "resume") =>
+      adapter().setDeploymentStatus(id, action),
+    updateWebhook: (id: string, webhook: { url: string; metadata: Record<string, string> }) =>
+      adapter().updateInboundDeployment(id, { webhookConfig: webhook }),
+    webhookUrl: () => telephony.sarvamOutboundWebhookUrl(),
+  };
+}
+
+/**
+ * Rotation of SARVAM_WEBHOOK_SECRET: replaces the webhook URL (and so its
+ * verify_token) on this customer's existing Sarvam deployment with one built
+ * from the CURRENT secret. An active deployment is paused for a few seconds
+ * for the edit (Sarvam edits only paused deployments), so the caller must
+ * confirm the pause explicitly. Every attempt is audited (actor,
+ * organization, deployment, reason, stage, outcome), never with the URL,
+ * the token or provider error text. See docs/sarvam-webhook-token-rotation.md.
+ */
+export const updateSarvamWebhookToken = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { orgId: string; reason: string; confirmPause: boolean }) => {
+    if (!input?.orgId) throw new Error("orgId is required");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return { ...input, confirmPause: input.confirmPause === true };
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { rotateDeploymentWebhook, ROTATION_AUDIT_ACTIONS } =
+      await import("@/lib/sarvam-webhook-rotation.server");
+    try {
+      const result = await rotateDeploymentWebhook(
+        supabaseAdmin,
+        { organizationId: data.orgId, confirmPause: data.confirmPause },
+        await sarvamRotationDeps(),
+      );
+      // Statuses only: never the URL, the token or provider error text.
+      await writeAudit(admin, {
+        action: ROTATION_AUDIT_ACTIONS[result.outcome],
+        entityType: "sarvam_deployment",
+        entityId: result.deploymentId,
+        organizationId: data.orgId,
+        newValue: {
+          stage: result.stage,
+          outcome: result.outcome,
+          deployment_id: result.deploymentId,
+          confirm_pause: data.confirmPause,
+          status_before: result.statusBefore,
+          status_after: result.statusAfter,
+          token_status_before: result.tokenStatusBefore,
+          token_status_after: result.tokenStatusAfter,
+          app_id_before: result.appIdBefore,
+          app_version_before: result.appVersionBefore,
+          paused_by_us: result.pausedByUs,
+          recovery: result.recovery,
+        },
+        reason: data.reason,
+      });
+      return { outcome: result.outcome, detail: result.detail };
+    } catch (err) {
+      await writeAudit(admin, {
+        action: ROTATION_AUDIT_ACTIONS.error,
+        entityType: "sarvam_deployment",
+        entityId: null,
+        organizationId: data.orgId,
+        newValue: { stage: "error", outcome: "error", confirm_pause: data.confirmPause },
+        reason: data.reason,
+      });
+      throw err;
+    }
+  });
+
+/**
+ * Recovery after a webhook-token update left the deployment paused: resumes
+ * that one deployment back to active (its recorded original state), only if
+ * Sarvam still shows the same agent, version and number, then clears the
+ * durable recovery marker on the number row. Audited.
+ */
+export const resumeSarvamDeploymentAfterTokenUpdate = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { orgId: string; reason: string }) => {
+    if (!input?.orgId) throw new Error("orgId is required");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { resumeAfterFailedRotation, RESUME_AUDIT_ACTIONS } =
+      await import("@/lib/sarvam-webhook-rotation.server");
+    try {
+      const result = await resumeAfterFailedRotation(
+        supabaseAdmin,
+        { organizationId: data.orgId },
+        await sarvamRotationDeps(),
+      );
+      await writeAudit(admin, {
+        action: RESUME_AUDIT_ACTIONS[result.outcome],
+        entityType: "sarvam_deployment",
+        entityId: result.deploymentId,
+        organizationId: data.orgId,
+        newValue: {
+          stage: result.stage,
+          outcome: result.outcome,
+          deployment_id: result.deploymentId,
+          status_before: result.statusBefore,
+          status_after: result.statusAfter,
+          marker_cleared: result.markerCleared,
+        },
+        reason: data.reason,
+      });
+      return { outcome: result.outcome, detail: result.detail };
+    } catch (err) {
+      await writeAudit(admin, {
+        action: RESUME_AUDIT_ACTIONS.error,
+        entityType: "sarvam_deployment",
+        entityId: null,
+        organizationId: data.orgId,
+        newValue: { stage: "error", outcome: "error" },
+        reason: data.reason,
+      });
+      throw err;
+    }
   });

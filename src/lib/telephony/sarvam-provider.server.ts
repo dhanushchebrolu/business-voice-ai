@@ -130,6 +130,9 @@ import { constantTimeEquals } from "../constant-time-equals.server.ts";
  * Klyro-owned record — never to construct or accept an organization_id).
  */
 
+/** Which accepted webhook token a deployment's URL carries (never the token itself). */
+export type WebhookTokenStatus = "current" | "previous" | "unknown" | "none";
+
 export interface SarvamTelephonyConfig {
   /**
    * Separate credentials for inbound (deployment) vs. outbound
@@ -161,6 +164,15 @@ export interface SarvamTelephonyConfig {
    * unconditionally.
    */
   webhookSecret?: string | undefined;
+  /**
+   * Optional PREVIOUS token, set only during an explicit rotation grace
+   * period (SARVAM_WEBHOOK_SECRET_PREVIOUS). While set, a webhook carrying
+   * either the current or the previous token is accepted, so deliveries to a
+   * deployment whose URL still holds the old token keep working until that
+   * URL is updated. Removing it ends the grace period: the old token is then
+   * rejected. Never used to build webhook URLs.
+   */
+  previousWebhookSecret?: string | undefined;
   /** Injectable for tests — passed straight through to sarvam-api-client.server.ts. Defaults to global fetch. */
   fetchImpl?: typeof fetch | undefined;
 }
@@ -525,7 +537,11 @@ export class SarvamTelephonyAdapter implements TelephonyProviderAdapter {
   /** Read-only: deployments Sarvam finds for `search` (an agent ID or number). */
   /** Read-only: one deployment as Sarvam has it (app, version, numbers, status, webhook). */
   async getDeployment(deploymentId: string): Promise<SarvamDeploymentDetail> {
-    return apiGetDeployment(this.managementApiConfig("inbound"), deploymentId);
+    // The webhook URL Sarvam returns contains our verify_token: classify it
+    // here and keep only the classification (see sarvam-api-client.server.ts).
+    return apiGetDeployment(this.managementApiConfig("inbound"), deploymentId, {
+      classifyWebhookToken: (token) => this.webhookTokenStatus(token),
+    });
   }
 
   /** Pause or resume inbound calls on a deployment. */
@@ -636,9 +652,28 @@ export class SarvamTelephonyAdapter implements TelephonyProviderAdapter {
   ): boolean {
     if (this.config.webhookSecret) {
       const provided = url?.searchParams.get("verify_token");
-      if (provided && constantTimeEquals(provided, this.config.webhookSecret)) return true;
+      if (provided && this.webhookTokenStatus(provided) !== "unknown") return true;
     }
     return SARVAM_WEBHOOK_AUTH_VERIFIED;
+  }
+
+  /**
+   * Which accepted token `token` is, compared in constant time: the current
+   * one, the rotation-period previous one, or neither. Only ever used for
+   * comparison; the token itself is never stored, returned or logged. With no
+   * current secret configured nothing is accepted ("unknown").
+   */
+  webhookTokenStatus(token: string | null | undefined): WebhookTokenStatus {
+    if (!token) return "none";
+    const current = this.config.webhookSecret;
+    if (!current) return "unknown";
+    // Evaluate both comparisons so the timing does not reveal which matched.
+    const isCurrent = constantTimeEquals(token, current);
+    const previous = this.config.previousWebhookSecret;
+    const isPrevious = previous ? constantTimeEquals(token, previous) : false;
+    if (isCurrent) return "current";
+    if (isPrevious) return "previous";
+    return "unknown";
   }
 
   normalizeWebhookEvent(rawBody: string): NormalizedCallEvent | null {

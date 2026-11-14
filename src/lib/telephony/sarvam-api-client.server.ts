@@ -930,6 +930,30 @@ export async function getRecording(
 export interface SarvamDeploymentDetail extends SarvamDeploymentSummary {
   connectionIds: string[];
   webhookUrlConfigured: boolean;
+  /**
+   * Which accepted token the webhook URL carries, when the caller supplied a
+   * classifier ("current" | "previous" | "unknown" | "none"). The URL and
+   * its verify_token are never part of this object.
+   */
+  webhookTokenStatus?: string;
+}
+
+export interface GetDeploymentOptions {
+  /**
+   * Called with the webhook URL's verify_token (or null) and returns a label.
+   * The token is passed to this function only and never stored, returned or
+   * logged, so the deployment read cannot leak it.
+   */
+  classifyWebhookToken?: (token: string | null) => string;
+}
+
+function webhookVerifyToken(webhookUrl: unknown): string | null {
+  if (typeof webhookUrl !== "string" || !webhookUrl) return null;
+  try {
+    return new URL(webhookUrl).searchParams.get("verify_token");
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -945,7 +969,10 @@ function connectionNumbers(cfg: Record<string, unknown>): string[] {
   ];
 }
 
-function parseDeploymentDetail(parsed: unknown): SarvamDeploymentDetail {
+function parseDeploymentDetail(
+  parsed: unknown,
+  opts?: GetDeploymentOptions,
+): SarvamDeploymentDetail {
   const d = asPlainObject(parsed) ?? {};
   const configs = (Array.isArray(d["connection_configs"]) ? d["connection_configs"] : []).map(
     (c) => asPlainObject(c) ?? {},
@@ -964,19 +991,27 @@ function parseDeploymentDetail(parsed: unknown): SarvamDeploymentDetail {
     status: typeof d["status"] === "string" ? d["status"] : null,
     connectionIds: configs.map((c) => String(c["connection_id"] ?? "")).filter(Boolean),
     webhookUrlConfigured: typeof asPlainObject(d["webhook_config"])?.["url"] === "string",
+    ...(opts?.classifyWebhookToken
+      ? {
+          webhookTokenStatus: opts.classifyWebhookToken(
+            webhookVerifyToken(asPlainObject(d["webhook_config"])?.["url"]),
+          ),
+        }
+      : {}),
   };
 }
 
 export async function getDeployment(
   config: SarvamApiClientConfig,
   deploymentId: string,
+  opts?: GetDeploymentOptions,
 ): Promise<SarvamDeploymentDetail> {
   const parsed = await sarvamRequest<unknown>(
     config,
     "GET",
     scopedPath(config, "app-authoring", `deployments/${encodeURIComponent(deploymentId)}`),
   );
-  return parseDeploymentDetail(parsed);
+  return parseDeploymentDetail(parsed, opts);
 }
 
 /** Pause (stop accepting inbound calls) or resume a deployment. */

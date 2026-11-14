@@ -46,6 +46,24 @@ export interface DeploymentView {
   status: string | null;
   phoneNumbers: string[];
   webhookUrlConfigured: boolean;
+  /**
+   * Which accepted token the deployment's webhook URL carries, when the read
+   * classified it: "current", "previous" (rotation grace period), "unknown"
+   * (one ClickAI would reject) or "none". Absent when not classified.
+   */
+  webhookTokenStatus?: string;
+}
+
+/** The webhook would reach ClickAI and be accepted (presence alone is not enough once classified). */
+export function webhookAccepted(
+  d: Pick<DeploymentView, "webhookUrlConfigured" | "webhookTokenStatus">,
+): boolean {
+  if (!d.webhookUrlConfigured) return false;
+  return (
+    d.webhookTokenStatus === undefined ||
+    d.webhookTokenStatus === "current" ||
+    d.webhookTokenStatus === "previous"
+  );
 }
 
 export interface PipelineDeps {
@@ -149,9 +167,11 @@ export function deploymentVerificationChecks(
     ),
     check(
       "webhook",
-      "Call-result webhook configured",
-      d.webhookUrlConfigured,
-      "its result webhook is not configured",
+      "Call-result webhook configured with a token ClickAI accepts",
+      webhookAccepted(d),
+      d.webhookUrlConfigured
+        ? "its result webhook carries a verification token ClickAI does not accept (update the webhook token)"
+        : "its result webhook is not configured",
     ),
     check(
       "routes_number",

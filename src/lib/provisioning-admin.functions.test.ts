@@ -287,3 +287,132 @@ describe("Phase 5 fixes: live customers and reuse safety", () => {
     assert.match(detailPage, /reverifyLiveDeployment/);
   });
 });
+
+describe("Sarvam webhook token rotation: admin action and wiring", () => {
+  const fnSrc = (name: string) => {
+    const i = src.indexOf(`export const ${name}`);
+    assert.ok(i > -1, name);
+    const next = src.indexOf("export const ", i + 1);
+    return src.slice(i, next === -1 ? undefined : next);
+  };
+  const telephonySrc = readFileSync(join(here, "telephony.server.ts"), "utf8");
+
+  test("admin-only (numbers.write), needs a reason, passes the explicit pause confirmation through", () => {
+    const h = fnSrc("updateSarvamWebhookToken");
+    assert.match(h, /assertPlatformAdmin\(context\.supabase, context\.userId, "numbers\.write"\)/);
+    assert.match(h, /A reason is required/);
+    assert.match(h, /confirmPause: input\.confirmPause === true/);
+    assert.match(h, /organizationId: data\.orgId/);
+  });
+
+  test("the audit record holds statuses only, never the URL or the token", () => {
+    const h = fnSrc("updateSarvamWebhookToken");
+    const audit = h.slice(h.indexOf("await writeAudit("), h.indexOf("return { outcome"));
+    assert.doesNotMatch(audit, /webhook\.url|\.url\b|verify_token|SARVAM_WEBHOOK_SECRET/);
+    assert.match(audit, /token_status_before|token_status_after/);
+    const ret = h.slice(h.indexOf("return { outcome"));
+    assert.match(ret, /return \{ outcome: result\.outcome, detail: result\.detail \}/);
+  });
+
+  test("the previous secret is read only from SARVAM_WEBHOOK_SECRET_PREVIOUS and never used to build URLs", () => {
+    assert.match(
+      telephonySrc,
+      /previousWebhookSecret: process\.env\["SARVAM_WEBHOOK_SECRET_PREVIOUS"\]/,
+    );
+    const builder = telephonySrc.slice(
+      telephonySrc.indexOf("function buildSarvamWebhookUrl"),
+      telephonySrc.indexOf("export function sarvamOutboundWebhookUrl"),
+    );
+    assert.doesNotMatch(builder, /PREVIOUS/);
+  });
+
+  test("the detail page offers the update with an explicit pause checkbox", () => {
+    assert.match(detailPage, /Update webhook token in Sarvam/);
+    assert.match(detailPage, /confirmPause/);
+    assert.match(detailPage, /type="checkbox"/);
+  });
+});
+
+describe("webhook-token rotation hardening: audit coverage and recovery", () => {
+  const fnSrc = (name: string) => {
+    const i = src.indexOf(`export const ${name}`);
+    assert.ok(i > -1, name);
+    const next = src.indexOf("export const ", i + 1);
+    return src.slice(i, next === -1 ? undefined : next);
+  };
+
+  for (const name of ["updateSarvamWebhookToken", "resumeSarvamDeploymentAfterTokenUpdate"])
+    test(`${name}: every attempt is audited, including errors, with stage and outcome but no text, URL or token`, () => {
+      const h = fnSrc(name);
+      assert.match(
+        h,
+        /assertPlatformAdmin\(context\.supabase, context\.userId, "numbers\.write"\)/,
+      );
+      assert.match(h, /A reason is required/);
+      const audits = h.split("await writeAudit(").slice(1);
+      assert.equal(audits.length, 2, "one audit on the normal path, one in the catch");
+      assert.match(h, /\} catch \(err\) \{[\s\S]*await writeAudit\([\s\S]*throw err;/);
+      for (const a of audits) {
+        const body = a.slice(0, a.indexOf("});"));
+        assert.match(body, /stage:/);
+        assert.match(body, /outcome:/);
+        assert.match(body, /organizationId: data\.orgId/);
+        assert.match(body, /reason: data\.reason/);
+        assert.doesNotMatch(body, /detail|\.url\b|verify_token|SARVAM_WEBHOOK_SECRET|message/);
+      }
+      // Refusals come back as results (not exceptions), so they reach the first audit too.
+      assert.ok(h.indexOf("await writeAudit(") < h.indexOf("} catch (err)"));
+    });
+
+  test("recovery state comes from the durable marker on the number row, never from audit logs or the request", () => {
+    for (const name of ["updateSarvamWebhookToken", "resumeSarvamDeploymentAfterTokenUpdate"]) {
+      const h = fnSrc(name);
+      assert.doesNotMatch(
+        h,
+        /audit_logs|loadPendingWebhookRecovery|data\.recovery|data\.deploymentId/,
+        name,
+      );
+      assert.match(h, /organizationId: data\.orgId/, name);
+    }
+    assert.match(
+      src,
+      /webhookRecovery: await \(\s*await import\("@\/lib\/sarvam-webhook-rotation\.server"\)\s*\)\.loadRecoveryMarker\(supabaseAdmin, orgId\)/,
+    );
+    assert.doesNotMatch(src, /loadPendingWebhookRecovery/);
+  });
+
+  test("the detail page shows recovery_required as a persistent alert with a resume-only action, never as success", () => {
+    assert.match(detailPage, /data-testid="webhook-recovery"/);
+    assert.match(detailPage, /Resume deployment/);
+    assert.match(
+      detailPage,
+      /r\.outcome === "rotated" \|\| r\.outcome === "already_current"\) toast\.success/,
+    );
+    assert.doesNotMatch(detailPage, /recovery_required"\)\s*toast\.success/);
+  });
+});
+
+test("every ReasonDialog on the detail page is top-level, never nested inside another dialog (browser-found bug)", () => {
+  const opens = detailPage.split("\n").filter((l) => l.trim() === "<ReasonDialog");
+  assert.ok(opens.length >= 6);
+  for (const l of opens)
+    assert.equal(l, "      <ReasonDialog", "a ReasonDialog is nested inside other JSX");
+});
+
+describe("audit failures cannot affect recovery state", () => {
+  const rotationSrc = readFileSync(join(here, "sarvam-webhook-rotation.server.ts"), "utf8");
+  const auditSrc = readFileSync(join(here, "platform-admin.server.ts"), "utf8");
+  test("the rotation module never reads or writes audit logs (the marker is the only recovery source)", () => {
+    assert.doesNotMatch(rotationSrc, /audit_logs|writeAudit|platform-admin/);
+    assert.match(rotationSrc, /metadata\.sarvam_webhook_recovery|RECOVERY_MARKER_KEY/);
+  });
+  test("writeAudit logs insert errors Supabase returns as values (still never throws, never logs values)", () => {
+    const fn = auditSrc.slice(auditSrc.indexOf("export async function writeAudit"));
+    assert.match(fn, /const \{ error \} = await supabaseAdmin\.from\("audit_logs"\)\.insert\(/);
+    assert.match(
+      fn,
+      /if \(error\) console\.error\("audit:write_failed", \{ action: entry\.action, code: error\.code \}\)/,
+    );
+    assert.doesNotMatch(fn.slice(0, fn.indexOf("\n}\n")), /throw /);
+  });
+});

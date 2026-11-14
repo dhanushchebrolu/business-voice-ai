@@ -126,7 +126,7 @@ export interface AuditEntry {
 export async function writeAudit(admin: PlatformAdmin, entry: AuditEntry): Promise<void> {
   try {
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    await supabaseAdmin.from("audit_logs").insert({
+    const { error } = await supabaseAdmin.from("audit_logs").insert({
       admin_user_id: admin.userId,
       admin_email: admin.email,
       action: entry.action,
@@ -137,7 +137,10 @@ export async function writeAudit(admin: PlatformAdmin, entry: AuditEntry): Promi
       new_value: (entry.newValue ?? null) as never,
       reason: entry.reason ?? null,
     });
+    // Supabase returns insert failures instead of throwing: log them too
+    // (action and error code only, never the values).
+    if (error) console.error("audit:write_failed", { action: entry.action, code: error.code });
   } catch (error) {
-    console.error("audit:write_failed", error);
+    console.error("audit:write_failed", { action: entry.action, error: (error as Error)?.message });
   }
 }

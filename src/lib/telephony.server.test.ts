@@ -6,6 +6,7 @@ import {
   getTelephonyAdapter,
   resolveSarvamKeys,
   normalizePastedKey,
+  sarvamOutboundWebhookUrl,
 } from "./telephony.server.ts";
 import { SarvamTelephonyAdapter } from "./telephony/sarvam-provider.server.ts";
 import { VobizTelephonyAdapter } from "./telephony/vobiz-provider.ts";
@@ -528,5 +529,49 @@ test("inbound compatibility: a dashboard-configured Sarvam URL with verify_token
       new URL("https://clickai.test/api/public/webhooks/telephony?provider=sarvam"),
     ),
     false,
+  );
+});
+
+test("webhook-token rotation: previous token accepted only with a current one, never in URLs, and invalid the moment it is removed", () => {
+  const OLD = "old-rotation-test-token-1234567890";
+  const NEW = "new-rotation-test-token-0987654321";
+  const url = (t: string) =>
+    new URL(
+      `https://clickai.example/api/public/webhooks/telephony?provider=sarvam&verify_token=${t}`,
+    );
+  const base = clearAllSarvamKeys({
+    SARVAM_API_KEY: "sk_test_rotation",
+    TELEPHONY_WEBHOOK_BASE_URL: "https://clickai.example",
+  });
+  // Grace period: both accepted; URLs carry only the current (new) token.
+  withEnv({ ...base, SARVAM_WEBHOOK_SECRET: NEW, SARVAM_WEBHOOK_SECRET_PREVIOUS: OLD }, () => {
+    const a = getTelephonyAdapter("sarvam")!;
+    assert.equal(a.verifyWebhookSignature("{}", {}, url(OLD)), true);
+    assert.equal(a.verifyWebhookSignature("{}", {}, url(NEW)), true);
+    const built = sarvamOutboundWebhookUrl();
+    assert.ok(built.ok);
+    assert.equal(new URL(built.url).searchParams.get("verify_token"), NEW);
+  });
+  // Previous removed: the old token is rejected on the very next adapter (no cache).
+  withEnv(
+    { ...base, SARVAM_WEBHOOK_SECRET: NEW, SARVAM_WEBHOOK_SECRET_PREVIOUS: undefined },
+    () => {
+      const a = getTelephonyAdapter("sarvam")!;
+      assert.equal(a.verifyWebhookSignature("{}", {}, url(OLD)), false);
+      assert.equal(a.verifyWebhookSignature("{}", {}, url(NEW)), true);
+    },
+  );
+  // A previous token without a current one authenticates nothing.
+  withEnv(
+    { ...base, SARVAM_WEBHOOK_SECRET: undefined, SARVAM_WEBHOOK_SECRET_PREVIOUS: OLD },
+    () => {
+      const a = getTelephonyAdapter("sarvam")!;
+      assert.equal(a.verifyWebhookSignature("{}", {}, url(OLD)), false);
+      assert.equal(
+        sarvamOutboundWebhookUrl().ok,
+        false,
+        "no URL is ever built from the previous token",
+      );
+    },
   );
 });
