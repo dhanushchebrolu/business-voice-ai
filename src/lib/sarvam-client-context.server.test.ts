@@ -77,8 +77,8 @@ describe("resolveOrganizationForSarvamContext — tenant resolution, priority or
     assert.equal(calls[0]!.filters["provider_deployment_id"], "dep_1");
   });
 
-  test("falls back to connection_id when deployment_id does not resolve", async () => {
-    const { client } = makeFakeSupabase({
+  test("never resolves a tenant from a connection id, which several organizations may share", async () => {
+    const { client, calls } = makeFakeSupabase({
       phone_numbers: [{ data: null, error: null }],
       telephony_connections: [{ data: { organization_id: "org_2" }, error: null }],
     });
@@ -86,7 +86,12 @@ describe("resolveOrganizationForSarvamContext — tenant resolution, priority or
       deploymentId: "dep_missing",
       connectionId: "conn_1",
     });
-    assert.equal(orgId, "org_2");
+    assert.equal(orgId, null);
+    assert.ok(calls.every((c) => c.table !== "telephony_connections"));
+    const onlyConnection = await resolveOrganizationForSarvamContext(client, {
+      connectionId: "conn_1",
+    });
+    assert.equal(onlyConnection, null);
   });
 
   test("falls back to phone_number, matching only an active sarvam number", async () => {

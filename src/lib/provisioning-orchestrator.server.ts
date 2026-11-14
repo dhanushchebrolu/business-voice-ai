@@ -55,6 +55,8 @@ export interface ProvisionOrganizationResult {
   note: string;
   /** The seven-state machine-readable status (Task list item 7) — see provisioning-state.ts. */
   state: ProvisioningState;
+  /** The Sarvam deployment the number is on, when one is on file or was created now. */
+  deploymentId?: string | null;
 }
 
 export async function provisionOrganizationAfterPayment(
@@ -65,14 +67,16 @@ export async function provisionOrganizationAfterPayment(
   let numberClaimedNow = false;
   let deploymentCreatedNow = false;
   let deploymentAttemptFailed = false;
+  let deploymentId: string | null = null;
   const sarvamCredentialsConfigured = validateSarvamEnv().allPresent;
 
   try {
-    const { data: org } = await supabaseAdmin
+    const { data: org, error: orgError } = await supabaseAdmin
       .from("organizations")
       .select("id, lifecycle_status")
       .eq("id", organizationId)
       .maybeSingle();
+    if (orgError) throw orgError;
     if (!org) {
       const note = "Organization not found — cannot provision.";
       return {
@@ -94,7 +98,7 @@ export async function provisionOrganizationAfterPayment(
     // Idempotency: reuse an already-assigned, non-released number for this
     // org (from a prior webhook retry, or an admin's manual assignment)
     // rather than claiming a second one from the pool.
-    const { data: existingNumbers } = await supabaseAdmin
+    const { data: existingNumbers, error: numbersError } = await supabaseAdmin
       .from("phone_numbers")
       .select(
         "id, status, provider, connection_id, agent_config_id, provider_deployment_id, inbound_enabled",
@@ -102,6 +106,8 @@ export async function provisionOrganizationAfterPayment(
       .eq("organization_id", organizationId)
       .neq("status", "released")
       .order("created_at", { ascending: true });
+    // A failed read must never look like "no number yet" — that would claim a second one.
+    if (numbersError) throw numbersError;
 
     let numberRow = existingNumbers?.[0] ?? null;
 
@@ -146,17 +152,19 @@ export async function provisionOrganizationAfterPayment(
     // Link the org's existing Sarvam connection/agent mapping onto this
     // number, if either is missing on the row and already exists for this
     // org — purely a Klyro-internal write, never a Sarvam call.
-    const { data: connection } = await supabaseAdmin
+    const { data: connection, error: connectionError } = await supabaseAdmin
       .from("telephony_connections")
       .select("id, provider, provider_connection_id")
       .eq("organization_id", organizationId)
       .eq("provider", "sarvam")
       .maybeSingle();
-    const { data: agentConfig } = await supabaseAdmin
+    if (connectionError) throw connectionError;
+    const { data: agentConfig, error: agentError } = await supabaseAdmin
       .from("agent_configs")
       .select("id, sarvam_app_id, sarvam_app_version")
       .eq("organization_id", organizationId)
       .maybeSingle();
+    if (agentError) throw agentError;
 
     const linkUpdate: { connection_id?: string; agent_config_id?: string } = {};
     if (!numberRow.connection_id && connection) linkUpdate.connection_id = connection.id;
@@ -191,6 +199,7 @@ export async function provisionOrganizationAfterPayment(
           name: `Klyro - ${organizationId} inbound`,
         });
         deploymentCreatedNow = true;
+        deploymentId = deployed.deploymentId;
         notes.push(`Created Sarvam inbound deployment ${deployed.deploymentId}.`);
 
         const { error: activateError } = await supabaseAdmin
@@ -224,6 +233,7 @@ export async function provisionOrganizationAfterPayment(
       phoneNumberId: numberRow.id,
       numberClaimedNow,
       deploymentCreatedNow,
+      deploymentId: deploymentId ?? numberRow.provider_deployment_id ?? null,
       note: notes.join(" "),
       state: computeProvisioningState({
         sarvamCredentialsConfigured,
@@ -238,14 +248,21 @@ export async function provisionOrganizationAfterPayment(
   } catch (err) {
     const note = `Automatic provisioning failed unexpectedly: ${(err as Error).message}`;
     console.error("provisioning_orchestrator:unexpected_error", organizationId, note);
+    // Best-effort only — the caller must never fail because this side-channel
+    // status write also failed — but a failure is logged, never swallowed.
     try {
-      await supabaseAdmin
+      const { error } = await supabaseAdmin
         .from("organizations")
         .update({ provisioning_note: note, provisioning_attempted_at: new Date().toISOString() })
         .eq("id", organizationId);
-    } catch {
-      // Best-effort only — the caller (Razorpay webhook) must never fail
-      // because this side-channel status write also failed.
+      if (error)
+        console.error("provisioning_orchestrator:note_write_failed", organizationId, error.message);
+    } catch (writeErr) {
+      console.error(
+        "provisioning_orchestrator:note_write_failed",
+        organizationId,
+        (writeErr as Error).message,
+      );
     }
     return {
       organizationId,
@@ -264,7 +281,7 @@ async function recordAttempt(
   lifecycleStatus: Database["public"]["Enums"]["lifecycle_status"],
   note: string,
 ): Promise<void> {
-  await supabaseAdmin
+  const { error } = await supabaseAdmin
     .from("organizations")
     .update({
       lifecycle_status: lifecycleStatus,
@@ -272,4 +289,5 @@ async function recordAttempt(
       provisioning_attempted_at: new Date().toISOString(),
     })
     .eq("id", organizationId);
+  if (error) throw error;
 }

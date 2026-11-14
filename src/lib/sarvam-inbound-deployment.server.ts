@@ -177,6 +177,30 @@ export async function createInboundDeploymentForNumbers(
   return { deploymentId: created.deploymentId, organizationId, outcome: "created" };
 }
 
+/**
+ * Moves one deployment to another committed version of the SAME agent
+ * (documented PATCH app_version), keeping its paused/active state: an
+ * active deployment is paused for the edit (Sarvam edits only paused ones)
+ * and always resumed afterwards; a paused one is edited and left paused.
+ */
+export async function setDeploymentAppVersion(
+  adapter: Pick<
+    SarvamTelephonyAdapter,
+    "getDeployment" | "setDeploymentStatus" | "updateInboundDeployment"
+  >,
+  deploymentId: string,
+  appVersion: number,
+): Promise<void> {
+  const current = await adapter.getDeployment(deploymentId);
+  const wasActive = current.status === "active";
+  if (wasActive) await adapter.setDeploymentStatus(deploymentId, "pause");
+  try {
+    await adapter.updateInboundDeployment(deploymentId, { appVersion });
+  } finally {
+    if (wasActive) await adapter.setDeploymentStatus(deploymentId, "resume");
+  }
+}
+
 export interface DeploymentSyncItem {
   deploymentId: string;
   /** updated: version and/or webhook patched. in_sync: nothing to do. app_mismatch: needs a new deployment. */

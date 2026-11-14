@@ -7,6 +7,8 @@ import {
 import type { ToolExecutionContext } from "./ai-tools.server.ts";
 import { zonedWallTimeToUtc } from "./calendar/timezone.ts";
 import { normalizeCustomerPhone } from "./phone-number.ts";
+import { checkInboundAdmission } from "./sarvam-inbound-admission.server.ts";
+import { UNIVERSAL_CAPABILITIES } from "./universal-agent-config.ts";
 import { customGreetingFor, renderGreeting } from "./agent-greeting.ts";
 
 /**
@@ -327,6 +329,12 @@ export interface AgentApiDeps {
   ) => Promise<{ content: string; isError?: boolean }>;
 }
 
+/** agent_configs.capabilities keys for lead capture and message taking (universal-agent-config.ts). */
+export const CALLBACK_CAPABILITY_KEYS = [
+  ...(UNIVERSAL_CAPABILITIES.find((c) => c.id === "lead_capture")?.keys ?? []),
+  ...(UNIVERSAL_CAPABILITIES.find((c) => c.id === "take_messages")?.keys ?? []),
+];
+
 export const AGENT_TOOLS = [
   "get_business_info",
   "check_availability",
@@ -453,6 +461,20 @@ export async function handleSarvamAgentRequest(
       return json({ error: "rate_limited" }, 429, {
         "retry-after": String(decision.retryAfterSeconds),
       });
+  }
+
+  // Admission gate: no business data or tool action unless this customer's
+  // number is ACTIVE with a verified deployment mapping. Fails closed.
+  const admission = await checkInboundAdmission(deps.supabaseAdmin, {
+    organizationId: auth.organizationId,
+    agentConfigId: auth.agentConfigId,
+  });
+  if (!admission.admitted) {
+    await audit(deps, auth, tool ?? "context", "rejected", undefined, {
+      error_code: "NOT_ADMITTED",
+      reason: admission.reason,
+    });
+    return json({ error: "not_admitted", guidance: SAFE_GUIDANCE }, 403);
   }
 
   const body = await readBody(request);
@@ -691,6 +713,24 @@ export async function handleSarvamAgentRequest(
       // Mid-call: the agent promises a callback only after this reports recorded=true.
       if (!interactionId)
         return json({ ok: false, error: "interaction_id is required to record a callback" }, 400);
+      // Only customers with lead capture or message taking switched on may record callbacks.
+      const { data: agentRow, error: agentError } = await deps.supabaseAdmin
+        .from("agent_configs")
+        .select("organization_id, capabilities")
+        .eq("id", auth.agentConfigId)
+        .maybeSingle();
+      if (agentError) throw agentError;
+      const caps = (agentRow?.capabilities ?? {}) as Record<string, boolean>;
+      if (
+        !agentRow ||
+        agentRow.organization_id !== auth.organizationId ||
+        !CALLBACK_CAPABILITY_KEYS.some((k) => caps[k] === true)
+      ) {
+        await audit(deps, auth, "callback", "rejected", interactionId, {
+          error_code: "CAPABILITY_DISABLED",
+        });
+        return json({ ok: true, recorded: false, error: { code: "CAPABILITY_DISABLED" } });
+      }
       if (callFacts(await callEvents()).callback_recorded)
         return json({ ok: true, recorded: true, duplicate: true });
       const raw = str(body, "caller_number", 200) ?? "";

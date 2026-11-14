@@ -68,6 +68,8 @@ import { Route as AppWhatsappRouteImport } from './routes/app.whatsapp'
 import { Route as AuthCallbackRouteImport } from './routes/auth.callback'
 import { Route as AdminCustomersIndexRouteImport } from './routes/admin.customers.index'
 import { Route as AdminCustomersOrgIdRouteImport } from './routes/admin.customers.$orgId'
+import { Route as AdminProvisioningIndexRouteImport } from './routes/admin.provisioning.index'
+import { Route as AdminProvisioningOrgIdRouteImport } from './routes/admin.provisioning.$orgId'
 import { Route as AppCampaignsCampaignIdRouteImport } from './routes/app.campaigns.$campaignId'
 import { Route as AppCampaignsNewRouteImport } from './routes/app.campaigns.new'
 import { Route as ApiInternalVoiceAgentOutboundClaimRouteImport } from './routes/api/internal/voice-agent/outbound-claim'
@@ -393,6 +395,16 @@ const AdminCustomersOrgIdRoute = AdminCustomersOrgIdRouteImport.update({
   path: '/$orgId',
   getParentRoute: () => AdminCustomersRoute,
 } as any)
+const AdminProvisioningIndexRoute = AdminProvisioningIndexRouteImport.update({
+  id: '/provisioning/',
+  path: '/provisioning/',
+  getParentRoute: () => AdminRoute,
+} as any)
+const AdminProvisioningOrgIdRoute = AdminProvisioningOrgIdRouteImport.update({
+  id: '/provisioning/$orgId',
+  path: '/provisioning/$orgId',
+  getParentRoute: () => AdminRoute,
+} as any)
 const AppCampaignsCampaignIdRoute = AppCampaignsCampaignIdRouteImport.update({
   id: '/$campaignId',
   path: '/$campaignId',
@@ -619,9 +631,11 @@ export interface FileRoutesByFullPath {
   '/admin/': typeof AdminIndexRoute
   '/app/': typeof AppIndexRoute
   '/admin/customers/$orgId': typeof AdminCustomersOrgIdRoute
+  '/admin/provisioning/$orgId': typeof AdminProvisioningOrgIdRoute
   '/app/campaigns/$campaignId': typeof AppCampaignsCampaignIdRoute
   '/app/campaigns/new': typeof AppCampaignsNewRoute
   '/admin/customers/': typeof AdminCustomersIndexRoute
+  '/admin/provisioning/': typeof AdminProvisioningIndexRoute
   '/api/internal/voice-agent/outbound-claim': typeof ApiInternalVoiceAgentOutboundClaimRoute
   '/api/internal/voice-agent/session': typeof ApiInternalVoiceAgentSessionRoute
   '/api/internal/voice-agent/session-end': typeof ApiInternalVoiceAgentSessionEndRoute
@@ -704,9 +718,11 @@ export interface FileRoutesByTo {
   '/admin': typeof AdminIndexRoute
   '/app': typeof AppIndexRoute
   '/admin/customers/$orgId': typeof AdminCustomersOrgIdRoute
+  '/admin/provisioning/$orgId': typeof AdminProvisioningOrgIdRoute
   '/app/campaigns/$campaignId': typeof AppCampaignsCampaignIdRoute
   '/app/campaigns/new': typeof AppCampaignsNewRoute
   '/admin/customers': typeof AdminCustomersIndexRoute
+  '/admin/provisioning': typeof AdminProvisioningIndexRoute
   '/api/internal/voice-agent/outbound-claim': typeof ApiInternalVoiceAgentOutboundClaimRoute
   '/api/internal/voice-agent/session': typeof ApiInternalVoiceAgentSessionRoute
   '/api/internal/voice-agent/session-end': typeof ApiInternalVoiceAgentSessionEndRoute
@@ -794,9 +810,11 @@ export interface FileRoutesById {
   '/admin/': typeof AdminIndexRoute
   '/app/': typeof AppIndexRoute
   '/admin/customers/$orgId': typeof AdminCustomersOrgIdRoute
+  '/admin/provisioning/$orgId': typeof AdminProvisioningOrgIdRoute
   '/app/campaigns/$campaignId': typeof AppCampaignsCampaignIdRoute
   '/app/campaigns/new': typeof AppCampaignsNewRoute
   '/admin/customers/': typeof AdminCustomersIndexRoute
+  '/admin/provisioning/': typeof AdminProvisioningIndexRoute
   '/api/internal/voice-agent/outbound-claim': typeof ApiInternalVoiceAgentOutboundClaimRoute
   '/api/internal/voice-agent/session': typeof ApiInternalVoiceAgentSessionRoute
   '/api/internal/voice-agent/session-end': typeof ApiInternalVoiceAgentSessionEndRoute
@@ -885,9 +903,11 @@ export interface FileRouteTypes {
     | '/admin/'
     | '/app/'
     | '/admin/customers/$orgId'
+    | '/admin/provisioning/$orgId'
     | '/app/campaigns/$campaignId'
     | '/app/campaigns/new'
     | '/admin/customers/'
+    | '/admin/provisioning/'
     | '/api/internal/voice-agent/outbound-claim'
     | '/api/internal/voice-agent/session'
     | '/api/internal/voice-agent/session-end'
@@ -970,9 +990,11 @@ export interface FileRouteTypes {
     | '/admin'
     | '/app'
     | '/admin/customers/$orgId'
+    | '/admin/provisioning/$orgId'
     | '/app/campaigns/$campaignId'
     | '/app/campaigns/new'
     | '/admin/customers'
+    | '/admin/provisioning'
     | '/api/internal/voice-agent/outbound-claim'
     | '/api/internal/voice-agent/session'
     | '/api/internal/voice-agent/session-end'
@@ -1059,9 +1081,11 @@ export interface FileRouteTypes {
     | '/admin/'
     | '/app/'
     | '/admin/customers/$orgId'
+    | '/admin/provisioning/$orgId'
     | '/app/campaigns/$campaignId'
     | '/app/campaigns/new'
     | '/admin/customers/'
+    | '/admin/provisioning/'
     | '/api/internal/voice-agent/outbound-claim'
     | '/api/internal/voice-agent/session'
     | '/api/internal/voice-agent/session-end'
@@ -1556,6 +1580,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AdminCustomersOrgIdRouteImport
       parentRoute: typeof AdminCustomersRoute
     }
+    '/admin/provisioning/': {
+      id: '/admin/provisioning/'
+      path: '/provisioning'
+      fullPath: '/admin/provisioning/'
+      preLoaderRoute: typeof AdminProvisioningIndexRouteImport
+      parentRoute: typeof AdminRoute
+    }
+    '/admin/provisioning/$orgId': {
+      id: '/admin/provisioning/$orgId'
+      path: '/provisioning/$orgId'
+      fullPath: '/admin/provisioning/$orgId'
+      preLoaderRoute: typeof AdminProvisioningOrgIdRouteImport
+      parentRoute: typeof AdminRoute
+    }
     '/app/campaigns/$campaignId': {
       id: '/app/campaigns/$campaignId'
       path: '/$campaignId'
@@ -1799,6 +1837,8 @@ interface AdminRouteChildren {
   AdminWalletsRoute: typeof AdminWalletsRoute
   AdminWebsiteAiRoute: typeof AdminWebsiteAiRoute
   AdminIndexRoute: typeof AdminIndexRoute
+  AdminProvisioningOrgIdRoute: typeof AdminProvisioningOrgIdRoute
+  AdminProvisioningIndexRoute: typeof AdminProvisioningIndexRoute
 }
 
 const AdminRouteChildren: AdminRouteChildren = {
@@ -1818,6 +1858,8 @@ const AdminRouteChildren: AdminRouteChildren = {
   AdminWalletsRoute: AdminWalletsRoute,
   AdminWebsiteAiRoute: AdminWebsiteAiRoute,
   AdminIndexRoute: AdminIndexRoute,
+  AdminProvisioningOrgIdRoute: AdminProvisioningOrgIdRoute,
+  AdminProvisioningIndexRoute: AdminProvisioningIndexRoute,
 }
 
 const AdminRouteWithChildren = AdminRoute._addFileChildren(AdminRouteChildren)

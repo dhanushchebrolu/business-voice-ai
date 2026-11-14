@@ -49,8 +49,9 @@ describe("tenant resolution — never trusts a caller-supplied organization id",
     assert.doesNotMatch(src, /"organization_id"|"org_id"/);
   });
 
-  test("rejects the request when none of the three identifiers is supplied", () => {
-    assert.match(src, /!phoneNumber && !connectionId && !deploymentId/);
+  test("rejects the request unless a deployment_id or phone_number is supplied — a connection_id alone never identifies a tenant", () => {
+    assert.match(src, /if \(!phoneNumber && !deploymentId\)/);
+    assert.doesNotMatch(src, /!phoneNumber && !connectionId/);
     assert.match(src, /status: 400/);
   });
 
@@ -68,7 +69,7 @@ describe("rate limiting", () => {
     const resolveIdx = src.indexOf("resolveOrganizationForSarvamContext(");
     assert.ok(rateLimitIdx > -1 && resolveIdx > -1);
     assert.ok(rateLimitIdx < resolveIdx);
-    assert.match(src, /rateLimitKey = deploymentId \?\? connectionId \?\? phoneNumber/);
+    assert.match(src, /rateLimitKey = deploymentId \?\? phoneNumber/);
   });
 
   test("a rate-limited request is rejected with 429 and a retry-after header", () => {
@@ -100,5 +101,23 @@ describe("response contract", () => {
     const guardEnd = src.indexOf("}", guardIdx);
     assert.ok(guardIdx > buildIdx);
     assert.match(src.slice(guardIdx, guardEnd), /status: 404/);
+  });
+});
+
+describe("admission gate (Phase 5)", () => {
+  test("checkLegacyContextAdmission runs after resolution and before buildSarvamClientContext, with the request identifiers", () => {
+    const resolveIdx = src.indexOf("await resolveOrganizationForSarvamContext(");
+    const gateIdx = src.indexOf("await checkLegacyContextAdmission(");
+    const buildIdx = src.indexOf("await buildSarvamClientContext(");
+    assert.ok(resolveIdx > -1 && gateIdx > resolveIdx && buildIdx > gateIdx);
+    const call = src.slice(gateIdx, src.indexOf(");", gateIdx));
+    assert.match(call, /deploymentId/);
+    assert.match(call, /phoneNumber/);
+  });
+
+  test("a refused request gets the same 404 as an unknown one (no data, no oracle)", () => {
+    const gateIdx = src.indexOf("if (!admission.admitted)");
+    const end = src.indexOf("}", gateIdx);
+    assert.match(src.slice(gateIdx, end), /status: 404/);
   });
 });

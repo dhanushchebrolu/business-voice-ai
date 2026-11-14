@@ -94,7 +94,7 @@ export interface ResolveContextParams {
 
 /**
  * Resolves the one organization a context request is about, in priority
- * order deployment_id > connection_id > phone_number (most specific and
+ * order deployment_id > phone_number (a connection id is never used — see below) (most specific and
  * least reusable identifier first). Returns null if none of the supplied
  * identifiers resolve to a real, currently-valid Klyro record — never
  * guesses, never falls back to "the most recently active organization" or
@@ -116,15 +116,9 @@ export async function resolveOrganizationForSarvamContext(
     if (data?.organization_id) return data.organization_id;
   }
 
-  if (params.connectionId) {
-    const { data } = await supabaseAdmin
-      .from("telephony_connections")
-      .select("organization_id")
-      .eq("provider", "sarvam")
-      .eq("provider_connection_id", params.connectionId)
-      .maybeSingle();
-    if (data?.organization_id) return data.organization_id;
-  }
+  // params.connectionId is deliberately NOT used: one Sarvam connection may
+  // serve several organizations (migration 20261114100000), so a connection
+  // id alone can never identify a tenant.
 
   if (params.phoneNumber) {
     const { data } = await supabaseAdmin

@@ -2,7 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { assertPlatformAdmin, writeAudit } from "@/lib/platform-admin.server";
 import { getTelephonyAdapter, providerStatus, TELEPHONY_PROVIDERS } from "@/lib/telephony.server";
-import { provisionOrganizationAfterPayment } from "@/lib/provisioning-orchestrator.server";
+import { runProvisioning } from "@/lib/provisioning-runs.server";
 import { TelephonyAdapterError } from "@/lib/telephony/adapter";
 import { VobizTelephonyAdapter } from "@/lib/telephony/vobiz-provider";
 import type { Json } from "@/integrations/supabase/types";
@@ -460,7 +460,15 @@ export const retryProvisioning = createServerFn({ method: "POST" })
     const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
-    const result = await provisionOrganizationAfterPayment(supabaseAdmin, data.orgId);
+    // Same run mechanism as the payment webhook: never in parallel with it.
+    const run = await runProvisioning(supabaseAdmin, {
+      organizationId: data.orgId,
+      trigger: "admin_retry",
+      createdBy: admin.userId,
+    });
+    if (!run.claimed || !run.result)
+      throw new Error("Provisioning is already running for this customer. Try again in a minute.");
+    const result = run.result;
 
     await writeAudit(admin, {
       action: "PROVISIONING_RETRIED",
@@ -468,6 +476,8 @@ export const retryProvisioning = createServerFn({ method: "POST" })
       entityId: data.orgId,
       organizationId: data.orgId,
       newValue: {
+        provisioningRunId: run.runId,
+        runStatus: run.status,
         phoneNumberId: result.phoneNumberId,
         numberClaimedNow: result.numberClaimedNow,
         deploymentCreatedNow: result.deploymentCreatedNow,

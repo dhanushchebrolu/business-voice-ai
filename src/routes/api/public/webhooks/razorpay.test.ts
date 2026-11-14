@@ -5,70 +5,39 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 /**
- * Regression coverage for the Razorpay webhook route's automatic
- * provisioning wiring (Task #93). createFileRoute-based handler, so —
- * consistent with this repo's established convention for routes this test
- * runner cannot safely import/execute — a source scan.
+ * Route-level checks for the platform Razorpay webhook (a createFileRoute
+ * handler this runner cannot import, so — as elsewhere in this repo — a
+ * source scan). The behavior itself is tested in
+ * src/lib/payments/razorpay-platform-webhook.server.test.ts and, for
+ * record_razorpay_capture, on real PostgreSQL.
  */
 
 const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "razorpay.ts"), "utf8");
 
-describe("setup_fee branch — automatic provisioning", () => {
-  test("imports and calls provisionOrganizationAfterPayment inside the setup_fee branch, after the lifecycle_status update", () => {
-    const branchIdx = src.indexOf('if (order.purpose === "setup_fee")');
-    assert.ok(branchIdx > -1);
-    const nextBranchIdx = src.indexOf('if (order.purpose === "monthly_plan")');
-    const branchSrc = src.slice(branchIdx, nextBranchIdx > -1 ? nextBranchIdx : undefined);
-
-    assert.match(branchSrc, /await import\(\s*"@\/lib\/provisioning-orchestrator\.server"\s*\)/);
-    const lifecycleUpdateIdx = branchSrc.indexOf('.eq("id", order.organization_id);');
-    const provisioningCallIdx = branchSrc.indexOf("await provisionOrganizationAfterPayment(");
-    assert.ok(lifecycleUpdateIdx > -1 && provisioningCallIdx > -1);
-    assert.ok(
-      lifecycleUpdateIdx < provisioningCallIdx,
-      "the lifecycle_status write must happen before automatic provisioning runs",
-    );
-    assert.match(branchSrc, /supabaseAdmin,\s*\n\s*order\.organization_id,/);
-  });
-
-  test("the call is awaited directly, not wrapped in its own try/catch — provisionOrganizationAfterPayment guarantees it never throws", () => {
-    const branchIdx = src.indexOf('if (order.purpose === "setup_fee")');
-    const nextBranchIdx = src.indexOf('if (order.purpose === "monthly_plan")');
-    const branchSrc = src.slice(branchIdx, nextBranchIdx > -1 ? nextBranchIdx : undefined);
-    assert.doesNotMatch(branchSrc, /try\s*\{[\s\S]*provisionOrganizationAfterPayment/);
-  });
-
-  test("does not fake success: the result note is logged, not discarded", () => {
-    assert.match(src, /console\.log\(\s*\n?\s*"razorpay:webhook_auto_provisioning"/);
-    assert.match(src, /provisioning\.note/);
-  });
-
-  test("automatic provisioning only runs for setup_fee, never for monthly_plan recurring billing", () => {
-    const monthlyIdx = src.indexOf('if (order.purpose === "monthly_plan")');
-    const nextIdx = src.indexOf('if (event.event === "payment.failed"');
-    const monthlySrc = src.slice(monthlyIdx, nextIdx > -1 ? nextIdx : undefined);
-    assert.doesNotMatch(monthlySrc, /provisionOrganizationAfterPayment/);
-  });
-});
-
-describe("existing signature/idempotency/lifecycle behavior is unchanged", () => {
-  test("still verifies the signature before reading anything from the payload", () => {
+describe("platform Razorpay webhook route", () => {
+  test("verifies the signature before parsing the payload", () => {
     const sigIdx = src.indexOf("verifySignature(raw, signature, secret)");
     const parseIdx = src.indexOf("JSON.parse(raw)");
-    assert.ok(sigIdx > -1 && parseIdx > -1);
-    assert.ok(sigIdx < parseIdx);
+    assert.ok(sigIdx > -1 && parseIdx > -1 && sigIdx < parseIdx);
   });
 
-  test("still relies on the (provider, event_id) unique index for idempotency", () => {
-    assert.match(src, /provider:\s*"razorpay"/);
-    assert.match(src, /event_id:\s*eventId/);
-    assert.match(src, /dedupeError\.code === "23505"/);
+  test("goes through the event ledger and only acknowledges duplicates already processed", () => {
+    const claimIdx = src.indexOf("claimWebhookEvent(");
+    const processIdx = src.indexOf("processRazorpayPlatformEvent(");
+    assert.ok(claimIdx > -1 && processIdx > claimIdx);
+    assert.match(src, /if \(!decision\.process\) return new Response\("ok \(duplicate\)"\)/);
   });
 
-  test("still only advances lifecycle_status forward from not_provisioned/setup_payment_pending", () => {
-    assert.match(
-      src,
-      /current\.lifecycle_status === "not_provisioned" \|\|\s*\n?\s*current\.lifecycle_status === "setup_payment_pending"/,
-    );
+  test("marks the event processed only after processing succeeded, and answers 500 on any failure", () => {
+    const processIdx = src.indexOf("processRazorpayPlatformEvent(");
+    const markIdx = src.indexOf("markWebhookEvent(supabaseAdmin, eventId, { processed: true");
+    assert.ok(markIdx > processIdx);
+    assert.match(src, /processed: false, error: message/);
+    assert.match(src, /"Processing error", \{ status: 500 \}/);
+    assert.match(src, /"Storage error", \{ status: 500 \}/);
+  });
+
+  test("no business logic or direct table writes remain in the route", () => {
+    assert.doesNotMatch(src, /\.from\("(payments|invoices|payment_orders|organizations)"\)/);
   });
 });

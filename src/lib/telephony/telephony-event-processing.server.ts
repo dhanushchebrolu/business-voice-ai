@@ -70,6 +70,37 @@ export async function processTelephonyEvent(
     providerCallId: event.providerCallId ? maskCallSid(event.providerCallId) : null,
   });
 
+  // Admission safety: a customer's agent answering through a deployment
+  // ClickAI never recorded blocks that customer's business data until an
+  // admin reviews it. Never stops the call from being logged.
+  const appId = event.raw?.["app_id"];
+  if (
+    providerId === "sarvam" &&
+    source === "provider" &&
+    event.providerDeploymentId &&
+    typeof appId === "string" &&
+    appId
+  ) {
+    try {
+      const [{ blockAdmissionOnUnknownDeployment }, { supabaseAdmin: admin }] = await Promise.all([
+        import("@/lib/sarvam-inbound-admission.server"),
+        import("@/integrations/supabase/client.server"),
+      ]);
+      const r = await blockAdmissionOnUnknownDeployment(admin, {
+        appId,
+        deploymentId: event.providerDeploymentId,
+        now: new Date(),
+      });
+      if (r.blocked)
+        console.error("sarvam:admission_blocked_unknown_deployment", {
+          agent_config_id: r.agentConfigId,
+          deployment_id: event.providerDeploymentId,
+        });
+    } catch (err) {
+      console.error("sarvam:admission_mismatch_check_failed", (err as Error).message);
+    }
+  }
+
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
   const { data: existingCall } = await supabaseAdmin

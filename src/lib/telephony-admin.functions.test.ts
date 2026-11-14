@@ -200,16 +200,15 @@ describe("no customer-facing code path can reach these admin mutations", () => {
 describe("retryProvisioning — the admin Retry action calls the same orchestrator the webhook calls, never a second implementation", () => {
   const fnSrc = extractFn("retryProvisioning");
 
-  test("imports and calls provisionOrganizationAfterPayment — no admin-only reimplementation of claim/link/deploy logic", () => {
-    assert.match(
-      src,
-      /import \{ provisionOrganizationAfterPayment \} from "@\/lib\/provisioning-orchestrator\.server"/,
-    );
-    assert.match(fnSrc, /await provisionOrganizationAfterPayment\(supabaseAdmin, data\.orgId\)/);
+  test("goes through runProvisioning (the webhook's run mechanism) — no admin-only reimplementation, never in parallel with a payment", () => {
+    assert.match(src, /import \{ runProvisioning \} from "@\/lib\/provisioning-runs\.server"/);
+    assert.match(fnSrc, /await runProvisioning\(supabaseAdmin, \{/);
+    assert.match(fnSrc, /trigger: "admin_retry"/);
+    assert.match(fnSrc, /if \(!run\.claimed \|\| !run\.result\)/);
   });
 
   test("audits the retry with the shared function's own returned result, after it resolves — never before", () => {
-    const callIdx = fnSrc.indexOf("await provisionOrganizationAfterPayment(");
+    const callIdx = fnSrc.indexOf("await runProvisioning(");
     const auditIdx = fnSrc.indexOf('action: "PROVISIONING_RETRIED"');
     assert.ok(callIdx > -1 && auditIdx > -1);
     assert.ok(callIdx < auditIdx, "the shared call must happen before the audit record");

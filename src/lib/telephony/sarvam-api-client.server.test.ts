@@ -13,6 +13,7 @@ import {
   getRecording,
   getDeployment,
   setDeploymentStatus,
+  parseRetryAfter,
   type SarvamApiClientConfig,
 } from "./sarvam-api-client.server.ts";
 import { TelephonyAdapterError } from "./adapter.ts";
@@ -778,5 +779,40 @@ describe("deployment state", () => {
       "https://apps.sarvam.ai/api/app-authoring/v1/orgs/org_1/workspaces/ws_1/deployments/dep_1/status",
     );
     assert.deepEqual(JSON.parse(capture.init!.body as string), { action: "pause" });
+  });
+});
+
+describe("rate limits: Retry-After (Phase 5)", () => {
+  test("parseRetryAfter reads delay-seconds and HTTP dates, ignores junk, caps at a day", () => {
+    const now = Date.parse("2026-11-14T10:00:00Z");
+    assert.equal(parseRetryAfter("30", now), 30);
+    assert.equal(parseRetryAfter("Sat, 14 Nov 2026 10:01:00 GMT", now), 60);
+    assert.equal(parseRetryAfter("Sat, 14 Nov 2026 09:00:00 GMT", now), 0);
+    assert.equal(parseRetryAfter("soon", now), undefined);
+    assert.equal(parseRetryAfter(null, now), undefined);
+    assert.equal(parseRetryAfter("999999", now), 86_400);
+  });
+
+  test("a 429 carries Retry-After on the error and stays outcome-unknown (never assumed not done)", async () => {
+    const config = {
+      ...baseConfig,
+      fetchImpl: (async () =>
+        new Response(JSON.stringify({ error: { message: "slow down" } }), {
+          status: 429,
+          headers: { "retry-after": "12" },
+        })) as typeof fetch,
+    };
+    await assert.rejects(
+      () => getDeployment(config, "dep_1"),
+      (err: unknown) => {
+        assert.ok(err instanceof TelephonyAdapterError);
+        assert.equal(err.status, 429);
+        assert.equal(err.retryAfterSeconds, 12);
+        assert.equal(err.outcomeUnknown, true);
+        assert.match(err.message, /wait 12s/);
+        assert.doesNotMatch(err.message, /sk_test_secret_value/);
+        return true;
+      },
+    );
   });
 });

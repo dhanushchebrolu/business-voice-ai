@@ -1,0 +1,542 @@
+import { createServerFn } from "@tanstack/react-start";
+import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import { assertPlatformAdmin, writeAudit } from "@/lib/platform-admin.server";
+import {
+  registrationGate,
+  queueStatus,
+  type ChecklistInput,
+  type QueueStatus,
+} from "@/lib/provisioning-view";
+
+/**
+ * Admin provisioning dashboard (queue + per-customer detail + agent
+ * registration). Every function checks assertPlatformAdmin server-side
+ * before touching data. Reads never include integration token hashes or
+ * any provider secret; the raw credential is only ever returned once, by
+ * issueSarvamIntegrationCredential (sarvam-integration.functions.ts), which
+ * the detail page reuses. Retry/verify/activate reuses retryProvisioning
+ * (telephony-admin.functions.ts) -> runProvisioning -> the pipeline.
+ */
+
+/** Columns safe to show admins; never token_hash. */
+export const INTEGRATION_SAFE_COLUMNS =
+  "id, status, token_prefix, expires_at, last_used_at, rotated_at, created_at, disabled_at, disabled_reason";
+
+const RUN_COLUMNS =
+  "id, organization_id, trigger, status, current_step, attempts, last_error, last_error_at, note, phone_number_id, sarvam_deployment_id, agent_config_fingerprint, deployment_verified_at, verification, started_at, finished_at, created_at, updated_at";
+
+export interface QueueRow {
+  runId: string;
+  organizationId: string;
+  customer: string;
+  clientId: string | null;
+  number: string | null;
+  status: QueueStatus;
+  currentStep: string | null;
+  attempts: number;
+  lastError: string | null;
+  updatedAt: string;
+  createdAt: string;
+}
+
+export const listProvisioningQueue = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { status?: QueueStatus | "all"; search?: string } | undefined) => ({
+    status: input?.status ?? "all",
+    search: (input?.search ?? "").trim().slice(0, 100).toLowerCase(),
+  }))
+  .handler(async ({ data, context }): Promise<{ rows: QueueRow[] }> => {
+    await assertPlatformAdmin(context.supabase, context.userId, "customers.read");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+
+    const { data: runs, error } = await supabaseAdmin
+      .from("provisioning_runs")
+      .select(
+        "id, organization_id, status, current_step, attempts, last_error, created_at, updated_at",
+      )
+      .order("created_at", { ascending: false })
+      .limit(500);
+    if (error) throw error;
+    // Latest run per organization.
+    const latest = new Map<string, NonNullable<typeof runs>[number]>();
+    for (const r of runs ?? [])
+      if (!latest.has(r.organization_id)) latest.set(r.organization_id, r);
+    const orgIds = [...latest.keys()];
+    if (!orgIds.length) return { rows: [] };
+
+    const [{ data: orgs, error: orgError }, { data: numbers, error: numError }] = await Promise.all(
+      [
+        supabaseAdmin.from("organizations").select("id, name, client_id").in("id", orgIds),
+        supabaseAdmin
+          .from("phone_numbers")
+          .select("organization_id, e164, status")
+          .in("organization_id", orgIds)
+          .eq("provider", "sarvam")
+          .neq("status", "released"),
+      ],
+    );
+    if (orgError) throw orgError;
+    if (numError) throw numError;
+    const orgById = new Map((orgs ?? []).map((o) => [o.id, o]));
+    const numberByOrg = new Map((numbers ?? []).map((n) => [n.organization_id, n.e164]));
+
+    const rows: QueueRow[] = [...latest.values()].map((r) => ({
+      runId: r.id,
+      organizationId: r.organization_id,
+      customer: orgById.get(r.organization_id)?.name ?? "(unknown)",
+      clientId: orgById.get(r.organization_id)?.client_id ?? null,
+      number: numberByOrg.get(r.organization_id) ?? null,
+      status: queueStatus(r),
+      currentStep: r.current_step,
+      attempts: r.attempts,
+      lastError: r.last_error,
+      updatedAt: r.updated_at,
+      createdAt: r.created_at,
+    }));
+    return {
+      rows: rows.filter(
+        (row) =>
+          (data.status === "all" || row.status === data.status) &&
+          (!data.search ||
+            [row.customer, row.clientId ?? "", row.number ?? ""].some((v) =>
+              v.toLowerCase().includes(data.search),
+            )),
+      ),
+    };
+  });
+
+/** Loads everything the detail page and the registration gate need, for one customer. */
+async function loadDetail(orgId: string) {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const { masterAgentAppId } = await import("@/lib/sarvam-agent-registration.server");
+
+  const { data: org, error: orgError } = await supabaseAdmin
+    .from("organizations")
+    .select("id, name, client_id, lifecycle_status, contact_email, provisioning_note")
+    .eq("id", orgId)
+    .maybeSingle();
+  if (orgError) throw orgError;
+  if (!org) throw new Error("Customer not found");
+
+  const [agentRes, numbersRes, connRes, runsRes, auditRes] = await Promise.all([
+    supabaseAdmin
+      .from("agent_configs")
+      .select("id, business_id, sarvam_app_id, sarvam_app_version")
+      .eq("organization_id", orgId)
+      .maybeSingle(),
+    supabaseAdmin
+      .from("phone_numbers")
+      .select(
+        "id, e164, status, provider, inbound_enabled, outbound_enabled, provider_deployment_id, connection_id, agent_config_id, sarvam_number_confirmed_at, verified_deployment_id, verified_sarvam_app_id, verified_sarvam_app_version, deployment_verified_at, admission_blocked_at, admission_blocked_reason",
+      )
+      .eq("organization_id", orgId)
+      .neq("status", "released")
+      .order("created_at", { ascending: true }),
+    supabaseAdmin
+      .from("telephony_connections")
+      .select("id, provider_connection_id, label, status")
+      .eq("organization_id", orgId)
+      .eq("provider", "sarvam")
+      .maybeSingle(),
+    supabaseAdmin
+      .from("provisioning_runs")
+      .select(RUN_COLUMNS)
+      .eq("organization_id", orgId)
+      .order("created_at", { ascending: false })
+      .limit(20),
+    // Audit history: who did what and why. Only these columns are read
+    // (writeAudit never stores credentials in any of them).
+    supabaseAdmin
+      .from("audit_logs")
+      .select("id, action, admin_email, reason, created_at")
+      .eq("organization_id", orgId)
+      .order("created_at", { ascending: false })
+      .limit(30),
+  ]);
+  for (const r of [agentRes, numbersRes, connRes, runsRes, auditRes]) if (r.error) throw r.error;
+  const agent = agentRes.data;
+
+  const { data: credential, error: credError } = agent
+    ? await supabaseAdmin
+        .from("sarvam_agent_integrations")
+        .select(INTEGRATION_SAFE_COLUMNS)
+        .eq("agent_config_id", agent.id)
+        .eq("status", "active")
+        .maybeSingle()
+    : { data: null, error: null };
+  if (credError) throw credError;
+
+  const { data: voiceLanguage, error: vlError } = agent
+    ? await supabaseAdmin
+        .from("agent_voice_language_settings")
+        .select(
+          "organization_id, default_language, allowed_languages, auto_language_switch, sarvam_voice_internal_id, sarvam_voice_name, status, applied_sarvam_app_id, applied_sarvam_app_version, applied_at, updated_at",
+        )
+        .eq("agent_config_id", agent.id)
+        .eq("organization_id", orgId)
+        .maybeSingle()
+    : { data: null, error: null };
+  if (vlError) throw vlError;
+
+  let business: { name: string; business_type: string } | null = null;
+  let config: import("@/lib/universal-agent-config").UniversalAgentConfig | null = null;
+  if (agent?.business_id) {
+    const { loadSnapshot } = await import("@/lib/agent-service.server");
+    const { buildUniversalAgentConfig } = await import("@/lib/universal-agent-config");
+    const snapshot = await loadSnapshot(supabaseAdmin, agent.business_id);
+    business = { name: snapshot.business.name, business_type: snapshot.business.business_type };
+    config = buildUniversalAgentConfig(snapshot, voiceLanguage ?? null);
+  }
+
+  const number = (numbersRes.data ?? []).find((n) => n.provider === "sarvam") ?? null;
+  const runs = runsRes.data ?? [];
+  const lastVerification = (runs.find((r) => r.verification)?.verification ?? null) as {
+    checks: { id: string; ok: boolean; label: string; detail: string }[];
+  } | null;
+
+  const gateInput: ChecklistInput = {
+    blockers: config
+      ? config.blockers
+      : ["The customer has not finished onboarding (no business profile or agent yet)."],
+    number: number
+      ? {
+          e164: number.e164,
+          status: number.status,
+          deploymentId: number.provider_deployment_id,
+          confirmedInSarvam: Boolean(number.sarvam_number_confirmed_at),
+          verifiedDeploymentId: number.verified_deployment_id,
+          admissionBlockedReason: number.admission_blocked_at
+            ? (number.admission_blocked_reason ?? "blocked")
+            : null,
+        }
+      : null,
+    connectionRegistered: Boolean(connRes.data?.provider_connection_id),
+    credential: credential ? { status: credential.status, expiresAt: credential.expires_at } : null,
+    agent: { appId: agent?.sarvam_app_id ?? null, appVersion: agent?.sarvam_app_version ?? null },
+    masterAgentAppId: masterAgentAppId(),
+    verification: lastVerification,
+    voiceLanguage: {
+      problem: config
+        ? config.voiceLanguageProblem
+        : "Voice and languages are not set for this customer yet.",
+      appliedAppId:
+        voiceLanguage?.status === "applied" ? voiceLanguage.applied_sarvam_app_id : null,
+      appliedVersion:
+        voiceLanguage?.status === "applied" ? voiceLanguage.applied_sarvam_app_version : null,
+    },
+    now: new Date(),
+  };
+
+  return {
+    org,
+    business,
+    agent,
+    numbers: numbersRes.data ?? [],
+    connection: connRes.data
+      ? {
+          registered: Boolean(connRes.data.provider_connection_id),
+          label: connRes.data.label,
+          status: connRes.data.status,
+        }
+      : null,
+    credential,
+    voiceLanguage,
+    config,
+    runs,
+    audit: auditRes.data ?? [],
+    masterAgentConfigured: Boolean(gateInput.masterAgentAppId),
+    gateInput: { ...gateInput, now: gateInput.now.toISOString(), masterAgentAppId: null },
+    _gate: gateInput,
+  };
+}
+
+export const getProvisioningDetail = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { orgId: string }) => {
+    if (!input?.orgId) throw new Error("orgId is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    await assertPlatformAdmin(context.supabase, context.userId, "customers.read");
+    const { _gate, ...detail } = await loadDetail(data.orgId);
+    void _gate;
+    return detail;
+  });
+
+/**
+ * Step 6: records the customer's own Sarvam agent (copied from the
+ * universal master agent) as theirs. Refused while onboarding is incomplete,
+ * without a live integration credential, or for the master agent itself.
+ */
+export const registerCustomerSarvamAgent = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator(
+    (input: { orgId: string; sarvamAppId: string; sarvamAppVersion: number; reason: string }) => {
+      if (!input?.orgId) throw new Error("orgId is required");
+      if (!input.sarvamAppId?.trim()) throw new Error("The Sarvam agent id is required");
+      if (!Number.isInteger(input.sarvamAppVersion) || input.sarvamAppVersion < 1)
+        throw new Error("The Sarvam agent version must be a positive whole number");
+      if (!input.reason?.trim()) throw new Error("A reason is required");
+      return input;
+    },
+  )
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "agents.write");
+    const detail = await loadDetail(data.orgId);
+    if (!detail.agent) throw new Error("This customer has no agent yet.");
+    const gate = registrationGate(detail._gate, data.sarvamAppId);
+    if (!gate.allowed) throw new Error(gate.reasons.join(" "));
+
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    // A live customer is moved verify-first (mapping saved only after Sarvam
+    // is confirmed on the new version); anyone else is mapped directly.
+    const { findLiveNumber, remapLiveAgent, defaultLiveRemapDeps } =
+      await import("@/lib/sarvam-live-remap.server");
+    const live = await findLiveNumber(supabaseAdmin, data.orgId, detail.agent.id);
+    const before = {
+      sarvam_app_id: detail.agent.sarvam_app_id,
+      sarvam_app_version: detail.agent.sarvam_app_version,
+    };
+    if (live) {
+      const result = await remapLiveAgent(
+        supabaseAdmin,
+        {
+          organizationId: data.orgId,
+          agentConfigId: detail.agent.id,
+          number: live,
+          appId: data.sarvamAppId,
+          appVersion: data.sarvamAppVersion,
+        },
+        await defaultLiveRemapDeps(),
+      );
+      if (result.outcome !== "verified") {
+        await writeAudit(admin, {
+          action: "SARVAM_APP_MAPPING_NOT_APPLIED",
+          entityType: "agent_config",
+          entityId: detail.agent.id,
+          organizationId: data.orgId,
+          newValue: {
+            sarvam_app_id: data.sarvamAppId.trim(),
+            sarvam_app_version: data.sarvamAppVersion,
+            live_reverification: result.outcome,
+          },
+          reason: data.reason,
+        });
+        throw new Error(result.detail);
+      }
+    }
+    const { applySarvamAgentMapping, masterAgentAppId } =
+      await import("@/lib/sarvam-agent-registration.server");
+    const mapped = live
+      ? { organizationId: data.orgId, before }
+      : await applySarvamAgentMapping(supabaseAdmin, {
+          agentConfigId: detail.agent.id,
+          organizationId: data.orgId,
+          sarvamAppId: data.sarvamAppId,
+          sarvamAppVersion: data.sarvamAppVersion,
+          masterAgentAppId: masterAgentAppId(),
+        });
+    await writeAudit(admin, {
+      action: "SARVAM_AGENT_REGISTERED",
+      entityType: "agent_config",
+      entityId: detail.agent.id,
+      organizationId: data.orgId,
+      oldValue: mapped.before,
+      newValue: {
+        sarvam_app_id: data.sarvamAppId.trim(),
+        sarvam_app_version: data.sarvamAppVersion,
+        agent_config_fingerprint: detail.config?.fingerprint ?? null,
+      },
+      reason: data.reason,
+    });
+
+    // Registering confirms this committed version carries the saved voice and
+    // languages (the dialog says so); the gate above guarantees they are saved and valid.
+    const { data: applied, error: applyError } = await supabaseAdmin
+      .from("agent_voice_language_settings")
+      .update({
+        status: "applied",
+        applied_sarvam_app_id: data.sarvamAppId.trim(),
+        applied_sarvam_app_version: data.sarvamAppVersion,
+        applied_at: new Date().toISOString(),
+        applied_by: context.userId,
+      })
+      .eq("agent_config_id", detail.agent.id)
+      .eq("organization_id", data.orgId)
+      .select("id");
+    if (applyError) throw applyError;
+    if (!applied?.length) throw new Error("Voice & language settings were not found to apply.");
+    await writeAudit(admin, {
+      action: "VOICE_LANGUAGE_SETTINGS_APPLIED",
+      entityType: "agent_config",
+      entityId: detail.agent.id,
+      organizationId: data.orgId,
+      newValue: {
+        applied_sarvam_app_id: data.sarvamAppId.trim(),
+        applied_sarvam_app_version: data.sarvamAppVersion,
+        via: "agent_registration",
+      },
+      reason: data.reason,
+    });
+
+    // A live customer was already moved and verified above.
+    if (live) return { ok: true as const, deploymentSync: { items: [] }, reverify: null };
+    // An existing deployment follows the new version (no-op for a new customer).
+    const { syncAgentDeployments } = await import("@/lib/sarvam-inbound-deployment.server");
+    const deploymentSync = await syncAgentDeployments(supabaseAdmin, detail.agent.id).catch(
+      (err: Error) => ({ items: [], error: err.message }),
+    );
+    // A customer that already has a deployment is re-verified now: until the
+    // new agent/version is verified, the admission gate serves no business data.
+    let reverify: { state: string | null; note: string | null } | null = null;
+    if (detail.numbers.some((n) => n.provider === "sarvam" && n.provider_deployment_id)) {
+      const { runProvisioning } = await import("@/lib/provisioning-runs.server");
+      const run = await runProvisioning(supabaseAdmin, {
+        organizationId: data.orgId,
+        trigger: "admin_retry",
+        createdBy: admin.userId,
+      });
+      reverify = { state: run.result?.state ?? null, note: run.result?.note ?? null };
+    }
+    return { ok: true as const, deploymentSync, reverify };
+  });
+
+/**
+ * Step 2 (manual): an admin confirms the customer's pre-assigned number
+ * already exists in Sarvam on the customer's connection. Sarvam documents
+ * no API to list or import numbers; ClickAI never rents, buys or claims one.
+ */
+export const confirmSarvamNumber = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { orgId: string; reason: string }) => {
+    if (!input?.orgId) throw new Error("orgId is required");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
+    const detail = await loadDetail(data.orgId);
+    const number = detail.numbers.find((n) => n.provider === "sarvam");
+    if (!number) throw new Error("This customer has no Sarvam number assigned.");
+    // Confirmation marks a number ClickAI provisions itself; a number that
+    // already has a deployment (for example a legacy live one) is never
+    // re-labelled as ClickAI-provisioned.
+    if (number.provider_deployment_id)
+      throw new Error(
+        "This number already has a Sarvam deployment; it does not need confirmation. Use Re-verify live deployment for a live customer.",
+      );
+    if (!detail.connection?.registered)
+      throw new Error("Register this customer's Sarvam connection first.");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const confirmedAt = new Date().toISOString();
+    const { data: updated, error } = await supabaseAdmin
+      .from("phone_numbers")
+      .update({ sarvam_number_confirmed_at: confirmedAt, sarvam_number_confirmed_by: admin.userId })
+      .eq("id", number.id)
+      .eq("organization_id", data.orgId)
+      .neq("status", "released")
+      .is("provider_deployment_id", null)
+      .select("id");
+    if (error) throw error;
+    if (!updated?.length) throw new Error("The number changed; reload and try again.");
+    await writeAudit(admin, {
+      action: "SARVAM_NUMBER_CONFIRMED",
+      entityType: "phone_number",
+      entityId: number.id,
+      organizationId: data.orgId,
+      newValue: { e164: number.e164, confirmed_at: confirmedAt },
+      reason: data.reason,
+    });
+    return { ok: true as const };
+  });
+
+/**
+ * Clears an admission block (set when a call reached the customer's agent
+ * through a deployment ClickAI never verified) after an admin reviewed it in
+ * Sarvam. The gate still requires a verified, ACTIVE number afterwards.
+ */
+export const clearAdmissionBlock = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { orgId: string; reason: string }) => {
+    if (!input?.orgId) throw new Error("orgId is required");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { data: cleared, error } = await supabaseAdmin
+      .from("phone_numbers")
+      .update({ admission_blocked_at: null, admission_blocked_reason: null })
+      .eq("organization_id", data.orgId)
+      .eq("provider", "sarvam")
+      .not("admission_blocked_at", "is", null)
+      .select("id, e164");
+    if (error) throw error;
+    if (!cleared?.length) throw new Error("Nothing is blocked for this customer.");
+    await writeAudit(admin, {
+      action: "INBOUND_ADMISSION_BLOCK_CLEARED",
+      entityType: "phone_number",
+      entityId: cleared[0]!.id,
+      organizationId: data.orgId,
+      newValue: { numbers: cleared.map((n) => n.e164) },
+      reason: data.reason,
+    });
+    return { ok: true as const };
+  });
+
+/**
+ * Re-verifies a customer whose number is already live, against Sarvam's own
+ * view of the deployment (read only; no Sarvam write). Saves the verified
+ * mapping on success, so a working live customer keeps (or regains) business
+ * data without new onboarding or voice settings. Never activates a number.
+ */
+export const reverifyLiveDeployment = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { orgId: string; reason: string }) => {
+    if (!input?.orgId) throw new Error("orgId is required");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { data: agent, error } = await supabaseAdmin
+      .from("agent_configs")
+      .select("id, sarvam_app_id, sarvam_app_version")
+      .eq("organization_id", data.orgId)
+      .maybeSingle();
+    if (error) throw error;
+    if (!agent?.sarvam_app_id || !agent.sarvam_app_version)
+      throw new Error("This customer's agent is not mapped to Sarvam.");
+    const { findLiveNumber, remapLiveAgent, defaultLiveRemapDeps } =
+      await import("@/lib/sarvam-live-remap.server");
+    const live = await findLiveNumber(supabaseAdmin, data.orgId, agent.id);
+    if (!live)
+      throw new Error(
+        "This customer has no live number (ACTIVE, inbound on, with a deployment). New customers are verified by provisioning instead.",
+      );
+    const result = await remapLiveAgent(
+      supabaseAdmin,
+      {
+        organizationId: data.orgId,
+        agentConfigId: agent.id,
+        number: live,
+        appId: agent.sarvam_app_id,
+        appVersion: agent.sarvam_app_version,
+      },
+      await defaultLiveRemapDeps(),
+    );
+    await writeAudit(admin, {
+      action:
+        result.outcome === "verified"
+          ? "LIVE_DEPLOYMENT_REVERIFIED"
+          : "LIVE_DEPLOYMENT_REVERIFY_FAILED",
+      entityType: "phone_number",
+      entityId: live.id,
+      organizationId: data.orgId,
+      newValue: { deployment_id: live.deploymentId, outcome: result.outcome },
+      reason: data.reason,
+    });
+    return { outcome: result.outcome, detail: result.detail };
+  });

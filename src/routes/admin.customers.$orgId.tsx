@@ -39,6 +39,7 @@ import { CrmPanel } from "@/components/admin/CrmPanel";
 import { PricingOverridePanel } from "@/components/admin/PricingOverridePanel";
 import { SarvamOutboundPanel } from "@/components/admin/SarvamOutboundPanel";
 import { SarvamIntegrationPanel } from "@/components/admin/SarvamIntegrationPanel";
+import { VoiceLanguagePanel } from "@/components/admin/VoiceLanguagePanel";
 import type { LifecycleStatus } from "@/lib/lifecycle";
 import type { ProvisioningCheckStatus } from "@/lib/provisioning-health.server";
 import type { ProvisioningState } from "@/lib/provisioning-state";
@@ -66,6 +67,15 @@ const PROVISIONING_STATE_LABEL: Record<
   provisioning: { label: "Provisioning", tone: "ready" },
   active: { label: "Active", tone: "live" },
   failed: { label: "Failed", tone: "error" },
+  waiting_for_onboarding: { label: "Waiting for onboarding data", tone: "ready" },
+  waiting_for_integration_credential: {
+    label: "Waiting for integration credential",
+    tone: "ready",
+  },
+  verification_failed: { label: "Deployment verification failed", tone: "error" },
+  waiting_for_voice_language: { label: "Waiting for voice & language", tone: "ready" },
+  waiting_for_number_confirmation: { label: "Confirm number in Sarvam", tone: "ready" },
+  manual_action_required: { label: "Manual Sarvam action needed", tone: "error" },
 };
 
 /** Tone for the Klyro-owned Exotel runtime's readiness state — labels come from KLYRO_RUNTIME_STATE_LABEL itself. */
@@ -545,6 +555,8 @@ function CustomerDetail() {
       />
 
       <SarvamIntegrationPanel orgId={org.id} />
+
+      <VoiceLanguagePanel orgId={org.id} />
 
       <SectionCard
         title="Klyro runtime"

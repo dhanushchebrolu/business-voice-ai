@@ -50,11 +50,16 @@ describe("unauthorized admin access rejected — every function gates before any
 });
 
 describe("admin can modify mapping — all writes go through service_role (supabaseAdmin), never the caller's own client", () => {
-  for (const name of [
-    "setSarvamAppMapping",
-    "registerTelephonyConnection",
-    "updateSarvamInboundDeployment",
-  ]) {
+  test("setSarvamAppMapping imports supabaseAdmin and passes it to the shared registration helper", () => {
+    const fnSrc = extractFn("setSarvamAppMapping");
+    assert.match(
+      fnSrc,
+      /const \{ supabaseAdmin \} = await import\("@\/integrations\/supabase\/client\.server"\)/,
+    );
+    assert.match(fnSrc, /applySarvamAgentMapping\(supabaseAdmin,/);
+  });
+
+  for (const name of ["registerTelephonyConnection", "updateSarvamInboundDeployment"]) {
     test(`${name} imports and uses supabaseAdmin for its writes`, () => {
       const fnSrc = extractFn(name);
       assert.match(
@@ -89,15 +94,15 @@ describe("setSarvamAppMapping — duplicate app ID rejected, audited, validated"
     assert.match(fnSrc, /input\.sarvamAppId\?\.trim\(\)/);
   });
 
-  test("translates the unique-index violation (23505) into a clear, non-leaking error", () => {
-    assert.match(fnSrc, /code.*===\s*"23505"/);
-    assert.match(fnSrc, /already mapped to a different agent/i);
+  test("delegates to the shared registration rules (duplicate app, master agent, same-org linking — tested in sarvam-agent-registration.server.test.ts)", () => {
+    assert.match(fnSrc, /await applySarvamAgentMapping\(supabaseAdmin, \{/);
+    assert.match(fnSrc, /masterAgentAppId: masterAgentAppId\(\)/);
   });
 
   test("writes an audit record with the resolved organization_id, old and new values", () => {
     assert.match(fnSrc, /action:\s*"SARVAM_APP_MAPPING_SET"/);
-    assert.match(fnSrc, /organizationId:\s*before\.organization_id/);
-    assert.match(fnSrc, /oldValue:\s*\{\s*sarvam_app_id:\s*before\.sarvam_app_id/);
+    assert.match(fnSrc, /organizationId:\s*mapped\.organizationId/);
+    assert.match(fnSrc, /oldValue:\s*mapped\.before/);
   });
 });
 
@@ -116,7 +121,7 @@ describe("registerTelephonyConnection — duplicate connection rejected, upserts
       2,
       "expected the 23505 check on both the update-existing and insert-new branches",
     );
-    assert.match(fnSrc, /already registered to a different organization/i);
+    assert.match(fnSrc, /already registered for this customer/i);
   });
 
   test("writes an audit record", () => {
@@ -279,9 +284,12 @@ describe("admin dashboard outbound call + call detail", () => {
   });
 
   test("mapping and connection registration only link the same organization's unlinked numbers", () => {
-    const mapping = extractFn("setSarvamAppMapping");
+    const helper = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "sarvam-agent-registration.server.ts"),
+      "utf8",
+    );
     assert.match(
-      mapping,
+      helper,
       /\.eq\("organization_id", before\.organization_id\)\s*\.is\("agent_config_id", null\)/,
     );
     const connection = extractFn("registerTelephonyConnection");

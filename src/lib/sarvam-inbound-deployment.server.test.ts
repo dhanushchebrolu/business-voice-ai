@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   createInboundDeploymentForNumbers,
   syncAgentDeployments,
+  setDeploymentAppVersion,
 } from "./sarvam-inbound-deployment.server.ts";
 
 /**
@@ -665,5 +666,94 @@ describe("syncAgentDeployments", () => {
       ],
     );
     assert.ok(!requests.some((r) => r.method !== "GET"), "read-only when nothing needs changing");
+  });
+});
+
+describe("sync preserves paused/active state (Phase 5)", () => {
+  test("a paused deployment is edited and left paused (never resumed by a sync)", async () => {
+    const agent = {
+      id: "agent_1",
+      organization_id: "org_1",
+      sarvam_app_id: "app_1",
+      sarvam_app_version: 4,
+    };
+    const { client } = makeFakeSupabase({
+      agent_configs: { select: [{ data: agent, error: null }] },
+      phone_numbers: {
+        select: [
+          {
+            data: [
+              { organization_id: "org_1", provider: "sarvam", provider_deployment_id: "dep_1" },
+            ],
+            error: null,
+          },
+        ],
+      },
+    });
+    const { result, requests } = await withRoutedFetch(
+      [
+        {
+          method: "GET",
+          suffix: "/deployments/dep_1",
+          status: 200,
+          body: {
+            deployment_id: "dep_1",
+            app_id: "app_1",
+            app_version: 3,
+            status: "paused",
+            webhook_config: { url: "https://clickai.example/x" },
+          },
+        },
+        {
+          method: "PATCH",
+          suffix: "/deployments/dep_1",
+          status: 200,
+          body: { deployment_id: "dep_1" },
+        },
+      ],
+      () => syncAgentDeployments(client, "agent_1"),
+    );
+    assert.equal(result!.items[0]!.action, "updated");
+    assert.ok(
+      !requests.some((r) => r.method === "PUT"),
+      "no pause or resume for a paused deployment",
+    );
+  });
+});
+
+describe("setDeploymentAppVersion keeps the deployment's state (Phase 5 fix 1)", () => {
+  const fake = (status: string, patchFails = false) => {
+    const log: string[] = [];
+    const adapter = {
+      getDeployment: async () => ({ status }) as never,
+      setDeploymentStatus: async (_id: string, action: "pause" | "resume") => {
+        log.push(action);
+        return {} as never;
+      },
+      updateInboundDeployment: async (_id: string, input: { appVersion?: number }) => {
+        log.push(`patch:${input.appVersion}`);
+        if (patchFails) throw new Error("422");
+        return {} as never;
+      },
+    };
+    return { adapter, log };
+  };
+
+  test("active: pause, patch, resume", async () => {
+    const { adapter, log } = fake("active");
+    await setDeploymentAppVersion(adapter, "dep_1", 6);
+    assert.deepEqual(log, ["pause", "patch:6", "resume"]);
+  });
+
+  test("paused: patched and left paused", async () => {
+    const { adapter, log } = fake("paused");
+    await setDeploymentAppVersion(adapter, "dep_1", 6);
+    assert.deepEqual(log, ["patch:6"]);
+  });
+
+  test("a failed patch on an active deployment still resumes it, and reports the failure", async () => {
+    const { adapter, log } = fake("active", true);
+    await assert.rejects(setDeploymentAppVersion(adapter, "dep_1", 6), /422/);
+    assert.deepEqual(log, ["pause", "patch:6", "resume"]);
   });
 });

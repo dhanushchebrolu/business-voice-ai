@@ -178,6 +178,25 @@ async function seed() {
       greetings: {},
       transfer_number: null,
       after_hours_behavior: "take_message",
+      capabilities: { answer_faqs: true, calendar_book: true, capture_lead: true },
+      sarvam_app_id: `App-${org}`,
+      sarvam_app_version: 3,
+    });
+    (db.tables["organizations"] ??= []).push({ id: org, lifecycle_status: "active" });
+    // An ACTIVE number with a verified deployment mapping: the admission gate's precondition.
+    (db.tables["phone_numbers"] ??= []).push({
+      id: `num-${org}`,
+      e164: org === ORG_SMILE ? "+917900000001" : "+917900000002",
+      status: "active",
+      provider: "sarvam",
+      organization_id: org,
+      agent_config_id: agent,
+      inbound_enabled: true,
+      provider_deployment_id: `dep-${org}`,
+      verified_deployment_id: `dep-${org}`,
+      verified_sarvam_app_id: `App-${org}`,
+      verified_sarvam_app_version: 3,
+      admission_blocked_at: null,
     });
     (db.tables["sarvam_agent_integrations"] ??= []).push({
       id: `int-${org}`,
@@ -900,6 +919,23 @@ describe("service validation, requested times and honest callbacks", () => {
     assert.equal(facts.lead_id, db.tables["leads"]![0]!["id"]);
   });
 
+  test("request_callback is refused when neither lead capture nor message taking is on", async () => {
+    const agent = db.tables["agent_configs"]!.find((a) => a["organization_id"] === ORG_SMILE)!;
+    agent["capabilities"] = { answer_faqs: true, calendar_book: true };
+    const body = await run("request_callback", {
+      interaction_id: "i-cap",
+      caller_number: "+919000000001",
+    });
+    assert.deepEqual(body, { ok: true, recorded: false, error: { code: "CAPABILITY_DISABLED" } });
+    assert.equal((db.tables["leads"] ?? []).length, 0);
+    agent["capabilities"] = { take_callback: true };
+    const allowed = await run("request_callback", {
+      interaction_id: "i-cap2",
+      caller_number: "+919000000001",
+    });
+    assert.equal(allowed["recorded"], true, "message taking alone is enough");
+  });
+
   test("request_callback without a caller number reports not recorded", async () => {
     const body = await run("request_callback", { interaction_id: "i-6", caller_number: "" });
     assert.deepEqual(body, { ok: true, recorded: false, error: { code: "NO_CALLER_NUMBER" } });
@@ -950,5 +986,73 @@ describe("service validation, requested times and honest callbacks", () => {
     const abc = await call("context", tokens[ORG_ABC]!, { interaction_id: "g-2" });
     assert.equal(smile.body["greeting"], "Welcome to Smile Dental. How can I help you today?");
     assert.equal(abc.body["greeting"], "Thank you for calling ABC Dental. How can I help you?");
+  });
+});
+
+describe("inbound admission gate at the HTTP boundary (Phase 5)", () => {
+  const numberOf = (org: string) =>
+    db.tables["phone_numbers"]!.find((n) => n["organization_id"] === org)!;
+  const NOT_ADMITTED: [string, Record<string, unknown>][] = [
+    ["provisioning number", { status: "provisioning" }],
+    ["paused / inbound off", { inbound_enabled: false }],
+    ["failed number", { status: "suspended" }],
+    ["no deployment", { provider_deployment_id: null }],
+    [
+      "unverified mapping",
+      {
+        verified_deployment_id: null,
+        verified_sarvam_app_id: null,
+        verified_sarvam_app_version: null,
+      },
+    ],
+    ["deployment mismatch", { verified_deployment_id: "dep-old" }],
+    ["agent mismatch", { verified_sarvam_app_id: "App-old" }],
+    ["version mismatch", { verified_sarvam_app_version: 2 }],
+    ["blocked", { admission_blocked_at: "2026-11-11T04:00:00Z" }],
+    ["released", { status: "released" }],
+  ];
+  for (const [name, patch] of NOT_ADMITTED)
+    test(`${name}: context, business info and tools all refused with no business data`, async () => {
+      Object.assign(numberOf(ORG_SMILE), patch);
+      for (const path of [
+        "context",
+        "tools/get_business_info",
+        "tools/check_availability",
+        "tools/book_appointment",
+      ]) {
+        const r = await call(path, tokens[ORG_SMILE]!, { date: "2026-11-12", time: "10:00" });
+        assert.equal(r.status, 403, `${name} ${path}`);
+        assert.equal(r.body["error"], "not_admitted");
+        assert.doesNotMatch(JSON.stringify(r.body), /Smile Dental|Dr\. Meera|500|parking/i);
+      }
+      assert.equal(toolCalls.length, 0, "no tool ever ran");
+      // The other customer is unaffected.
+      assert.equal((await call("context", tokens[ORG_ABC]!)).status, 200);
+    });
+
+  test("a body naming another tenant's deployment or number never changes who is admitted", async () => {
+    Object.assign(numberOf(ORG_SMILE), { status: "provisioning" });
+    const r = await call("context", tokens[ORG_SMILE]!, {
+      deployment_id: "dep-org-abc",
+      phone_number: "+917900000002",
+      organization_id: ORG_ABC,
+    });
+    assert.equal(r.status, 403);
+  });
+
+  test("a database failure while checking admission refuses (fails closed)", async () => {
+    db.failOn = "phone_numbers";
+    const r = await call("context", tokens[ORG_SMILE]!);
+    assert.equal(r.status, 403);
+    db.failOn = null;
+  });
+
+  test("a refused request is audited as rejected under its own tenant, without secrets", async () => {
+    Object.assign(numberOf(ORG_SMILE), { status: "provisioning" });
+    await call("context", tokens[ORG_SMILE]!);
+    const ev = db.tables["sarvam_agent_events"]!.at(-1)!;
+    assert.equal(ev["organization_id"], ORG_SMILE);
+    assert.equal(ev["status"], "rejected");
+    assert.doesNotMatch(JSON.stringify(ev), new RegExp(tokens[ORG_SMILE]!));
   });
 });

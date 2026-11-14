@@ -14,6 +14,7 @@ import { featureLocksQuery } from "@/lib/access";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
 import { requestPhoneNumber } from "@/lib/telephony-customer.functions";
+import { activateMyNumber, getMyActivationStatus } from "@/lib/customer-activation.functions";
 
 /** Has this org already asked for a number? RLS-scoped (org members read own customer_events) — the same source of truth requestPhoneNumber itself checks, so a page refresh never loses the "request submitted" state. */
 const numberRequestQuery = (orgId: string | undefined) =>
@@ -68,6 +69,30 @@ function NumbersPage() {
   const queryClient = useQueryClient();
   const [requesting, setRequesting] = useState(false);
   const [providerSetupRequired, setProviderSetupRequired] = useState(false);
+  const activate = useServerFn(activateMyNumber);
+  const fetchActivation = useServerFn(getMyActivationStatus);
+  const [activating, setActivating] = useState(false);
+  const { data: activation, refetch: refetchActivation } = useQuery({
+    queryKey: ["my-activation", orgId],
+    enabled: Boolean(orgId),
+    queryFn: () => fetchActivation({ data: { orgId: orgId! } }).catch(() => null),
+  });
+
+  const onActivate = async () => {
+    if (!orgId) return;
+    setActivating(true);
+    try {
+      const result = await activate({ data: { orgId } });
+      if (result.status === "live") toast.success(result.message);
+      else toast.message(result.message);
+      await refetchActivation();
+      await queryClient.invalidateQueries({ queryKey: ["numbers", orgId] });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not start activation.");
+    } finally {
+      setActivating(false);
+    }
+  };
 
   const onRequestNumber = async () => {
     setRequesting(true);
@@ -179,10 +204,33 @@ function NumbersPage() {
                 </>
               ) : (
                 <>
-                  <p className="mt-1.5 text-xl font-medium text-muted-foreground">
-                    Not assigned yet
-                  </p>
-                  {existingRequest ? (
+                  {candidateNumber ? (
+                    <div data-testid="activate-number">
+                      <p className="mt-1.5 font-mono text-xl">{candidateNumber.e164}</p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Assigned to your workspace, not live yet. It starts answering only after
+                        your AI receptionist and its connection are set up and verified.
+                      </p>
+                      {activation ? (
+                        <p className="mt-2 text-xs" role="status">
+                          {activation.message}
+                        </p>
+                      ) : null}
+                      <Button
+                        size="sm"
+                        className="mt-3"
+                        disabled={activating || activation?.status === "in_progress"}
+                        onClick={onActivate}
+                      >
+                        {activating ? "Activating…" : "Activate number"}
+                      </Button>
+                    </div>
+                  ) : (
+                    <p className="mt-1.5 text-xl font-medium text-muted-foreground">
+                      Not assigned yet
+                    </p>
+                  )}
+                  {candidateNumber ? null : existingRequest ? (
                     <div className="mt-2 flex items-start gap-2 text-xs text-muted-foreground">
                       <Hourglass className="mt-0.5 size-3.5 shrink-0" />
                       <span>

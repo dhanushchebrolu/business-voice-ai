@@ -15,7 +15,15 @@ export type ProvisioningState =
   | "waiting_for_number"
   | "provisioning"
   | "active"
-  | "failed";
+  | "failed"
+  // Phase 2 provisioning pipeline (provisioning-pipeline.server.ts) only:
+  | "waiting_for_onboarding"
+  | "waiting_for_integration_credential"
+  | "verification_failed"
+  | "waiting_for_voice_language"
+  // Phase 5: an admin must confirm the number exists in Sarvam / act by hand in Sarvam.
+  | "waiting_for_number_confirmation"
+  | "manual_action_required";
 
 export interface ComputeProvisioningStateInput {
   /** Platform-wide: do SARVAM_INBOUND_VOICE_API_KEY/SARVAM_OUTBOUND_VOICE_API_KEY/SARVAM_ORG_ID/SARVAM_WORKSPACE_ID all resolve? (validateSarvamEnv().allPresent) */

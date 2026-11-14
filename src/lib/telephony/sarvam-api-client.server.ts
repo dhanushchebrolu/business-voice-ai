@@ -239,6 +239,11 @@ async function sarvamRequest<T>(
     const error = mapErrorResponse(res.status, parsed, rawText);
     if (requestId) error.message += ` (Sarvam request ${requestId})`;
     error.outcomeUnknown = !DEFINITE_REJECTION_STATUSES.has(res.status);
+    const retryAfter = parseRetryAfter(res.headers.get("retry-after"));
+    if (retryAfter !== undefined) {
+      error.retryAfterSeconds = retryAfter;
+      error.message += ` Sarvam asked to wait ${retryAfter}s.`;
+    }
     throw error;
   }
   return parsed as T;
@@ -252,6 +257,15 @@ async function sarvamRequest<T>(
  * the outcome unknown.
  */
 const DEFINITE_REJECTION_STATUSES = new Set([400, 401, 403, 404, 422]);
+
+/** Retry-After as delay-seconds or an HTTP date; undefined when absent or unreadable. */
+export function parseRetryAfter(value: string | null, now = Date.now()): number | undefined {
+  if (!value) return undefined;
+  const v = value.trim();
+  if (/^\d+$/.test(v)) return Math.min(Number(v), 86_400);
+  const at = Date.parse(v);
+  return Number.isNaN(at) ? undefined : Math.max(0, Math.min(Math.ceil((at - now) / 1000), 86_400));
+}
 
 /* ------------------------------------------------------------------ */
 /* 1 & 2. Inbound deployment create / update                            */

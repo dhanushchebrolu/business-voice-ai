@@ -198,6 +198,8 @@ export class TelephonyAdapterError extends Error {
    * assume an outbound call was not placed. Defaults to false.
    */
   outcomeUnknown: boolean;
+  /** Seconds the provider asked us to wait (HTTP Retry-After on a 429), when it said. */
+  retryAfterSeconds?: number;
   constructor(message: string, status = 502, outcomeUnknown = false) {
     super(message);
     this.status = status;

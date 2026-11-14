@@ -75,49 +75,67 @@ export const setSarvamAppMapping = createServerFn({ method: "POST" })
     const admin = await assertPlatformAdmin(context.supabase, context.userId, "agents.write");
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
-    const { data: before } = await supabaseAdmin
+    // A customer whose number is already live keeps its business data:
+    // Sarvam is moved and verified first, and ClickAI's mapping changes only
+    // after that passes (sarvam-live-remap.server.ts).
+    const { data: target, error: targetError } = await supabaseAdmin
       .from("agent_configs")
-      .select("id, organization_id, sarvam_app_id, sarvam_app_version")
+      .select("id, organization_id")
       .eq("id", data.agentConfigId)
       .maybeSingle();
-    if (!before) throw new Error("Agent not found");
-
-    const { error } = await supabaseAdmin
-      .from("agent_configs")
-      // A direct mapping replaces any template mapping (the template's
-      // trigger would otherwise copy its own app id back over this one).
-      .update({
-        sarvam_app_id: data.sarvamAppId,
-        sarvam_app_version: data.sarvamAppVersion,
-        sarvam_application_id: null,
-      })
-      .eq("id", data.agentConfigId);
-    if (error) {
-      // idx_agent_configs_sarvam_app_id or the template guard trigger —
-      // this Sarvam app is already mapped to a different agent.
-      if ((error as { code?: string }).code === "23505")
-        throw new Error("This Sarvam app is already mapped to a different agent.");
-      throw error;
+    if (targetError) throw targetError;
+    if (!target) throw new Error("Agent not found");
+    const { findLiveNumber, remapLiveAgent, defaultLiveRemapDeps } =
+      await import("@/lib/sarvam-live-remap.server");
+    const live = await findLiveNumber(supabaseAdmin, target.organization_id, target.id);
+    if (live) {
+      const result = await remapLiveAgent(
+        supabaseAdmin,
+        {
+          organizationId: target.organization_id,
+          agentConfigId: target.id,
+          number: live,
+          appId: data.sarvamAppId,
+          appVersion: data.sarvamAppVersion,
+        },
+        await defaultLiveRemapDeps(),
+      );
+      await writeAudit(admin, {
+        action:
+          result.outcome === "verified"
+            ? "SARVAM_APP_MAPPING_SET"
+            : "SARVAM_APP_MAPPING_NOT_APPLIED",
+        entityType: "agent_config",
+        entityId: data.agentConfigId,
+        organizationId: target.organization_id,
+        newValue: {
+          sarvam_app_id: data.sarvamAppId.trim(),
+          sarvam_app_version: data.sarvamAppVersion,
+          live_reverification: result.outcome,
+        },
+        reason: data.reason,
+      });
+      if (result.outcome !== "verified") throw new Error(result.detail);
+      return { ok: true as const, deploymentSync: { items: [] }, liveReverification: result };
     }
 
-    // Numbers assigned before the agent existed get it now (same org only).
-    const { error: linkError } = await supabaseAdmin
-      .from("phone_numbers")
-      .update({ agent_config_id: data.agentConfigId })
-      .eq("organization_id", before.organization_id)
-      .is("agent_config_id", null)
-      .neq("status", "released");
-    if (linkError) throw linkError;
+    // Validation, master-agent refusal, the one-app-per-agent rule and
+    // same-org number linking live in one shared place.
+    const { applySarvamAgentMapping, masterAgentAppId } =
+      await import("@/lib/sarvam-agent-registration.server");
+    const mapped = await applySarvamAgentMapping(supabaseAdmin, {
+      agentConfigId: data.agentConfigId,
+      sarvamAppId: data.sarvamAppId,
+      sarvamAppVersion: data.sarvamAppVersion,
+      masterAgentAppId: masterAgentAppId(),
+    });
 
     await writeAudit(admin, {
       action: "SARVAM_APP_MAPPING_SET",
       entityType: "agent_config",
       entityId: data.agentConfigId,
-      organizationId: before.organization_id,
-      oldValue: {
-        sarvam_app_id: before.sarvam_app_id,
-        sarvam_app_version: before.sarvam_app_version,
-      },
+      organizationId: mapped.organizationId,
+      oldValue: mapped.before,
       newValue: { sarvam_app_id: data.sarvamAppId, sarvam_app_version: data.sarvamAppVersion },
       reason: data.reason,
     });
@@ -409,9 +427,7 @@ export const registerTelephonyConnection = createServerFn({ method: "POST" })
         .eq("id", existing.id);
       if (error) {
         if ((error as { code?: string }).code === "23505")
-          throw new Error(
-            "This Sarvam connection ID is already registered to a different organization.",
-          );
+          throw new Error("This Sarvam connection ID is already registered for this customer.");
         throw error;
       }
       connectionRowId = existing.id;
@@ -429,9 +445,7 @@ export const registerTelephonyConnection = createServerFn({ method: "POST" })
         .single();
       if (error) {
         if ((error as { code?: string }).code === "23505")
-          throw new Error(
-            "This Sarvam connection ID is already registered to a different organization.",
-          );
+          throw new Error("This Sarvam connection ID is already registered for this customer.");
         throw error;
       }
       connectionRowId = row.id;

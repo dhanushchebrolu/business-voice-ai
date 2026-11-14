@@ -43,14 +43,14 @@ export const Route = createFileRoute("/api/public/sarvam/client-context")({
         const phoneNumber = url.searchParams.get("phone_number") ?? undefined;
         const connectionId = url.searchParams.get("connection_id") ?? undefined;
         const deploymentId = url.searchParams.get("deployment_id") ?? undefined;
-        if (!phoneNumber && !connectionId && !deploymentId) {
-          return new Response("One of phone_number, connection_id, or deployment_id is required", {
-            status: 400,
-          });
+        // A connection may serve several organizations, so it can never
+        // identify the tenant on its own.
+        if (!phoneNumber && !deploymentId) {
+          return new Response("deployment_id or phone_number is required", { status: 400 });
         }
 
         const { checkSarvamContextRateLimit } = await import("@/lib/rate-limit.server");
-        const rateLimitKey = deploymentId ?? connectionId ?? phoneNumber ?? "unknown";
+        const rateLimitKey = deploymentId ?? phoneNumber ?? "unknown";
         const decision = await checkSarvamContextRateLimit(rateLimitKey);
         if (!decision.allowed) {
           return new Response("Rate limited", {
@@ -73,9 +73,22 @@ export const Route = createFileRoute("/api/public/sarvam/client-context")({
         console.log(
           "sarvam_context:resolve",
           organizationId ?? "unresolved",
-          phoneNumber ? "phone_number" : connectionId ? "connection_id" : "deployment_id",
+          deploymentId ? "deployment_id" : "phone_number",
         );
         if (!organizationId) {
+          return new Response("Not found", { status: 404 });
+        }
+
+        // Admission gate: the same request identifiers must match this
+        // customer's ACTIVE, verified number. Fails closed, no data.
+        const { checkLegacyContextAdmission } =
+          await import("@/lib/sarvam-inbound-admission.server");
+        const admission = await checkLegacyContextAdmission(supabaseAdmin, organizationId, {
+          deploymentId,
+          phoneNumber,
+        });
+        if (!admission.admitted) {
+          console.log("sarvam_context:not_admitted", organizationId, admission.reason);
           return new Response("Not found", { status: 404 });
         }
 

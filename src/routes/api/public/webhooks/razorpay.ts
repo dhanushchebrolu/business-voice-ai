@@ -1,9 +1,14 @@
 import { createFileRoute } from "@tanstack/react-router";
 
 /**
- * Razorpay webhook — the single source of truth for unlocking an account.
- * Signature is verified before anything is read from the payload, and every
- * event is recorded so it is only ever processed once.
+ * Razorpay webhook for ClickAI's own charges (setup fee, monthly plan, phone
+ * service fee) — the single source of truth for unlocking an account.
+ * The signature is verified before anything is read from the payload; the
+ * event ledger, payment-level idempotency and provisioning live in
+ * src/lib/payments/razorpay-platform-webhook.server.ts.
+ *
+ * Responses: 200 once the event is fully applied (or was already); 500 when
+ * any write failed, so Razorpay redelivers and the event is processed again.
  */
 export const Route = createFileRoute("/api/public/webhooks/razorpay")({
   server: {
@@ -22,13 +27,7 @@ export const Route = createFileRoute("/api/public/webhooks/razorpay")({
           return new Response("Invalid signature", { status: 401 });
         }
 
-        let event: {
-          event?: string;
-          payload?: {
-            payment?: { entity?: Record<string, unknown> };
-            refund?: { entity?: Record<string, unknown> };
-          };
-        };
+        let event: import("@/lib/payments/razorpay-platform-webhook.server").RazorpayEvent;
         try {
           event = JSON.parse(raw);
         } catch {
@@ -39,172 +38,33 @@ export const Route = createFileRoute("/api/public/webhooks/razorpay")({
         if (!eventId) return new Response("Missing event id", { status: 400 });
 
         const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+        const { claimWebhookEvent, markWebhookEvent, processRazorpayPlatformEvent } =
+          await import("@/lib/payments/razorpay-platform-webhook.server");
 
-        // Idempotency: the unique (provider, event_id) index rejects replays.
-        const { error: dedupeError } = await supabaseAdmin.from("webhook_events").insert({
-          provider: "razorpay",
-          event_id: eventId,
-          event_type: event.event ?? null,
-          payload: JSON.parse(raw),
-        });
-        if (dedupeError) {
-          if (dedupeError.code === "23505") return new Response("ok (duplicate)");
-          console.error("razorpay:webhook_store_failed", dedupeError.message);
+        let decision;
+        try {
+          decision = await claimWebhookEvent(supabaseAdmin, eventId, event, JSON.parse(raw));
+        } catch (err) {
+          console.error("razorpay:webhook_store_failed", (err as Error).message);
           return new Response("Storage error", { status: 500 });
         }
+        if (!decision.process) return new Response("ok (duplicate)");
 
         try {
-          const entity = event.payload?.payment?.entity as
-            | {
-                id?: string;
-                order_id?: string;
-                amount?: number;
-                currency?: string;
-                status?: string;
-                method?: string;
-                notes?: Record<string, string>;
-              }
-            | undefined;
-
-          if (
-            (event.event === "payment.captured" || event.event === "order.paid") &&
-            entity?.order_id
-          ) {
-            const { data: order } = await supabaseAdmin
-              .from("payment_orders")
-              .select("id, organization_id, purpose, amount, currency")
-              .eq("provider_order_id", entity.order_id)
-              .maybeSingle();
-
-            if (order) {
-              const { data: payment } = await supabaseAdmin
-                .from("payments")
-                .upsert(
-                  {
-                    organization_id: order.organization_id,
-                    order_id: order.id,
-                    provider: "razorpay",
-                    provider_payment_id: entity.id ?? null,
-                    purpose: order.purpose,
-                    amount: entity.amount ?? order.amount,
-                    currency: entity.currency ?? order.currency,
-                    status: "captured",
-                    method: entity.method ?? null,
-                    captured_at: new Date().toISOString(),
-                  },
-                  { onConflict: "provider_payment_id" },
-                )
-                .select("id")
-                .maybeSingle();
-
-              await supabaseAdmin
-                .from("payment_orders")
-                .update({ status: "paid" })
-                .eq("id", order.id);
-
-              await supabaseAdmin.from("invoices").insert({
-                organization_id: order.organization_id,
-                number: `INV-${new Date().getFullYear()}-${entity.id ?? order.id.slice(0, 8)}`,
-                payment_id: payment?.id ?? null,
-                amount: entity.amount ?? order.amount,
-                currency: entity.currency ?? order.currency,
-                status: "paid",
-                line_items: [{ purpose: order.purpose, amount: entity.amount ?? order.amount }],
-                paid_at: new Date().toISOString(),
-              });
-
-              if (order.purpose === "setup_fee") {
-                // Only advance lifecycle forward — never regress an
-                // already-further-along customer (e.g. a stray retry).
-                const { data: current } = await supabaseAdmin
-                  .from("organizations")
-                  .select("lifecycle_status")
-                  .eq("id", order.organization_id)
-                  .maybeSingle();
-                const shouldAdvance =
-                  current &&
-                  (current.lifecycle_status === "not_provisioned" ||
-                    current.lifecycle_status === "setup_payment_pending");
-                await supabaseAdmin
-                  .from("organizations")
-                  .update(
-                    shouldAdvance
-                      ? {
-                          setup_paid_at: new Date().toISOString(),
-                          lifecycle_status: "setup_paid" as const,
-                        }
-                      : { setup_paid_at: new Date().toISOString() },
-                  )
-                  .eq("id", order.organization_id);
-
-                // Automatic provisioning (claim a pool number, link any
-                // already-registered Sarvam connection/agent, attempt an
-                // inbound deployment) — never throws, so a Sarvam outage or
-                // a missing admin-side mapping cannot turn an already-
-                // recorded payment into a failed webhook. See
-                // provisioning-orchestrator.server.ts for exactly what this
-                // does and does not automate.
-                const { provisionOrganizationAfterPayment } =
-                  await import("@/lib/provisioning-orchestrator.server");
-                const provisioning = await provisionOrganizationAfterPayment(
-                  supabaseAdmin,
-                  order.organization_id,
-                );
-                console.log(
-                  "razorpay:webhook_auto_provisioning",
-                  order.organization_id,
-                  provisioning.note,
-                );
-              }
-              if (order.purpose === "monthly_plan") {
-                // Recurring billing does not move the onboarding lifecycle —
-                // it only extends the next billing date. account_status is
-                // derived from lifecycle_status by a database trigger, so it
-                // is intentionally not written here.
-                const next = new Date();
-                next.setMonth(next.getMonth() + 1);
-                await supabaseAdmin
-                  .from("organizations")
-                  .update({ next_billing_at: next.toISOString() })
-                  .eq("id", order.organization_id);
-              }
-            }
-          }
-
-          if (event.event === "payment.failed" && entity?.order_id) {
-            await supabaseAdmin
-              .from("payment_orders")
-              .update({ status: "failed" })
-              .eq("provider_order_id", entity.order_id);
-          }
-
-          if (event.event === "refund.processed" || event.event === "refund.failed") {
-            const refundEntity = event.payload?.refund?.entity as
-              { id?: string; status?: string } | undefined;
-            if (refundEntity?.id) {
-              await supabaseAdmin
-                .from("refunds")
-                .update({
-                  status: event.event === "refund.processed" ? "processed" : "failed",
-                  processed_at:
-                    event.event === "refund.processed" ? new Date().toISOString() : null,
-                })
-                .eq("provider_refund_id", refundEntity.id);
-            }
-          }
-
-          await supabaseAdmin
-            .from("webhook_events")
-            .update({ processed_at: new Date().toISOString() })
-            .eq("provider", "razorpay")
-            .eq("event_id", eventId);
+          const outcome = await processRazorpayPlatformEvent(supabaseAdmin, event);
+          await markWebhookEvent(supabaseAdmin, eventId, { processed: true, note: outcome.note });
         } catch (err) {
-          console.error("razorpay:webhook_processing_failed", (err as Error).message);
-          await supabaseAdmin
-            .from("webhook_events")
-            .update({ error: (err as Error).message })
-            .eq("provider", "razorpay")
-            .eq("event_id", eventId);
+          const message = (err as Error).message;
+          console.error("razorpay:webhook_processing_failed", eventId, message);
+          try {
+            await markWebhookEvent(supabaseAdmin, eventId, { processed: false, error: message });
+          } catch (markErr) {
+            console.error(
+              "razorpay:webhook_error_record_failed",
+              eventId,
+              (markErr as Error).message,
+            );
+          }
           return new Response("Processing error", { status: 500 });
         }
 

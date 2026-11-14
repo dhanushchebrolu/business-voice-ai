@@ -9,7 +9,7 @@ import { workspaceQuery, numbersQuery } from "@/lib/workspace";
 import { agentStatusLabel } from "@/lib/agent-status";
 import { normalizeSpeakingPace } from "@/lib/agent-form";
 import { GREETING_MAX_LENGTH, customGreetingFor, renderGreeting } from "@/lib/agent-greeting";
-import { LANGUAGES, VOICES, PACE_MIN, PACE_MAX } from "@/lib/voices";
+import { LANGUAGES } from "@/lib/voices";
 import {
   PERSONAS,
   CAPABILITIES,
@@ -40,7 +40,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
-import { Slider } from "@/components/ui/slider";
 import {
   Select,
   SelectContent,
@@ -410,60 +409,13 @@ function AgentPage() {
             </div>
           </SectionCard>
 
-          <SectionCard
-            title="Voice & language"
-            description="Speech is produced by Sarvam's Bulbul voices."
-          >
-            <div className="space-y-4">
-              <FieldRow label="Primary language">
-                <Select
-                  value={form.primary_language}
-                  onValueChange={(v) => setForm({ ...form, primary_language: v })}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {LANGUAGES.map((l) => (
-                      <SelectItem key={l.code} value={l.code}>
-                        {l.label} — {l.native}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </FieldRow>
-              <FieldRow label="Voice">
-                <Select
-                  value={form.voice_id}
-                  onValueChange={(v) => setForm({ ...form, voice_id: v })}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent className="max-h-72">
-                    {VOICES.map((v) => (
-                      <SelectItem key={v.id} value={v.id}>
-                        {v.name} · {v.gender}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </FieldRow>
-              <FieldRow label={`Speaking pace — ${form.speaking_pace.toFixed(2)}x`}>
-                <Slider
-                  min={PACE_MIN}
-                  max={PACE_MAX}
-                  step={0.05}
-                  value={[form.speaking_pace]}
-                  onValueChange={(vals) => setForm({ ...form, speaking_pace: vals[0] ?? 1 })}
-                />
-              </FieldRow>
-              <p className="text-xs text-muted-foreground">
-                Callers are answered automatically in the language they speak — English, Hindi,
-                Bengali, Tamil, Telugu, Gujarati, Kannada, Malayalam, Marathi, Punjabi or Odia. The
-                primary language is used for the greeting and until the caller's language is clear.
-              </p>
-            </div>
+          {/* Voice and languages live on the customer's Sarvam agent and are set by the
+              ClickAI team during onboarding (agent_voice_language_settings). */}
+          <SectionCard title="Voice & language" description="Set up for you by the ClickAI team.">
+            <p className="text-sm text-muted-foreground">
+              Your receptionist's voice and the languages it speaks are configured by the ClickAI
+              team during onboarding. To change them, contact ClickAI support.
+            </p>
           </SectionCard>
         </TabsContent>
 

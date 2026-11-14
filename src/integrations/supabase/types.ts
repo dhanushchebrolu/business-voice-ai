@@ -58,6 +58,63 @@ export type Database = {
           },
         ];
       };
+      agent_voice_language_settings: {
+        Row: {
+          agent_config_id: string;
+          allowed_languages: string[];
+          applied_at: string | null;
+          applied_by: string | null;
+          applied_sarvam_app_version: number | null;
+          applied_sarvam_app_id: string | null;
+          auto_language_switch: boolean;
+          created_at: string;
+          default_language: string;
+          id: string;
+          organization_id: string;
+          sarvam_voice_internal_id: string;
+          sarvam_voice_name: string;
+          status: string;
+          updated_at: string;
+          updated_by: string | null;
+        };
+        Insert: {
+          agent_config_id: string;
+          allowed_languages: string[];
+          applied_at?: string | null;
+          applied_by?: string | null;
+          applied_sarvam_app_version?: number | null;
+          applied_sarvam_app_id?: string | null;
+          auto_language_switch?: boolean;
+          created_at?: string;
+          default_language: string;
+          id?: string;
+          organization_id: string;
+          sarvam_voice_internal_id: string;
+          sarvam_voice_name: string;
+          status?: string;
+          updated_at?: string;
+          updated_by?: string | null;
+        };
+        Update: {
+          agent_config_id?: string;
+          allowed_languages?: string[];
+          applied_at?: string | null;
+          applied_by?: string | null;
+          applied_sarvam_app_version?: number | null;
+          applied_sarvam_app_id?: string | null;
+          auto_language_switch?: boolean;
+          created_at?: string;
+          default_language?: string;
+          id?: string;
+          organization_id?: string;
+          sarvam_voice_internal_id?: string;
+          sarvam_voice_name?: string;
+          status?: string;
+          updated_at?: string;
+          updated_by?: string | null;
+        };
+        Relationships: [];
+      };
       agent_configs: {
         Row: {
           active_version: number;
@@ -1888,6 +1945,14 @@ export type Database = {
           reserved_at: string | null;
           status: string;
           suspended_reason: string | null;
+          admission_blocked_at: string | null;
+          admission_blocked_reason: string | null;
+          deployment_verified_at: string | null;
+          sarvam_number_confirmed_at: string | null;
+          sarvam_number_confirmed_by: string | null;
+          verified_deployment_id: string | null;
+          verified_sarvam_app_id: string | null;
+          verified_sarvam_app_version: number | null;
           updated_at: string;
         };
         Insert: {
@@ -1913,6 +1978,14 @@ export type Database = {
           reserved_at?: string | null;
           status?: string;
           suspended_reason?: string | null;
+          admission_blocked_at?: string | null;
+          admission_blocked_reason?: string | null;
+          deployment_verified_at?: string | null;
+          sarvam_number_confirmed_at?: string | null;
+          sarvam_number_confirmed_by?: string | null;
+          verified_deployment_id?: string | null;
+          verified_sarvam_app_id?: string | null;
+          verified_sarvam_app_version?: number | null;
           updated_at?: string;
         };
         Update: {
@@ -1938,6 +2011,14 @@ export type Database = {
           reserved_at?: string | null;
           status?: string;
           suspended_reason?: string | null;
+          admission_blocked_at?: string | null;
+          admission_blocked_reason?: string | null;
+          deployment_verified_at?: string | null;
+          sarvam_number_confirmed_at?: string | null;
+          sarvam_number_confirmed_by?: string | null;
+          verified_deployment_id?: string | null;
+          verified_sarvam_app_id?: string | null;
+          verified_sarvam_app_version?: number | null;
           updated_at?: string;
         };
         Relationships: [
@@ -2378,6 +2459,78 @@ export type Database = {
           token_prefix?: string;
           test_caller_numbers?: string[];
           updated_at?: string;
+        };
+        Relationships: [];
+      };
+      provisioning_runs: {
+        Row: {
+          agent_config_fingerprint: string | null;
+          attempts: number;
+          created_at: string;
+          created_by: string | null;
+          current_step: string | null;
+          deployment_verified_at: string | null;
+          finished_at: string | null;
+          generated_agent_config: Json | null;
+          id: string;
+          last_error: string | null;
+          last_error_at: string | null;
+          note: string | null;
+          organization_id: string;
+          phone_number_id: string | null;
+          sarvam_deployment_id: string | null;
+          source_payment_id: string | null;
+          started_at: string | null;
+          status: string;
+          trigger: string;
+          updated_at: string;
+          verification: Json | null;
+        };
+        Insert: {
+          agent_config_fingerprint?: string | null;
+          attempts?: number;
+          created_at?: string;
+          created_by?: string | null;
+          current_step?: string | null;
+          deployment_verified_at?: string | null;
+          generated_agent_config?: Json | null;
+          finished_at?: string | null;
+          id?: string;
+          last_error?: string | null;
+          last_error_at?: string | null;
+          note?: string | null;
+          organization_id: string;
+          phone_number_id?: string | null;
+          sarvam_deployment_id?: string | null;
+          source_payment_id?: string | null;
+          started_at?: string | null;
+          status?: string;
+          trigger: string;
+          updated_at?: string;
+          verification?: Json | null;
+        };
+        Update: {
+          agent_config_fingerprint?: string | null;
+          attempts?: number;
+          created_at?: string;
+          created_by?: string | null;
+          current_step?: string | null;
+          deployment_verified_at?: string | null;
+          generated_agent_config?: Json | null;
+          finished_at?: string | null;
+          id?: string;
+          last_error?: string | null;
+          last_error_at?: string | null;
+          note?: string | null;
+          organization_id?: string;
+          phone_number_id?: string | null;
+          sarvam_deployment_id?: string | null;
+          source_payment_id?: string | null;
+          started_at?: string | null;
+          status?: string;
+          trigger?: string;
+          updated_at?: string;
+          verification?: Json | null;
         };
         Relationships: [];
       };
@@ -4604,6 +4757,17 @@ export type Database = {
       [_ in never]: never;
     };
     Functions: {
+      record_razorpay_capture: {
+        Args: {
+          p_amount: number;
+          p_captured_at: string;
+          p_currency: string;
+          p_method: string | null;
+          p_provider_order_id: string;
+          p_provider_payment_id: string;
+        };
+        Returns: Json;
+      };
       bootstrap_first_platform_admin: {
         Args: { p_email: string | null; p_user_id: string };
         Returns: boolean;
