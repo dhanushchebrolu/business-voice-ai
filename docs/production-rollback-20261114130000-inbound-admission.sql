@@ -3,11 +3,27 @@
 -- write these columns (the admission gate, number confirmation, customer
 -- activation). Dropping the columns discards verification and confirmation
 -- history only; no customer or payment data lives in them.
+--
+-- First step of the ordered runbook docs/production-rollback-runbook-provisioning.md:
+--   Worker -> 130000 (this file) -> 120000 -> 110000 -> 100000 -> 090000
+--
+-- Precondition queries (read-only, run first):
+--   SELECT version FROM supabase_migrations.schema_migrations
+--    WHERE version = '20261114130000';                       -- expect: 1 row
+--   SELECT count(*) FROM public.provisioning_runs
+--    WHERE trigger = 'customer_activate';                     -- expect: 0 (else blocked)
+--   SELECT count(*) FILTER (WHERE verified_deployment_id IS NOT NULL) AS verified,
+--          count(*) FILTER (WHERE admission_blocked_at IS NOT NULL) AS blocked
+--     FROM public.phone_numbers;                              -- informational: lost with the columns
 
 BEGIN;
 
 DO $$
 BEGIN
+  -- Already rolled back (or never applied): stop with a clear message, change nothing.
+  IF NOT EXISTS (SELECT 1 FROM supabase_migrations.schema_migrations WHERE version = '20261114130000') THEN
+    RAISE EXCEPTION 'ROLLBACK_NOT_NEEDED: 20261114130000 is not recorded as applied';
+  END IF;
   IF EXISTS (SELECT 1 FROM public.provisioning_runs WHERE trigger = 'customer_activate') THEN
     RAISE EXCEPTION 'ROLLBACK_BLOCKED: customer_activate runs exist; keep the widened trigger check or relabel those rows first';
   END IF;
@@ -34,3 +50,13 @@ ALTER TABLE public.phone_numbers
 DELETE FROM supabase_migrations.schema_migrations WHERE version = '20261114130000';
 
 COMMIT;
+
+-- Post-rollback verification (read-only):
+--   SELECT count(*) FROM information_schema.columns
+--    WHERE table_schema = 'public' AND table_name = 'phone_numbers'
+--      AND column_name IN ('verified_deployment_id','sarvam_number_confirmed_at','admission_blocked_at');  -- 0
+--   SELECT pg_get_constraintdef(oid) FROM pg_constraint
+--    WHERE conname = 'provisioning_runs_trigger_check';      -- no customer_activate
+--   SELECT count(*) FROM supabase_migrations.schema_migrations
+--    WHERE version = '20261114130000';                        -- 0
+--   SELECT count(*) FROM public.phone_numbers;                -- unchanged row count
