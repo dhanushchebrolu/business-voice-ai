@@ -272,6 +272,14 @@ function toIsoOrNow(...candidates: unknown[]): string {
   return new Date().toISOString();
 }
 
+/** Sarvam's start_datetime as ISO, only when it parses and is not after the call's end; never invented. */
+function callStartIso(start: unknown, endIso: string): string | undefined {
+  if (!isNonEmptyString(start)) return undefined;
+  const d = new Date(start);
+  if (Number.isNaN(d.getTime()) || d.getTime() > new Date(endIso).getTime()) return undefined;
+  return d.toISOString();
+}
+
 function toDurationSeconds(v: unknown): number | undefined {
   const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
   // Sarvam reports fractional seconds (e.g. 201.077…); call_logs.duration_seconds is an integer.
@@ -784,6 +792,8 @@ export class SarvamTelephonyAdapter implements TelephonyProviderAdapter {
       fields["final_agent_variables"],
       fields["output_agent_variables"],
     );
+    const occurredAt = toIsoOrNow(fields["end_datetime"], fields["start_datetime"]);
+    const startedAt = callStartIso(fields["start_datetime"], occurredAt);
     return {
       eventId: interactionId,
       providerCallId: interactionId,
@@ -795,7 +805,8 @@ export class SarvamTelephonyAdapter implements TelephonyProviderAdapter {
       durationSeconds,
       recordingUrl: null,
       failureReason: null,
-      occurredAt: toIsoOrNow(fields["end_datetime"], fields["start_datetime"]),
+      occurredAt,
+      ...(startedAt ? { startedAt } : {}),
       transcript,
       agentVariables,
       providerDeploymentId: isNonEmptyString(fields["deployment_id"])

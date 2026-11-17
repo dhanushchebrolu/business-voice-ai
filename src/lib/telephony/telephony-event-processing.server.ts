@@ -308,7 +308,7 @@ export async function processTelephonyEvent(
       destination_number: destinationNumber,
       status: gate.allowed ? event.status : "failed",
       failure_reason: gate.allowed ? null : gate.reason,
-      started_at: event.occurredAt,
+      started_at: event.startedAt ?? event.occurredAt,
       ended_at: isTerminal ? event.occurredAt : null,
       duration_seconds: event.durationSeconds ?? 0,
       transcript:

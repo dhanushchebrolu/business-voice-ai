@@ -95,6 +95,23 @@ describe("telephony webhook route — inbound tenant resolution (unchanged from 
     assert.match(routeSrc, /transcript:\s*event\.transcript/);
     assert.match(routeSrc, /provider_metadata:\s*buildProviderMetadata\(event\)/);
   });
+
+  test("started_at uses the provider's real start time when it has one, otherwise the event time as before", () => {
+    assert.match(routeSrc, /started_at:\s*event\.startedAt \?\? event\.occurredAt,/);
+  });
+
+  test("only the Sarvam adapter sets startedAt, so Vobiz, Exotel and other providers keep started_at = event time", () => {
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const read = (f: string) => readFileSync(join(dir, f), "utf8");
+    assert.match(read("sarvam-provider.server.ts"), /startedAt/);
+    for (const file of [
+      "vobiz-provider.ts",
+      "exotel-provider.ts",
+      "generic-provider.ts",
+      "mock-provider.ts",
+    ])
+      assert.doesNotMatch(read(file), /startedAt/, file);
+  });
 });
 
 describe("telephony webhook route — outbound tenant correlation (Sarvam addition)", () => {

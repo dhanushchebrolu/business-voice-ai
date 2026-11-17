@@ -80,6 +80,41 @@ test("normalizeWebhookEvent: inbound completion payload maps every verified fiel
   });
 });
 
+test("normalizeWebhookEvent: inbound call keeps Sarvam's real start time apart from its end time", () => {
+  const adapter = new SarvamTelephonyAdapter(config);
+  const event = adapter.normalizeWebhookEvent(JSON.stringify(INBOUND_SAMPLE));
+  assert.ok(event);
+  assert.equal(event.startedAt, "2026-09-08T10:00:00.000Z");
+  assert.equal(event.occurredAt, "2026-09-08T10:00:42.000Z");
+  assert.equal(event.durationSeconds, 42);
+});
+
+test("normalizeWebhookEvent: a missing, invalid or after-the-end start time is left unset, never invented", () => {
+  const adapter = new SarvamTelephonyAdapter(config);
+  const { start_datetime: _omit, ...withoutStart } = INBOUND_SAMPLE;
+  for (const payload of [
+    withoutStart,
+    { ...INBOUND_SAMPLE, start_datetime: "not-a-date" },
+    { ...INBOUND_SAMPLE, start_datetime: "" },
+    { ...INBOUND_SAMPLE, start_datetime: 12345 },
+    { ...INBOUND_SAMPLE, start_datetime: "2026-09-08T10:05:00Z" },
+  ]) {
+    const event = adapter.normalizeWebhookEvent(JSON.stringify(payload));
+    assert.ok(event);
+    assert.equal(event.startedAt, undefined);
+    assert.equal(event.occurredAt, "2026-09-08T10:00:42.000Z");
+    assert.equal(event.durationSeconds, 42);
+  }
+});
+
+test("normalizeWebhookEvent: outbound attempts are unchanged and carry no separate start time", () => {
+  const adapter = new SarvamTelephonyAdapter(config);
+  const event = adapter.normalizeWebhookEvent(JSON.stringify(OUTBOUND_SUCCESS_SAMPLE));
+  assert.ok(event);
+  assert.equal(event.startedAt, undefined);
+  assert.equal(event.occurredAt, "2026-09-08T10:05:30.000Z");
+});
+
 test("normalizeWebhookEvent: outbound campaign attempt (connected/completed) maps every verified field", () => {
   const adapter = new SarvamTelephonyAdapter(config);
   const event = adapter.normalizeWebhookEvent(JSON.stringify(OUTBOUND_SUCCESS_SAMPLE));

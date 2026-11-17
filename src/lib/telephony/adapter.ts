@@ -77,6 +77,12 @@ export interface NormalizedCallEvent {
   failureReason?: string | null | undefined;
   occurredAt: string;
   /**
+   * When the call actually started, if the provider reports it separately
+   * (Sarvam sends one webhook after the call, so occurredAt is the END time).
+   * Unset for providers whose events arrive as the call progresses.
+   */
+  startedAt?: string | undefined;
+  /**
    * Ordered conversation transcript, when the provider's own runtime handled
    * the entire call end-to-end (STT/LLM/TTS) rather than Klyro bridging live
    * audio itself — e.g. a Sarvam Voice Agents `interaction_transcript`.
