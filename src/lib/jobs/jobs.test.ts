@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { PermanentJobError, type EnqueueInput, type Job, type QueueStore } from "./queue.server.ts";
 import { runDueJobs } from "./runner.server.ts";
 import { periodicJobs, runScheduledTick } from "./scheduler.server.ts";
-import { buildJobHandlers } from "./handlers.server.ts";
+import { buildJobHandlers, CAMPAIGN_DISPATCH_CLAIM_WINDOW_MS } from "./handlers.server.ts";
 
 /** In-memory queue with the SQL functions' semantics (idempotency, fencing, dead-letter). */
 class FakeStore implements QueueStore {
@@ -128,10 +128,9 @@ describe("scheduled tick", () => {
     assert.notEqual(key(b, "sweep.sarvam_reconcile"), key(c, "sweep.sarvam_reconcile"));
     assert.notEqual(key(a, "sweep.call_finalization"), key(b, "sweep.call_finalization"));
     assert.equal(key(a, "jobs.prune"), "jobs.prune:2026-11-11");
-    assert.ok(
-      !a.some((j) => /campaign|payment/.test(j.kind)),
-      "no campaign or payment work is scheduled",
-    );
+    assert.notEqual(key(a, "campaign.dispatch"), key(b, "campaign.dispatch"), "once a minute");
+    assert.equal(key(a, "campaign.dispatch"), "campaign.dispatch:2026-11-11T10:02");
+    assert.ok(!a.some((j) => /payment/.test(j.kind)), "no payment work is scheduled");
   });
 
   test("a tick enqueues sweeps once, runs them and raises an alert for dead letters", async () => {
@@ -140,19 +139,22 @@ describe("scheduled tick", () => {
     const supabaseAdmin = { rpc: async () => ({ data: statsRows, error: null }) } as never;
     const ran: string[] = [];
     const handlers = Object.fromEntries(
-      ["sweep.call_finalization", "sweep.sarvam_reconcile", "jobs.prune"].map((k) => [
-        k,
-        async () => {
-          ran.push(k);
-        },
-      ]),
+      ["sweep.call_finalization", "campaign.dispatch", "sweep.sarvam_reconcile", "jobs.prune"].map(
+        (k) => [
+          k,
+          async () => {
+            ran.push(k);
+          },
+        ],
+      ),
     );
     const now = new Date("2026-11-11T10:00:30Z");
     const first = await runScheduledTick({ supabaseAdmin, store, handlers, now });
     const second = await runScheduledTick({ supabaseAdmin, store, handlers, now });
-    assert.equal(first.enqueued.length, 3);
+    assert.equal(first.enqueued.length, 4);
     assert.equal(second.enqueued.length, 0, "same bucket: nothing new");
     assert.deepEqual(ran.sort(), [
+      "campaign.dispatch",
       "jobs.prune",
       "sweep.call_finalization",
       "sweep.sarvam_reconcile",
@@ -162,10 +164,11 @@ describe("scheduled tick", () => {
 });
 
 describe("handlers", () => {
-  test("only the expected kinds exist: no campaign dispatch or payment expiry", () => {
+  test("only the expected kinds exist: campaign dispatch, no payment expiry", () => {
     const handlers = buildJobHandlers({ supabaseAdmin: {} as never, store: new FakeStore() });
     assert.deepEqual(Object.keys(handlers).sort(), [
       "call.finalize",
+      "campaign.dispatch",
       "jobs.prune",
       "sarvam.reconcile_call",
       "sweep.call_finalization",
@@ -278,5 +281,76 @@ describe("crash after the effect, before the acknowledgement", () => {
     assert.equal(summary.succeeded, 1);
     assert.equal(resolutions, 1, "resolved exactly once across the crash");
     assert.equal(store.jobs.get(id)!.status, "succeeded");
+  });
+});
+
+describe("campaign.dispatch job", () => {
+  async function runWithSetting(value: string | undefined) {
+    const now = new Date("2026-11-17T10:00:00Z");
+    const seen: { deadline: number }[] = [];
+    const handlers = buildJobHandlers({
+      supabaseAdmin: {} as never,
+      store: new FakeStore(),
+      now: () => now,
+      dispatchCampaigns: async (options) => {
+        seen.push(options);
+        return { contactsDialed: 0 };
+      },
+    });
+    const prior = process.env["CAMPAIGN_DISPATCH_ENABLED"];
+    if (value === undefined) delete process.env["CAMPAIGN_DISPATCH_ENABLED"];
+    else process.env["CAMPAIGN_DISPATCH_ENABLED"] = value;
+    try {
+      const result = await handlers["campaign.dispatch"]!({ payload: {} } as Job);
+      return { result, seen, now };
+    } finally {
+      if (prior === undefined) delete process.env["CAMPAIGN_DISPATCH_ENABLED"];
+      else process.env["CAMPAIGN_DISPATCH_ENABLED"] = prior;
+    }
+  }
+
+  for (const value of [undefined, "", "  ", "false", "FALSE", "0", "yes", "1", "enabled"])
+    test(`dispatch stays off when CAMPAIGN_DISPATCH_ENABLED is ${JSON.stringify(value) ?? "unset"}`, async () => {
+      const { result, seen } = await runWithSetting(value);
+      assert.deepEqual(result, { skipped: "disabled" });
+      assert.equal(seen.length, 0, "the dispatcher is never called");
+    });
+
+  for (const value of ["true", "TRUE", " true "])
+    test(`dispatch runs when CAMPAIGN_DISPATCH_ENABLED is ${JSON.stringify(value)}, with a claim deadline`, async () => {
+      const { result, seen, now } = await runWithSetting(value);
+      assert.deepEqual(result, { contactsDialed: 0 });
+      assert.equal(seen.length, 1);
+      assert.equal(seen[0]!.deadline, now.getTime() + CAMPAIGN_DISPATCH_CLAIM_WINDOW_MS);
+    });
+
+  test("the claim window leaves room for one Sarvam request inside the job timeout", () => {
+    assert.ok(CAMPAIGN_DISPATCH_CLAIM_WINDOW_MS + 15_000 < 20_000);
+  });
+
+  test("overlapping ticks in the same minute enqueue one dispatch job", async () => {
+    const store = new FakeStore();
+    const supabaseAdmin = { rpc: async () => ({ data: [], error: null }) } as never;
+    let runs = 0;
+    const handlers = {
+      "campaign.dispatch": async () => {
+        runs++;
+      },
+      "sweep.call_finalization": async () => {},
+      "sweep.sarvam_reconcile": async () => {},
+      "jobs.prune": async () => {},
+    };
+    await Promise.all([
+      runScheduledTick({ supabaseAdmin, store, handlers, now: new Date("2026-11-17T10:00:05Z") }),
+      runScheduledTick({ supabaseAdmin, store, handlers, now: new Date("2026-11-17T10:00:40Z") }),
+    ]);
+    assert.equal(runs, 1);
+    await runScheduledTick({
+      supabaseAdmin,
+      store,
+      handlers,
+      now: new Date("2026-11-17T10:01:05Z"),
+    });
+    assert.equal(runs, 2, "the next minute dispatches again");
   });
 });

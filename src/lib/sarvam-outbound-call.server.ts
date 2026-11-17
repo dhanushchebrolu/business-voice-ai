@@ -11,6 +11,14 @@ import { TelephonyAdapterError } from "./telephony/adapter.ts";
 import { UNRESOLVED_SARVAM_STATUSES } from "./sarvam-call-review.ts";
 import { normalizeCustomerPhone } from "./phone-number.ts";
 import { finalizeTerminalCallSafely } from "./telephony/call-finalization.server.ts";
+import {
+  isOutboundReady,
+  OUTBOUND_NOT_READY_MESSAGE,
+  outboundBusinessName,
+  outboundCallVariables,
+  outboundOpeningLine,
+  withoutReservedOutboundVariables,
+} from "./sarvam-outbound-mode.server.ts";
 
 export interface SendInstantOutboundCallResult {
   callId: string;
@@ -89,6 +97,48 @@ export async function recordSarvamStartFailure(
   if (error) throw error;
   if (!data || data.length === 0) return "superseded";
   return unknown ? "outcome_unknown" : "failed";
+}
+
+/**
+ * Saves Sarvam's start response on the call row: only `attempt_id` becomes
+ * provider_call_id (never interaction_id, so the webhook's attempt-id check
+ * cannot reject the real result); interaction_id goes to provider_metadata.
+ *
+ * Never throws: the call has been placed, so a failed write must not be
+ * mistaken for a failed start. One retry, then a log line. The call still
+ * resolves: Sarvam's result webhook finds the row by metadata.call_id and
+ * backfills provider_call_id. Returns whether the response was saved.
+ */
+export async function persistStartResult(
+  supabaseAdmin: SupabaseClient<Database>,
+  callId: string,
+  started: { attemptId?: string | undefined; interactionId?: string | undefined },
+): Promise<boolean> {
+  const patch: Record<string, unknown> = {};
+  if (started.attemptId) patch["provider_call_id"] = started.attemptId;
+  if (started.interactionId) patch["provider_metadata"] = { interaction_id: started.interactionId };
+  if (Object.keys(patch).length === 0) return true;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const { error } = await supabaseAdmin
+        .from("call_logs")
+        .update(patch as never)
+        .eq("id", callId);
+      if (!error) return true;
+      console.error("sarvam_outbound:start_result_not_saved", {
+        callId,
+        attempt,
+        code: (error as { code?: string }).code ?? null,
+      });
+    } catch (err) {
+      console.error("sarvam_outbound:start_result_not_saved", {
+        callId,
+        attempt,
+        error: (err as Error).message,
+      });
+    }
+  }
+  return false;
 }
 
 /**
@@ -214,6 +264,10 @@ export async function sendSarvamInstantOutboundCall(
     phoneNumberId: string;
     toE164: string;
     agentVariables?: Record<string, unknown> | undefined;
+    /** Why this call is made; reaches the agent as campaign_objective. */
+    objective?: string | undefined;
+    /** Extra instructions from the customer; reaches the agent as campaign_instructions. */
+    instructions?: string | undefined;
   },
 ): Promise<SendInstantOutboundCallResult> {
   // Canonical E.164 before anything is read, written or dialled, so the
@@ -265,23 +319,24 @@ export async function sendSarvamInstantOutboundCall(
 
   const { data: agentConfig } = await supabaseAdmin
     .from("agent_configs")
-    .select(`id, organization_id, sarvam_app_id, sarvam_app_version, ${TEMPLATE_AGENT_COLUMNS}`)
+    .select(
+      `id, organization_id, sarvam_app_id, sarvam_app_version, sarvam_outbound_ready_app_id, sarvam_outbound_ready_version, ${TEMPLATE_AGENT_COLUMNS}`,
+    )
     .eq("id", phoneNumber.agent_config_id)
     .maybeSingle();
   if (!agentConfig || agentConfig.organization_id !== phoneNumber.organization_id)
     throw new Error("This number's agent does not belong to this organization.");
   if (!agentConfig.sarvam_app_id || !agentConfig.sarvam_app_version)
     throw new Error("This number's agent has not been mapped to a Sarvam app yet.");
+  // The customer's one agent dials only in a version confirmed for outbound.
+  if (!isOutboundReady(agentConfig)) throw new Error(OUTBOUND_NOT_READY_MESSAGE);
   // Read before the call row is reserved, so a missing profile dials nothing.
   const templateVariables = await templateCallVariables(
     supabaseAdmin,
     agentConfig,
     phoneNumber.organization_id,
   );
-  const agentVariables =
-    Object.keys(templateVariables).length > 0
-      ? { ...params.agentVariables, ...templateVariables }
-      : params.agentVariables;
+  const openingLine = outboundOpeningLine(await outboundBusinessName(supabaseAdmin, agentConfig));
 
   // An earlier Sarvam call to this number that is still unresolved —
   // `initiated` (in progress, or its start request never finished) or
@@ -328,25 +383,24 @@ export async function sendSarvamInstantOutboundCall(
       connectionId: connection.provider_connection_id,
       fromE164: phoneNumber.e164,
       toE164,
-      agentVariables,
+      // Direction, call id and objective last, so nothing else can change them.
+      agentVariables: {
+        ...withoutReservedOutboundVariables(params.agentVariables),
+        ...templateVariables,
+        ...outboundCallVariables({
+          callId: call.id,
+          objective: params.objective,
+          instructions: params.instructions,
+        }),
+      },
+      appOverrides: { initialBotMessage: openingLine },
       webhookUrl,
       metadata: { organizationId: phoneNumber.organization_id, callId: call.id },
     });
 
-    // Sarvam's documented response is { attempt_id }, the same key every
-    // single-call webhook carries, so only it becomes provider_call_id. When
-    // it is missing, provider_call_id stays null (never an interaction_id, so
-    // the webhook route's attempt-id check can't reject the real webhook) and
-    // the webhook's metadata.call_id fallback backfills it.
-    const patch: Record<string, unknown> = {};
-    if (dialed.attemptId) patch["provider_call_id"] = dialed.attemptId;
-    if (dialed.interactionId) patch["provider_metadata"] = { interaction_id: dialed.interactionId };
-    if (Object.keys(patch).length > 0) {
-      await supabaseAdmin
-        .from("call_logs")
-        .update(patch as never)
-        .eq("id", call.id);
-    }
+    // Sarvam's documented response is { attempt_id }; when it is missing the
+    // webhook's metadata.call_id fallback backfills provider_call_id.
+    await persistStartResult(supabaseAdmin, call.id, dialed);
     return { callId: call.id, interactionId: dialed.interactionId ?? null, outcome: "started" };
   } catch (err) {
     const recorded = await recordSarvamStartFailure(supabaseAdmin, call.id, err);

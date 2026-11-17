@@ -719,7 +719,9 @@ export class SarvamTelephonyAdapter implements TelephonyProviderAdapter {
         durationSeconds: status === "completed" ? toDurationSeconds(fields["duration"]) : undefined,
         recordingUrl: null,
         failureReason: isNonEmptyString(fields["failure_reason"]) ? fields["failure_reason"] : null,
-        occurredAt: new Date().toISOString(),
+        // Becomes ended_at: Sarvam's own end time when the payload has one
+        // (end_datetime, as on its other webhooks), otherwise when the result arrived.
+        occurredAt: toIsoOrNow(fields["end_datetime"]),
         transcript: parseTranscript(fields["interaction_transcript"]),
         agentVariables: collectAgentVariables(
           undefined,

@@ -29,6 +29,8 @@ import {
 interface CreateSarvamInstantOutboundCallInput {
   phoneNumberId: string;
   toE164: string;
+  /** Why the call is made; sanitized and capped before it reaches the agent. */
+  objective?: string | undefined;
 }
 
 export const createSarvamInstantOutboundCall = createServerFn({ method: "POST" })
@@ -43,16 +45,15 @@ export const createSarvamInstantOutboundCall = createServerFn({ method: "POST" }
   })
   .handler(async ({ data, context }) => {
     const { supabase, userId } = context;
-
-    const { data: membership } = await supabase
-      .from("organization_members")
-      .select("organization_id, role")
-      .eq("user_id", userId)
-      .order("created_at")
-      .limit(1)
-      .maybeSingle();
-    if (!membership) throw new Error("No workspace found for this account");
-    const orgId = membership.organization_id;
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    // The caller number's own organization; dialling needs an owner or admin of it.
+    const { outboundNumberOrganizationForCaller } =
+      await import("@/lib/outbound-authorization.server");
+    const orgId = await outboundNumberOrganizationForCaller(
+      { supabase, supabaseAdmin },
+      userId,
+      data.phoneNumberId,
+    );
 
     const gate = await checkTelephonyAccess(orgId, data.phoneNumberId, "outbound");
     if (!gate.allowed || !gate.phoneNumber)
@@ -63,10 +64,10 @@ export const createSarvamInstantOutboundCall = createServerFn({ method: "POST" }
     const affordable = await walletCanAffordOutbound(orgId);
     if (!affordable) throw new Error("Insufficient wallet balance to place this call.");
 
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const result = await sendSarvamInstantOutboundCall(supabaseAdmin, {
       phoneNumberId: data.phoneNumberId,
       toE164: data.toE164,
+      objective: typeof data.objective === "string" ? data.objective : undefined,
     });
 
     // outcome "unknown": Sarvam may have placed the call; it stays unconfirmed

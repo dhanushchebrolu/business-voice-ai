@@ -5,10 +5,11 @@ import type { JobHandler } from "./runner.server.ts";
 import type { ReconcileDeps } from "../sarvam-reconciliation.server.ts";
 
 /**
- * Job kinds and their handlers. Deliberately absent: campaign dispatch and
- * payment expiry. Campaign dispatch stays disabled and payment enforcement
- * is unchanged; a job of an unknown kind is dead-lettered, never run.
+ * Job kinds and their handlers. Deliberately absent: payment expiry (payment
+ * enforcement is unchanged); a job of an unknown kind is dead-lettered, never run.
  *
+ *   campaign.dispatch       dial due contacts of running campaigns (once a
+ *                           minute); runs only when CAMPAIGN_DISPATCH_ENABLED=true
  *   sweep.sarvam_reconcile  find unresolved Sarvam outbound calls, enqueue one
  *                           sarvam.reconcile_call each (at most hourly per call)
  *   sarvam.reconcile_call   read Sarvam's attempt, resolve only a final outcome
@@ -17,6 +18,16 @@ import type { ReconcileDeps } from "../sarvam-reconciliation.server.ts";
  *   call.finalize           finalize one call (idempotent, leased in SQL)
  *   jobs.prune              delete succeeded jobs older than 7 days
  */
+
+// The runner times a job out at 20 s and one Sarvam start request can take 15 s,
+// so new contacts are claimed only in the first few seconds of the job.
+// shortcut: caps throughput at a few dials a minute; give dispatch its own job timeout before large campaigns.
+export const CAMPAIGN_DISPATCH_CLAIM_WINDOW_MS = 3_000;
+
+/** Outbound dialling is opt-in: only an explicit "true" turns campaign dispatch on. */
+export function campaignDispatchEnabled(): boolean {
+  return process.env["CAMPAIGN_DISPATCH_ENABLED"]?.trim().toLowerCase() === "true";
+}
 
 const RECONCILE_MIN_AGE_MS = 15 * 60 * 1000;
 const RECONCILE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -29,6 +40,8 @@ export interface HandlerDeps {
   /** Sarvam lookups and resolution; default to the real adapter / resolution path. */
   reconcile?: ReconcileDeps;
   finalize?: (callId: string) => Promise<{ state: string; error?: string }>;
+  /** Campaign dispatcher; defaults to dispatchDueCampaigns. */
+  dispatchCampaigns?: (options: { deadline: number }) => Promise<Record<string, unknown>>;
 }
 
 const hourBucket = (d: Date) => d.toISOString().slice(0, 13);
@@ -63,6 +76,19 @@ export function buildJobHandlers(deps: HandlerDeps): Record<string, JobHandler> 
   const now = () => deps.now?.() ?? new Date();
 
   return {
+    "campaign.dispatch": async () => {
+      if (!campaignDispatchEnabled()) return { skipped: "disabled" };
+      const dispatch =
+        deps.dispatchCampaigns ??
+        (async (options: { deadline: number }) => {
+          const { dispatchDueCampaigns } = await import("../campaign-dispatch.server.ts");
+          return (await dispatchDueCampaigns(options)) as unknown as Record<string, unknown>;
+        });
+      // Per-campaign failures are in the summary; the job itself succeeds, so
+      // nothing is re-run before the next minute's dispatch.
+      return dispatch({ deadline: now().getTime() + CAMPAIGN_DISPATCH_CLAIM_WINDOW_MS });
+    },
+
     "sweep.sarvam_reconcile": async () => {
       const t = now();
       const { data, error } = await supabaseAdmin

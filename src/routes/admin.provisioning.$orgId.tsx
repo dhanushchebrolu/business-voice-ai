@@ -8,6 +8,7 @@ import {
   clearAdmissionBlock,
   confirmSarvamNumber,
   reverifyLiveDeployment,
+  setSarvamOutboundReady,
   updateSarvamWebhookToken,
   resumeSarvamDeploymentAfterTokenUpdate,
   getProvisioningDetail,
@@ -75,6 +76,8 @@ function ProvisioningDetail() {
   const [clearOpen, setClearOpen] = useState(false);
   const [reverifyOpen, setReverifyOpen] = useState(false);
   const reverifyLive = useServerFn(reverifyLiveDeployment);
+  const setOutboundReady = useServerFn(setSarvamOutboundReady);
+  const [outboundDialog, setOutboundDialog] = useState<"mark" | "clear" | null>(null);
   const updateWebhookToken = useServerFn(updateSarvamWebhookToken);
   const [webhookOpen, setWebhookOpen] = useState(false);
   const [confirmPause, setConfirmPause] = useState(false);
@@ -420,6 +423,38 @@ function ProvisioningDetail() {
             Register Sarvam agent
           </Button>
         </div>
+        <div
+          className="mt-3 flex flex-wrap items-center gap-2 text-sm"
+          data-testid="outbound-ready"
+        >
+          <span>Outbound calls:</span>
+          <code className="text-xs">
+            {data.agent?.sarvam_app_id &&
+            data.agent.sarvam_outbound_ready_app_id === data.agent.sarvam_app_id &&
+            data.agent.sarvam_outbound_ready_version === data.agent.sarvam_app_version
+              ? `confirmed for v${data.agent.sarvam_outbound_ready_version}`
+              : "not confirmed for this version"}
+          </code>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setOutboundDialog("mark")}
+            disabled={!data.agent?.sarvam_app_id}
+          >
+            Confirm this version for outbound
+          </Button>
+          {data.agent?.sarvam_outbound_ready_version ? (
+            <Button size="sm" variant="outline" onClick={() => setOutboundDialog("clear")}>
+              Withdraw outbound
+            </Button>
+          ) : null}
+        </div>
+        <p className="mt-1 text-xs text-muted-foreground">
+          The same agent handles inbound and outbound calls. Confirm only a committed version that
+          declares call_direction (default inbound), clickai_call_id, campaign_objective and
+          campaign_instructions and carries the outbound section, after a supervised outbound call
+          and an inbound check.
+        </p>
         {!data.masterAgentConfigured ? (
           <p className="mt-2 text-xs text-muted-foreground">
             SARVAM_MASTER_AGENT_APP_ID is not set on this server, so the master-agent check relies
@@ -611,6 +646,29 @@ function ProvisioningDetail() {
         onConfirm={async (reason) => {
           await clearBlock({ data: { orgId, reason } });
           toast.success("Block cleared.");
+          await refresh();
+        }}
+      />
+      <ReasonDialog
+        open={outboundDialog !== null}
+        onOpenChange={(open) => {
+          if (!open) setOutboundDialog(null);
+        }}
+        title={
+          outboundDialog === "clear"
+            ? "Withdraw outbound calling"
+            : "Confirm this agent version for outbound"
+        }
+        description={
+          outboundDialog === "clear"
+            ? "ClickAI stops placing outbound calls (single calls and campaigns) for this customer until a version is confirmed again. Inbound calls are not affected."
+            : "Records the customer's current Sarvam agent version as tested for outbound calls. Nothing changes in Sarvam. Mapping the agent to another version later blocks outbound again until that version is confirmed."
+        }
+        onConfirm={async (reason) => {
+          await setOutboundReady({ data: { orgId, ready: outboundDialog === "mark", reason } });
+          toast.success(
+            outboundDialog === "clear" ? "Outbound withdrawn." : "Version confirmed for outbound.",
+          );
           await refresh();
         }}
       />

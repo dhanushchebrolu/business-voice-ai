@@ -121,7 +121,9 @@ async function loadDetail(orgId: string) {
   const [agentRes, numbersRes, connRes, runsRes, auditRes] = await Promise.all([
     supabaseAdmin
       .from("agent_configs")
-      .select("id, business_id, sarvam_app_id, sarvam_app_version")
+      .select(
+        "id, business_id, sarvam_app_id, sarvam_app_version, sarvam_outbound_ready_app_id, sarvam_outbound_ready_version",
+      )
       .eq("organization_id", orgId)
       .maybeSingle(),
     supabaseAdmin
@@ -486,6 +488,42 @@ export const clearAdmissionBlock = createServerFn({ method: "POST" })
       reason: data.reason,
     });
     return { ok: true as const };
+  });
+
+/**
+ * Records (or clears) the customer's current Sarvam agent version as
+ * confirmed for outbound calls: the same one agent answers inbound and, in
+ * this version, also declares call_direction and the campaign variables and
+ * carries the outbound section. Mark it only after a supervised outbound test
+ * and an inbound regression check. ClickAI changes nothing in Sarvam here.
+ * A later remap to another version blocks outbound again automatically.
+ */
+export const setSarvamOutboundReady = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { orgId: string; ready: boolean; reason: string }) => {
+    if (!input?.orgId) throw new Error("orgId is required");
+    if (typeof input.ready !== "boolean") throw new Error("ready must be true or false");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "agents.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { setOutboundReady } = await import("@/lib/sarvam-outbound-mode.server");
+    const result = await setOutboundReady(supabaseAdmin, {
+      organizationId: data.orgId,
+      ready: data.ready,
+    });
+    if (!result.ok) throw new Error(result.reason);
+    await writeAudit(admin, {
+      action: data.ready ? "SARVAM_OUTBOUND_READY_SET" : "SARVAM_OUTBOUND_READY_CLEARED",
+      entityType: "agent_config",
+      entityId: null,
+      organizationId: data.orgId,
+      newValue: { ready: result.ready, app_id: result.appId, app_version: result.appVersion },
+      reason: data.reason,
+    });
+    return result;
   });
 
 /**

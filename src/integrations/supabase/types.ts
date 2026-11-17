@@ -137,6 +137,8 @@ export type Database = {
           primary_language: string;
           sarvam_app_id: string | null;
           sarvam_app_version: number | null;
+          sarvam_outbound_ready_app_id: string | null;
+          sarvam_outbound_ready_version: number | null;
           speaking_pace: number;
           status: string;
           transfer_number: string | null;
@@ -164,6 +166,8 @@ export type Database = {
           primary_language?: string;
           sarvam_app_id?: string | null;
           sarvam_app_version?: number | null;
+          sarvam_outbound_ready_app_id?: string | null;
+          sarvam_outbound_ready_version?: number | null;
           speaking_pace?: number;
           status?: string;
           transfer_number?: string | null;
@@ -191,6 +195,8 @@ export type Database = {
           primary_language?: string;
           sarvam_app_id?: string | null;
           sarvam_app_version?: number | null;
+          sarvam_outbound_ready_app_id?: string | null;
+          sarvam_outbound_ready_version?: number | null;
           speaking_pace?: number;
           status?: string;
           transfer_number?: string | null;

@@ -105,6 +105,8 @@ beforeEach(() => {
       agent_name: "A",
       sarvam_app_id: "app_a",
       sarvam_app_version: 1,
+      sarvam_outbound_ready_app_id: "app_a",
+      sarvam_outbound_ready_version: 1,
     },
     {
       id: "agent_b",
@@ -112,6 +114,8 @@ beforeEach(() => {
       agent_name: "B",
       sarvam_app_id: "app_b",
       sarvam_app_version: 3,
+      sarvam_outbound_ready_app_id: "app_b",
+      sarvam_outbound_ready_version: 3,
     },
   ];
   db.tables["phone_numbers"] = [];

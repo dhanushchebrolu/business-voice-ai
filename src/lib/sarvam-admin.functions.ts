@@ -787,24 +787,48 @@ export const updateSarvamCampaign = createServerFn({ method: "POST" })
   })
   .handler(async ({ data, context }) => {
     const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { checkSarvamCampaignStatusChange } = await import("@/lib/sarvam-outbound-mode.server");
+    // Every attempt is audited, refusals and errors too (never provider error text).
+    const audit = (organizationId: string | null, outcome: string) =>
+      writeAudit(admin, {
+        action:
+          outcome === "updated" ? "SARVAM_CAMPAIGN_UPDATED" : "SARVAM_CAMPAIGN_UPDATE_REFUSED",
+        entityType: "sarvam_campaign",
+        entityId: data.campaignId,
+        organizationId,
+        newValue: { name: data.name ?? null, status: data.status ?? null, outcome },
+        reason: data.reason,
+      });
+
+    // Starting or resuming dialling needs the mapped customer's agent version
+    // to be outbound-ready; unknown campaigns fail closed. Stopping always passes.
+    const check = await checkSarvamCampaignStatusChange(supabaseAdmin, {
+      providerCampaignId: data.campaignId.trim(),
+      status: data.status,
+    });
+    if (!check.ok) {
+      await audit(check.organizationId, "refused_not_outbound_ready");
+      throw new Error(check.reason);
+    }
+
     const adapter = getTelephonyAdapter("sarvam");
-    if (!adapter) throw new Error("Sarvam is not connected. Configure SARVAM_API_KEY first.");
-    if (!(adapter instanceof SarvamTelephonyAdapter))
-      throw new Error("Unexpected adapter type for provider 'sarvam'.");
+    if (!adapter || !(adapter instanceof SarvamTelephonyAdapter)) {
+      await audit(check.organizationId, "refused_sarvam_not_connected");
+      throw new Error("Sarvam is not connected. Configure SARVAM_API_KEY first.");
+    }
 
-    const updated = await adapter.updateCampaign(data.campaignId, {
-      name: data.name?.trim() || undefined,
-      status: data.status?.trim() || undefined,
-    });
-
-    await writeAudit(admin, {
-      action: "SARVAM_CAMPAIGN_UPDATED",
-      entityType: "sarvam_campaign",
-      entityId: data.campaignId,
-      organizationId: null,
-      newValue: { name: data.name, status: data.status },
-      reason: data.reason,
-    });
+    let updated;
+    try {
+      updated = await adapter.updateCampaign(data.campaignId, {
+        name: data.name?.trim() || undefined,
+        status: data.status?.trim() || undefined,
+      });
+    } catch (err) {
+      await audit(check.organizationId, "error");
+      throw err;
+    }
+    await audit(check.organizationId, "updated");
 
     return { ok: true as const, campaignId: updated.campaignId };
   });

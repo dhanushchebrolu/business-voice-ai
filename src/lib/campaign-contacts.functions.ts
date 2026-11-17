@@ -37,17 +37,18 @@ export interface ImportCsvResult {
   duplicatesInFile: number;
 }
 
-async function resolveOrgId(context: { supabase: unknown; userId: string }): Promise<string> {
-  const supabase = context.supabase as import("@supabase/supabase-js").SupabaseClient;
-  const { data: membership } = await supabase
-    .from("organization_members")
-    .select("organization_id")
-    .eq("user_id", context.userId)
-    .order("created_at")
-    .limit(1)
-    .maybeSingle();
-  if (!membership) throw new Error("No workspace found for this account");
-  return membership.organization_id as string;
+type CallerContext = { supabase: unknown; userId: string };
+
+/** The campaign's own organization, once the caller is a member of it. */
+async function campaignOrgId(context: CallerContext, campaignId: string): Promise<string> {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const { campaignOrganizationForCaller } = await import("@/lib/outbound-authorization.server");
+  return campaignOrganizationForCaller(
+    { supabase: context.supabase as typeof supabaseAdmin, supabaseAdmin },
+    context.userId,
+    campaignId,
+    { dial: false, notFoundMessage: "Campaign not found for this organization." },
+  );
 }
 
 async function requireOwnCampaign(orgId: string, campaignId: string) {
@@ -75,7 +76,7 @@ export const importCampaignContactsCsv = createServerFn({ method: "POST" })
     return input;
   })
   .handler(async ({ data, context }): Promise<ImportCsvResult> => {
-    const orgId = await resolveOrgId(context);
+    const orgId = await campaignOrgId(context, data.campaignId);
     await requireOwnCampaign(orgId, data.campaignId);
 
     const table = csvToTable(data.csvText);
@@ -190,7 +191,7 @@ export const enrollExistingContacts = createServerFn({ method: "POST" })
     return input;
   })
   .handler(async ({ data, context }) => {
-    const orgId = await resolveOrgId(context);
+    const orgId = await campaignOrgId(context, data.campaignId);
     await requireOwnCampaign(orgId, data.campaignId);
 
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
@@ -241,14 +242,22 @@ export const setContactOptOut = createServerFn({ method: "POST" })
     return input;
   })
   .handler(async ({ data, context }) => {
-    const orgId = await resolveOrgId(context);
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const { data: contact } = await supabaseAdmin
       .from("contacts")
       .select("id, organization_id")
       .eq("id", data.contactId)
       .maybeSingle();
-    if (!contact || contact.organization_id !== orgId) throw new Error("Contact not found.");
+    if (!contact) throw new Error("Contact not found.");
+    // The contact's own organization, once the caller is a member of it.
+    const { requireRole } = await import("@/lib/outbound-authorization.server");
+    const orgId = await requireRole(
+      { supabase: context.supabase as typeof supabaseAdmin, supabaseAdmin },
+      context.userId,
+      contact.organization_id,
+      false,
+      "Contact not found.",
+    );
 
     await supabaseAdmin
       .from("contacts")

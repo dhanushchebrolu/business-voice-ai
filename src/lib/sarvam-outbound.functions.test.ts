@@ -26,8 +26,8 @@ const src = readFileSync(
 );
 
 describe("createSarvamInstantOutboundCall — authorization and entitlement gates run before the shared call", () => {
-  test("resolves organization membership and calls checkTelephonyAccess before delegating", () => {
-    const membershipIdx = src.indexOf('.from("organization_members")');
+  test("resolves the number's own organization (owner or admin) and calls checkTelephonyAccess before delegating", () => {
+    const membershipIdx = src.indexOf("await outboundNumberOrganizationForCaller(");
     const gateIdx = src.indexOf("checkTelephonyAccess(orgId, data.phoneNumberId,");
     const delegateIdx = src.indexOf("await sendSarvamInstantOutboundCall(");
     assert.ok(membershipIdx > -1 && gateIdx > -1 && delegateIdx > -1);

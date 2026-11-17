@@ -1,4 +1,8 @@
 import type { CohortTransformation } from "./telephony/sarvam-api-client.server.ts";
+import {
+  outboundCallVariables,
+  withoutReservedOutboundVariables,
+} from "./sarvam-outbound-mode.server.ts";
 
 /**
  * Builds the CSV + transformation-mapping payload for the (experimental)
@@ -63,4 +67,42 @@ export function buildCohortPayload(rows: CohortRow[]): CohortPayload {
       appVariableColumns,
     },
   };
+}
+
+/**
+ * Cohort rows for the experimental sarvam_campaign mode. Sarvam dials these
+ * itself, with the customer's one agent, so every row carries the outbound
+ * variables explicitly, spread LAST so no contact column can change them:
+ * call_direction = "outbound", clickai_call_id = the campaign_contacts id
+ * (the ClickAI record for this attempt; no call_logs row exists until
+ * Sarvam's webhook), and the campaign's objective and instructions.
+ */
+export function buildOutboundCohortRows(
+  pending: { id: string; variables: unknown; phone: string | null | undefined }[],
+  campaign: { objective?: string | null; call_instructions?: string | null },
+): CohortRow[] {
+  return pending
+    .filter((cc) => Boolean(cc.phone))
+    .map((cc) => ({
+      campaignContactId: cc.id,
+      phone: cc.phone as string,
+      variables: {
+        ...withoutReservedOutboundVariables(stringValues(cc.variables)),
+        ...outboundCallVariables({
+          callId: cc.id,
+          objective: campaign.objective,
+          instructions: campaign.call_instructions,
+        }),
+      },
+    }));
+}
+
+/** Contact variables as strings (CSV cells); non-string values are dropped. */
+function stringValues(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).filter(
+      (entry): entry is [string, string] => typeof entry[1] === "string",
+    ),
+  );
 }

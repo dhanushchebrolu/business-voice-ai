@@ -210,7 +210,10 @@ describe("Sarvam campaigns — adapter/server boundary only, platform-admin-gate
       fnSrc,
       /assertPlatformAdmin\(context\.supabase, context\.userId, "numbers\.write"\)/,
     );
-    assert.match(fnSrc, /action:\s*"SARVAM_CAMPAIGN_UPDATED"/);
+    // Success and every refusal or error are audited.
+    assert.match(fnSrc, /"SARVAM_CAMPAIGN_UPDATED"/);
+    assert.match(fnSrc, /"SARVAM_CAMPAIGN_UPDATE_REFUSED"/);
+    assert.match(fnSrc, /await writeAudit\(admin,|writeAudit\(admin, \{/);
   });
 
   test("updateSarvamCampaign requires at least one of name or status to be provided", () => {

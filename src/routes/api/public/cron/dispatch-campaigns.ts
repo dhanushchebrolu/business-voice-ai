@@ -19,6 +19,14 @@ export const Route = createFileRoute("/api/public/cron/dispatch-campaigns")({
         const authError = await authenticateCronRequest(request);
         if (authError) return authError;
 
+        // Same opt-in as the scheduled job: nothing dials unless explicitly enabled.
+        const { campaignDispatchEnabled } = await import("@/lib/jobs/handlers.server");
+        if (!campaignDispatchEnabled()) {
+          return new Response(JSON.stringify({ skipped: "disabled" }), {
+            headers: { "content-type": "application/json" },
+          });
+        }
+
         try {
           const summary = await dispatchDueCampaigns();
           return new Response(JSON.stringify(summary), {

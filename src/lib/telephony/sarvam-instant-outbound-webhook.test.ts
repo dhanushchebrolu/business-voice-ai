@@ -271,14 +271,36 @@ test("campaign dispatcher sends call_id and stores only attempt_id as provider_c
     join(dirname(fileURLToPath(import.meta.url)), "../campaign-dispatch.server.ts"),
     "utf8",
   );
+  const shared = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "../sarvam-outbound-call.server.ts"),
+    "utf8",
+  );
   assert.match(dispatch, /callId: call\.id/);
+  // Both outbound paths save the start response through the same function.
+  assert.match(dispatch, /await persistStartResult\(supabaseAdmin, call\.id, result\);/);
   assert.match(
-    dispatch,
-    /if \(result\.attemptId\) patch\["provider_call_id"\] = result\.attemptId;/,
+    shared,
+    /if \(started\.attemptId\) patch\["provider_call_id"\] = started\.attemptId;/,
   );
   assert.match(
-    dispatch,
-    /patch\["provider_metadata"\] = \{ interaction_id: result\.interactionId \}/,
+    shared,
+    /patch\["provider_metadata"\] = \{ interaction_id: started\.interactionId \}/,
   );
-  assert.doesNotMatch(dispatch, /attemptId \?\? result\.interactionId/);
+  assert.doesNotMatch(dispatch + shared, /attemptId \?\? \w+\.interactionId/);
+});
+
+describe("single-call end time (becomes ended_at)", () => {
+  test("Sarvam's end_datetime is used when present", () => {
+    const e = normalize(payload({ end_datetime: "2026-11-17T14:51:22.942708+00:00" }));
+    assert.equal(e?.occurredAt, "2026-11-17T14:51:22.942Z");
+  });
+
+  test("missing or invalid end time falls back to when the result arrived, as before", () => {
+    for (const end of [undefined, "", "not-a-date", 12345]) {
+      const before = Date.now();
+      const e = normalize(payload(end === undefined ? {} : { end_datetime: end }));
+      const at = Date.parse(e!.occurredAt);
+      assert.ok(at >= before && at <= Date.now(), `fallback for ${String(end)}`);
+    }
+  });
 });

@@ -43,6 +43,7 @@ export function periodicJobs(now: Date): { kind: string; idempotencyKey: string 
   const fiveMinute = `${iso.slice(0, 14)}${String(Math.floor(now.getUTCMinutes() / 5) * 5).padStart(2, "0")}`;
   return [
     { kind: "sweep.call_finalization", idempotencyKey: `sweep.call_finalization:${minute}` },
+    { kind: "campaign.dispatch", idempotencyKey: `campaign.dispatch:${minute}` },
     { kind: "sweep.sarvam_reconcile", idempotencyKey: `sweep.sarvam_reconcile:${fiveMinute}` },
     { kind: "jobs.prune", idempotencyKey: `jobs.prune:${iso.slice(0, 10)}` },
   ];

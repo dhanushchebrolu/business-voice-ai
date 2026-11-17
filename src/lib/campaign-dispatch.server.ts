@@ -1,19 +1,26 @@
-import { getTelephonyAdapter, sarvamOutboundWebhookUrl } from "@/lib/telephony.server";
-import { checkTelephonyAccess, walletCanAffordOutbound } from "@/lib/telephony-guard.server";
-import { SarvamTelephonyAdapter } from "@/lib/telephony/sarvam-provider.server";
-import {
-  TEMPLATE_AGENT_COLUMNS,
-  templateCallVariables,
-} from "@/lib/sarvam-tenant-variables.server";
-import { isWithinCallingWindow, type CampaignSchedule } from "@/lib/campaign-schedule";
-import { normalizeCustomerPhone } from "@/lib/phone-number";
-import { decideCampaignContactOutcome, type CallTerminalStatus } from "@/lib/campaign-outcome";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import type { Database } from "@/integrations/supabase/types";
+import { getTelephonyAdapter, sarvamOutboundWebhookUrl } from "./telephony.server.ts";
+import { checkTelephonyAccess, walletCanAffordOutbound } from "./telephony-guard.server.ts";
+import { SarvamTelephonyAdapter } from "./telephony/sarvam-provider.server.ts";
+import { TEMPLATE_AGENT_COLUMNS, templateCallVariables } from "./sarvam-tenant-variables.server.ts";
+import { isWithinCallingWindow, type CampaignSchedule } from "./campaign-schedule.ts";
+import { normalizeCustomerPhone } from "./phone-number.ts";
+import { decideCampaignContactOutcome, type CallTerminalStatus } from "./campaign-outcome.ts";
 import {
   isSarvamOutboundDestinationAllowed,
+  persistStartResult,
   recordCampaignStartFailure,
   releaseCampaignClaim,
-} from "@/lib/sarvam-outbound-call.server";
-import { finalizeTerminalCallSafely } from "@/lib/telephony/call-finalization.server";
+} from "./sarvam-outbound-call.server.ts";
+import { finalizeTerminalCallSafely } from "./telephony/call-finalization.server.ts";
+import {
+  isOutboundReady,
+  outboundBusinessName,
+  outboundCallVariables,
+  outboundOpeningLine,
+  withoutReservedOutboundVariables,
+} from "./sarvam-outbound-mode.server.ts";
 
 /**
  * The outbound campaign dispatcher — Klyro's own pacing/retry engine
@@ -27,10 +34,11 @@ import { finalizeTerminalCallSafely } from "@/lib/telephony/call-finalization.se
  * walletCanAffordOutbound) the existing single-call outbound flow already
  * uses — no second, competing authorization or billing system.
  *
- * Invoked by the cron-authenticated route
- * (src/routes/api/public/cron/dispatch-campaigns.ts) on whatever interval
- * the platform's own scheduler is configured for — not by end users, and
- * never by an unauthenticated caller (see authenticateCronRequest).
+ * Invoked once a minute by the Worker's own scheduler (the `campaign.dispatch`
+ * job, src/lib/jobs/handlers.server.ts), and by the cron-authenticated route
+ * (src/routes/api/public/cron/dispatch-campaigns.ts) — never by end users or
+ * an unauthenticated caller. A pause or cancel stops the batch at the next
+ * contact: the campaign is re-read before every claim and again after it.
  *
  * Bounded on purpose: at most MAX_CONTACTS_PER_CAMPAIGN_PER_TICK contacts
  * per running campaign, per invocation — a single cron tick must never try
@@ -49,8 +57,50 @@ export interface DispatchSummary {
   errors: { campaignId: string; message: string }[];
 }
 
-export async function dispatchDueCampaigns(): Promise<DispatchSummary> {
+/** Everything the dispatcher reads or dials through; tests replace these with fakes. */
+export interface DispatchDeps {
+  supabaseAdmin: SupabaseClient<Database>;
+  checkTelephonyAccess: typeof checkTelephonyAccess;
+  walletCanAffordOutbound: typeof walletCanAffordOutbound;
+  /** The Sarvam adapter, or null when Sarvam is not configured. */
+  adapter: Pick<SarvamTelephonyAdapter, "createInstantOutbound"> | null;
+  webhookUrl: ReturnType<typeof sarvamOutboundWebhookUrl>;
+  templateVariables: (
+    agentConfig: Parameters<typeof templateCallVariables>[1],
+    organizationId: string,
+  ) => Promise<Record<string, unknown>>;
+  finalize: (callId: string) => Promise<unknown>;
+  now: () => number;
+}
+
+export interface DispatchOptions {
+  /** Stop claiming contacts at this time (ms since epoch); calls already started still finish. */
+  deadline?: number;
+  deps?: DispatchDeps;
+}
+
+async function defaultDispatchDeps(): Promise<DispatchDeps> {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const adapter = getTelephonyAdapter("sarvam");
+  return {
+    supabaseAdmin,
+    checkTelephonyAccess,
+    walletCanAffordOutbound,
+    adapter: adapter instanceof SarvamTelephonyAdapter ? adapter : null,
+    webhookUrl: sarvamOutboundWebhookUrl(),
+    templateVariables: (agentConfig, organizationId) =>
+      templateCallVariables(supabaseAdmin, agentConfig, organizationId),
+    finalize: (callId) => finalizeTerminalCallSafely(supabaseAdmin, callId),
+    now: Date.now,
+  };
+}
+
+export async function dispatchDueCampaigns(
+  options: DispatchOptions = {},
+): Promise<DispatchSummary> {
+  const deps = options.deps ?? (await defaultDispatchDeps());
+  const deadline = options.deadline ?? Number.POSITIVE_INFINITY;
+  const { supabaseAdmin } = deps;
   const summary: DispatchSummary = {
     campaignsConsidered: 0,
     campaignsDialed: 0,
@@ -72,9 +122,10 @@ export async function dispatchDueCampaigns(): Promise<DispatchSummary> {
     .eq("dispatch_mode", "instant_outbound_fallback");
 
   for (const campaign of campaigns ?? []) {
+    if (deps.now() >= deadline) break;
     summary.campaignsConsidered++;
     try {
-      const dialed = await dispatchOneCampaign(campaign);
+      const dialed = await dispatchOneCampaign(campaign, deps, deadline);
       summary.contactsDialed += dialed.dialed;
       summary.contactsSkipped += dialed.skipped;
       if (dialed.dialed > 0) summary.campaignsDialed++;
@@ -101,8 +152,10 @@ async function dispatchOneCampaign(
     retry_after_minutes: number;
     retry_statuses: string[];
   },
+  deps: DispatchDeps,
+  deadline: number,
 ): Promise<{ dialed: number; skipped: number; completed: boolean }> {
-  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const { supabaseAdmin } = deps;
 
   if (!isWithinCallingWindow((campaign.schedule as CampaignSchedule) ?? {})) {
     return { dialed: 0, skipped: 0, completed: false };
@@ -111,7 +164,7 @@ async function dispatchOneCampaign(
     return { dialed: 0, skipped: 0, completed: false };
   }
 
-  const gate = await checkTelephonyAccess(
+  const gate = await deps.checkTelephonyAccess(
     campaign.organization_id,
     campaign.phone_number_id,
     "outbound",
@@ -131,7 +184,9 @@ async function dispatchOneCampaign(
       : Promise.resolve({ data: null }),
     supabaseAdmin
       .from("agent_configs")
-      .select(`organization_id, sarvam_app_id, sarvam_app_version, ${TEMPLATE_AGENT_COLUMNS}`)
+      .select(
+        `organization_id, sarvam_app_id, sarvam_app_version, sarvam_outbound_ready_app_id, sarvam_outbound_ready_version, ${TEMPLATE_AGENT_COLUMNS}`,
+      )
       .eq("id", campaign.agent_config_id)
       .eq("organization_id", campaign.organization_id)
       .maybeSingle(),
@@ -143,19 +198,21 @@ async function dispatchOneCampaign(
   ) {
     return { dialed: 0, skipped: 0, completed: false };
   }
-
-  const adapter = getTelephonyAdapter("sarvam");
-  if (!adapter || !(adapter instanceof SarvamTelephonyAdapter)) {
+  // The customer's one agent dials only in a version confirmed for outbound.
+  if (!isOutboundReady(agentConfig)) {
+    console.error("campaign_dispatch:agent_not_outbound_ready", campaign.id);
     return { dialed: 0, skipped: 0, completed: false };
   }
-  const templateVariables = await templateCallVariables(
-    supabaseAdmin,
-    agentConfig,
-    campaign.organization_id,
-  );
+
+  const adapter = deps.adapter;
+  if (!adapter) {
+    return { dialed: 0, skipped: 0, completed: false };
+  }
+  const templateVariables = await deps.templateVariables(agentConfig, campaign.organization_id);
+  const openingLine = outboundOpeningLine(await outboundBusinessName(supabaseAdmin, agentConfig));
   // Authenticated result URL (verify_token). Without it Sarvam's results would
   // be rejected, so nothing is dialled. Only the reason is logged, never the URL.
-  const webhook = sarvamOutboundWebhookUrl();
+  const webhook = deps.webhookUrl;
   if (!webhook.ok) {
     console.error("campaign_dispatch:webhook_not_configured", campaign.id, webhook.reason);
     return { dialed: 0, skipped: 0, completed: false };
@@ -167,14 +224,26 @@ async function dispatchOneCampaign(
     .select("id, contact_id, status, attempts, variables")
     .eq("campaign_id", campaign.id)
     .in("status", ["pending", "retry_scheduled"])
-    .or(`next_attempt_at.is.null,next_attempt_at.lte.${new Date().toISOString()}`)
+    .or(`next_attempt_at.is.null,next_attempt_at.lte.${new Date(deps.now()).toISOString()}`)
     .order("created_at")
     .limit(MAX_CONTACTS_PER_CAMPAIGN_PER_TICK);
 
   let dialed = 0;
   let skipped = 0;
 
+  // Read fresh for every contact, so a pause or cancel stops the batch at the next claim.
+  const stillRunning = async () => {
+    const { data, error } = await supabaseAdmin
+      .from("campaigns")
+      .select("status")
+      .eq("id", campaign.id)
+      .maybeSingle();
+    if (error) throw error;
+    return data?.status === "running";
+  };
+
   for (const cc of due ?? []) {
+    if (deps.now() >= deadline || !(await stillRunning())) break;
     const { data: contact } = await supabaseAdmin
       .from("contacts")
       .select("id, phone, opted_out")
@@ -216,7 +285,7 @@ async function dispatchOneCampaign(
     // campaign can run out of wallet balance mid-run, and every remaining
     // contact must simply stay "pending" (never marked failed) until
     // there's balance again, exactly like the single-call path's own gate.
-    const affordable = await walletCanAffordOutbound(campaign.organization_id);
+    const affordable = await deps.walletCanAffordOutbound(campaign.organization_id);
     if (!affordable) {
       skipped++;
       break; // no point trying the rest of this campaign's batch this tick
@@ -251,6 +320,22 @@ async function dispatchOneCampaign(
     if (!claimed || claimed.length === 0) {
       skipped++;
       continue;
+    }
+    // A pause or cancel that landed between the check above and this claim:
+    // nothing is dialled, and the contact goes back (or is cancelled). A failed
+    // read counts as "not running", so the claimed contact is never stranded.
+    const running = await stillRunning().catch((err: Error) => {
+      console.error("campaign_dispatch:status_check_failed", campaign.id, err.message);
+      return false;
+    });
+    if (!running) {
+      await releaseCampaignClaim(supabaseAdmin, {
+        campaignId: campaign.id,
+        campaignContactId: cc.id,
+        previousStatus: cc.status,
+        previousAttempts: cc.attempts,
+      });
+      break;
     }
 
     const { data: call, error: insertError } = await supabaseAdmin
@@ -293,13 +378,16 @@ async function dispatchOneCampaign(
     }
 
     const agentVariables: Record<string, unknown> = {
-      ...((cc.variables as Record<string, unknown> | null) ?? {}),
+      ...withoutReservedOutboundVariables(cc.variables as Record<string, unknown> | null),
       // The customer's own business identity wins over contact columns.
       ...templateVariables,
+      // Direction, call id and objective last, so no contact column can change them.
+      ...outboundCallVariables({
+        callId: call.id,
+        objective: campaign.objective,
+        instructions: campaign.call_instructions,
+      }),
     };
-    if (campaign.objective) agentVariables["campaign_objective"] = campaign.objective;
-    if (campaign.call_instructions)
-      agentVariables["campaign_instructions"] = campaign.call_instructions;
 
     try {
       const result = await adapter.createInstantOutbound({
@@ -309,6 +397,7 @@ async function dispatchOneCampaign(
         fromE164: gate.phoneNumber.e164,
         toE164: destination,
         agentVariables,
+        appOverrides: { initialBotMessage: openingLine },
         webhookUrl,
         metadata: {
           organizationId: campaign.organization_id,
@@ -318,18 +407,7 @@ async function dispatchOneCampaign(
           callId: call.id,
         },
       });
-      // Only Sarvam's attempt_id (on every single-call webhook) becomes
-      // provider_call_id; see sendSarvamInstantOutboundCall for why never interaction_id.
-      const patch: Record<string, unknown> = {};
-      if (result.attemptId) patch["provider_call_id"] = result.attemptId;
-      if (result.interactionId)
-        patch["provider_metadata"] = { interaction_id: result.interactionId };
-      if (Object.keys(patch).length > 0) {
-        await supabaseAdmin
-          .from("call_logs")
-          .update(patch as never)
-          .eq("id", call.id);
-      }
+      await persistStartResult(supabaseAdmin, call.id, result);
       dialed++;
     } catch (err) {
       // Race-safe: only a call still `initiated` is changed, and the contact
@@ -342,7 +420,7 @@ async function dispatchOneCampaign(
         // The campaign's "failed" outcome (which may schedule a retry) is applied
         // by finalization, exactly once, guarded by current_call_id.
         async () => {
-          await finalizeTerminalCallSafely(supabaseAdmin, call.id);
+          await deps.finalize(call.id);
         },
       );
       if (recorded === "outcome_unknown") {
@@ -351,7 +429,7 @@ async function dispatchOneCampaign(
     }
   }
 
-  const completed = await maybeCompleteCampaign(campaign.id);
+  const completed = await maybeCompleteCampaign(campaign.id, supabaseAdmin);
   return { dialed, skipped, completed };
 }
 
@@ -409,8 +487,12 @@ export async function applyOutcomeToCampaignContact(
 }
 
 /** Marks a campaign completed once every enrolled contact has reached a terminal (non-retryable, non-in-flight) state. */
-export async function maybeCompleteCampaign(campaignId: string): Promise<boolean> {
-  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+export async function maybeCompleteCampaign(
+  campaignId: string,
+  client?: SupabaseClient<Database>,
+): Promise<boolean> {
+  const supabaseAdmin =
+    client ?? (await import("@/integrations/supabase/client.server")).supabaseAdmin;
   const { count } = await supabaseAdmin
     .from("campaign_contacts")
     .select("id", { count: "exact", head: true })

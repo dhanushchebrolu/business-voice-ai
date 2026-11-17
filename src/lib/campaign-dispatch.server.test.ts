@@ -117,17 +117,32 @@ describe("campaign dispatch cron route — access control", () => {
   test("never accepts a caller-supplied campaign/organization id — it dispatches everything due", () => {
     assert.doesNotMatch(cronRoute, /request\.(json|text)\(\)/);
   });
+
+  test("dials only when campaign dispatch is explicitly enabled, checked after auth", () => {
+    const auth = cronRoute.indexOf("if (authError) return authError");
+    const gate = cronRoute.indexOf("if (!campaignDispatchEnabled()) {");
+    const dispatchIdx = cronRoute.indexOf("await dispatchDueCampaigns(");
+    assert.ok(auth > -1 && gate > auth && dispatchIdx > gate);
+    assert.match(cronRoute.slice(gate, dispatchIdx), /skipped: "disabled"/);
+  });
 });
 
 describe("campaign lifecycle server functions — tenant isolation", () => {
-  test("every transition re-resolves the organization from the authenticated user's own membership, never a client-supplied org id", () => {
-    // Each handler calls resolveOrgId(context) rather than trusting an
-    // organizationId field on the input.
+  test("every handler takes the organization from the campaign itself, checked against the caller's membership, never a client-supplied org id", () => {
     const handlerCount = (campaignsFn.match(/\.handler\(async \(\{ data, context \}\)/g) ?? [])
       .length;
-    const resolveCount = (campaignsFn.match(/resolveOrgId\(context\)/g) ?? []).length;
+    const resolveCount = (campaignsFn.match(/campaignOrgId\(context, data\.campaignId, /g) ?? [])
+      .length;
     assert.ok(handlerCount > 0, "expected at least one handler");
     assert.equal(resolveCount, handlerCount);
+    assert.doesNotMatch(campaignsFn, /\.order\("created_at"\)\s*\.limit\(1\)/);
+    assert.doesNotMatch(campaignsFn, /organizationId:\s*data\./);
+  });
+
+  test("launching or resuming dials, so it needs an owner or admin; pause, cancel and stats need membership", () => {
+    assert.match(campaignsFn, /campaignOrgId\(context, data\.campaignId, true\)/);
+    assert.match(campaignsFn, /simpleTransition\(\["running"\], "paused", "paused_at", false\)/);
+    assert.match(campaignsFn, /simpleTransition\(\["paused"\], "running", null, true\)/);
   });
 
   test("launch re-validates entitlement/billing/readiness — it does not just flip a status column", () => {
@@ -160,10 +175,12 @@ describe("Sarvam result webhook: both outbound paths use the authenticated URL",
     const d = src(dispatch);
     assert.match(
       d,
-      /import \{ getTelephonyAdapter, sarvamOutboundWebhookUrl \} from "@\/lib\/telephony\.server";/,
+      /import \{ getTelephonyAdapter, sarvamOutboundWebhookUrl \} from "\.\/telephony\.server\.ts";/,
     );
     assert.doesNotMatch(d, /sarvamWebhookUrl\(/);
-    const check = d.indexOf("const webhook = sarvamOutboundWebhookUrl();");
+    // Built once per dispatch run (defaultDispatchDeps), read per campaign.
+    assert.match(d, /webhookUrl: sarvamOutboundWebhookUrl\(\),/);
+    const check = d.indexOf("const webhook = deps.webhookUrl;");
     const refuse = d.indexOf("if (!webhook.ok) {", check);
     const due = d.indexOf('.from("campaign_contacts")', check);
     const dial = d.indexOf("adapter.createInstantOutbound({", check);

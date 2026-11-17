@@ -3,7 +3,7 @@ import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { checkTelephonyAccess, walletCanAffordOutbound } from "@/lib/telephony-guard.server";
 import { getTelephonyAdapter } from "@/lib/telephony.server";
 import { SarvamTelephonyAdapter } from "@/lib/telephony/sarvam-provider.server";
-import { buildCohortPayload } from "@/lib/campaign-cohort";
+import { buildCohortPayload, buildOutboundCohortRows } from "@/lib/campaign-cohort";
 
 /**
  * Platform-wide kill switch for the experimental `sarvam_campaign` dispatch
@@ -38,17 +38,20 @@ function sarvamCampaignModeArmed(): boolean {
  * calling window/retry rules.
  */
 
-async function resolveOrgId(context: { supabase: unknown; userId: string }): Promise<string> {
-  const supabase = context.supabase as import("@supabase/supabase-js").SupabaseClient;
-  const { data: membership } = await supabase
-    .from("organization_members")
-    .select("organization_id")
-    .eq("user_id", context.userId)
-    .order("created_at")
-    .limit(1)
-    .maybeSingle();
-  if (!membership) throw new Error("No workspace found for this account");
-  return membership.organization_id as string;
+/** The campaign's own organization, once the caller may act on it (dial: owner or admin). */
+async function campaignOrgId(
+  context: { supabase: unknown; userId: string },
+  campaignId: string,
+  dial: boolean,
+): Promise<string> {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const { campaignOrganizationForCaller } = await import("@/lib/outbound-authorization.server");
+  return campaignOrganizationForCaller(
+    { supabase: context.supabase as typeof supabaseAdmin, supabaseAdmin },
+    context.userId,
+    campaignId,
+    { dial },
+  );
 }
 
 interface LaunchCampaignInput {
@@ -62,7 +65,7 @@ export const launchCampaign = createServerFn({ method: "POST" })
     return input;
   })
   .handler(async ({ data, context }) => {
-    const orgId = await resolveOrgId(context);
+    const orgId = await campaignOrgId(context, data.campaignId, true);
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
     const { data: campaign } = await supabaseAdmin
@@ -104,7 +107,9 @@ export const launchCampaign = createServerFn({ method: "POST" })
 
       const { data: agentConfig } = await supabaseAdmin
         .from("agent_configs")
-        .select("organization_id, sarvam_app_id, sarvam_app_version")
+        .select(
+          "organization_id, sarvam_app_id, sarvam_app_version, sarvam_outbound_ready_app_id, sarvam_outbound_ready_version",
+        )
         .eq("id", campaign.agent_config_id)
         .maybeSingle();
       if (!agentConfig || agentConfig.organization_id !== orgId)
@@ -113,6 +118,9 @@ export const launchCampaign = createServerFn({ method: "POST" })
         throw new Error(
           "This campaign's agent has not been mapped to a Sarvam app yet — contact support.",
         );
+      const { isOutboundReady, OUTBOUND_NOT_READY_MESSAGE } =
+        await import("@/lib/sarvam-outbound-mode.server");
+      if (!isOutboundReady(agentConfig)) throw new Error(OUTBOUND_NOT_READY_MESSAGE);
     }
 
     // 3. Billing: at least one call must be affordable right now (spec §43).
@@ -192,6 +200,8 @@ async function launchViaSarvamCampaign(
     organization_id: string;
     provider_campaign_id: string | null;
     provider_cohort_id: string | null;
+    objective?: string | null;
+    call_instructions?: string | null;
   },
   orgId: string,
 ) {
@@ -208,20 +218,15 @@ async function launchViaSarvamCampaign(
     .eq("campaign_id", campaign.id)
     .in("status", ["pending", "retry_scheduled"]);
 
-  const rows = (pending ?? [])
-    .filter((cc) => (cc as { contacts: { phone: string } | null }).contacts?.phone)
-    .map((cc) => {
-      const typed = cc as {
-        id: string;
-        variables: Record<string, string>;
-        contacts: { phone: string };
-      };
-      return {
-        campaignContactId: typed.id,
-        phone: typed.contacts.phone,
-        variables: typed.variables,
-      };
-    });
+  // Every row is explicitly outbound for the customer's one agent: direction,
+  // ClickAI id and campaign context are applied after the contact's own columns.
+  const rows = buildOutboundCohortRows(
+    (pending ?? []).map((cc) => {
+      const typed = cc as { id: string; variables: unknown; contacts: { phone: string } | null };
+      return { id: typed.id, variables: typed.variables, phone: typed.contacts?.phone };
+    }),
+    campaign,
+  );
   if (rows.length === 0) return;
 
   const payload = buildCohortPayload(rows);
@@ -263,6 +268,7 @@ function simpleTransition(
   fromStatuses: string[],
   toStatus: string,
   timestampColumn: string | null,
+  dial: boolean,
 ) {
   return createServerFn({ method: "POST" })
     .middleware([requireSupabaseAuth])
@@ -271,7 +277,7 @@ function simpleTransition(
       return input;
     })
     .handler(async ({ data, context }) => {
-      const orgId = await resolveOrgId(context);
+      const orgId = await campaignOrgId(context, data.campaignId, dial);
       const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
       const { data: campaign } = await supabaseAdmin
         .from("campaigns")
@@ -293,10 +299,10 @@ function simpleTransition(
 }
 
 /** Pause: stops the dispatcher from claiming any more due contacts for this campaign. In-flight calls finish normally. */
-export const pauseCampaign = simpleTransition(["running"], "paused", "paused_at");
+export const pauseCampaign = simpleTransition(["running"], "paused", "paused_at", false);
 
 /** Resume: identical readiness bar as launch is deliberately NOT re-run here — spec §38 only requires pause->edit->resume for fields that need it; resuming without editing should not re-block on transient billing dips the dispatcher itself already re-checks per call. */
-export const resumeCampaign = simpleTransition(["paused"], "running", null);
+export const resumeCampaign = simpleTransition(["paused"], "running", null, true);
 
 export const cancelCampaign = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
@@ -305,7 +311,7 @@ export const cancelCampaign = createServerFn({ method: "POST" })
     return input;
   })
   .handler(async ({ data, context }) => {
-    const orgId = await resolveOrgId(context);
+    const orgId = await campaignOrgId(context, data.campaignId, false);
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const { data: campaign } = await supabaseAdmin
       .from("campaigns")
@@ -342,7 +348,7 @@ export const getCampaignStats = createServerFn({ method: "GET" })
     return input;
   })
   .handler(async ({ data, context }): Promise<CampaignStats> => {
-    const orgId = await resolveOrgId(context);
+    const orgId = await campaignOrgId(context, data.campaignId, false);
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const { data: campaign } = await supabaseAdmin
       .from("campaigns")

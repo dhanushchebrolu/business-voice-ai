@@ -30,11 +30,12 @@ export function memorySupabase(opts: {
     let op: "select" | "insert" | "update" = "select";
     let payload: Row | null = null;
     let returning = false;
-    let mode: "many" | "single" | "maybeSingle" = "many";
+    let mode: "many" | "single" | "maybeSingle" | "count" = "many";
+    let limit = Number.POSITIVE_INFINITY;
 
     const rows = () => (tables[table] ??= []);
 
-    function run(): { data: unknown; error: unknown } {
+    function run(): { data: unknown; error: unknown; count?: number } {
       const failKey = `${table}:${op}`;
       if (op !== "select" && failures[failKey]) {
         const error = failures[failKey];
@@ -63,8 +64,9 @@ export function memorySupabase(opts: {
           for (const r of matched)
             Object.assign(r, payload, { updated_at: new Date().toISOString() });
         }
-        result = matched;
+        result = op === "select" ? matched.slice(0, limit) : matched;
       }
+      if (mode === "count") return { data: null, count: result.length, error: null };
       if (op !== "select" && !returning) return { data: null, error: null };
       const copy = result.map((r) => ({ ...r }));
       if (mode === "single")
@@ -76,8 +78,30 @@ export function memorySupabase(opts: {
     }
 
     const b = {
-      select() {
+      select(_columns?: string, options?: { count?: string; head?: boolean }) {
         if (op !== "select") returning = true;
+        if (options?.head) mode = "count";
+        return b;
+      },
+      limit(n: number) {
+        limit = n;
+        return b;
+      },
+      /** PostgREST `or`: comma-separated `column.op.value`, ops is/eq/lte/gte. */
+      or(expression: string) {
+        const parts = expression.split(",").map((p) => {
+          const [col, operator, ...rest] = p.split(".");
+          const value = rest.join(".");
+          return (r: Row) => {
+            const v = r[col!];
+            if (operator === "is") return value === "null" ? (v ?? null) === null : false;
+            if (operator === "eq") return String(v) === value;
+            if (operator === "lte") return v != null && String(v) <= value;
+            if (operator === "gte") return v != null && String(v) >= value;
+            throw new Error(`memory-supabase: unsupported or() operator ${operator}`);
+          };
+        });
+        filters.push((r) => parts.some((f) => f(r)));
         return b;
       },
       insert(p: Row) {

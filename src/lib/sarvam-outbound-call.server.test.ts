@@ -2,6 +2,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
   isSarvamOutboundDestinationAllowed,
+  persistStartResult,
   sendSarvamInstantOutboundCall,
 } from "./sarvam-outbound-call.server.ts";
 
@@ -148,6 +149,8 @@ const AGENT_CONFIG_ROW = {
   organization_id: "org_1",
   sarvam_app_id: "app_1",
   sarvam_app_version: 2,
+  sarvam_outbound_ready_app_id: "app_1",
+  sarvam_outbound_ready_version: 2,
 };
 
 describe("sendSarvamInstantOutboundCall — happy path", () => {
@@ -579,5 +582,224 @@ describe("sendSarvamInstantOutboundCall — authenticated result webhook", () =>
     const { SARVAM_WEBHOOK_SECRET_MISSING_MESSAGE } = await import("./telephony.server.ts");
     assert.match(SARVAM_WEBHOOK_SECRET_MISSING_MESSAGE, /SARVAM_WEBHOOK_SECRET/);
     assert.doesNotMatch(SARVAM_WEBHOOK_SECRET_MISSING_MESSAGE, /verify_token=|test-webhook-secret/);
+  });
+});
+
+describe("persistStartResult — saving Sarvam's start response", () => {
+  function failingClient(mode: "error" | "throw") {
+    const writes: unknown[] = [];
+    const client = {
+      from: () => ({
+        update: (patch: unknown) => ({
+          eq: async () => {
+            writes.push(patch);
+            if (mode === "throw") throw new Error("network down");
+            return { error: { code: "57014", message: "statement timeout" } };
+          },
+        }),
+      }),
+    };
+    return { client: client as never, writes };
+  }
+
+  for (const mode of ["error", "throw"] as const)
+    test(`a write that keeps failing (${mode}) is tried twice, logged, and never thrown`, async () => {
+      const { client, writes } = failingClient(mode);
+      const logged: unknown[][] = [];
+      const original = console.error;
+      console.error = (...args: unknown[]) => void logged.push(args);
+      try {
+        const saved = await persistStartResult(client, "call_1", {
+          attemptId: "att_1",
+          interactionId: "int_1",
+        });
+        assert.equal(saved, false);
+      } finally {
+        console.error = original;
+      }
+      assert.equal(writes.length, 2);
+      assert.deepEqual(writes[0], {
+        provider_call_id: "att_1",
+        provider_metadata: { interaction_id: "int_1" },
+      });
+      assert.equal(logged.length, 2);
+      assert.equal(logged[0]![0], "sarvam_outbound:start_result_not_saved");
+      assert.doesNotMatch(JSON.stringify(logged), /att_1|int_1/, "ids from Sarvam are not logged");
+    });
+
+  test("nothing to save: no write at all", async () => {
+    const { client, writes } = failingClient("error");
+    assert.equal(await persistStartResult(client, "call_1", {}), true);
+    assert.equal(writes.length, 0);
+  });
+
+  test("the single call still reports started when the write fails", async () => {
+    const { client } = makeFakeSupabase({
+      phone_numbers: { select: [{ data: PHONE_NUMBER_ROW, error: null }] },
+      telephony_connections: { select: [{ data: CONNECTION_ROW, error: null }] },
+      agent_configs: { select: [{ data: AGENT_CONFIG_ROW, error: null }] },
+      call_logs: {
+        select: [{ data: null, error: null }],
+        insert: [{ data: { id: "call_1" }, error: null }],
+        update: [
+          { data: null, error: { code: "57014", message: "statement timeout" } },
+          { data: null, error: { code: "57014", message: "statement timeout" } },
+        ],
+      },
+    });
+    const original = console.error;
+    console.error = () => {};
+    try {
+      const { result } = await withSarvamEnvAndFetch(
+        { status: 200, body: { attempt_id: "att_1" } },
+        () =>
+          sendSarvamInstantOutboundCall(client, {
+            phoneNumberId: "num_1",
+            toE164: "+912222222222",
+          }),
+      );
+      assert.deepEqual(result, { callId: "call_1", interactionId: null, outcome: "started" });
+    } finally {
+      console.error = original;
+    }
+  });
+});
+
+describe("sendSarvamInstantOutboundCall — one agent, outbound mode set per call", () => {
+  const scriptUntilDial = (
+    agentRow: Record<string, unknown>,
+    extra: Record<string, unknown> = {},
+  ) =>
+    makeFakeSupabase({
+      phone_numbers: { select: [{ data: PHONE_NUMBER_ROW, error: null }] },
+      telephony_connections: { select: [{ data: CONNECTION_ROW, error: null }] },
+      agent_configs: { select: [{ data: agentRow, error: null }] },
+      call_logs: {
+        select: [{ data: null, error: null }],
+        insert: [{ data: { id: "call_1" }, error: null }],
+        update: [{ data: null, error: null }],
+      },
+      ...extra,
+    });
+
+  for (const [label, row] of [
+    [
+      "never confirmed for outbound",
+      {
+        ...AGENT_CONFIG_ROW,
+        sarvam_outbound_ready_app_id: null,
+        sarvam_outbound_ready_version: null,
+      },
+    ],
+    [
+      "remapped to a version not yet confirmed",
+      { ...AGENT_CONFIG_ROW, sarvam_outbound_ready_version: 1 },
+    ],
+  ] as const)
+    test(`refused when the agent version is ${label}: nothing reserved, nothing dialled`, async () => {
+      const { client, calls } = scriptUntilDial(row);
+      const { result, requestBody } = await withSarvamEnvAndFetch({ status: 200, body: {} }, () =>
+        sendSarvamInstantOutboundCall(client, {
+          phoneNumberId: "num_1",
+          toE164: "+912222222222",
+        }).then(
+          () => "dialled",
+          (e: Error) => e.message,
+        ),
+      );
+      assert.match(String(result), /not been confirmed for outbound/);
+      assert.equal(requestBody, undefined, "no request to Sarvam");
+      assert.equal(calls.filter((c) => c.table === "call_logs").length, 0, "no reservation");
+    });
+
+  test("dials the customer's ONE agent mapping with direction, call id, objective and the outbound opening line", async () => {
+    const { client } = scriptUntilDial(
+      { ...AGENT_CONFIG_ROW, business_id: "biz_1" },
+      {
+        businesses: {
+          select: [
+            { data: { name: "Smile Bright Dental", organization_id: "org_1" }, error: null },
+          ],
+        },
+      },
+    );
+    const { requestBody } = await withSarvamEnvAndFetch(
+      { status: 200, body: { attempt_id: "att_1" } },
+      () =>
+        sendSarvamInstantOutboundCall(client, {
+          phoneNumberId: "num_1",
+          toE164: "+912222222222",
+          objective: " Confirm\ntomorrow's visit ",
+          // A caller-supplied value can never change the direction or the call id.
+          agentVariables: {
+            call_direction: "inbound",
+            clickai_call_id: "someone-else",
+            note: "kept",
+          },
+        }),
+    );
+    const appConfig = (requestBody as { app_config: Record<string, unknown> }).app_config;
+    assert.equal(appConfig["app_id"], "app_1", "the same agent the inbound deployment uses");
+    assert.equal(appConfig["app_version"], 2);
+    assert.deepEqual(appConfig["agent_variables"], {
+      note: "kept",
+      call_direction: "outbound",
+      clickai_call_id: "call_1",
+      campaign_objective: "Confirm tomorrow's visit",
+    });
+    assert.deepEqual(appConfig["app_overrides"], {
+      initial_bot_message:
+        "Hello, this is the virtual assistant calling from Smile Bright Dental. Is this a good time to talk?",
+    });
+  });
+
+  test("another customer's business name is never used in the opening line", async () => {
+    const { client } = scriptUntilDial(
+      { ...AGENT_CONFIG_ROW, business_id: "biz_other" },
+      {
+        businesses: {
+          select: [{ data: { name: "Other Clinic", organization_id: "org_2" }, error: null }],
+        },
+      },
+    );
+    const { requestBody } = await withSarvamEnvAndFetch({ status: 200, body: {} }, () =>
+      sendSarvamInstantOutboundCall(client, { phoneNumberId: "num_1", toE164: "+912222222222" }),
+    );
+    const overrides = (
+      requestBody as { app_config: { app_overrides: { initial_bot_message: string } } }
+    ).app_config.app_overrides;
+    assert.doesNotMatch(overrides.initial_bot_message, /Other Clinic/);
+  });
+});
+
+describe("sendSarvamInstantOutboundCall — reserved outbound variables", () => {
+  test("caller-supplied variables cannot set the objective or instructions; only the objective parameter can", async () => {
+    const { client } = makeFakeSupabase({
+      phone_numbers: { select: [{ data: PHONE_NUMBER_ROW, error: null }] },
+      telephony_connections: { select: [{ data: CONNECTION_ROW, error: null }] },
+      agent_configs: { select: [{ data: AGENT_CONFIG_ROW, error: null }] },
+      call_logs: {
+        select: [{ data: null, error: null }],
+        insert: [{ data: { id: "call_1" }, error: null }],
+        update: [{ data: null, error: null }],
+      },
+    });
+    const { requestBody } = await withSarvamEnvAndFetch({ status: 200, body: {} }, () =>
+      sendSarvamInstantOutboundCall(client, {
+        phoneNumberId: "num_1",
+        toE164: "+912222222222",
+        agentVariables: {
+          campaign_objective: "smuggled",
+          campaign_instructions: "smuggled",
+          keep: "yes",
+        },
+      }),
+    );
+    const vars = (requestBody as { app_config: { agent_variables: Record<string, unknown> } })
+      .app_config.agent_variables;
+    assert.equal("campaign_objective" in vars, false);
+    assert.equal("campaign_instructions" in vars, false);
+    assert.equal(vars["keep"], "yes");
+    assert.equal(vars["call_direction"], "outbound");
   });
 });
