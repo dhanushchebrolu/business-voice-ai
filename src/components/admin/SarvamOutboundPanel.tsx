@@ -168,6 +168,7 @@ export function SarvamOutboundPanel({ orgId, agent, numbers, connections, onChan
   const [callOpen, setCallOpen] = useState(false);
   const [callNumberId, setCallNumberId] = useState("");
   const [destination, setDestination] = useState("");
+  const [objective, setObjective] = useState("");
   const [approved, setApproved] = useState(false);
   const [lastCall, setLastCall] = useState<{ callId: string; outcome: string } | null>(null);
   const [detailCallId, setDetailCallId] = useState<string | null>(null);
@@ -963,6 +964,13 @@ export function SarvamOutboundPanel({ orgId, agent, numbers, connections, onChan
                 Enter the number with its country code, e.g. +91…
               </p>
             ) : null}
+            <Input
+              aria-label="Reason for the call"
+              placeholder="Reason the agent gives, e.g. a reminder about your cleaning appointment"
+              maxLength={300}
+              value={objective}
+              onChange={(e) => setObjective(e.target.value)}
+            />
             <p className="text-xs text-muted-foreground">
               Agent: {agent?.agent_name ?? "—"} (Sarvam app {agent?.sarvam_app_id ?? "—"} v
               {agent?.sarvam_app_version ?? "—"})
@@ -990,6 +998,7 @@ export function SarvamOutboundPanel({ orgId, agent, numbers, connections, onChan
               orgId,
               phoneNumberId: callNumberId,
               toE164: normalizedDestination,
+              objective: objective.trim() || undefined,
               confirmCall: true,
               reason,
             },
@@ -998,6 +1007,7 @@ export function SarvamOutboundPanel({ orgId, agent, numbers, connections, onChan
           // Fresh approval and number for the next call: no accidental redial.
           setApproved(false);
           setDestination("");
+          setObjective("");
           if (result.outcome === "unknown")
             toast.warning("Call start unconfirmed", {
               description: "Held for review in Calls. It will not be redialled.",

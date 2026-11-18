@@ -26,7 +26,7 @@ const DEFAULT_GATES: OutboundGates = { checkTelephonyAccess, walletCanAffordOutb
  */
 export async function placeSarvamCallForOrganization(
   supabaseAdmin: SupabaseClient<Database>,
-  params: { orgId: string; phoneNumberId: string; toE164: string },
+  params: { orgId: string; phoneNumberId: string; toE164: string; objective?: string | undefined },
   gates: OutboundGates = DEFAULT_GATES,
 ): Promise<SendInstantOutboundCallResult> {
   const gate = await gates.checkTelephonyAccess(params.orgId, params.phoneNumberId, "outbound");
@@ -41,6 +41,7 @@ export async function placeSarvamCallForOrganization(
   return sendSarvamInstantOutboundCall(supabaseAdmin, {
     phoneNumberId: params.phoneNumberId,
     toE164: params.toE164,
+    objective: params.objective,
   });
 }
 

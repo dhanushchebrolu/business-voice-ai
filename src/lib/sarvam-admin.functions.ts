@@ -1295,6 +1295,8 @@ export interface PlaceAdminSarvamOutboundCallInput {
   orgId: string;
   phoneNumberId: string;
   toE164: string;
+  /** Why the call is made; reaches the agent as campaign_objective (sanitized and capped there). */
+  objective?: string | undefined;
   /** Must be true: the admin explicitly approved dialling this one number. */
   confirmCall: boolean;
   reason: string;
@@ -1341,6 +1343,7 @@ export const placeAdminSarvamOutboundCall = createServerFn({ method: "POST" })
         orgId: data.orgId,
         phoneNumberId: data.phoneNumberId,
         toE164: data.toE164,
+        objective: typeof data.objective === "string" ? data.objective : undefined,
       });
     } catch (err) {
       // Refused or rejected attempts are audited too: who tried to call whom.

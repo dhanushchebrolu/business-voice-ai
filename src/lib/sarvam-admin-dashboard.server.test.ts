@@ -293,6 +293,45 @@ describe("admin call-on-behalf: gates, dialling and provider errors", () => {
     assert.equal(call["provider_call_id"], "att_1");
   });
 
+  test("the admin's reason for the call reaches the agent as campaign_objective, sanitized, with the direction fixed", async () => {
+    const n = number({});
+    const { requests, error } = await withSarvam(
+      { status: 200, body: { attempt_id: "att_2" } },
+      () =>
+        placeSarvamCallForOrganization(
+          client(),
+          {
+            orgId: ORG_A,
+            phoneNumberId: n["id"] as string,
+            toE164: "+919876543210",
+            objective: "  Reminder about\nyour cleaning   appointment ",
+          },
+          allowAll,
+        ),
+    );
+    assert.equal(error, undefined);
+    const vars = (requests[0] as { app_config: { agent_variables: Record<string, string> } })
+      .app_config.agent_variables;
+    assert.equal(vars["campaign_objective"], "Reminder about your cleaning appointment");
+    assert.equal(vars["call_direction"], "outbound");
+    assert.equal(vars["clickai_call_id"], db.tables["call_logs"]![0]!["id"]);
+  });
+
+  test("without a reason no campaign_objective is sent", async () => {
+    const n = number({});
+    const { requests } = await withSarvam({ status: 200, body: { attempt_id: "att_3" } }, () =>
+      placeSarvamCallForOrganization(
+        client(),
+        { orgId: ORG_A, phoneNumberId: n["id"] as string, toE164: "+919876543210" },
+        allowAll,
+      ),
+    );
+    const vars = (requests[0] as { app_config: { agent_variables: Record<string, string> } })
+      .app_config.agent_variables;
+    assert.equal("campaign_objective" in vars, false);
+    assert.equal(vars["call_direction"], "outbound");
+  });
+
   test("tenant isolation: a number belonging to another customer is refused before anything is written", async () => {
     const n = number({
       organization_id: ORG_B,
