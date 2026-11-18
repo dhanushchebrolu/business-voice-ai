@@ -126,6 +126,17 @@ export interface VobizConfig {
   /** Shared secret Klyro appends as `?verify_token=` to every answer_url/hangup_url it gives Vobiz. */
   webhookVerifyToken: string;
   /**
+   * Rotation overlap only: the token being replaced, still accepted on
+   * incoming callbacks until `previousWebhookVerifyTokenExpiresAt`. It is
+   * never put into a URL Klyro hands out. Ignored (fail closed) unless the
+   * expiry is a valid ISO 8601 time in the future and no more than
+   * VOBIZ_PREVIOUS_TOKEN_MAX_WINDOW_MS away.
+   */
+  previousWebhookVerifyToken?: string | undefined;
+  previousWebhookVerifyTokenExpiresAt?: string | undefined;
+  /** Clock for the previous-token expiry; tests only. */
+  now?: (() => number) | undefined;
+  /**
    * Whether a request missing the X-Vobiz-Signature-V3(/-MA-V3) + nonce
    * headers is rejected outright. Defaults to `true` — Vobiz's own
    * documented behavior is that the signature is absent only when the
@@ -141,6 +152,41 @@ export interface VobizConfig {
 }
 
 const DEFAULT_BASE_URL = "https://api.vobiz.ai/api/v1";
+
+/** Longest overlap a previous verify_token may be configured for. */
+export const VOBIZ_PREVIOUS_TOKEN_MAX_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+
+/** Constant-time comparison; an empty expected value never matches. */
+function tokenMatches(provided: Buffer, expected: string | undefined): boolean {
+  if (!expected) return false;
+  const expectedBytes = Buffer.from(expected, "utf8");
+  return provided.length === expectedBytes.length && timingSafeEqual(provided, expectedBytes);
+}
+
+/**
+ * Whether the configured previous token is usable right now: "active", or why
+ * not. Values are never returned or logged, only this status.
+ */
+export function previousVobizTokenStatus(
+  config: Pick<
+    VobizConfig,
+    "webhookVerifyToken" | "previousWebhookVerifyToken" | "previousWebhookVerifyTokenExpiresAt"
+  >,
+  nowMs: number,
+): "unset" | "active" | "expired" | "invalid_expiry" | "window_too_long" | "same_as_current" {
+  if (!config.previousWebhookVerifyToken) return "unset";
+  if (config.previousWebhookVerifyToken === config.webhookVerifyToken) return "same_as_current";
+  const expiresAt = config.previousWebhookVerifyTokenExpiresAt;
+  const expiresMs =
+    expiresAt &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.test(expiresAt)
+      ? Date.parse(expiresAt)
+      : Number.NaN;
+  if (!Number.isFinite(expiresMs)) return "invalid_expiry";
+  if (expiresMs <= nowMs) return "expired";
+  if (expiresMs - nowMs > VOBIZ_PREVIOUS_TOKEN_MAX_WINDOW_MS) return "window_too_long";
+  return "active";
+}
 
 const STATUS_MAP: Record<string, NormalizedCallStatus> = {
   ringing: "ringing",
@@ -393,16 +439,32 @@ export class VobizTelephonyAdapter implements TelephonyProviderAdapter {
       return false;
     }
     const providedTokenBytes = Buffer.from(providedToken, "utf8");
-    const tokenMatched =
-      providedTokenBytes.length === expectedTokenBytes.length &&
-      timingSafeEqual(providedTokenBytes, expectedTokenBytes);
-    if (!tokenMatched) {
+    const matchedCurrent = tokenMatches(providedTokenBytes, expectedToken);
+    // Both comparisons always run, so timing never reveals which one matched.
+    const matchedPreviousValue = tokenMatches(
+      providedTokenBytes,
+      this.config.previousWebhookVerifyToken,
+    );
+    const previousStatus = previousVobizTokenStatus(this.config, (this.config.now ?? Date.now)());
+    const matchedPrevious = !matchedCurrent && matchedPreviousValue && previousStatus === "active";
+    if (!matchedCurrent && !matchedPrevious) {
       console.error("vobiz_provider:webhook_verify_token_check", {
         secretConfigured: expectedTokenBytes.length > 0,
         receivedTokenPresent: true,
         matched: false,
+        // Only when the old token was presented: why it was refused.
+        ...(matchedPreviousValue ? { previousTokenStatus: previousStatus } : {}),
       });
       return false;
+    }
+    if (matchedPrevious) {
+      // Rotation in progress: a callback still carries the replaced token.
+      console.warn("vobiz_provider:webhook_verify_token_check", {
+        secretConfigured: true,
+        receivedTokenPresent: true,
+        matched: true,
+        matchedToken: "previous",
+      });
     }
 
     // V3 primary, falling back to the sub-account (MA_) header variant —

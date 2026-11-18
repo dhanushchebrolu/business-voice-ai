@@ -40,6 +40,14 @@ const TEL_ROLLBACK = readFileSync(
   join(docs, "production-rollback-20261118-exotel-vobiz-provider-metadata.sql"),
   "utf8",
 );
+const WE_CLEANUP = readFileSync(
+  join(docs, "production-cleanup-20261118-webhook-events-payload.sql"),
+  "utf8",
+);
+const WE_ROLLBACK = readFileSync(
+  join(docs, "production-rollback-20261118-webhook-events-payload.sql"),
+  "utf8",
+);
 const MIGRATION_FILES = readdirSync(migrationsDir)
   .filter((f) => /^\d{14}_.*\.sql$/.test(f))
   .sort();
@@ -332,6 +340,113 @@ SELECT count(*) FROM ${BACKUP};`);
     assert.equal(metaOf(VOBIZ_ID)["verify_token"], "SYNTHETIC-VBZ");
     assert.equal(metaOf(REC_ID)["From"], "+919876500096");
     assert.deepEqual(metaOf(EXOTEL_ID), { From: "+919876500097", CallSid: "CA1" });
+    rows(`DROP TABLE IF EXISTS ${BACKUP};`);
+    assert.deepEqual(rows(`SELECT to_regclass('${BACKUP}') IS NULL;`), ["t"]);
+  });
+});
+
+describe("one-time webhook_events payload cleanup (reviewed SQL, run as written)", () => {
+  const BACKUP = "public.webhook_events_payload_backup_20261118";
+  const exotelRaw = (i: number) => ({
+    CallSid: `CA-${i}`,
+    From: "+919876500093",
+    To: "+917900000003",
+    CallFrom: "09876500093",
+    DialWhomNumber: "+917900000003",
+    verify_token: "SYNTHETIC-EXO",
+    flow_id: "flow-synth",
+  });
+  const sarvamRaw = (i: number) => ({
+    interaction_id: `20261112/we_${i}`,
+    user_phone_number: "+919876500094",
+    agent_phone_number: "+917900000004",
+    interaction_transcript: [{ role: "user", en_text: "I am Meena" }],
+    final_agent_variables: { customer_name: "Meena" },
+  });
+  const state = () =>
+    rows(`SELECT provider || '|' || event_id || '|' || coalesce(event_type, '-') || '|' ||
+                 coalesce(processed_at::text, '-') || '|' || coalesce(error, '-') || '|' || created_at::text
+            FROM public.webhook_events ORDER BY provider, event_id;`);
+  const payloadOf = (provider: string, eventId: string) =>
+    rows(
+      `SELECT payload::text FROM public.webhook_events WHERE provider = '${provider}' AND event_id = '${eventId}';`,
+    )[0];
+
+  test("seed: production-shaped rows, plus rows the cleanup must not touch", (t) => {
+    if (!ready(t)) return;
+    rows(`
+      INSERT INTO public.webhook_events (provider, event_id, event_type, payload, processed_at)
+        SELECT 'exotel', 'CA-' || g || ':completed:2026-09-16', 'completed',
+               ${lit(exotelRaw(0))} || jsonb_build_object('CallSid', 'CA-' || g), now()
+          FROM generate_series(1, 26) g;
+      INSERT INTO public.webhook_events (provider, event_id, event_type, payload, processed_at)
+        SELECT 'sarvam', '20261112/we_' || g, 'completed',
+               ${lit(sarvamRaw(0))} || jsonb_build_object('interaction_id', '20261112/we_' || g), now()
+          FROM generate_series(1, 7) g;
+      INSERT INTO public.webhook_events (provider, event_id, event_type, payload) VALUES
+        ('sarvam', 'op-1', 'completed', ${lit({ source: "operator_resolution", call_id: "c1", outcome: "completed" })}),
+        ('sarvam', 'new-1', 'completed', '{}'::jsonb),
+        ('whatsapp', 'wamid.1', 'message', ${lit({ From: "+919876500095", text: "hi" })}),
+        ('razorpay', 'evt_1', 'payment.captured', ${lit({ payload: { id: "pay_1" } })});
+    `);
+  });
+
+  test("an unexpected row count aborts and changes nothing", (t) => {
+    if (!ready(t)) return;
+    rows(
+      `INSERT INTO public.webhook_events (provider, event_id, event_type, payload)
+         VALUES ('vobiz', 'cu-extra:completed:x', 'completed', ${lit({ From: "+919876500096", verify_token: "SYNTHETIC-VBZ" })});`,
+    );
+    const before = state();
+    const r = execSql!(WE_CLEANUP);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /expected exactly 33/);
+    assert.deepEqual(rows(`SELECT to_regclass('${BACKUP}') IS NULL;`), ["t"]);
+    assert.deepEqual(state(), before);
+    rows(`DELETE FROM public.webhook_events WHERE event_id = 'cu-extra:completed:x';`);
+  });
+
+  test("the 33 raw rows get an empty payload; keys, processing state and other providers are untouched", (t) => {
+    if (!ready(t)) return;
+    const before = state();
+    const r = execSql!(WE_CLEANUP);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(
+      state(),
+      before,
+      "event_id, event_type, processed_at, error, created_at unchanged",
+    );
+    assert.equal(payloadOf("exotel", "CA-1:completed:2026-09-16"), "{}");
+    assert.equal(payloadOf("sarvam", "20261112/we_7"), "{}");
+    const all = rows(
+      `SELECT payload::text FROM public.webhook_events WHERE provider IN ('exotel', 'sarvam');`,
+    ).join(" ");
+    for (const leak of ["+91", "SYNTHETIC", "Meena", "flow-synth"])
+      assert.ok(!all.includes(leak), leak);
+    assert.match(payloadOf("sarvam", "op-1")!, /operator_resolution/, "operator rows untouched");
+    assert.match(payloadOf("whatsapp", "wamid.1")!, /\+919876500095/, "other providers untouched");
+    assert.match(payloadOf("razorpay", "evt_1")!, /pay_1/);
+    // Idempotency still holds: a replay of a cleaned event hits the unique key.
+    const replay = execSql!(
+      `INSERT INTO public.webhook_events (provider, event_id, event_type, payload)
+         VALUES ('exotel', 'CA-1:completed:2026-09-16', 'completed', '{}'::jsonb);`,
+    );
+    assert.notEqual(replay.status, 0);
+    assert.match(replay.stderr, /duplicate key|unique/);
+    assert.deepEqual(rows(`SELECT count(*) FROM ${BACKUP};`), ["33"]);
+    const api = execSql!(`SET ROLE authenticated;
+SELECT count(*) FROM ${BACKUP};`);
+    assert.notEqual(api.status, 0);
+    assert.match(api.stderr, /permission denied/);
+  });
+
+  test("Part A of the rollback restores the payloads; Part B drops the backup", (t) => {
+    if (!ready(t)) return;
+    const r = execSql!(WE_ROLLBACK.split("-- Part B")[0]!);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(payloadOf("exotel", "CA-2:completed:2026-09-16")!, /SYNTHETIC-EXO/);
+    assert.match(payloadOf("sarvam", "20261112/we_1")!, /\+919876500094/);
+    assert.equal(payloadOf("sarvam", "new-1"), "{}");
     rows(`DROP TABLE IF EXISTS ${BACKUP};`);
     assert.deepEqual(rows(`SELECT to_regclass('${BACKUP}') IS NULL;`), ["t"]);
   });

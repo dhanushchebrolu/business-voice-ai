@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import {
   PROVIDER_METADATA_KEYS,
@@ -6,7 +6,10 @@ import {
   buildProviderMetadata,
   isPlausibleClientReference,
   sanitizeProviderMetadata,
+  telephonyWebhookEventRow,
 } from "./webhook-correlation.server.ts";
+import { ExotelTelephonyAdapter } from "./exotel-provider.ts";
+import { VobizTelephonyAdapter } from "./vobiz-provider.ts";
 import { SarvamTelephonyAdapter } from "./sarvam-provider.server.ts";
 import type { NormalizedCallEvent } from "./adapter.ts";
 
@@ -134,4 +137,132 @@ test("isPlausibleClientReference: rejects non-UUID values rather than letting th
   assert.equal(isPlausibleClientReference("' OR '1'='1"), false);
   assert.equal(isPlausibleClientReference("8f14e45f-ceea-467e-a4a9"), false); // truncated
   assert.equal(isPlausibleClientReference("8f14e45fceea467ea4a91c1c1c1c1c1c"), false); // no dashes
+});
+
+/**
+ * webhook_events rows for real webhook shapes: each payload goes through the
+ * provider's own adapter, exactly as the telephony route does, and the stored
+ * row must keep the de-duplication key but nothing from the raw webhook.
+ */
+describe("telephonyWebhookEventRow: the stored webhook_events row holds identifiers only", () => {
+  const SENSITIVE = [
+    "+919876500091",
+    "919876500091",
+    "+917900000061",
+    "SYNTH-VERIFY-TOKEN",
+    "Asha",
+    "root canal",
+    "MA_SYNTH_ACCOUNT",
+    "Ravi Kumar",
+    "recordings.example",
+    "tenant-synth",
+  ];
+  const assertClean = (row: unknown) => {
+    const text = JSON.stringify(row);
+    for (const value of SENSITIVE) assert.ok(!text.includes(value), `row leaks ${value}`);
+  };
+
+  test("Exotel GET status callback (fields and verify_token in the query string)", () => {
+    const adapter = new ExotelTelephonyAdapter({
+      accountSid: "acsid",
+      apiKey: "key",
+      apiToken: "token",
+      subdomain: "api.exotel.com",
+      webhookVerifyToken: "SYNTH-VERIFY-TOKEN",
+    });
+    const raw = new URLSearchParams({
+      CallSid: "CA-synth-1",
+      Status: "completed",
+      Direction: "incoming",
+      From: "+919876500091",
+      To: "+917900000061",
+      CallFrom: "09876500091",
+      CallTo: "07900000061",
+      DialWhomNumber: "+917900000061",
+      RecordingUrl: "https://recordings.example/exo.mp3",
+      tenant_id: "tenant-synth",
+      verify_token: "SYNTH-VERIFY-TOKEN",
+    }).toString();
+    const event = adapter.normalizeWebhookEvent(raw);
+    assert.ok(event);
+    assert.ok(
+      JSON.stringify(event.raw).includes("SYNTH-VERIFY-TOKEN"),
+      "fixture carries the token",
+    );
+    const row = telephonyWebhookEventRow("exotel", event);
+    assert.deepEqual(row.payload, {});
+    assert.equal(row.provider, "exotel");
+    assert.match(row.event_id, /^CA-synth-1:/);
+    assert.equal(row.event_type, event.status);
+    assertClean(row);
+  });
+
+  test("Vobiz form-encoded hangup callback", () => {
+    const adapter = new VobizTelephonyAdapter({
+      authId: "AUTH123",
+      authToken: "secret-token",
+      webhookVerifyToken: "SYNTH-VERIFY-TOKEN",
+    });
+    const raw = new URLSearchParams({
+      CallUUID: "cu-synth-1",
+      CallStatus: "completed",
+      Direction: "inbound",
+      From: "+919876500091",
+      To: "917900000061",
+      CallerName: "Ravi Kumar",
+      ParentAuthID: "MA_SYNTH_ACCOUNT",
+      BillRate: "0.5",
+      verify_token: "SYNTH-VERIFY-TOKEN",
+    }).toString();
+    const event = adapter.normalizeWebhookEvent(raw);
+    assert.ok(event);
+    const row = telephonyWebhookEventRow("vobiz", event);
+    assert.deepEqual(row.payload, {});
+    assert.match(row.event_id, /cu-synth-1/);
+    assertClean(row);
+  });
+
+  test("Sarvam inbound end-of-call webhook (transcript, variables, numbers)", () => {
+    const adapter = new SarvamTelephonyAdapter({ inboundApiKey: "k_in", outboundApiKey: "k_out" });
+    const event = adapter.normalizeWebhookEvent(
+      JSON.stringify({
+        app_id: "Conversatio-synth",
+        app_version: "5",
+        deployment_id: "dep-synth",
+        interaction_id: "20261118/int-synth",
+        user_phone_number: "+919876500091",
+        agent_phone_number: "+917900000061",
+        duration: 42,
+        start_datetime: "2026-11-18T10:00:00Z",
+        end_datetime: "2026-11-18T10:00:42Z",
+        final_agent_variables: { customer_name: "Asha", caller_interest: "root canal" },
+        output_agent_variables: { opted_out: "no" },
+        interaction_transcript: [{ role: "user", en_text: "I am Asha, I need a root canal" }],
+        recording_url: "https://recordings.example/s.wav",
+        metadata: {},
+      }),
+    );
+    assert.ok(event);
+    const row = telephonyWebhookEventRow("sarvam", event);
+    assert.deepEqual(row, {
+      provider: "sarvam",
+      event_id: "20261118/int-synth",
+      event_type: event.status,
+      payload: {},
+    });
+    assertClean(row);
+  });
+
+  test("the same delivery always yields the same key, so replays still hit the unique index", () => {
+    const event = {
+      eventId: undefined,
+      providerCallId: "CA-1",
+      status: "completed",
+      occurredAt: "2026-11-18T10:00:00.000Z",
+    } as const;
+    assert.deepEqual(
+      telephonyWebhookEventRow("exotel", event as never),
+      telephonyWebhookEventRow("exotel", event as never),
+    );
+  });
 });

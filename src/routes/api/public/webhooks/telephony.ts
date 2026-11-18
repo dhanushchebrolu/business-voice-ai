@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { getRequestWaitUntil } from "@/lib/background-task.server";
 import { maskCallSid } from "@/lib/telephony/media-session-authorization.server";
 import { processTelephonyEvent } from "@/lib/telephony/telephony-event-processing.server";
+import { telephonyWebhookEventRow } from "@/lib/telephony/webhook-correlation.server";
 
 /**
  * Inbound telephony provider webhook — the single entry point every
@@ -88,7 +89,8 @@ async function handleTelephonyWebhook(request: Request): Promise<Response> {
   const event = adapter.normalizeWebhookEvent(raw, headers);
   if (!event) return new Response("Invalid payload", { status: 400 });
 
-  const eventId = event.eventId ?? `${event.providerCallId}:${event.status}:${event.occurredAt}`;
+  const eventRow = telephonyWebhookEventRow(providerId, event);
+  const eventId = eventRow.event_id;
 
   // Structured webhook-receipt log: method/provider/status/direction/call
   // reference only — never the raw body/query string or headers (which may
@@ -108,13 +110,9 @@ async function handleTelephonyWebhook(request: Request): Promise<Response> {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
   // Idempotency: the unique (provider, event_id) index rejects replays,
-  // exactly like the Razorpay webhook (spec §10/§Q/§O).
-  const { error: dedupeError } = await supabaseAdmin.from("webhook_events").insert({
-    provider: providerId,
-    event_id: eventId,
-    event_type: event.status,
-    payload: event.raw as never,
-  });
+  // exactly like the Razorpay webhook (spec §10/§Q/§O). The row holds
+  // identifiers only, never the raw webhook (see telephonyWebhookEventRow).
+  const { error: dedupeError } = await supabaseAdmin.from("webhook_events").insert(eventRow);
   if (dedupeError) {
     if ((dedupeError as { code?: string }).code !== "23505") {
       console.error("telephony:webhook_store_failed", dedupeError.message);

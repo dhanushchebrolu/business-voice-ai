@@ -1,7 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { VobizTelephonyAdapter } from "./vobiz-provider.ts";
+import { VobizTelephonyAdapter, previousVobizTokenStatus } from "./vobiz-provider.ts";
 
 const config = {
   authId: "AUTH123",
@@ -529,5 +529,129 @@ describe("hangupCall: Vobiz's documented live-call hang-up API", () => {
         );
       },
     );
+  });
+});
+
+describe("verify_token rotation: a time-limited previous token", () => {
+  const NOW = Date.parse("2026-11-20T10:00:00Z");
+  const CURRENT = "new-token-0123456789abcdef0123456789";
+  const PREVIOUS = "old-token-0123456789abcdef0123456789";
+  const inDays = (d: number) => new Date(NOW + d * 86_400_000).toISOString();
+  const rotating = (over: Partial<ConstructorParameters<typeof VobizTelephonyAdapter>[0]> = {}) =>
+    new VobizTelephonyAdapter({
+      ...config,
+      webhookVerifyToken: CURRENT,
+      previousWebhookVerifyToken: PREVIOUS,
+      previousWebhookVerifyTokenExpiresAt: inDays(3),
+      now: () => NOW,
+      ...over,
+    });
+  const urlWith = (token?: string) =>
+    new URL(
+      `https://clickai.test/api/public/webhooks/telephony?provider=vobiz${token ? `&verify_token=${token}` : ""}`,
+    );
+  const check = (adapter: VobizTelephonyAdapter, token?: string) => {
+    const url = urlWith(token);
+    return adapter.verifyWebhookSignature("", signedHeaders(url), url);
+  };
+
+  /** Captures console output so tests can prove no token value is logged. */
+  function captureLogs<T>(fn: () => T): { result: T; text: string } {
+    const lines: unknown[] = [];
+    const saved = { error: console.error, warn: console.warn, info: console.info };
+    console.error = console.warn = console.info = (...args: unknown[]) => void lines.push(args);
+    try {
+      return { result: fn(), text: JSON.stringify(lines) };
+    } finally {
+      Object.assign(console, saved);
+    }
+  }
+
+  test("the current token is accepted", () => {
+    assert.equal(check(rotating(), CURRENT), true);
+  });
+
+  test("the previous token is accepted before its expiry, and logged as previous without its value", () => {
+    const { result, text } = captureLogs(() => check(rotating(), PREVIOUS));
+    assert.equal(result, true);
+    assert.match(text, /"matchedToken":"previous"/);
+    assert.ok(!text.includes(PREVIOUS) && !text.includes(CURRENT), "no token value logged");
+  });
+
+  test("an invalid token is rejected", () => {
+    assert.equal(check(rotating(), "not-a-token"), false);
+  });
+
+  test("a missing token is rejected", () => {
+    assert.equal(check(rotating()), false);
+  });
+
+  test("the previous token is rejected once its expiry has passed (status logged, not the value)", () => {
+    const adapter = rotating({ previousWebhookVerifyTokenExpiresAt: inDays(-0.01) });
+    const { result, text } = captureLogs(() => check(adapter, PREVIOUS));
+    assert.equal(result, false);
+    assert.match(text, /"previousTokenStatus":"expired"/);
+    assert.ok(!text.includes(PREVIOUS));
+    assert.equal(check(adapter, CURRENT), true, "the current token is unaffected");
+  });
+
+  test("fails closed when the overlap isn't explicitly bounded", () => {
+    for (const expiresAt of [undefined, "", "next week", "2026-11-21", "2026-11-21T10:00:00"])
+      assert.equal(
+        check(rotating({ previousWebhookVerifyTokenExpiresAt: expiresAt }), PREVIOUS),
+        false,
+        String(expiresAt),
+      );
+    assert.equal(
+      check(rotating({ previousWebhookVerifyTokenExpiresAt: inDays(15) }), PREVIOUS),
+      false,
+      "more than 14 days ahead",
+    );
+    assert.equal(
+      check(rotating({ previousWebhookVerifyTokenExpiresAt: inDays(14) }), PREVIOUS),
+      true,
+    );
+  });
+
+  test("the previous token still needs a valid Vobiz signature (existing checks unchanged)", () => {
+    const url = urlWith(PREVIOUS);
+    assert.equal(rotating().verifyWebhookSignature("", {}, url), false, "signature missing");
+    assert.equal(
+      rotating().verifyWebhookSignature(
+        "",
+        { ...signedHeaders(url), "x-vobiz-signature-v3": "AAAA" },
+        url,
+      ),
+      false,
+      "signature wrong",
+    );
+  });
+
+  test("callback URLs Klyro hands out always carry the current token, never the previous one", () => {
+    const handedOut = new URL(
+      rotating().withVerifyToken("https://clickai.test/api/public/webhooks/vobiz-answer"),
+    );
+    assert.equal(handedOut.searchParams.get("verify_token"), CURRENT);
+    const status = previousVobizTokenStatus(
+      {
+        webhookVerifyToken: CURRENT,
+        previousWebhookVerifyToken: PREVIOUS,
+        previousWebhookVerifyTokenExpiresAt: inDays(3),
+      },
+      NOW,
+    );
+    assert.equal(status, "active");
+    assert.equal(
+      previousVobizTokenStatus(
+        {
+          webhookVerifyToken: CURRENT,
+          previousWebhookVerifyToken: CURRENT,
+          previousWebhookVerifyTokenExpiresAt: inDays(3),
+        },
+        NOW,
+      ),
+      "same_as_current",
+    );
+    assert.equal(previousVobizTokenStatus({ webhookVerifyToken: CURRENT }, NOW), "unset");
   });
 });

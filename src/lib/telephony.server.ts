@@ -355,6 +355,11 @@ export function getTelephonyAdapter(providerId: string): TelephonyProviderAdapte
       baseUrl: process.env["VOBIZ_BASE_URL"] || undefined,
       phoneNumber: process.env["VOBIZ_PHONE_NUMBER"] || undefined,
       webhookVerifyToken,
+      // Rotation overlap: accepted only until the expiry (at most 14 days
+      // ahead); see VobizConfig.previousWebhookVerifyToken.
+      previousWebhookVerifyToken: process.env["VOBIZ_WEBHOOK_VERIFY_TOKEN_PREVIOUS"] || undefined,
+      previousWebhookVerifyTokenExpiresAt:
+        process.env["VOBIZ_WEBHOOK_VERIFY_TOKEN_PREVIOUS_EXPIRES_AT"] || undefined,
       // Defaults to required (true) unless explicitly set to the literal
       // string "false" — see VobizConfig's doc for why this must stay an
       // explicit opt-out, never a silent default.

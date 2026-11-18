@@ -67,6 +67,28 @@ export function buildProviderMetadata(event: NormalizedCallEvent): Record<string
   });
 }
 
+/**
+ * The `webhook_events` row recorded for a telephony webhook: only what
+ * de-duplication and retry need. `(provider, event_id)` is the unique
+ * idempotency key and `event_type` the status. The payload is deliberately
+ * empty: the raw webhook (caller and called numbers, transcripts, agent
+ * variables, provider account ids, the `verify_token` query parameter) is
+ * never stored. Nothing reads it back: a failed event is retried from the
+ * provider's re-delivery, not from this row. The event id is the provider's
+ * own call or interaction id, never a phone number.
+ */
+export function telephonyWebhookEventRow(
+  providerId: string,
+  event: Pick<NormalizedCallEvent, "eventId" | "providerCallId" | "status" | "occurredAt">,
+): { provider: string; event_id: string; event_type: string; payload: Record<string, never> } {
+  return {
+    provider: providerId,
+    event_id: event.eventId ?? `${event.providerCallId}:${event.status}:${event.occurredAt}`,
+    event_type: event.status,
+    payload: {},
+  };
+}
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
