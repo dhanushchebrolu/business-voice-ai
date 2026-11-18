@@ -353,6 +353,7 @@ export function callFacts(events: { kind: string; status: string; detail: unknow
   booking_error: string | null;
   callback_recorded: boolean;
   lead_id: string | null;
+  opted_out: boolean;
 } {
   const d = (e: { detail: unknown }) => (e.detail ?? {}) as Record<string, unknown>;
   const s = (v: unknown) => (typeof v === "string" ? v : null);
@@ -375,6 +376,7 @@ export function callFacts(events: { kind: string; status: string; detail: unknow
     booking_error: book ? s(d(book)["error_code"]) : null,
     callback_recorded: Boolean(callback),
     lead_id: callback ? s(d(callback)["lead_id"]) : null,
+    opted_out: events.some((e) => e.kind === "call_outcome" && d(e)["opted_out"] === true),
   };
 }
 export type AgentTool = (typeof AGENT_TOOLS)[number];
@@ -434,6 +436,259 @@ async function defaultExecuteTool(
 ): Promise<NonNullable<AgentApiDeps["executeTool"]>> {
   const { executeAiTool } = await import("./ai-tools.server.ts");
   return (ctx, name, input) => executeAiTool(supabaseAdmin, ctx, name, input);
+}
+
+interface LeadInput {
+  name: string | null;
+  phone: string;
+  askedAbout: string | null;
+  notes: string | null;
+}
+
+/**
+ * The id of this call's one lead, derived from (integration, interaction): a
+ * retried or recovered save hits the primary key instead of creating a second
+ * lead, and an opt-out can find the lead even if its audit row was never written.
+ */
+export async function callLeadId(integrationId: string, interactionId: string): Promise<string> {
+  const digest = new Uint8Array(
+    await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(`clickai-call-lead:${integrationId}:${interactionId}`),
+    ),
+  );
+  const hex = Array.from(digest.slice(0, 16), (b) => b.toString(16).padStart(2, "0")).join("");
+  // RFC 4122 layout (version 5 nibble, variant bits) so it reads as a normal UUID.
+  const v = `5${hex.slice(13, 16)}`;
+  const variant = ((parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16) + hex.slice(17, 20);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${v}-${variant}-${hex.slice(20, 32)}`;
+}
+
+/**
+ * Saves this call's lead under its deterministic id. A repeat finds the row
+ * (23505 on the primary key) and reports it as existing, never as a second lead.
+ * Returns null when it could not be saved (the error is audited).
+ */
+async function saveCallLead(
+  deps: AgentApiDeps,
+  auth: AuthenticatedIntegration,
+  interactionId: string | undefined,
+  lead: LeadInput,
+  integrationId: string = auth.integrationId,
+): Promise<{ id: string; created: boolean } | null> {
+  const id = interactionId ? await callLeadId(integrationId, interactionId) : undefined;
+  const { data, error } = await deps.supabaseAdmin
+    .from("leads")
+    .insert({
+      ...(id ? { id } : {}),
+      organization_id: auth.organizationId,
+      business_id: auth.businessId,
+      name: lead.name,
+      phone: lead.phone,
+      source: "phone", // leads.source default; other call leads use it too
+      asked_about: lead.askedAbout,
+      notes: lead.notes,
+    })
+    .select("id")
+    .single();
+  if (id && (error as { code?: string } | null)?.code === "23505") return { id, created: false };
+  if (error || !data) {
+    await audit(deps, auth, "lead", "error", interactionId, {
+      error: (error?.message ?? "no row").slice(0, 300),
+    });
+    return null;
+  }
+  return { id: data.id, created: true };
+}
+
+/**
+ * ClickAI's own record of what happened on this call. A failed read throws (the
+ * caller answers with a temporary error and writes nothing), so a callback or a
+ * lead is never decided on a missing opt-out record.
+ */
+async function readCallEvents(
+  deps: AgentApiDeps,
+  auth: AuthenticatedIntegration,
+  interactionId: string | undefined,
+) {
+  if (!interactionId) return [];
+  const { data, error } = await deps.supabaseAdmin
+    .from("sarvam_agent_events")
+    .select("kind, status, detail")
+    .eq("integration_id", auth.integrationId)
+    .eq("interaction_id", interactionId)
+    .in("kind", ["check_availability", "book_appointment", "callback", "call_outcome"])
+    .order("created_at", { ascending: true });
+  if (error) throw error;
+  return data ?? [];
+}
+
+/** "yes" / "true" (any case) from Sarvam's opted_out agent variable. */
+export function isOptedOutValue(value: unknown): boolean {
+  return typeof value === "string"
+    ? ["yes", "true"].includes(value.trim().toLowerCase())
+    : value === true;
+}
+
+export interface CallOutcomeInput {
+  outcome?: string | undefined;
+  summary?: string | undefined;
+  customerName?: string | undefined;
+  callerNumber?: string | undefined;
+  interest?: string | undefined;
+  requestedSlot?: string | undefined;
+  /** Sarvam's opted_out agent variable, as sent. */
+  optedOut?: unknown;
+  /** "tool": Sarvam's on-end tool call; "reconciliation": recovered from the call-end webhook. */
+  source: "tool" | "reconciliation";
+}
+
+/** The lead an outcome row says is due (its outbox entry), as stored in detail.lead. */
+type DueLead = {
+  name: string | null;
+  phone: string;
+  asked_about: string | null;
+  notes: string | null;
+};
+
+/**
+ * Completes one outcome row's due lead: saves it under the call's
+ * deterministic id (a repeat finds it), then records lead_id on the row so the
+ * sweep stops looking. Safe to run any number of times; a lead the team later
+ * deletes is never recreated once lead_id is recorded.
+ */
+export async function completeDueLead(
+  deps: AgentApiDeps,
+  auth: AuthenticatedIntegration,
+  event: { id: string; integration_id: string; interaction_id: string; detail: unknown },
+): Promise<string | null> {
+  const detail = (event.detail ?? {}) as Record<string, unknown>;
+  const due = detail["lead"] as DueLead | undefined;
+  if (!due || detail["lead_id"]) return (detail["lead_id"] as string | undefined) ?? null;
+  const saved = await saveCallLead(
+    deps,
+    auth,
+    event.interaction_id,
+    { name: due.name, phone: due.phone, askedAbout: due.asked_about, notes: due.notes },
+    event.integration_id,
+  );
+  if (!saved) return null; // still due: the next retry or sweep tries again
+  // Audited by the attempt that created it (a later attempt finds it and does not).
+  if (saved.created)
+    await audit(deps, auth, "lead", "ok", event.interaction_id, { lead_id: saved.id });
+  const { error } = await deps.supabaseAdmin
+    .from("sarvam_agent_events")
+    .update({ detail: { ...detail, lead_id: saved.id } as Json })
+    .eq("id", event.id);
+  if (error) throw error;
+  return saved.id;
+}
+
+/**
+ * Records one call's outcome — once per (integration, interaction), enforced by
+ * idx_sarvam_agent_events_one_outcome — and at most one lead. Safe to run any
+ * number of times from the tool call and the reconciliation job, in any order
+ * or at the same time:
+ *   - an opt-out first marks this call's lead (its deterministic id; a callback
+ *     lead saved mid-call has the same id) as do_not_contact; idempotent;
+ *   - the outcome row is the single audit record and also the lead's outbox:
+ *     detail.lead holds a due lead, detail.lead_id is set once it is saved;
+ *   - every attempt, including a duplicate, completes a still-due lead, and the
+ *     sweep does the same for rows nobody retries — so a crash between the
+ *     outcome row and the lead never loses the lead, and never doubles it.
+ */
+export async function recordCallOutcome(
+  deps: AgentApiDeps,
+  auth: AuthenticatedIntegration,
+  interactionId: string | undefined,
+  input: CallOutcomeInput,
+): Promise<{ duplicate: boolean; leadId: string | null }> {
+  // `facts` come from ClickAI's own tool log for this call, never from the LLM's summary.
+  const facts = callFacts(await readCallEvents(deps, auth, interactionId));
+  const optedOut = isOptedOutValue(input.optedOut);
+  const callerRaw = input.callerNumber ?? "";
+  const callerPhone = normalizeCustomerPhone(callerRaw.slice(0, 40), null);
+  const testCall = isTestCaller(callerRaw, callerPhone, auth.testCallerNumbers);
+
+  let suppressedLeadId: string | null = null;
+  if (optedOut && interactionId) {
+    const ownLead = await callLeadId(auth.integrationId, interactionId);
+    const { data: updated, error: suppressError } = await deps.supabaseAdmin
+      .from("leads")
+      .update({ status: "do_not_contact" })
+      .in("id", [...new Set([ownLead, facts.lead_id].filter((x): x is string => Boolean(x)))])
+      .eq("organization_id", auth.organizationId)
+      .select("id");
+    if (suppressError) throw suppressError;
+    suppressedLeadId = updated?.[0]?.id ?? null;
+  }
+
+  // A lead is a follow-up for the team: callback requests, and enquiries where the caller
+  // named themself or a service. Booked calls already have a booking; a summary alone never
+  // qualifies; a callback already saved mid-call (request_callback) is not saved twice.
+  const kind = input.outcome?.toLowerCase();
+  const qualifies =
+    kind === "callback_requested" ||
+    (kind === "enquiry_answered" && Boolean(input.customerName || input.interest));
+  const leadDue: DueLead | null =
+    qualifies && !optedOut && !testCall && !facts.callback_recorded && callerPhone && interactionId
+      ? {
+          name: input.customerName ?? null,
+          phone: callerPhone,
+          asked_about: input.interest ?? input.outcome ?? null,
+          notes: input.summary ?? null,
+        }
+      : null;
+
+  const outcome = {
+    outcome: input.outcome,
+    summary: input.summary,
+    customer_name: input.customerName,
+    caller_number: callerRaw.slice(0, 40) || undefined,
+    interest: input.interest,
+    requested_slot: input.requestedSlot,
+    // The person asked not to be contacted again: never a lead, whatever the outcome says.
+    opted_out: optedOut,
+    ...(optedOut ? { suppressed_lead_id: suppressedLeadId } : {}),
+    source: input.source,
+    facts,
+    ...(testCall ? { test_call: true } : {}),
+    ...(leadDue ? { lead: leadDue } : {}),
+  };
+  const { data: inserted, error: insertError } = await deps.supabaseAdmin
+    .from("sarvam_agent_events")
+    .insert({
+      integration_id: auth.integrationId,
+      organization_id: auth.organizationId,
+      kind: "call_outcome",
+      status: "ok",
+      interaction_id: interactionId ?? null,
+      detail: outcome as Json,
+    })
+    .select("id")
+    .single();
+  if ((insertError as { code?: string } | null)?.code === "23505") {
+    // Already recorded: finish its lead if an earlier attempt stopped before saving it.
+    const { data: existing, error: readError } = await deps.supabaseAdmin
+      .from("sarvam_agent_events")
+      .select("id, integration_id, interaction_id, detail")
+      .eq("integration_id", auth.integrationId)
+      .eq("interaction_id", interactionId!)
+      .eq("kind", "call_outcome")
+      .maybeSingle();
+    if (readError) throw readError;
+    if (existing) await completeDueLead(deps, auth, existing as never);
+    return { duplicate: true, leadId: null };
+  }
+  if (insertError || !inserted) throw insertError ?? new Error("outcome not recorded");
+  if (!leadDue) return { duplicate: false, leadId: null };
+  const leadId = await completeDueLead(deps, auth, {
+    id: inserted.id,
+    integration_id: auth.integrationId,
+    interaction_id: interactionId!,
+    detail: outcome,
+  });
+  return { duplicate: false, leadId };
 }
 
 /** Entry point shared by the two public routes. `tool` is undefined for the on-start context. */
@@ -669,45 +924,9 @@ export async function handleSarvamAgentRequest(
       return json({ ok: !out.isError, service, result: booked });
     }
 
-    const saveLead = async (lead: {
-      name: string | null;
-      phone: string;
-      askedAbout: string | null;
-      notes: string | null;
-    }): Promise<string | null> => {
-      const { data, error } = await deps.supabaseAdmin
-        .from("leads")
-        .insert({
-          organization_id: auth.organizationId,
-          business_id: auth.businessId,
-          name: lead.name,
-          phone: lead.phone,
-          source: "phone", // leads.source default; other call leads use it too
-          asked_about: lead.askedAbout,
-          notes: lead.notes,
-        })
-        .select("id")
-        .single();
-      if (error || !data) {
-        await audit(deps, auth, "lead", "error", interactionId, {
-          error: (error?.message ?? "no row").slice(0, 300),
-        });
-        return null;
-      }
-      return data.id;
-    };
-    const callEvents = async () =>
-      interactionId
-        ? ((
-            await deps.supabaseAdmin
-              .from("sarvam_agent_events")
-              .select("kind, status, detail")
-              .eq("integration_id", auth.integrationId)
-              .eq("interaction_id", interactionId)
-              .in("kind", ["check_availability", "book_appointment", "callback"])
-              .order("created_at", { ascending: true })
-          ).data ?? [])
-        : [];
+    const saveLead = async (lead: LeadInput) =>
+      (await saveCallLead(deps, auth, interactionId, lead))?.id ?? null;
+    const callEvents = () => readCallEvents(deps, auth, interactionId);
 
     if (tool === "request_callback") {
       // Mid-call: the agent promises a callback only after this reports recorded=true.
@@ -731,8 +950,15 @@ export async function handleSarvamAgentRequest(
         });
         return json({ ok: true, recorded: false, error: { code: "CAPABILITY_DISABLED" } });
       }
-      if (callFacts(await callEvents()).callback_recorded)
-        return json({ ok: true, recorded: true, duplicate: true });
+      const known = callFacts(await callEvents());
+      // An opt-out recorded for this call (by record_call_outcome) wins over any later callback.
+      if (known.opted_out) {
+        await audit(deps, auth, "callback", "rejected", interactionId, {
+          error_code: "CALLER_OPTED_OUT",
+        });
+        return json({ ok: true, recorded: false, error: { code: "CALLER_OPTED_OUT" } });
+      }
+      if (known.callback_recorded) return json({ ok: true, recorded: true, duplicate: true });
       const raw = str(body, "caller_number", 200) ?? "";
       const phone = normalizeCustomerPhone(raw, null);
       if (isTestCaller(raw, phone, auth.testCallerNumbers)) {
@@ -766,53 +992,18 @@ export async function handleSarvamAgentRequest(
       );
     }
 
-    // record_call_outcome (on_end): once per interaction; a lead only for a qualified follow-up (below).
-    // `facts` come from ClickAI's own tool log for this call, never from the LLM's summary.
-    const facts = callFacts(await callEvents());
-    const outcome = {
+    // record_call_outcome (on_end): the same idempotent path the reconciliation job uses.
+    const recorded = await recordCallOutcome(deps, auth, interactionId, {
       outcome: str(body, "outcome", 100),
       summary: str(body, "summary", 2000),
-      customer_name: str(body, "customer_name", 200),
-      caller_number: str(body, "caller_number", 40),
+      customerName: str(body, "customer_name", 200),
+      callerNumber: str(body, "caller_number", 200),
       interest: str(body, "interest", 200),
-      requested_slot: str(body, "requested_slot", 200),
-      facts,
-    };
-    const callerPhone = normalizeCustomerPhone(outcome.caller_number ?? "", null);
-    const testCall = isTestCaller(
-      str(body, "caller_number", 200) ?? "",
-      callerPhone,
-      auth.testCallerNumbers,
-    );
-    const { error: dupError } = await deps.supabaseAdmin.from("sarvam_agent_events").insert({
-      integration_id: auth.integrationId,
-      organization_id: auth.organizationId,
-      kind: "call_outcome",
-      status: "ok",
-      interaction_id: interactionId ?? null,
-      detail: (testCall ? { ...outcome, test_call: true } : outcome) as Json,
+      requestedSlot: str(body, "requested_slot", 200),
+      optedOut: str(body, "opted_out", 10),
+      source: "tool",
     });
-    if (dupError && (dupError as { code?: string }).code === "23505")
-      return json({ ok: true, duplicate: true });
-    if (dupError) throw dupError;
-    // A lead is a follow-up for the team: callback requests, and enquiries where the caller
-    // named themself or a service. Booked calls already have a booking; a summary alone never
-    // qualifies; a callback already saved mid-call (request_callback) is not saved twice.
-    const kind = outcome.outcome?.toLowerCase();
-    const qualifies =
-      kind === "callback_requested" ||
-      (kind === "enquiry_answered" && Boolean(outcome.customer_name || outcome.interest));
-    const phone = qualifies && !testCall && !facts.callback_recorded ? callerPhone : null;
-    if (phone) {
-      const leadId = await saveLead({
-        name: outcome.customer_name ?? null,
-        phone,
-        askedAbout: outcome.interest ?? outcome.outcome ?? null,
-        notes: outcome.summary ?? null,
-      });
-      if (leadId) await audit(deps, auth, "lead", "ok", interactionId, { lead_id: leadId });
-    }
-    return json({ ok: true, duplicate: false });
+    return json({ ok: true, duplicate: recorded.duplicate });
   } catch (err) {
     console.error("sarvam_agent:error", { tool: tool ?? "context", error: (err as Error).message });
     await audit(deps, auth, tool ?? "context", "error", interactionId, {
@@ -966,9 +1157,10 @@ export function sarvamToolConfiguration(baseUrl: string): {
           customer_name: "@customer_name",
           interest: "@caller_interest",
           requested_slot: "@requested_slot",
+          opted_out: "@opted_out",
         },
         purpose:
-          "Records the call's outcome once per call and saves a lead for callback requests and named enquiries.",
+          "Records the call's outcome once per call and saves a lead for callback requests and named enquiries, never for a caller who opted out.",
       },
     ],
     inputVariables: contextVars.map((name) => ({

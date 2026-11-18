@@ -7,6 +7,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { workspaceQuery, contactsQuery, type ContactRow } from "@/lib/workspace";
 import { supabase } from "@/integrations/supabase/client";
 import { csvToTable, validateContactRows } from "@/lib/contacts-import";
+import { setContactOptOut } from "@/lib/campaign-contacts.functions";
 import {
   PageHeader,
   EmptyState,
@@ -62,17 +63,22 @@ function ContactsPage() {
     );
   }, [contacts, q]);
 
+  // Server-side and audited: clearing do-not-call needs an owner/admin and a reason.
   async function toggleOptOut(contact: ContactRow) {
-    const { error } = await supabase
-      .from("contacts")
-      .update({
-        opted_out: !contact.opted_out,
-        opted_out_at: !contact.opted_out ? new Date().toISOString() : null,
-        opted_out_reason: !contact.opted_out ? "Manually marked do-not-call" : null,
-      })
-      .eq("id", contact.id);
-    if (error) {
-      toast.error("Could not update this contact.");
+    let reason: string | undefined;
+    if (contact.opted_out) {
+      const entered = window.prompt(
+        "Why should this contact be removed from the do-not-call list? (owners and admins only)",
+      );
+      if (entered === null) return;
+      reason = entered;
+    }
+    try {
+      await setContactOptOut({
+        data: { contactId: contact.id, optedOut: !contact.opted_out, reason },
+      });
+    } catch (err) {
+      toast.error((err as Error).message || "Could not update this contact.");
       return;
     }
     await qc.invalidateQueries({ queryKey: ["contacts", orgId] });

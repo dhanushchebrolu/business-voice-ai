@@ -118,6 +118,64 @@ describe("finalizeTerminalCall — orchestration", () => {
     assert.equal(campaign["_lead_notes"], JSON.stringify({ interest_level: "high" }));
   });
 
+  test("a completed call where the contact opted out records the opt-out and creates no lead", async () => {
+    const f = fakeClient({
+      call: { ...CALL, final_agent_variables: { opted_out: "yes", interest_level: "high" } },
+    });
+    assert.equal((await finalizeTerminalCall(f.client, "call_1", { getRate })).state, "done");
+    const campaign = f.rpcs.find((r) => r.fn === "apply_call_campaign_outcome")!.args;
+    assert.equal(campaign["_contact_status"], "opted_out");
+    assert.equal(campaign["_create_lead"], false);
+  });
+
+  test("variables stored grouped as the Sarvam parser makes them ({ final, output }) are read correctly", async () => {
+    const f = fakeClient({
+      call: {
+        ...CALL,
+        final_agent_variables: {
+          initial: { call_direction: "outbound" },
+          final: { opted_out: "yes", interest_level: "high", business_description: "…" },
+          output: {},
+        },
+      },
+    });
+    await finalizeTerminalCall(f.client, "call_1", { getRate });
+    const campaign = f.rpcs.find((r) => r.fn === "apply_call_campaign_outcome")!.args;
+    assert.equal(campaign["_contact_status"], "opted_out", "the opt-out inside `final` is seen");
+    assert.equal(campaign["_create_lead"], false);
+    assert.deepEqual(campaign["_output_variables"], { opted_out: "yes", interest_level: "high" });
+  });
+
+  test("lead notes and campaign output keep only the approved fields", async () => {
+    const f = fakeClient({
+      call: {
+        ...CALL,
+        final_agent_variables: {
+          call_outcome: "callback_requested",
+          call_summary: "Wants a cleaning.",
+          interest_level: "high",
+          opted_out: "no",
+          faqs: "Q: EMI? …",
+          business_email: "clinic@example.com",
+          campaign_objective: "Remind patients",
+        },
+      },
+    });
+    await finalizeTerminalCall(f.client, "call_1", { getRate });
+    const campaign = f.rpcs.find((r) => r.fn === "apply_call_campaign_outcome")!.args;
+    assert.deepEqual(JSON.parse(campaign["_lead_notes"] as string), {
+      call_outcome: "callback_requested",
+      call_summary: "Wants a cleaning.",
+      interest_level: "high",
+    });
+    assert.deepEqual(campaign["_output_variables"], {
+      call_outcome: "callback_requested",
+      call_summary: "Wants a cleaning.",
+      opted_out: "no",
+      interest_level: "high",
+    });
+  });
+
   test("a retryable outcome under max attempts schedules a retry", async () => {
     const f = fakeClient({ call: { ...CALL, status: "no_answer", duration_seconds: 0 } });
     await finalizeTerminalCall(f.client, "call_1", { getRate });

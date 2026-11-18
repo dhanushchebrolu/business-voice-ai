@@ -50,3 +50,18 @@ describe("decideCampaignContactOutcome", () => {
     assert.equal(decision.status, "retry_scheduled");
   });
 });
+
+describe("detectSpecialOutcome (also gates campaign leads)", () => {
+  test("an opt-out wins; wrong number next; anything else is not special", async () => {
+    const { detectSpecialOutcome } = await import("./campaign-outcome.ts");
+    assert.equal(
+      detectSpecialOutcome({ opted_out: "yes", call_outcome: "callback_requested" }),
+      "opted_out",
+    );
+    assert.equal(detectSpecialOutcome({ opted_out: true }), "opted_out");
+    assert.equal(detectSpecialOutcome({ do_not_call: "true" }), "opted_out");
+    assert.equal(detectSpecialOutcome({ opted_out: "no", wrong_number: "yes" }), "wrong_number");
+    assert.equal(detectSpecialOutcome({ opted_out: "no", interest_level: "high" }), null);
+    assert.equal(detectSpecialOutcome(null), null);
+  });
+});

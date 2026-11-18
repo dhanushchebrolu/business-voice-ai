@@ -162,8 +162,11 @@ describe("webhook route — campaign hook never bypasses idempotency", () => {
     assert.ok(idx !== -1 && hookIdx !== -1 && hookIdx > idx);
   });
 
-  test("a lead is only ever created from a real terminal 'completed' event, never fabricated", () => {
-    assert.match(webhookRoute, /event\.status === "completed" && contactId/);
+  test("a lead is only ever created from a real terminal 'completed' event, never fabricated, and never for an opt-out", () => {
+    assert.match(
+      webhookRoute,
+      /event\.status === "completed" &&\s+contactId &&\s+detectSpecialOutcome\(finalCallVariables\(event\.agentVariables\)\) !== "opted_out"/,
+    );
   });
 });
 

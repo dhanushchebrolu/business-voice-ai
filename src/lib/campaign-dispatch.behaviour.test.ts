@@ -22,12 +22,14 @@ function setup(contactCount: number) {
   for (let i = 1; i <= contactCount; i++) {
     contacts.push({
       id: `contact_${i}`,
+      organization_id: ORG,
       phone: `+9198765432${String(i).padStart(2, "0")}`,
       opted_out: false,
     });
     campaignContacts.push({
       id: `cc_${i}`,
       campaign_id: CAMPAIGN,
+      organization_id: ORG,
       contact_id: `contact_${i}`,
       status: "pending",
       attempts: 0,
@@ -327,5 +329,144 @@ describe("campaign dispatch — reserved outbound variables", () => {
     assert.equal("campaign_objective" in vars, false);
     assert.equal("campaign_instructions" in vars, false);
     assert.equal(vars["city"], "Pune");
+  });
+});
+
+describe("campaign dispatch — do-not-call", () => {
+  test("a contact already on do-not-call is never dialled and its enrolment is closed", async () => {
+    const t = setup(2);
+    t.table("contacts")[0]!["opted_out"] = true;
+    const summary = await dispatchDueCampaigns({ deps: t.deps });
+    assert.deepEqual(t.dialed, ["+919876543202"]);
+    assert.equal(summary.contactsDialed, 1);
+    const first = t.table("campaign_contacts").find((c) => c["id"] === "cc_1")!;
+    assert.equal(first["status"], "opted_out");
+    assert.equal(first["attempts"], 0);
+  });
+
+  test("an opt-out landing after the first read is caught immediately before the dial", async () => {
+    const t = setup(1);
+    // The wallet check runs after the first contact read and before the claim.
+    t.onWalletCheck.fn = () => {
+      t.table("contacts")[0]!["opted_out"] = true;
+    };
+    const summary = await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 0, "nothing dialled");
+    assert.equal(summary.contactsDialed, 0);
+    assert.equal(t.table("call_logs").length, 0, "no call row written");
+    const cc = t.table("campaign_contacts")[0]!;
+    assert.equal(cc["status"], "opted_out");
+    assert.equal(cc["attempts"], 0, "the claim's attempt is given back");
+    assert.equal(cc["current_call_id"], null);
+  });
+});
+
+describe("campaign dispatch — do-not-call by number, per workspace", () => {
+  test("another opted-out contact holding the same number in this workspace stops the dial", async () => {
+    const t = setup(1);
+    const phone = t.table("contacts")[0]!["phone"];
+    t.table("contacts").push({ id: "dup", organization_id: ORG, phone, opted_out: true });
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 0);
+    assert.equal(t.table("campaign_contacts")[0]!["status"], "opted_out");
+  });
+
+  test("the same number opted out in another workspace does not stop this one", async () => {
+    const t = setup(1);
+    const phone = t.table("contacts")[0]!["phone"];
+    t.table("contacts").push({ id: "other", organization_id: "org_other", phone, opted_out: true });
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 1);
+  });
+});
+
+describe("campaign dispatch — read failure is not an opt-out", () => {
+  /** Makes the n-th read of `contacts` (1-based) fail like a dropped connection. */
+  function failContactsRead(t: ReturnType<typeof setup>, nth: number) {
+    const client = t.db.client as unknown as { from: (table: string) => unknown };
+    const realFrom = client.from;
+    let reads = 0;
+    const failing: Record<string, unknown> = {
+      select: () => failing,
+      eq: () => failing,
+      limit: () => failing,
+      maybeSingle: () => failing,
+      then: (resolve: (v: unknown) => void) =>
+        Promise.resolve({ data: null, error: { message: "connection reset" } }).then(resolve),
+    };
+    client.from = (table: string) =>
+      table === "contacts" && ++reads === nth ? failing : realFrom(table);
+    return () => {
+      client.from = realFrom;
+    };
+  }
+  const quiet = async (fn: () => Promise<unknown>) => {
+    const original = console.error;
+    console.error = () => {};
+    try {
+      await fn();
+    } finally {
+      console.error = original;
+    }
+  };
+
+  test("a failed first contact read skips the contact for now and marks nothing", async () => {
+    const t = setup(1);
+    const restore = failContactsRead(t, 1);
+    try {
+      await quiet(() => dispatchDueCampaigns({ deps: t.deps }));
+    } finally {
+      restore();
+    }
+    assert.equal(t.dialed.length, 0);
+    const cc = t.table("campaign_contacts")[0]!;
+    assert.equal(cc["status"], "pending", "still due, not opted out");
+    assert.equal(cc["attempts"], 0);
+    assert.equal(t.table("contacts")[0]!["opted_out"], false);
+    // The next run, with the database back, dials it.
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 1);
+  });
+
+  test("a failed re-check after the claim gives the claim back and marks nothing", async () => {
+    const t = setup(1);
+    // Read 1: the first contact read; read 2: the re-check's contact read.
+    const restore = failContactsRead(t, 2);
+    try {
+      await quiet(() => dispatchDueCampaigns({ deps: t.deps }));
+    } finally {
+      restore();
+    }
+    assert.equal(t.dialed.length, 0);
+    assert.equal(t.table("call_logs").length, 0, "no call row written");
+    const cc = t.table("campaign_contacts")[0]!;
+    assert.equal(cc["status"], "pending");
+    assert.equal(cc["attempts"], 0);
+    assert.equal(cc["current_call_id"], null);
+    assert.equal(t.table("contacts")[0]!["opted_out"], false);
+  });
+
+  test("a confirmed opt-out closes this enrolment and the contact's other pending enrolments", async () => {
+    const t = setup(1);
+    t.table("contacts")[0]!["opted_out"] = true;
+    t.table("campaign_contacts").push({
+      id: "cc_other",
+      campaign_id: "camp_other",
+      organization_id: ORG,
+      contact_id: "contact_1",
+      status: "pending",
+      attempts: 0,
+    });
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 0);
+    assert.equal(
+      t.table("campaign_contacts").find((c) => c["id"] === "cc_1")!["status"],
+      "opted_out",
+    );
+    assert.equal(
+      t.table("campaign_contacts").find((c) => c["id"] === "cc_other")!["status"],
+      "opted_out",
+    );
+    assert.equal(t.table("contacts")[0]!["opted_out"], true);
   });
 });

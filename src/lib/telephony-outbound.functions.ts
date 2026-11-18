@@ -3,6 +3,7 @@ import { normalizeCustomerPhone } from "@/lib/phone-number";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { getTelephonyAdapter } from "@/lib/telephony.server";
 import { checkTelephonyAccess, walletCanAffordOutbound } from "@/lib/telephony-guard.server";
+import { isNumberSuppressed, OPT_OUT_NUMBER_MESSAGE } from "@/lib/contact-suppression.server";
 import {
   INVALID_DESTINATION_MESSAGE,
   SARVAM_USE_INSTANT_OUTBOUND_MESSAGE,
@@ -76,6 +77,9 @@ export const initiateOutboundCall = createServerFn({ method: "POST" })
     if (!adapter) throw new Error(`${gate.phoneNumber.provider} is not connected.`);
 
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    // Do-not-call: refused before anything is written or dialled.
+    if (await isNumberSuppressed(supabaseAdmin, orgId, data.toE164))
+      throw new Error(OPT_OUT_NUMBER_MESSAGE);
     const { data: call, error: insertError } = await supabaseAdmin
       .from("call_logs")
       .insert({

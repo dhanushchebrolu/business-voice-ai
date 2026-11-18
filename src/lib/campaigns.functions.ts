@@ -3,7 +3,11 @@ import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { checkTelephonyAccess, walletCanAffordOutbound } from "@/lib/telephony-guard.server";
 import { getTelephonyAdapter } from "@/lib/telephony.server";
 import { SarvamTelephonyAdapter } from "@/lib/telephony/sarvam-provider.server";
-import { buildCohortPayload, buildOutboundCohortRows } from "@/lib/campaign-cohort";
+import {
+  buildCohortPayload,
+  buildOutboundCohortRows,
+  partitionDoNotCall,
+} from "@/lib/campaign-cohort";
 
 /**
  * Platform-wide kill switch for the experimental `sarvam_campaign` dispatch
@@ -214,17 +218,31 @@ async function launchViaSarvamCampaign(
 
   const { data: pending } = await supabaseAdmin
     .from("campaign_contacts")
-    .select("id, variables, contacts(phone)")
+    .select("id, variables, contacts(phone, opted_out)")
     .eq("campaign_id", campaign.id)
     .in("status", ["pending", "retry_scheduled"]);
+  const typedPending = (pending ?? []) as {
+    id: string;
+    variables: unknown;
+    contacts: { phone: string; opted_out: boolean } | null;
+  }[];
+
+  const { dialable, excluded } = partitionDoNotCall(typedPending);
+  if (excluded.length > 0) {
+    await supabaseAdmin
+      .from("campaign_contacts")
+      .update({ status: "opted_out", next_attempt_at: null })
+      .in(
+        "id",
+        excluded.map((cc) => cc.id),
+      )
+      .in("status", ["pending", "retry_scheduled"]);
+  }
 
   // Every row is explicitly outbound for the customer's one agent: direction,
   // ClickAI id and campaign context are applied after the contact's own columns.
   const rows = buildOutboundCohortRows(
-    (pending ?? []).map((cc) => {
-      const typed = cc as { id: string; variables: unknown; contacts: { phone: string } | null };
-      return { id: typed.id, variables: typed.variables, phone: typed.contacts?.phone };
-    }),
+    dialable.map((cc) => ({ id: cc.id, variables: cc.variables, phone: cc.contacts?.phone })),
     campaign,
   );
   if (rows.length === 0) return;

@@ -20,8 +20,13 @@ import {
   applyOutcomeToCampaignContact,
   maybeCompleteCampaign,
 } from "@/lib/campaign-dispatch.server";
-import type { CallTerminalStatus } from "@/lib/campaign-outcome";
+import { detectSpecialOutcome, type CallTerminalStatus } from "@/lib/campaign-outcome";
 import { finalizeTerminalCallSafely } from "@/lib/telephony/call-finalization.server";
+import {
+  finalCallVariables,
+  leadNotesFromVariables,
+  retainCallVariables,
+} from "@/lib/call-variables";
 
 /** Who reported a final status: the provider's webhook, or an operator's resolution. */
 type EventSource = "provider" | "operator";
@@ -314,6 +319,11 @@ export async function processTelephonyEvent(
       transcript:
         event.transcript && event.transcript.length > 0 ? (event.transcript as never) : null,
       provider_metadata: buildProviderMetadata(event) as never,
+      // Sarvam's final agent variables: the source the end-of-call outcome is
+      // recovered from if the on-end tool call never arrived.
+      ...(providerId === "sarvam" && isTerminal
+        ? { final_agent_variables: retainCallVariables(event.agentVariables, "inbound") as never }
+        : {}),
     })
     .select("*")
     .single();
@@ -574,11 +584,12 @@ async function applyCallEvent(
     status: event.status,
     provider_metadata: buildProviderMetadata(event),
   };
-  if (isSarvamOutbound(call) && TERMINAL_CALL_STATUSES.includes(event.status)) {
-    // What finalization (call-finalization.server.ts) needs later, written with
-    // the final status itself, so it never depends on this event again.
-    patch["final_agent_variables"] = event.agentVariables ?? null;
-    patch["resolution_source"] = source;
+  if (call.provider === "sarvam" && TERMINAL_CALL_STATUSES.includes(event.status)) {
+    // What finalization (outbound) and end-of-call outcome recovery (inbound)
+    // need later, written with the final status itself, so neither depends on
+    // this event again.
+    patch["final_agent_variables"] = retainCallVariables(event.agentVariables, call.direction);
+    if (isSarvamOutbound(call)) patch["resolution_source"] = source;
   }
   if (event.status === "answered" && !call.answered_at) patch["answered_at"] = event.occurredAt;
   if (event.recordingUrl) patch["recording_url"] = event.recordingUrl;
@@ -820,7 +831,7 @@ async function applyCampaignTerminalEvent(
     event.status as CallTerminalStatus,
     cc.attempts,
     campaign,
-    event.agentVariables ?? null,
+    finalCallVariables(event.agentVariables),
   );
 
   const completed = await maybeCompleteCampaign(campaignId);
@@ -828,14 +839,19 @@ async function applyCampaignTerminalEvent(
     console.error("telephony:campaign_completed", campaignId);
   }
 
-  if (event.status === "completed" && contactId) {
+  // A contact who opted out on this call is never turned into a lead for follow-up.
+  if (
+    event.status === "completed" &&
+    contactId &&
+    detectSpecialOutcome(finalCallVariables(event.agentVariables)) !== "opted_out"
+  ) {
     const { data: contact } = await supabaseAdmin
       .from("contacts")
       .select("name, phone, email")
       .eq("id", contactId)
       .maybeSingle();
     if (contact) {
-      const vars = event.agentVariables ?? {};
+      const vars = finalCallVariables(event.agentVariables) ?? {};
       const interest =
         typeof vars["interest_level"] === "string" ? (vars["interest_level"] as string) : null;
       await supabaseAdmin.from("leads").insert({
@@ -849,7 +865,7 @@ async function applyCampaignTerminalEvent(
         source: "campaign",
         asked_about: campaign.name,
         score: interest === "high" ? "hot" : interest === "low" ? "cold" : "warm",
-        notes: Object.keys(vars).length > 0 ? JSON.stringify(vars) : null,
+        notes: leadNotesFromVariables(vars),
       });
     }
   }

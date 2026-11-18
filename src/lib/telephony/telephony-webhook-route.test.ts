@@ -228,7 +228,7 @@ describe("telephony webhook route — duplicate/racing inbound callbacks never c
   test("a concurrent duplicate insert (23505 on idx_call_logs_provider_call_id) falls back to the same update path as a pre-existing row, never throws past it", () => {
     const insertIdx = routeSrc.indexOf('.from("call_logs")\n    .insert(');
     assert.ok(insertIdx > -1);
-    const nearby = routeSrc.slice(insertIdx, insertIdx + 2200);
+    const nearby = routeSrc.slice(insertIdx, insertIdx + 2800);
     assert.match(nearby, /if \(insertError\) \{/);
     assert.match(nearby, /\(insertError as \{ code\?: string \}\)\.code === "23505"/);
     assert.match(nearby, /\.eq\("provider", providerId\)/);
@@ -668,5 +668,20 @@ describe("CallSid correlation diagnostics (production incident: media route said
       2,
       "expected exactly two unmasked provider_call_id sites — the two DB write payloads",
     );
+  });
+});
+
+describe("stored Sarvam call variables are the approved fields only", () => {
+  test("both call_logs writes keep only the allowlisted variables, never the raw payload", () => {
+    const src = routeSrc.replace(/\r\n/g, "\n");
+    assert.match(
+      src,
+      /final_agent_variables: retainCallVariables\(event\.agentVariables, "inbound"\)/,
+    );
+    assert.match(
+      src,
+      /patch\["final_agent_variables"\] = retainCallVariables\(event\.agentVariables, call\.direction\);/,
+    );
+    assert.doesNotMatch(src, /final_agent_variables[^\n]*event\.agentVariables \?\? null/);
   });
 });

@@ -14,6 +14,12 @@ import {
   releaseCampaignClaim,
 } from "./sarvam-outbound-call.server.ts";
 import { finalizeTerminalCallSafely } from "./telephony/call-finalization.server.ts";
+import { retainCallVariables } from "./call-variables.ts";
+import {
+  isContactSuppressed,
+  isNumberSuppressed,
+  suppressContact,
+} from "./contact-suppression.server.ts";
 import {
   isOutboundReady,
   outboundBusinessName,
@@ -244,16 +250,33 @@ async function dispatchOneCampaign(
 
   for (const cc of due ?? []) {
     if (deps.now() >= deadline || !(await stillRunning())) break;
-    const { data: contact } = await supabaseAdmin
+    const { data: contact, error: contactError } = await supabaseAdmin
       .from("contacts")
       .select("id, phone, opted_out")
       .eq("id", cc.contact_id)
       .maybeSingle();
+    // A failed read is not an opt-out: nothing is dialled or written, and the
+    // contact stays due for a later run.
+    if (contactError) {
+      console.error("campaign_dispatch:contact_read_failed", campaign.id, cc.id);
+      skipped++;
+      continue;
+    }
     if (!contact || contact.opted_out) {
       await supabaseAdmin
         .from("campaign_contacts")
         .update({ status: "opted_out", next_attempt_at: null })
         .eq("id", cc.id);
+      // A confirmed opt-out also closes this contact's other not-yet-dialled
+      // enrolments (idempotent; the contact flag itself is already set).
+      if (contact)
+        await suppressContact(supabaseAdmin, {
+          organizationId: campaign.organization_id,
+          contactId: contact.id,
+          reason: "Requested during an outbound call",
+        }).catch((err: Error) =>
+          console.error("campaign_dispatch:suppress_failed", campaign.id, err.message),
+        );
       skipped++;
       continue;
     }
@@ -336,6 +359,49 @@ async function dispatchOneCampaign(
         previousAttempts: cc.attempts,
       });
       break;
+    }
+    // Do-not-call is read again after the claim, immediately before the call row
+    // and the dial: an opt-out that landed since the first read stops this call.
+    // Both the contact and its normalized number are checked, so no other
+    // contact record holding the same number in this workspace can be dialled.
+    // A failed read is not an opt-out: nothing is dialled, the claim is given
+    // back exactly as it was, and the contact stays due for a later run.
+    let suppressed: boolean;
+    try {
+      const [byContact, byNumber] = await Promise.all([
+        isContactSuppressed(supabaseAdmin, contact.id),
+        isNumberSuppressed(supabaseAdmin, campaign.organization_id, destination),
+      ]);
+      suppressed = byContact || byNumber;
+    } catch (err) {
+      console.error(
+        "campaign_dispatch:opt_out_check_failed",
+        campaign.id,
+        cc.id,
+        (err as Error).message,
+      );
+      await releaseCampaignClaim(supabaseAdmin, {
+        campaignId: campaign.id,
+        campaignContactId: cc.id,
+        previousStatus: cc.status,
+        previousAttempts: cc.attempts,
+      });
+      skipped++;
+      continue;
+    }
+    if (suppressed) {
+      await supabaseAdmin
+        .from("campaign_contacts")
+        .update({
+          status: "opted_out",
+          next_attempt_at: null,
+          attempts: cc.attempts,
+          current_call_id: null,
+        })
+        .eq("id", cc.id)
+        .eq("current_call_id", callId);
+      skipped++;
+      continue;
     }
 
     const { data: call, error: insertError } = await supabaseAdmin
@@ -444,8 +510,10 @@ export async function applyOutcomeToCampaignContact(
   attempts: number,
   campaign: { max_attempts: number; retry_after_minutes: number; retry_statuses: string[] },
   agentVariables: Record<string, unknown> | null,
+  client?: SupabaseClient<Database>,
 ) {
-  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const supabaseAdmin =
+    client ?? (await import("@/integrations/supabase/client.server")).supabaseAdmin;
   const decision = decideCampaignContactOutcome(
     terminalStatus,
     attempts,
@@ -463,25 +531,24 @@ export async function applyOutcomeToCampaignContact(
       status: decision.status,
       next_attempt_at: decision.nextAttemptAt,
       outcome: terminalStatus,
-      output_variables: (agentVariables ?? {}) as never,
+      output_variables: (retainCallVariables(agentVariables, "outbound") ?? {}) as never,
     })
     .eq("id", campaignContactId);
 
   if (decision.status === "opted_out") {
+    // The contact is ClickAI's own mapping (campaign_contacts.contact_id), never
+    // a number or a provider-supplied identifier. Monotonic and idempotent.
     const { data: cc } = await supabaseAdmin
       .from("campaign_contacts")
-      .select("contact_id")
+      .select("contact_id, organization_id")
       .eq("id", campaignContactId)
       .maybeSingle();
     if (cc) {
-      await supabaseAdmin
-        .from("contacts")
-        .update({
-          opted_out: true,
-          opted_out_at: new Date().toISOString(),
-          opted_out_reason: "Requested during an outbound call",
-        })
-        .eq("id", cc.contact_id);
+      await suppressContact(supabaseAdmin, {
+        organizationId: cc.organization_id,
+        contactId: cc.contact_id,
+        reason: "Requested during an outbound call",
+      });
     }
   }
 }

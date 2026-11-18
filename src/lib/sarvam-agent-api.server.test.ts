@@ -52,6 +52,9 @@ class FakeDb {
             )
           )
             return { data: null, error: { code: "23505", message: "duplicate key" } };
+          // Primary key, as in PostgreSQL.
+          if (r["id"] && rows().some((e) => e["id"] === r["id"]))
+            return { data: null, error: { code: "23505", message: "duplicate key" } };
           const row = { id: crypto.randomUUID(), ...r };
           rows().push(row);
           inserted.push({ ...row });
@@ -568,6 +571,12 @@ describe("call outcome, validation and audit", () => {
       [{ outcome: "not_interested", customer_name: "Ravi" }, false],
       [{ outcome: "other", interest: "reminder" }, false],
       [{ outcome: "callback_requested", caller_number: "someone@example.com" }, false],
+      // An opt-out is never a lead, whatever the outcome; "no" or absent keeps today's behaviour.
+      [{ outcome: "callback_requested", opted_out: "yes" }, false],
+      [{ outcome: "callback_requested", opted_out: "TRUE" }, false],
+      [{ outcome: "enquiry_answered", customer_name: "Ravi", opted_out: "yes" }, false],
+      [{ outcome: "callback_requested", opted_out: "no" }, true],
+      [{ outcome: "enquiry_answered", interest: "root canal", opted_out: "" }, true],
     ];
     for (const [i, [extra, expectLead]] of cases.entries()) {
       const leadsBefore = (db.tables["leads"] ?? []).length;
@@ -951,6 +960,225 @@ describe("service validation, requested times and honest callbacks", () => {
     assert.equal((db.tables["leads"] ?? []).length, 0);
   });
 
+  describe("opt-out during a call", () => {
+    const caller = "+919000000011";
+    const leads = () => db.tables["leads"] ?? [];
+    const events = (kind: string, id: string) =>
+      (db.tables["sarvam_agent_events"] ?? []).filter(
+        (e) => e["kind"] === kind && e["interaction_id"] === id,
+      );
+
+    test("1. callback saved, then opt-out: the saved lead is suppressed and later callbacks are refused", async () => {
+      assert.equal(
+        (await run("request_callback", { interaction_id: "o-1", caller_number: caller }))[
+          "recorded"
+        ],
+        true,
+      );
+      assert.equal(leads().length, 1);
+      assert.equal(leads()[0]!["status"] ?? "new", "new", "the database default; untouched");
+      await run("record_call_outcome", {
+        interaction_id: "o-1",
+        caller_number: caller,
+        outcome: "callback_requested",
+        opted_out: "yes",
+      });
+      assert.equal(leads().length, 1, "no second lead");
+      assert.equal(leads()[0]!["status"], "do_not_contact");
+      // One auditable record: the call's outcome row carries the opt-out and what it suppressed.
+      const recorded = events("call_outcome", "o-1");
+      assert.equal(recorded.length, 1);
+      const outcome = recorded[0]!["detail"] as Record<string, unknown>;
+      assert.equal(outcome["opted_out"], true);
+      assert.equal(outcome["suppressed_lead_id"], leads()[0]!["id"]);
+      assert.equal(outcome["source"], "tool");
+      // A callback arriving after the opt-out is on record is refused and saves nothing.
+      assert.deepEqual(
+        await run("request_callback", { interaction_id: "o-1", caller_number: caller }),
+        { ok: true, recorded: false, error: { code: "CALLER_OPTED_OUT" } },
+      );
+      assert.equal(leads().length, 1);
+    });
+
+    test("1b. a retried end-of-call request still leaves the lead suppressed", async () => {
+      await run("request_callback", { interaction_id: "o-1b", caller_number: caller });
+      const end = {
+        interaction_id: "o-1b",
+        caller_number: caller,
+        outcome: "callback_requested",
+        opted_out: "yes",
+      };
+      await run("record_call_outcome", end);
+      leads()[0]!["status"] = "new"; // e.g. the first suppression write was lost
+      assert.deepEqual(await run("record_call_outcome", end), { ok: true, duplicate: true });
+      assert.equal(leads()[0]!["status"], "do_not_contact");
+      assert.equal(leads().length, 1);
+    });
+
+    test("2. opt-out on record first, then a callback: refused, no lead", async () => {
+      await run("record_call_outcome", {
+        interaction_id: "o-2",
+        caller_number: caller,
+        outcome: "not_interested",
+        opted_out: "yes",
+      });
+      const res = await run("request_callback", {
+        interaction_id: "o-2",
+        caller_number: caller,
+        customer_name: "Ravi",
+      });
+      assert.deepEqual(res, { ok: true, recorded: false, error: { code: "CALLER_OPTED_OUT" } });
+      assert.equal(leads().length, 0);
+      assert.equal(events("callback", "o-2")[0]!["status"], "rejected");
+    });
+
+    test("3. opt-out with no callback: no lead, even when the outcome says callback_requested", async () => {
+      await run("record_call_outcome", {
+        interaction_id: "o-3",
+        caller_number: caller,
+        outcome: "callback_requested",
+        customer_name: "Ravi",
+        opted_out: "yes",
+      });
+      assert.equal(leads().length, 0);
+      const outcome = events("call_outcome", "o-3")[0]!["detail"] as Record<string, unknown>;
+      assert.equal(outcome["opted_out"], true);
+      assert.equal(outcome["suppressed_lead_id"], null);
+    });
+
+    test("4. callback without an opt-out keeps today's behaviour", async () => {
+      await run("request_callback", { interaction_id: "o-4", caller_number: caller });
+      await run("record_call_outcome", {
+        interaction_id: "o-4",
+        caller_number: caller,
+        outcome: "callback_requested",
+        opted_out: "no",
+      });
+      assert.equal(leads().length, 1);
+      assert.equal(leads()[0]!["status"] ?? "new", "new", "the database default; untouched");
+      const outcome = events("call_outcome", "o-4")[0]!["detail"] as Record<string, unknown>;
+      assert.equal(outcome["opted_out"], false);
+      assert.ok(!("suppressed_lead_id" in outcome));
+    });
+
+    test("an opt-out only touches this call's own lead in this organization", async () => {
+      (db.tables["leads"] ??= []).push({
+        id: "other-org-lead",
+        organization_id: ORG_ABC,
+        status: "new",
+      });
+      await run("request_callback", { interaction_id: "o-5", caller_number: caller });
+      await run("record_call_outcome", {
+        interaction_id: "o-5",
+        caller_number: caller,
+        outcome: "callback_requested",
+        opted_out: "yes",
+      });
+      assert.equal(leads().find((l) => l["id"] === "other-org-lead")!["status"], "new");
+    });
+
+    test("record_call_outcome's recommended body is exactly the eight-field contract", () => {
+      const tool = sarvamToolConfiguration("https://clickai.in").tools.find(
+        (t) => t.name === "record_call_outcome",
+      )!;
+      assert.equal(tool.lifecycle, "on_end");
+      assert.equal(
+        tool.url,
+        "https://clickai.in/api/public/sarvam/agent/tools/record_call_outcome",
+      );
+      assert.deepEqual(tool.body, {
+        interaction_id: "@Interaction ID",
+        caller_number: "@User Identifier",
+        outcome: "@call_outcome",
+        summary: "@call_summary",
+        customer_name: "@customer_name",
+        interest: "@caller_interest",
+        requested_slot: "@requested_slot",
+        opted_out: "@opted_out",
+      });
+    });
+
+    test("integration: Sarvam's opted_out, sent through that body, reaches ClickAI and blocks the lead", async () => {
+      // What Sarvam sends: each "@…" filled from the call's system and after-call variables.
+      const tool = sarvamToolConfiguration("https://clickai.in").tools.find(
+        (t) => t.name === "record_call_outcome",
+      )!;
+      const system: Record<string, string> = {
+        "Interaction ID": "o-int",
+        "User Identifier": caller,
+      };
+      const finalVariables: Record<string, string> = {
+        call_outcome: "callback_requested",
+        call_summary: "Asked for a callback, then asked not to be called again.",
+        customer_name: "Ravi",
+        caller_interest: "root canal",
+        requested_slot: "",
+        opted_out: "yes",
+      };
+      const fill = (vars: Record<string, string>) =>
+        Object.fromEntries(
+          Object.entries(tool.body).map(([field, ref]) => {
+            const name = ref.slice(1);
+            return [field, system[name] ?? vars[name] ?? ""];
+          }),
+        );
+      const sent = fill(finalVariables);
+      assert.equal(sent["opted_out"], "yes", "the field reaches ClickAI");
+      assert.deepEqual(await run("record_call_outcome", sent), { ok: true, duplicate: false });
+      assert.equal(leads().length, 0, "no lead for an opt-out");
+      const recorded = events("call_outcome", "o-int")[0]!["detail"] as Record<string, unknown>;
+      assert.equal(recorded["opted_out"], true);
+
+      // The same call without the opt-out (the old seven-field body) would have created a lead.
+      const withoutOptOut = fill({ ...finalVariables, opted_out: "no" });
+      withoutOptOut["interaction_id"] = "o-int-2";
+      await run("record_call_outcome", withoutOptOut);
+      assert.equal(leads().length, 1);
+    });
+
+    test("if this call's records cannot be read, no callback lead is saved (fails closed)", async () => {
+      await run("record_call_outcome", {
+        interaction_id: "o-7",
+        caller_number: caller,
+        outcome: "not_interested",
+        opted_out: "yes",
+      });
+      db.failOn = "sarvam_agent_events";
+      try {
+        const res = await run("request_callback", { interaction_id: "o-7", caller_number: caller });
+        assert.equal(res["recorded"], undefined, "not reported as recorded");
+        assert.equal(res["ok"], false);
+      } finally {
+        db.failOn = null;
+      }
+      assert.equal(leads().length, 0);
+    });
+
+    test("an inbound caller with an unverified number cannot put any contact on do-not-call", async () => {
+      // The claimed number belongs to contacts in this and another customer's workspace.
+      const victim = "+919000000099";
+      (db.tables["contacts"] ??= []).push(
+        { id: "own-contact", organization_id: ORG_SMILE, phone: victim, opted_out: false },
+        { id: "other-contact", organization_id: ORG_ABC, phone: victim, opted_out: false },
+      );
+      await run("record_call_outcome", {
+        interaction_id: "o-6",
+        caller_number: victim,
+        outcome: "not_interested",
+        opted_out: "yes",
+      });
+      assert.ok(
+        db.tables["contacts"]!.every((c) => c["opted_out"] === false),
+        "no contact is identified or updated from a caller number",
+      );
+      assert.equal(
+        (events("call_outcome", "o-6")[0]!["detail"] as Record<string, unknown>)["opted_out"],
+        true,
+        "the opt-out itself is still recorded",
+      );
+    });
+  });
+
   test("callFacts reports what the tools actually did", () => {
     assert.deepEqual(
       callFacts([
@@ -974,6 +1202,7 @@ describe("service validation, requested times and honest callbacks", () => {
         booking_error: "TEST_CALL_NOT_SAVED",
         callback_recorded: false,
         lead_id: null,
+        opted_out: false,
       },
     );
   });

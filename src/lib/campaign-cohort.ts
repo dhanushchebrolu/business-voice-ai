@@ -106,3 +106,17 @@ function stringValues(value: unknown): Record<string, string> {
     ),
   );
 }
+
+/**
+ * Splits campaign contacts before a cohort upload: a contact on do-not-call,
+ * or one whose contact row is missing, is never uploaded (Sarvam dials an
+ * uploaded cohort on its own, so this is the last point ClickAI can stop it).
+ */
+export function partitionDoNotCall<T extends { contacts: { opted_out: boolean } | null }>(
+  rows: T[],
+): { dialable: T[]; excluded: T[] } {
+  const dialable: T[] = [];
+  const excluded: T[] = [];
+  for (const row of rows) (row.contacts && !row.contacts.opted_out ? dialable : excluded).push(row);
+  return { dialable, excluded };
+}

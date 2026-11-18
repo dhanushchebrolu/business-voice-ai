@@ -11,6 +11,7 @@ import { TelephonyAdapterError } from "./telephony/adapter.ts";
 import { UNRESOLVED_SARVAM_STATUSES } from "./sarvam-call-review.ts";
 import { normalizeCustomerPhone } from "./phone-number.ts";
 import { finalizeTerminalCallSafely } from "./telephony/call-finalization.server.ts";
+import { isNumberSuppressed, OPT_OUT_NUMBER_MESSAGE } from "./contact-suppression.server.ts";
 import {
   isOutboundReady,
   OUTBOUND_NOT_READY_MESSAGE,
@@ -300,6 +301,9 @@ export async function sendSarvamInstantOutboundCall(
         : "Outbound calling is not configured on this platform yet.",
     );
   const webhookUrl = webhook.url;
+  // Do-not-call: refused before anything is written or dialled.
+  if (await isNumberSuppressed(supabaseAdmin, phoneNumber.organization_id, toE164))
+    throw new Error(OPT_OUT_NUMBER_MESSAGE);
 
   const adapter = getTelephonyAdapter("sarvam");
   if (!adapter) throw new Error("Sarvam is not connected. Configure SARVAM_API_KEY first.");

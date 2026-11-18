@@ -11,22 +11,60 @@ import type { NormalizedCallEvent } from "./adapter.ts";
  */
 
 /**
- * Merges a normalized event's structured extras (agent variables, and any
- * deployment/campaign/attempt identifiers) into the raw payload under
- * underscore-prefixed keys, so nothing is lost and nothing collides with a
- * real field of the same name in a provider's own raw payload. Every field
- * folded in here is already documented as service-role-only, never exposed
- * to a customer (see the Phase D migration's column-level grant on
- * call_logs, and adapter.ts's doc comments on these NormalizedCallEvent
- * fields).
+ * The only provider_metadata keys a telephony webhook may store, and the
+ * readers that need them:
+ *   - interaction_id: call recordings (call-recording.functions.ts) and the
+ *     admin call view (sarvam-admin-calls.server.ts);
+ *   - recording_url: the provider's recording link, when it sends one;
+ *   - app_id: the Sarvam agent that handled the call;
+ *   - late_provider_report: kept by telephony-event-processing when a
+ *     provider's final report arrives after an operator resolved the call.
+ * Never the raw payload: it carries every agent variable, the transcript,
+ * both phone numbers and (outbound) ClickAI's webhook URL with its token.
+ * The transcript, numbers and allowlisted variables have their own columns.
+ */
+export const PROVIDER_METADATA_KEYS = [
+  "interaction_id",
+  "recording_url",
+  "app_id",
+  "late_provider_report",
+] as const;
+
+/** Keys only an unsanitized (raw-payload) row has; used to find older rows to clean. */
+export const RAW_PROVIDER_METADATA_MARKERS = [
+  "_agent_variables",
+  "final_agent_variables",
+  "interaction_transcript",
+  "user_phone_number",
+  "webhook_config",
+] as const;
+
+/** provider_metadata reduced to PROVIDER_METADATA_KEYS (strings, and the late report object). */
+export function sanitizeProviderMetadata(metadata: unknown): Record<string, unknown> {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return {};
+  const source = metadata as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of ["interaction_id", "recording_url", "app_id"] as const) {
+    const value = source[key];
+    if (typeof value === "string" && value) out[key] = value.slice(0, 2048);
+  }
+  const late = source["late_provider_report"];
+  if (late && typeof late === "object" && !Array.isArray(late)) out["late_provider_report"] = late;
+  return out;
+}
+
+/**
+ * provider_metadata for a call from one normalized webhook event: only the
+ * identifiers ClickAI's readers use (PROVIDER_METADATA_KEYS), never the raw
+ * payload or agent variables.
  */
 export function buildProviderMetadata(event: NormalizedCallEvent): Record<string, unknown> {
-  const metadata: Record<string, unknown> = { ...event.raw };
-  if (event.agentVariables) metadata["_agent_variables"] = event.agentVariables;
-  if (event.providerDeploymentId) metadata["_deployment_id"] = event.providerDeploymentId;
-  if (event.providerCampaignId) metadata["_campaign_id"] = event.providerCampaignId;
-  if (event.providerAttemptId) metadata["_attempt_id"] = event.providerAttemptId;
-  return metadata;
+  const raw = (event.raw ?? {}) as Record<string, unknown>;
+  return sanitizeProviderMetadata({
+    interaction_id: raw["interaction_id"],
+    recording_url: event.recordingUrl ?? raw["recording_url"],
+    app_id: raw["app_id"],
+  });
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

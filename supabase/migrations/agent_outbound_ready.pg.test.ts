@@ -180,9 +180,11 @@ describe("agent_configs outbound-ready columns", () => {
 
   test("the rollback removes exactly the two columns and the check; the agent row survives", (t) => {
     if (!ready(t)) return;
-    rows(
+    // The migration history is owned by the database owner (as in production).
+    const recorded = execSql!(
       `INSERT INTO supabase_migrations.schema_migrations (version) VALUES ('20261117180000') ON CONFLICT DO NOTHING;`,
     );
+    assert.equal(recorded.status, 0, recorded.stderr);
     const r = execSql!(ROLLBACK);
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(
@@ -197,11 +199,33 @@ describe("agent_configs outbound-ready columns", () => {
       ),
       ["App-1 v5"],
     );
+    const history = execSql!(
+      `\\pset format unaligned\n\\pset tuples_only on\nSELECT count(*) FROM supabase_migrations.schema_migrations WHERE version = '20261117180000';`,
+    );
+    assert.equal(history.status, 0, history.stderr);
+    assert.match(history.stdout, /^0$/m, "the history row is removed (read as the owner)");
+
+    // Re-applying after the rollback restores both columns and the check, and
+    // the existing agent still starts not confirmed.
+    const reapplied = execSql!(
+      `BEGIN;\n${readFileSync(join(migrationsDir, MIGRATION), "utf8")}\nCOMMIT;`,
+    );
+    assert.equal(reapplied.status, 0, reapplied.stderr);
+    assert.deepEqual(
+      rows(`SELECT count(*) FROM information_schema.columns
+             WHERE table_schema = 'public' AND table_name = 'agent_configs'
+               AND column_name IN ('sarvam_outbound_ready_app_id', 'sarvam_outbound_ready_version');`),
+      ["2"],
+    );
     assert.deepEqual(
       rows(
-        `SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version = '20261117180000';`,
+        `SELECT coalesce(sarvam_outbound_ready_app_id, '-') FROM public.agent_configs WHERE id = '${AGENT}';`,
       ),
-      ["0"],
+      ["-"],
+    );
+    fails(
+      `UPDATE public.agent_configs SET sarvam_outbound_ready_version = 5 WHERE id = '${AGENT}';`,
+      /agent_configs_outbound_ready_complete/,
     );
   });
 });

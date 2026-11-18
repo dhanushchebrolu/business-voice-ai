@@ -42,7 +42,7 @@ export interface OutcomeDecision {
  * Never invents a Sarvam-side contract; these are Klyro-side convention
  * keys a campaign's own agent instructions can choose to populate.
  */
-function detectSpecialOutcome(
+export function detectSpecialOutcome(
   agentVariables: Record<string, unknown> | null | undefined,
 ): "opted_out" | "wrong_number" | null {
   if (!agentVariables) return null;

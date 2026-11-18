@@ -34,7 +34,12 @@ function makeFakeSupabase(script: Record<string, Partial<Record<OpType, QueryRes
   function nextResult(table: string, type: OpType): QueryResult {
     consumedIdx[table] ??= { select: 0, update: 0, insert: 0 };
     const idx = consumedIdx[table]![type]++;
-    const result = script[table]?.[type]?.[idx];
+    const result =
+      script[table]?.[type]?.[idx] ??
+      // The do-not-call lookup: unless a test scripts it, the number is not on the list.
+      (table === "contacts" && type === "select" && !script[table]
+        ? { data: [], error: null }
+        : undefined);
     if (!result) throw new Error(`test bug: no scripted ${type} result #${idx} for table ${table}`);
     return result;
   }
@@ -251,6 +256,27 @@ describe("sendSarvamInstantOutboundCall — validation before ever dialing", () 
       sendSarvamInstantOutboundCall(client, { phoneNumberId: "num_1", toE164: "+912222222222" }),
       /only applies to Sarvam-provisioned numbers/i,
     );
+  });
+
+  test("refuses a number on this workspace's do-not-call list before anything is written or dialled", async () => {
+    const { client, calls } = makeFakeSupabase({
+      phone_numbers: { select: [{ data: PHONE_NUMBER_ROW, error: null }] },
+      contacts: { select: [{ data: [{ id: "contact_dnc" }], error: null }] },
+    });
+    const { requestBody } = await withSarvamEnvAndFetch({ status: 200, body: {} }, () =>
+      assert.rejects(
+        sendSarvamInstantOutboundCall(client, { phoneNumberId: "num_1", toE164: "+912222222222" }),
+        /do-not-call list/i,
+      ),
+    );
+    assert.equal(requestBody, undefined, "nothing was sent to Sarvam");
+    const lookup = calls.find((c) => c.table === "contacts")!;
+    assert.deepEqual(lookup.filters, [
+      ["organization_id", PHONE_NUMBER_ROW.organization_id],
+      ["phone", "+912222222222"],
+      ["opted_out", true],
+    ]);
+    assert.ok(!calls.some((c) => c.type !== "select"), "nothing written");
   });
 
   test("rejects when the number has no connection configured", async () => {

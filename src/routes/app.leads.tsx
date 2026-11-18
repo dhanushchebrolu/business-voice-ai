@@ -23,7 +23,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-const STATUSES = ["new", "contacted", "qualified", "won", "lost"];
+// do_not_contact: set by ClickAI when the caller opted out; shown so staff can see it.
+const STATUSES = ["new", "contacted", "qualified", "won", "lost", "do_not_contact"];
 
 export const Route = createFileRoute("/app/leads")({
   head: () => ({
@@ -114,7 +115,7 @@ function LeadsPage() {
                         <SelectContent>
                           {STATUSES.map((s) => (
                             <SelectItem key={s} value={s} className="text-xs capitalize">
-                              {s}
+                              {s.replace(/_/g, " ")}
                             </SelectItem>
                           ))}
                         </SelectContent>

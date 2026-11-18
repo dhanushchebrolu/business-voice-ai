@@ -139,24 +139,31 @@ describe("scheduled tick", () => {
     const supabaseAdmin = { rpc: async () => ({ data: statsRows, error: null }) } as never;
     const ran: string[] = [];
     const handlers = Object.fromEntries(
-      ["sweep.call_finalization", "campaign.dispatch", "sweep.sarvam_reconcile", "jobs.prune"].map(
-        (k) => [
-          k,
-          async () => {
-            ran.push(k);
-          },
-        ],
-      ),
+      [
+        "sweep.call_finalization",
+        "campaign.dispatch",
+        "sweep.sarvam_reconcile",
+        "sweep.call_outcome_reconcile",
+        "sweep.call_variable_retention",
+        "jobs.prune",
+      ].map((k) => [
+        k,
+        async () => {
+          ran.push(k);
+        },
+      ]),
     );
     const now = new Date("2026-11-11T10:00:30Z");
     const first = await runScheduledTick({ supabaseAdmin, store, handlers, now });
     const second = await runScheduledTick({ supabaseAdmin, store, handlers, now });
-    assert.equal(first.enqueued.length, 4);
+    assert.equal(first.enqueued.length, 6);
     assert.equal(second.enqueued.length, 0, "same bucket: nothing new");
     assert.deepEqual(ran.sort(), [
       "campaign.dispatch",
       "jobs.prune",
       "sweep.call_finalization",
+      "sweep.call_outcome_reconcile",
+      "sweep.call_variable_retention",
       "sweep.sarvam_reconcile",
     ]);
     assert.equal(first.health.alert, true);
@@ -172,8 +179,48 @@ describe("handlers", () => {
       "jobs.prune",
       "sarvam.reconcile_call",
       "sweep.call_finalization",
+      "sweep.call_outcome_reconcile",
+      "sweep.call_variable_retention",
       "sweep.sarvam_reconcile",
     ]);
+  });
+
+  test("the variable retention sweep runs hourly and reports what it cleared", async () => {
+    const a = periodicJobs(new Date("2026-11-18T10:05:00Z"));
+    const b = periodicJobs(new Date("2026-11-18T10:55:00Z"));
+    const c = periodicJobs(new Date("2026-11-18T11:00:00Z"));
+    const key = (jobs: typeof a) =>
+      jobs.find((j) => j.kind === "sweep.call_variable_retention")!.idempotencyKey;
+    assert.equal(key(a), key(b), "once an hour");
+    assert.notEqual(key(b), key(c));
+    const handlers = buildJobHandlers({
+      supabaseAdmin: {} as never,
+      store: new FakeStore(),
+      now: () => new Date("2026-11-18T10:00:00Z"),
+      expireVariables: async () => ({ inboundCleared: 2, outboundCleared: 1 }),
+    });
+    assert.deepEqual(await handlers["sweep.call_variable_retention"]!({ payload: {} } as Job), {
+      inboundCleared: 2,
+      outboundCleared: 1,
+    });
+  });
+
+  test("the outcome reconcile sweep runs the recovery and reports its summary", async () => {
+    let at: Date | null = null;
+    const handlers = buildJobHandlers({
+      supabaseAdmin: {} as never,
+      store: new FakeStore(),
+      now: () => new Date("2026-11-18T10:00:00Z"),
+      reconcileOutcomes: async (now) => {
+        at = now;
+        return { candidates: 1, recorded: 1 };
+      },
+    });
+    assert.deepEqual(await handlers["sweep.call_outcome_reconcile"]!({ payload: {} } as Job), {
+      candidates: 1,
+      recorded: 1,
+    });
+    assert.equal(at!.toISOString(), "2026-11-18T10:00:00.000Z");
   });
 
   test("a reconcile or finalize job without a call id is a permanent error", async () => {

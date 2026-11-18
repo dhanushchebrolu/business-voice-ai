@@ -4763,6 +4763,14 @@ export type Database = {
       [_ in never]: never;
     };
     Functions: {
+      reverse_contact_opt_out: {
+        Args: {
+          p_contact_id: string;
+          p_organization_id: string;
+          p_reason: string;
+        };
+        Returns: undefined;
+      };
       record_razorpay_capture: {
         Args: {
           p_amount: number;

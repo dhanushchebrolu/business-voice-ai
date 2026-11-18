@@ -1,6 +1,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { decideCampaignContactOutcome, type CallTerminalStatus } from "../campaign-outcome.ts";
+import {
+  finalCallVariables,
+  leadNotesFromVariables,
+  retainCallVariables,
+} from "../call-variables.ts";
 
 /**
  * Finalization of a SARVAM OUTBOUND call that has reached a final status:
@@ -171,10 +176,8 @@ async function applyBilling(rpc: Rpc, call: FinalizingCall, token: string, deps:
 }
 
 async function applyCampaign(supabaseAdmin: Client, rpc: Rpc, call: FinalizingCall, token: string) {
-  const vars =
-    call.final_agent_variables && typeof call.final_agent_variables === "object"
-      ? (call.final_agent_variables as Record<string, unknown>)
-      : null;
+  // Flat final variables, whether stored grouped ({ final, output }) or already flat.
+  const vars = finalCallVariables(call.final_agent_variables);
   let decision: { status: string; nextAttemptAt: string | null } | null = null;
 
   if (call.campaign_id && call.campaign_contact_id) {
@@ -211,10 +214,13 @@ async function applyCampaign(supabaseAdmin: Client, rpc: Rpc, call: FinalizingCa
     _token: token,
     _contact_status: decision?.status ?? null,
     _next_attempt_at: decision?.nextAttemptAt ?? null,
-    _output_variables: vars ?? {},
-    _create_lead: decision !== null && call.status === "completed",
+    // Only the retained call fields (call-variables.ts), never the agent's whole context.
+    _output_variables: retainCallVariables(vars, "outbound") ?? {},
+    // A contact who opted out on this call is never turned into a lead for follow-up.
+    _create_lead:
+      decision !== null && call.status === "completed" && decision.status !== "opted_out",
     _lead_score: interest === "high" ? "hot" : interest === "low" ? "cold" : "warm",
-    _lead_notes: vars && Object.keys(vars).length > 0 ? JSON.stringify(vars) : null,
+    _lead_notes: leadNotesFromVariables(vars),
   });
   if (result.error) throw result.error;
   const outcome = result.data as { result?: string } | null;

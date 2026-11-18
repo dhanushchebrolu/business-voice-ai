@@ -1,6 +1,6 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
-import { csvToTable, validateContactRows, applyVariableMapping } from "./contacts-import";
+import { csvToTable, validateContactRows } from "./contacts-import";
 
 /**
  * Enrolling contacts into a campaign (spec §11/§12/§26). The client may
@@ -87,74 +87,13 @@ export const importCampaignContactsCsv = createServerFn({ method: "POST" })
 
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
-    let enrolled = 0;
-    let alreadyInCampaign = 0;
-    let optedOut = 0;
-
-    for (const row of summary.valid) {
-      const mappedFields = applyVariableMapping(row.fields, data.mapping);
-      const name =
-        mappedFields["customer_name"] ?? row.fields["name"] ?? row.fields["Name"] ?? null;
-
-      // Upsert into Klyro's own CRM (unique on organization_id+phone) — never
-      // overwrites opted_out state, so a re-upload of a number that opted
-      // out previously cannot silently re-enable it.
-      const { data: existing } = await supabaseAdmin
-        .from("contacts")
-        .select("id, opted_out, custom_fields")
-        .eq("organization_id", orgId)
-        .eq("phone", row.phone!)
-        .maybeSingle();
-
-      let contactId: string;
-      if (existing) {
-        contactId = existing.id;
-        await supabaseAdmin
-          .from("contacts")
-          .update({
-            name,
-            custom_fields: {
-              ...(existing.custom_fields as Record<string, unknown>),
-              ...row.fields,
-            } as never,
-          })
-          .eq("id", contactId);
-        if (existing.opted_out) {
-          optedOut++;
-          continue;
-        }
-      } else {
-        const { data: created, error: createError } = await supabaseAdmin
-          .from("contacts")
-          .insert({
-            organization_id: orgId,
-            name,
-            phone: row.phone!,
-            custom_fields: row.fields,
-            source: "csv_import",
-          })
-          .select("id")
-          .single();
-        if (createError) throw createError;
-        contactId = created.id;
-      }
-
-      const { error: enrollError } = await supabaseAdmin.from("campaign_contacts").insert({
-        campaign_id: data.campaignId,
-        organization_id: orgId,
-        contact_id: contactId,
-        variables: mappedFields,
-      });
-      if (enrollError) {
-        // Unique (campaign_id, contact_id) violation = already enrolled — not an error.
-        if ((enrollError as { code?: string }).code === "23505") {
-          alreadyInCampaign++;
-          continue;
-        }
-        throw enrollError;
-      }
-      enrolled++;
-    }
+    const { enrollContactRows } = await import("@/lib/campaign-enrollment.server");
+    const { enrolled, alreadyInCampaign, optedOut } = await enrollContactRows(supabaseAdmin, {
+      organizationId: orgId,
+      campaignId: data.campaignId,
+      rows: summary.valid,
+      mapping: data.mapping,
+    });
 
     await supabaseAdmin.from("campaign_uploads").insert({
       campaign_id: data.campaignId,
@@ -250,34 +189,29 @@ export const setContactOptOut = createServerFn({ method: "POST" })
       .maybeSingle();
     if (!contact) throw new Error("Contact not found.");
     // The contact's own organization, once the caller is a member of it.
-    const { requireRole } = await import("@/lib/outbound-authorization.server");
-    const orgId = await requireRole(
-      { supabase: context.supabase as typeof supabaseAdmin, supabaseAdmin },
+    const { memberRole } = await import("@/lib/outbound-authorization.server");
+    const role = await memberRole(
+      context.supabase as typeof supabaseAdmin,
       context.userId,
       contact.organization_id,
-      false,
-      "Contact not found.",
+    );
+    if (!role) throw new Error("Contact not found.");
+
+    // Marking also pulls the contact out of every not-yet-dialled enrolment;
+    // clearing needs an owner/admin and a reason, and is audited (audit_logs).
+    const { changeContactOptOut } = await import("@/lib/contact-suppression.server");
+    // Clearing runs as the signed-in user (their JWT), never as the service role.
+    const result = await changeContactOptOut(
+      supabaseAdmin,
+      context.supabase as typeof supabaseAdmin,
+      {
+        organizationId: contact.organization_id,
+        contactId: data.contactId,
+        actorRole: role,
+        optedOut: data.optedOut,
+        reason: data.reason,
+      },
     );
 
-    await supabaseAdmin
-      .from("contacts")
-      .update({
-        opted_out: data.optedOut,
-        opted_out_at: data.optedOut ? new Date().toISOString() : null,
-        opted_out_reason: data.optedOut ? (data.reason ?? "Manually marked do-not-call") : null,
-      })
-      .eq("id", data.contactId);
-
-    // Pull the contact out of any not-yet-dialed enrollment across every
-    // campaign it's in — an opt-out must stop future dialing immediately,
-    // not just block new enrollment.
-    if (data.optedOut) {
-      await supabaseAdmin
-        .from("campaign_contacts")
-        .update({ status: "opted_out", next_attempt_at: null })
-        .eq("contact_id", data.contactId)
-        .in("status", ["pending", "retry_scheduled"]);
-    }
-
-    return { ok: true };
+    return { ok: true, changed: result.changed };
   });

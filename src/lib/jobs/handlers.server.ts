@@ -16,6 +16,11 @@ import type { ReconcileDeps } from "../sarvam-reconciliation.server.ts";
  *   sweep.call_finalization find calls whose billing/campaign finalization is
  *                           due, enqueue one call.finalize each
  *   call.finalize           finalize one call (idempotent, leased in SQL)
+ *   sweep.call_outcome_reconcile  record end-of-call outcomes Sarvam's on-end
+ *                           tool never delivered, from the stored call-end
+ *                           webhook (idempotent; see call-outcome-reconciliation)
+ *   sweep.call_variable_retention  clear stored final agent variables once the
+ *                           recovery window (and outbound finalization) is over
  *   jobs.prune              delete succeeded jobs older than 7 days
  */
 
@@ -40,6 +45,10 @@ export interface HandlerDeps {
   /** Sarvam lookups and resolution; default to the real adapter / resolution path. */
   reconcile?: ReconcileDeps;
   finalize?: (callId: string) => Promise<{ state: string; error?: string }>;
+  /** Stored call-variable expiry; defaults to expireCallVariables. */
+  expireVariables?: (now: Date) => Promise<Record<string, unknown>>;
+  /** End-of-call outcome recovery; defaults to reconcileCallOutcomes. */
+  reconcileOutcomes?: (now: Date) => Promise<Record<string, unknown>>;
   /** Campaign dispatcher; defaults to dispatchDueCampaigns. */
   dispatchCampaigns?: (options: { deadline: number }) => Promise<Record<string, unknown>>;
 }
@@ -168,6 +177,33 @@ export function buildJobHandlers(deps: HandlerDeps): Record<string, JobHandler> 
         state: result.state,
         ...("error" in result && result.error ? { error: result.error } : {}),
       };
+    },
+
+    "sweep.call_outcome_reconcile": async () => {
+      const reconcile =
+        deps.reconcileOutcomes ??
+        (async (at: Date) => {
+          const { reconcileCallOutcomes } =
+            await import("../call-outcome-reconciliation.server.ts");
+          return (await reconcileCallOutcomes(supabaseAdmin, { now: at })) as unknown as Record<
+            string,
+            unknown
+          >;
+        });
+      return reconcile(now());
+    },
+
+    "sweep.call_variable_retention": async () => {
+      const expire =
+        deps.expireVariables ??
+        (async (at: Date) => {
+          const { expireCallVariables } = await import("../call-variable-retention.server.ts");
+          return (await expireCallVariables(supabaseAdmin, { now: at })) as unknown as Record<
+            string,
+            unknown
+          >;
+        });
+      return expire(now());
     },
 
     "jobs.prune": async () => {
