@@ -56,10 +56,26 @@ jobs:
         # The disposable-cluster regression tests (supabase/migrations/*.pg.test.ts)
         # run their own initdb/pg_ctl-managed cluster — they need the server
         # binaries on PATH, not a separately running Postgres service container.
+        #
+        # GitHub's ubuntu-26.04 image already ships the PostgreSQL 18 server in
+        # /usr/lib/postgresql/18/bin, which is where pg-test-cluster.ts looks;
+        # apt only ever added the 18.6 kB `postgresql` meta-package. Run
+        # 44521771352 failed (exit 100) fetching that package while Ubuntu's
+        # mirrors returned 503 / timed out, before any of our checks ran. So
+        # install only when no server is present, with apt retries. Nothing is
+        # weakened: the next step still fails if any PostgreSQL test skips.
         run: |
           set -eo pipefail
-          sudo apt-get update
-          sudo apt-get install -y postgresql
+          if compgen -G "/usr/lib/postgresql/*/bin/initdb" > /dev/null \
+            && compgen -G "/usr/lib/postgresql/*/bin/pg_ctl" > /dev/null \
+            && compgen -G "/usr/lib/postgresql/*/bin/psql" > /dev/null; then
+            echo "Using the PostgreSQL server already on the runner image:"
+            ls -d /usr/lib/postgresql/*/bin
+          else
+            sudo apt-get -o Acquire::Retries=5 update
+            sudo apt-get -o Acquire::Retries=5 install -y postgresql
+          fi
+          "$(ls -d /usr/lib/postgresql/*/bin | sort -V | tail -1)/initdb" --version
 
       - name: Typecheck
         run: npx tsc --noEmit
