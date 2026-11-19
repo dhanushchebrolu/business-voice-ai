@@ -159,7 +159,7 @@ function newOrg(balance: number, maxSeconds: number | null = MAX_SECONDS): Org {
     INSERT INTO public.businesses (id, organization_id, name) VALUES ('${org.id}', '${org.id}', 'Clinic');
     INSERT INTO public.agent_configs (id, organization_id, business_id, sarvam_app_id, sarvam_app_version,
         sarvam_outbound_ready_app_id, sarvam_outbound_ready_version, sarvam_outbound_max_call_seconds)
-      VALUES ('${org.agent}', '${org.id}', '${org.id}', 'App-1', 6, 'App-1', 6, ${maxSeconds ?? "NULL"});
+      VALUES ('${org.agent}', '${org.id}', '${org.id}', 'App-${org.agent}', 6, 'App-${org.agent}', 6, ${maxSeconds ?? "NULL"});
     INSERT INTO public.phone_numbers (id, organization_id, e164, provider, status, outbound_enabled, agent_config_id)
       VALUES ('${org.number}', '${org.id}', '+9179${String(++destinationSeq).padStart(8, "0")}', 'sarvam', 'active', true, '${org.agent}');
     ${balance > 0 ? `INSERT INTO public.wallet_transactions (organization_id, amount, kind, description) VALUES ('${org.id}', ${balance}, 'topup', 'seed');` : ""}`);
