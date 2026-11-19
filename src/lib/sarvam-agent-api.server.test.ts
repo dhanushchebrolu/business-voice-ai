@@ -67,9 +67,16 @@ class FakeDb {
       }
       return { data: matched.map((r) => ({ ...r })), error: null };
     };
+    // A `json->>key` column reads a key of a JSON column, as in PostgREST.
+    const field = (r: Row, col: string) => {
+      const [base, key] = col.split("->>");
+      const v = r[base!];
+      return key === undefined ? v : v && typeof v === "object" ? (v as Row)[key] : undefined;
+    };
     const builder = {
       select: () => builder,
-      eq: (col: string, val: unknown) => (filters.push((r) => r[col] === val), builder),
+      eq: (col: string, val: unknown) => (filters.push((r) => field(r, col) === val), builder),
+      neq: (col: string, val: unknown) => (filters.push((r) => field(r, col) !== val), builder),
       in: (col: string, vals: unknown[]) => (filters.push((r) => vals.includes(r[col])), builder),
       not: (col: string, _o: string, _v: unknown) => (
         filters.push((r) => r[col] !== null && r[col] !== undefined),

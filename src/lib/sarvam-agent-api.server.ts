@@ -7,6 +7,7 @@ import {
 import type { ToolExecutionContext } from "./ai-tools.server.ts";
 import { zonedWallTimeToUtc } from "./calendar/timezone.ts";
 import { normalizeCustomerPhone } from "./phone-number.ts";
+import { UNRESOLVED_SARVAM_STATUSES } from "./sarvam-call-review.ts";
 import { checkInboundAdmission } from "./sarvam-inbound-admission.server.ts";
 import { UNIVERSAL_CAPABILITIES } from "./universal-agent-config.ts";
 import { customGreetingFor, renderGreeting } from "./agent-greeting.ts";
@@ -565,6 +566,19 @@ export async function completeDueLead(
   const detail = (event.detail ?? {}) as Record<string, unknown>;
   const due = detail["lead"] as DueLead | undefined;
   if (!due || detail["lead_id"]) return (detail["lead_id"] as string | undefined) ?? null;
+  const direction = await resolveLeadDirection(deps, auth, event.interaction_id, due.phone);
+  // Held: still due, so the sweep decides again once Sarvam's webhook links the call.
+  if (direction === "unknown") return null;
+  if (direction !== "inbound") {
+    // Not a follow-up: drop the due lead so the sweep stops, and keep why.
+    const { lead: _dropped, ...rest } = detail;
+    const { error } = await deps.supabaseAdmin
+      .from("sarvam_agent_events")
+      .update({ detail: { ...rest, lead_skipped: direction } as Json })
+      .eq("id", event.id);
+    if (error) throw error;
+    return null;
+  }
   const saved = await saveCallLead(
     deps,
     auth,
@@ -582,6 +596,67 @@ export async function completeDueLead(
     .eq("id", event.id);
   if (error) throw error;
   return saved.id;
+}
+
+/**
+ * Who a due lead belongs to, from what ClickAI has stored, never a time window:
+ *   - own_number: the caller number is one of the customer's own numbers;
+ *   - inbound / outbound: Sarvam's interaction id matches one of the customer's
+ *     Sarvam calls (inbound rows keep it as provider_call_id, outbound rows as
+ *     provider_metadata.interaction_id once Sarvam's result webhook arrives);
+ *   - inbound: no match yet, and the customer has no unfinished ClickAI outbound
+ *     call. Every outbound call is written before it is dialled and stays
+ *     unfinished until its result arrives, so the outcome cannot be one;
+ *   - unknown: no match yet while an outbound call is unfinished. The lead is
+ *     held, and the sweep decides once the webhook links the interaction.
+ *
+ * The agent's call_outcome uses the inbound taxonomy (a booking the agent must
+ * refuse on an outbound call reads as callback_requested), so an outbound
+ * outcome is never a lead. An explicit outbound callback request becomes one in
+ * call finalization, from outbound_result and ClickAI's own dialled number.
+ */
+export type LeadDirection = "inbound" | "outbound" | "own_number" | "unknown";
+
+export async function resolveLeadDirection(
+  deps: AgentApiDeps,
+  auth: AuthenticatedIntegration,
+  interactionId: string,
+  phone: string,
+): Promise<LeadDirection> {
+  const db = deps.supabaseAdmin;
+  const { data: own, error: ownError } = await db
+    .from("phone_numbers")
+    .select("id")
+    .eq("organization_id", auth.organizationId)
+    .eq("e164", phone)
+    .neq("status", "released")
+    .limit(1);
+  if (ownError) throw ownError;
+  if ((own ?? []).length > 0) return "own_number";
+
+  for (const column of ["provider_call_id", "provider_metadata->>interaction_id"]) {
+    const { data, error } = await db
+      .from("call_logs")
+      .select("direction")
+      .eq("organization_id", auth.organizationId)
+      .eq("provider", "sarvam")
+      .eq(column, interactionId)
+      .limit(1);
+    if (error) throw error;
+    const direction = data?.[0]?.direction;
+    if (direction === "outbound" || direction === "inbound") return direction;
+  }
+
+  const { data: open, error: openError } = await db
+    .from("call_logs")
+    .select("id")
+    .eq("organization_id", auth.organizationId)
+    .eq("provider", "sarvam")
+    .eq("direction", "outbound")
+    .in("status", [...UNRESOLVED_SARVAM_STATUSES])
+    .limit(1);
+  if (openError) throw openError;
+  return (open ?? []).length > 0 ? "unknown" : "inbound";
 }
 
 /**
@@ -630,6 +705,7 @@ export async function recordCallOutcome(
   const qualifies =
     kind === "callback_requested" ||
     (kind === "enquiry_answered" && Boolean(input.customerName || input.interest));
+  // Direction is decided when the lead is saved (completeDueLead), not here.
   const leadDue: DueLead | null =
     qualifies && !optedOut && !testCall && !facts.callback_recorded && callerPhone && interactionId
       ? {

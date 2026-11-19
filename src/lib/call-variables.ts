@@ -27,6 +27,8 @@ export const OUTBOUND_RETAINED_VARIABLES = [
   "interest_level",
   "do_not_call",
   "wrong_number",
+  // An explicit "contact me later" on a single outbound call (call-finalization's lead).
+  "outbound_result",
 ] as const;
 
 /** What a campaign lead's notes may show: the call's own result, never the agent's context. */

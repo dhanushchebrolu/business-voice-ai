@@ -72,7 +72,7 @@ describe("stored call variables", () => {
     });
   });
 
-  test("outbound keeps the six plus interest_level, do_not_call and wrong_number", () => {
+  test("outbound keeps the six plus interest_level, do_not_call, wrong_number and outbound_result", () => {
     const event = adapter.normalizeWebhookEvent(
       JSON.stringify({
         attempt_id: "att_1",
@@ -92,6 +92,7 @@ describe("stored call variables", () => {
     assert.equal(kept!["interest_level"], "high");
     assert.equal(kept!["do_not_call"], "no");
     assert.equal(kept!["wrong_number"], "no");
+    assert.equal(kept!["outbound_result"], "interested");
   });
 
   test("final wins over output; output fills a missing name; call-start inputs are not outcomes", () => {
@@ -143,6 +144,8 @@ describe("stored call variables", () => {
       "wrong_number",
       "call_outcome",
       "interest_level",
+      // call-finalization's explicit-callback lead.
+      "outbound_result",
     ])
       assert.ok((OUTBOUND_RETAINED_VARIABLES as readonly string[]).includes(name), name);
   });

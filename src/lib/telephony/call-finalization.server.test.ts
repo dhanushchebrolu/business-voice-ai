@@ -2,6 +2,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { finalizeTerminalCall, finalizeTerminalCallSafely } from "./call-finalization.server.ts";
+import { callLeadId } from "../sarvam-agent-api.server.ts";
 
 /**
  * Orchestration of finalizeTerminalCall against a scripted client: which
@@ -38,8 +39,11 @@ function fakeClient(opts: {
   campaign?: Record<string, unknown> | null;
   contact?: Record<string, unknown> | null;
   replies?: Partial<Record<string, RpcReply>>;
+  /** Error returned by every insert (e.g. a unique violation on a retried lead). */
+  insertError?: { code?: string; message: string } | null;
 }) {
   const rpcs: Rpc[] = [];
+  const inserts: { table: string; row: Record<string, unknown> }[] = [];
   const defaults: Record<string, RpcReply> = {
     claim_call_finalization: { data: "token_1" },
     apply_call_billing: { data: "applied" },
@@ -65,6 +69,12 @@ function fakeClient(opts: {
         eq: () => builder,
         single: () => builder,
         maybeSingle: () => builder,
+        insert: (row: Record<string, unknown>) => {
+          inserts.push({ table, row });
+          return {
+            then: (resolve: (r: unknown) => void) => resolve({ error: opts.insertError ?? null }),
+          };
+        },
         then: (resolve: (r: unknown) => void) =>
           resolve({
             data: rows[table] ?? null,
@@ -74,7 +84,7 @@ function fakeClient(opts: {
       return builder;
     },
   };
-  return { client: client as never, rpcs, names: () => rpcs.map((r) => r.fn) };
+  return { client: client as never, rpcs, inserts, names: () => rpcs.map((r) => r.fn) };
 }
 
 const getRate = async () => RATE;
@@ -307,5 +317,131 @@ describe("Phase 1 scope: Sarvam outbound only (source checks)", () => {
       resolution,
       /if \(now && isResolvableSarvamCall\(\{ \.\.\.call, status: now\.status \}\)\)\s*await supabaseAdmin\s*\.from\("webhook_events"\)\s*\.delete\(\)/,
     );
+  });
+});
+
+describe("finalizeTerminalCall: follow-up lead for a single outbound call", () => {
+  const DIALLED = "+919876500077";
+  const single = (vars: Record<string, unknown>, over: Record<string, unknown> = {}) => ({
+    ...CALL,
+    campaign_id: null,
+    campaign_contact_id: null,
+    contact_id: null,
+    business_id: "biz_1",
+    destination_number: DIALLED,
+    final_agent_variables: vars,
+    ...over,
+  });
+  const leads = (f: ReturnType<typeof fakeClient>) => f.inserts.filter((i) => i.table === "leads");
+
+  test("an explicit callback request saves exactly one lead, on ClickAI's own dialled number", async () => {
+    const f = fakeClient({
+      call: single({
+        outbound_result: "callback_requested",
+        opted_out: "no",
+        wrong_number: "no",
+        customer_name: "  Asha  ",
+      }),
+    });
+    assert.deepEqual(await finalizeTerminalCall(f.client, "call_1", { getRate }), {
+      state: "done",
+    });
+    assert.equal(leads(f).length, 1);
+    const row = leads(f)[0]!.row;
+    assert.equal(row["id"], await callLeadId("outbound-callback", "call_1"));
+    assert.equal(row["phone"], DIALLED);
+    assert.equal(row["call_id"], "call_1");
+    assert.equal(row["organization_id"], "org_1");
+    assert.equal(row["business_id"], "biz_1");
+    assert.equal(row["name"], "Asha");
+    // No campaign: the campaign step still runs for its checkpoint but creates no lead itself.
+    const campaign = f.rpcs.find((r) => r.fn === "apply_call_campaign_outcome")!.args;
+    assert.equal(campaign["_create_lead"], false);
+  });
+
+  test("a retried finalization finds the same lead (unique violation) and still completes", async () => {
+    const f = fakeClient({
+      call: single({ outbound_result: "callback_requested", opted_out: "no" }),
+      insertError: { code: "23505", message: "duplicate key value" },
+    });
+    assert.deepEqual(await finalizeTerminalCall(f.client, "call_1", { getRate }), {
+      state: "done",
+    });
+    assert.equal(leads(f).length, 1, "one attempt, same deterministic id");
+    assert.equal(leads(f)[0]!.row["id"], await callLeadId("outbound-callback", "call_1"));
+  });
+
+  test("any other insert error fails the step instead of losing the lead silently", async () => {
+    const f = fakeClient({
+      call: single({ outbound_result: "callback_requested", opted_out: "no" }),
+      insertError: { code: "42501", message: "permission denied" },
+    });
+    const result = await finalizeTerminalCall(f.client, "call_1", { getRate });
+    assert.equal(result.state, "failed");
+    assert.ok(!f.names().includes("apply_call_campaign_outcome"), "checkpoint not set");
+  });
+
+  test("booking interest alone (the agent sent them to the clinic) never creates a lead", async () => {
+    for (const outbound_result of ["interested", "not_interested", "booked", undefined, ""]) {
+      const f = fakeClient({
+        call: single({
+          // The inbound-taxonomy outcome Sarvam picks for a refused outbound booking.
+          call_outcome: "callback_requested",
+          outbound_result,
+          interest_level: "high",
+          opted_out: "no",
+        }),
+      });
+      await finalizeTerminalCall(f.client, "call_1", { getRate });
+      assert.equal(leads(f).length, 0, String(outbound_result));
+    }
+  });
+
+  test("an opt-out takes precedence, even if the result also says callback_requested", async () => {
+    for (const vars of [
+      { outbound_result: "opted_out", opted_out: "yes" },
+      { outbound_result: "callback_requested", opted_out: "yes" },
+      { outbound_result: "callback_requested", do_not_call: "true" },
+    ]) {
+      const f = fakeClient({ call: single(vars) });
+      await finalizeTerminalCall(f.client, "call_1", { getRate });
+      assert.equal(leads(f).length, 0, JSON.stringify(vars));
+    }
+  });
+
+  test("a wrong number never creates a lead", async () => {
+    for (const vars of [
+      { outbound_result: "wrong_person", wrong_number: "yes" },
+      { outbound_result: "callback_requested", wrong_number: "yes" },
+    ]) {
+      const f = fakeClient({ call: single(vars) });
+      await finalizeTerminalCall(f.client, "call_1", { getRate });
+      assert.equal(leads(f).length, 0, JSON.stringify(vars));
+    }
+  });
+
+  test("an unconnected call, a non-exact value or an unusable dialled number creates none", async () => {
+    const cases: Record<string, unknown>[] = [
+      single({ outbound_result: "callback_requested" }, { status: "no_answer" }),
+      single({ outbound_result: "Callback_Requested " }),
+      single({ outbound_result: ["callback_requested"] }),
+      single({ outbound_result: "callback_requested" }, { destination_number: "not-a-number" }),
+      single({ outbound_result: "callback_requested" }, { destination_number: null }),
+    ];
+    for (const call of cases) {
+      const f = fakeClient({ call });
+      await finalizeTerminalCall(f.client, "call_1", { getRate });
+      assert.equal(leads(f).length, 0, JSON.stringify(call));
+    }
+  });
+
+  test("a campaign call is unchanged: no single-call lead, the campaign step decides", async () => {
+    const f = fakeClient({
+      call: { ...CALL, final_agent_variables: { outbound_result: "callback_requested" } },
+    });
+    await finalizeTerminalCall(f.client, "call_1", { getRate });
+    assert.equal(leads(f).length, 0);
+    const campaign = f.rpcs.find((r) => r.fn === "apply_call_campaign_outcome")!.args;
+    assert.equal(campaign["_create_lead"], true);
   });
 });

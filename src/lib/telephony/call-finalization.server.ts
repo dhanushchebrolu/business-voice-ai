@@ -1,6 +1,12 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
-import { decideCampaignContactOutcome, type CallTerminalStatus } from "../campaign-outcome.ts";
+import {
+  decideCampaignContactOutcome,
+  detectSpecialOutcome,
+  type CallTerminalStatus,
+} from "../campaign-outcome.ts";
+import { callLeadId } from "../sarvam-agent-api.server.ts";
+import { normalizeCustomerPhone } from "../phone-number.ts";
 import {
   finalCallVariables,
   leadNotesFromVariables,
@@ -61,6 +67,8 @@ interface FinalizingCall {
   campaign_id: string | null;
   campaign_contact_id: string | null;
   contact_id: string | null;
+  business_id?: string | null;
+  destination_number?: string | null;
   final_agent_variables: unknown;
   billing_applied_at: string | null;
   campaign_applied_at: string | null;
@@ -95,7 +103,7 @@ export async function finalizeTerminalCall(
   const { data, error: readError } = await supabaseAdmin
     .from("call_logs")
     .select(
-      "id, organization_id, status, duration_seconds, campaign_id, campaign_contact_id, contact_id, final_agent_variables, billing_applied_at, campaign_applied_at",
+      "id, organization_id, status, duration_seconds, campaign_id, campaign_contact_id, contact_id, business_id, destination_number, final_agent_variables, billing_applied_at, campaign_applied_at",
     )
     .eq("id", callId)
     .single();
@@ -208,6 +216,10 @@ async function applyCampaign(supabaseAdmin: Client, rpc: Rpc, call: FinalizingCa
     );
   }
 
+  // A single (non-campaign) call: a follow-up lead only on an explicit request. Saved before
+  // the step's checkpoint, with a deterministic id, so a retried finalization never doubles it.
+  if (!decision) await saveExplicitCallbackLead(supabaseAdmin, call, vars);
+
   const interest = typeof vars?.["interest_level"] === "string" ? vars["interest_level"] : null;
   const result = await rpc("apply_call_campaign_outcome", {
     _call: call.id,
@@ -225,4 +237,40 @@ async function applyCampaign(supabaseAdmin: Client, rpc: Rpc, call: FinalizingCa
   if (result.error) throw result.error;
   const outcome = result.data as { result?: string } | null;
   if (outcome?.result === "lease_lost") throw new Error("the lease was lost");
+}
+
+/**
+ * One follow-up lead for a single (non-campaign) outbound call, only when the person
+ * explicitly asked to be contacted later: outbound_result is exactly "callback_requested"
+ * (a value the agent picks from a fixed list after the call), the call completed, and the
+ * person neither opted out nor said it was the wrong number (detectSpecialOutcome).
+ * Booking interest alone is never enough: on an outbound call the agent sends people to
+ * the clinic to book, which is not a callback request.
+ *
+ * The phone is ClickAI's own dialled number (call_logs.destination_number), never the
+ * agent's tool-reported caller id. The id is deterministic per call, so a retried
+ * finalization finds the lead (unique violation) instead of adding a second one.
+ */
+export async function saveExplicitCallbackLead(
+  supabaseAdmin: Client,
+  call: FinalizingCall,
+  vars: Record<string, unknown> | null,
+): Promise<void> {
+  if (call.status !== "completed" || !vars) return;
+  if (vars["outbound_result"] !== "callback_requested" || detectSpecialOutcome(vars)) return;
+  const phone = normalizeCustomerPhone(call.destination_number ?? "", null);
+  if (!phone) return;
+  const rawName = typeof vars["customer_name"] === "string" ? vars["customer_name"].trim() : "";
+  const { error } = await supabaseAdmin.from("leads").insert({
+    id: await callLeadId("outbound-callback", call.id),
+    organization_id: call.organization_id,
+    business_id: call.business_id ?? null,
+    call_id: call.id,
+    name: rawName ? rawName.slice(0, 200) : null,
+    phone,
+    source: "phone",
+    asked_about: "Callback requested on an outbound call",
+    notes: leadNotesFromVariables(vars),
+  });
+  if (error && (error as { code?: string }).code !== "23505") throw error;
 }
