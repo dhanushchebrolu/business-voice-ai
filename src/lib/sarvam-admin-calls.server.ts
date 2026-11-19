@@ -1,34 +1,46 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
-import { checkTelephonyAccess, walletCanAffordOutbound } from "./telephony-guard.server.ts";
+import { checkTelephonyAccess, type walletCanAffordOutbound } from "./telephony-guard.server.ts";
 import { isOutboundReady } from "./sarvam-outbound-mode.server.ts";
 import {
+  CALLING_HOURS_MESSAGE,
+  OUTBOUND_DISABLED_MESSAGE,
+  outboundCallingDisabled,
+  withinCallingHours,
+} from "./outbound-eligibility.server.ts";
+import {
+  DAILY_LIMIT_MESSAGE,
+  DESTINATION_LIMIT_MESSAGE,
+  HOURLY_LIMIT_MESSAGE,
+  INSUFFICIENT_BALANCE_MESSAGE,
+  SINGLE_CALL_LIMITS,
+  TOO_MANY_IN_FLIGHT_MESSAGE,
   sendSarvamInstantOutboundCall,
   type SendInstantOutboundCallResult,
 } from "./sarvam-outbound-call.server.ts";
 
 export interface OutboundGates {
   checkTelephonyAccess: typeof checkTelephonyAccess;
-  walletCanAffordOutbound: typeof walletCanAffordOutbound;
 }
 
-const DEFAULT_GATES: OutboundGates = { checkTelephonyAccess, walletCanAffordOutbound };
+const DEFAULT_GATES: OutboundGates = { checkTelephonyAccess };
 
-/**
- * Per-customer limits on single outbound calls, counted from call_logs over
- * the last hour: calls not final yet (each may still be billed) and calls
- * started. A runaway client, a double-clicking user or a leaked session can
- * never dial more than this, whatever the wallet holds.
- */
-export const SINGLE_CALL_LIMITS = { inFlight: 3, perHour: 30 } as const;
-
-export const TOO_MANY_IN_FLIGHT_MESSAGE = `You already have ${SINGLE_CALL_LIMITS.inFlight} outbound calls in progress. Wait for one to finish before placing another.`;
-export const HOURLY_LIMIT_MESSAGE = `You have reached the limit of ${SINGLE_CALL_LIMITS.perHour} outbound calls an hour. Try again later.`;
-export const INSUFFICIENT_BALANCE_MESSAGE = "Insufficient wallet balance to place this call.";
+export {
+  DAILY_LIMIT_MESSAGE,
+  DESTINATION_LIMIT_MESSAGE,
+  HOURLY_LIMIT_MESSAGE,
+  INSUFFICIENT_BALANCE_MESSAGE,
+  SINGLE_CALL_LIMITS,
+  TOO_MANY_IN_FLIGHT_MESSAGE,
+};
 
 const FINAL_STATUSES = new Set(["completed", "failed", "busy", "no_answer", "cancelled"]);
 
-/** The customer's single Sarvam outbound calls of the last hour: how many, and how many aren't final yet. */
+/**
+ * The customer's single Sarvam outbound calls of the last hour: how many, and
+ * how many aren't final yet. For the Calls page preview only; the limits
+ * themselves are enforced atomically by admit_single_outbound_call.
+ */
 export async function recentOutboundCallCounts(
   supabaseAdmin: SupabaseClient<Database>,
   orgId: string,
@@ -54,23 +66,26 @@ export async function recentOutboundCallCounts(
 /**
  * The production gate for one Sarvam outbound call on behalf of an
  * organization: the number must belong to `orgId` and be active with outbound
- * enabled, the phone feature must be unlocked (entitlement/lifecycle/payment),
- * the customer must be under its call limits, and the wallet must afford a
- * minute of this call plus one for each call still in progress. Only then is
- * the shared sendSarvamInstantOutboundCall called, which adds the
- * connection/agent ownership checks, the readiness gate, do-not-call, the
- * test allowlist and the one-unresolved-call-per-destination reservation.
- * The one gate for every single call: the customer's own
- * createSarvamInstantOutboundCall and the admin's call-on-behalf both use it,
- * so an admin can never place a call the customer could not.
- *
- * shortcut: the limits are a read before the insert, so two requests in the
- * same instant can both pass; the per-destination unique index still stops
- * duplicates. Move the counts into SQL if exact limits ever matter.
+ * enabled, and the phone feature must be unlocked (entitlement/lifecycle/
+ * payment). Then the shared sendSarvamInstantOutboundCall, which runs every
+ * other rule: eligibility (kill switch, country, calling hours, prior
+ * relationship), do-not-call, the test allowlist, connection/agent ownership,
+ * outbound readiness, and the atomic admission (limits, wallet, idempotency,
+ * one open call per number). The one gate for every single call: the
+ * customer's own createSarvamInstantOutboundCall and the admin's
+ * call-on-behalf both use it, so an admin can never place a call the
+ * customer could not.
  */
 export async function placeSarvamCallForOrganization(
   supabaseAdmin: SupabaseClient<Database>,
-  params: { orgId: string; phoneNumberId: string; toE164: string; objective?: string | undefined },
+  params: {
+    orgId: string;
+    phoneNumberId: string;
+    toE164: string;
+    objective?: string | undefined;
+    idempotencyKey?: string | undefined;
+    now?: Date | undefined;
+  },
   gates: OutboundGates = DEFAULT_GATES,
 ): Promise<SendInstantOutboundCallResult> {
   const gate = await gates.checkTelephonyAccess(params.orgId, params.phoneNumberId, "outbound");
@@ -79,17 +94,12 @@ export async function placeSarvamCallForOrganization(
   if (gate.phoneNumber.provider !== "sarvam")
     throw new Error("This flow only applies to Sarvam-provisioned numbers.");
 
-  const counts = await recentOutboundCallCounts(supabaseAdmin, params.orgId);
-  if (counts.inFlight >= SINGLE_CALL_LIMITS.inFlight) throw new Error(TOO_MANY_IN_FLIGHT_MESSAGE);
-  if (counts.lastHour >= SINGLE_CALL_LIMITS.perHour) throw new Error(HOURLY_LIMIT_MESSAGE);
-
-  if (!(await gates.walletCanAffordOutbound(params.orgId, counts.inFlight + 1)))
-    throw new Error(INSUFFICIENT_BALANCE_MESSAGE);
-
   return sendSarvamInstantOutboundCall(supabaseAdmin, {
     phoneNumberId: params.phoneNumberId,
     toE164: params.toE164,
     objective: params.objective,
+    idempotencyKey: params.idempotencyKey,
+    now: params.now,
   });
 }
 
@@ -226,6 +236,8 @@ export interface OutboundCallingStatus {
   numbers: OutboundCallingNumber[];
   /** Customer price per started minute, in the smallest currency unit. */
   ratePerMinute: number;
+  /** The customer's own wallet balance, same unit. */
+  walletBalance: number;
   currency: string;
   limits: typeof SINGLE_CALL_LIMITS;
   inFlight: number;
@@ -258,7 +270,7 @@ export async function loadOutboundCallingStatus(
   orgId: string,
   deps: OutboundStatusDeps,
 ): Promise<OutboundCallingStatus> {
-  const [numbersRes, feature, rate, counts] = await Promise.all([
+  const [numbersRes, feature, rate, counts, walletRes] = await Promise.all([
     supabaseAdmin
       .from("phone_numbers")
       .select("id, e164, display_number, status, provider, outbound_enabled, agent_config_id")
@@ -268,7 +280,14 @@ export async function loadOutboundCallingStatus(
     deps.checkFeatureAccess(orgId, "phone"),
     deps.getCallRate(orgId, "outbound"),
     recentOutboundCallCounts(supabaseAdmin, orgId, deps.now?.()),
+    // wallet_balances (migration 20261111090100) is not in the generated types yet.
+    (supabaseAdmin as unknown as SupabaseClient)
+      .from("wallet_balances")
+      .select("balance")
+      .eq("organization_id", orgId)
+      .maybeSingle(),
   ]);
+  if (walletRes.error) throw walletRes.error;
   if (numbersRes.error) throw numbersRes.error;
   const numbers = numbersRes.data ?? [];
 
@@ -289,8 +308,10 @@ export async function loadOutboundCallingStatus(
   );
 
   const blockers: string[] = [];
+  if (outboundCallingDisabled()) blockers.push(OUTBOUND_DISABLED_MESSAGE);
   if (!feature.allowed)
     blockers.push(feature.reason ?? "Phone calling is locked for this workspace.");
+  if (!withinCallingHours(deps.now?.() ?? new Date())) blockers.push(CALLING_HOURS_MESSAGE);
   if (counts.inFlight >= SINGLE_CALL_LIMITS.inFlight) blockers.push(TOO_MANY_IN_FLIGHT_MESSAGE);
   else if (counts.lastHour >= SINGLE_CALL_LIMITS.perHour) blockers.push(HOURLY_LIMIT_MESSAGE);
   else if (!(await deps.walletCanAffordOutbound(orgId, counts.inFlight + 1)))
@@ -309,6 +330,7 @@ export async function loadOutboundCallingStatus(
       ],
     })),
     ratePerMinute: rate.customerAmountPerMinute,
+    walletBalance: Number((walletRes.data as { balance?: number } | null)?.balance ?? 0),
     currency: rate.currency,
     limits: SINGLE_CALL_LIMITS,
     inFlight: counts.inFlight,

@@ -30,10 +30,41 @@ import { TelephonyAdapterError, type NormalizedCallEvent } from "./telephony/ada
 type Row = Record<string, unknown>;
 type Filter = { col: string; op: "eq" | "is" | "in"; val: unknown };
 
+/** 11:00 India time: inside the outbound calling window, whenever the suite runs. */
+const DAYTIME = new Date("2026-11-19T05:30:00Z");
+
 class MemoryDb {
   tables: Record<string, Row[]> = { call_logs: [], campaign_contacts: [], webhook_events: [] };
   /** Runs right after a successful update on `table` — used to interleave a webhook mid-handler. */
   afterUpdate: Partial<Record<string, () => Promise<void>>> = {};
+
+  /**
+   * admit_single_outbound_call reserves the call row; here it goes through the
+   * modelled insert below, so the reservation index decides races exactly as
+   * before (its limits and locking are tested against PostgreSQL in
+   * outbound_call_admission.pg.test.ts). Other functions (finalization) are no-ops.
+   */
+  rpc = async (fn: string, args: Record<string, unknown>) => {
+    if (fn !== "admit_single_outbound_call") return { data: null, error: null };
+    const { data, error } = (await this.from("call_logs")
+      .insert({
+        organization_id: args["_org"],
+        phone_number_id: args["_phone_number_id"],
+        provider: "sarvam",
+        direction: "outbound",
+        caller_number: args["_caller_number"],
+        destination_number: args["_destination"],
+        status: "initiated",
+        started_at: new Date().toISOString(),
+        idempotency_key: args["_idempotency_key"],
+      })
+      .select("id")
+      .single()) as { data: Row | null; error: { code?: string } | null };
+    if (error?.code === "23505")
+      return { data: { result: "refused", reason: "destination_busy" }, error: null };
+    if (error) return { data: null, error };
+    return { data: { result: "admitted", call_id: data!["id"] }, error: null };
+  };
 
   // An arrow property, so `this` inside the builder's arrow `then` is the database.
   from = (table: string) => {
@@ -126,6 +157,8 @@ class MemoryDb {
           this.tables[table] = rows.filter((r) => !matches(r));
           return resolve({ data: null, error: null });
         }
+        if (table === "leads" && op === "select")
+          return resolve({ data: [{ id: "earlier_lead" }], error: null });
         const hit = rows.filter(matches);
         if (op === "update") {
           for (const r of hit) Object.assign(r, payload);
@@ -1056,7 +1089,11 @@ describe("single-call number reservation (concurrent requests and crash recovery
 
   const send = async (env: ReturnType<typeof setup>, to = TO) => {
     const { sendSarvamInstantOutboundCall } = await import("./sarvam-outbound-call.server.ts");
-    return sendSarvamInstantOutboundCall(env.db as never, { phoneNumberId: "num_1", toE164: to });
+    return sendSarvamInstantOutboundCall(env.db as never, {
+      now: DAYTIME,
+      phoneNumberId: "num_1",
+      toE164: to,
+    });
   };
 
   test("two concurrent requests to the same number: exactly one is dialled, even before attempt_id is saved", async () => {
@@ -1217,6 +1254,7 @@ describe("single-call number reservation (concurrent requests and crash recovery
     await withSarvam(async () => {
       globalThis.fetch = (async () => new Response("{}", { status: 503 })) as typeof fetch;
       const first = await sendSarvamInstantOutboundCall(env.db as never, {
+        now: DAYTIME,
         phoneNumberId: "num_1",
         toE164: TO,
       });
@@ -1301,7 +1339,11 @@ describe("equivalent number formats share one reservation (single call vs campai
 
   const send = async (env: ReturnType<typeof setup>, to: string) => {
     const { sendSarvamInstantOutboundCall } = await import("./sarvam-outbound-call.server.ts");
-    return sendSarvamInstantOutboundCall(env.db as never, { phoneNumberId: "num_1", toE164: to });
+    return sendSarvamInstantOutboundCall(env.db as never, {
+      now: DAYTIME,
+      phoneNumberId: "num_1",
+      toE164: to,
+    });
   };
 
   for (const typed of ["0091 98765 43210", "+91 98765 43210", "+91-98765-43210"]) {
@@ -1800,7 +1842,11 @@ describe("campaign dispatch vs the number reservation", () => {
     try {
       const { sendSarvamInstantOutboundCall } = await import("./sarvam-outbound-call.server.ts");
       const [single, campaign] = await Promise.allSettled([
-        sendSarvamInstantOutboundCall(env.db as never, { phoneNumberId: "num_1", toE164: TO }),
+        sendSarvamInstantOutboundCall(env.db as never, {
+          now: DAYTIME,
+          phoneNumberId: "num_1",
+          toE164: TO,
+        }),
         dispatchContact(env, "cc_a"),
       ]);
       const rowsForNumber = env.db.tables["call_logs"]!.filter(

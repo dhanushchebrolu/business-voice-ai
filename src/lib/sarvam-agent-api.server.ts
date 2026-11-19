@@ -529,10 +529,12 @@ async function readCallEvents(
  * customer's outbound calls. The agent sends `clickai_call_id` (the outbound
  * agent variable ClickAI sets; empty on inbound calls). On an outbound call the
  * agent's own caller id comes from Sarvam's user_identifier, which is not
- * verified for instant outbound, so it is never trusted when this is known:
- * bookings and callbacks get the dialled number instead. Same organization
- * only; anything else (no id, not a UUID, another customer's call, an inbound
- * call) is null and the tool behaves exactly as before.
+ * verified for instant outbound. When this is known, the inbound-only tools
+ * refuse: an outbound call never books (the agent sends the person to the
+ * clinic) and never records a mid-call callback (finalization saves one from
+ * outbound_result, on this dialled number, so it is never saved twice). Same
+ * organization only; anything else (no id, not a UUID, another customer's
+ * call, an inbound call) is null and the tool behaves exactly as before.
  */
 export async function dialledNumberForTool(
   deps: AgentApiDeps,
@@ -965,8 +967,27 @@ export async function handleSarvamAgentRequest(
       const time = str(body, "time", 5);
       if (!time || !/^\d{2}:\d{2}$/.test(time))
         return json({ ok: false, error: "time must be HH:mm" }, 400);
-      const dialled = await dialledNumberForTool(deps, auth, body);
-      const caller = dialled ?? str(body, "customer_phone", 200) ?? "";
+      if (await dialledNumberForTool(deps, auth, body)) {
+        await audit(deps, auth, "book_appointment", "rejected", interactionId, {
+          date,
+          time,
+          outbound_call: true,
+          error_code: "OUTBOUND_BOOKING_NOT_ALLOWED",
+        });
+        return json({
+          ok: true,
+          outbound_call: true,
+          result: {
+            success: false,
+            error: {
+              code: "OUTBOUND_BOOKING_NOT_ALLOWED",
+              message:
+                "Appointments are not booked on calls the clinic places. Ask the person to call the clinic to book.",
+            },
+          },
+        });
+      }
+      const caller = str(body, "customer_phone", 200) ?? "";
       const phone = normalizeCustomerPhone(caller, null);
       const start = zonedWallTimeToUtc(date, time, business.timezone);
       const end = new Date(start.getTime() + duration * 60_000);
@@ -1022,7 +1043,6 @@ export async function handleSarvamAgentRequest(
       await audit(deps, auth, "book_appointment", out.isError ? "error" : "ok", interactionId, {
         date,
         time,
-        ...(dialled ? { outbound_call: true } : {}),
         service_id: service?.id ?? null,
         outcome: booked.success ? (booked.bookingOutcome ?? "unknown") : "not_booked",
         booking_id: booked.success ? (booked.data?.id ?? null) : null,
@@ -1039,6 +1059,22 @@ export async function handleSarvamAgentRequest(
       // Mid-call: the agent promises a callback only after this reports recorded=true.
       if (!interactionId)
         return json({ ok: false, error: "interaction_id is required to record a callback" }, 400);
+      if (await dialledNumberForTool(deps, auth, body)) {
+        await audit(deps, auth, "callback", "rejected", interactionId, {
+          outbound_call: true,
+          error_code: "OUTBOUND_USE_CALL_RESULT",
+        });
+        return json({
+          ok: true,
+          recorded: false,
+          outbound_call: true,
+          error: {
+            code: "OUTBOUND_USE_CALL_RESULT",
+            message:
+              "On calls the clinic places, set outbound_result to callback_requested; the callback is saved when the call ends.",
+          },
+        });
+      }
       // Only customers with lead capture or message taking switched on may record callbacks.
       const { data: agentRow, error: agentError } = await deps.supabaseAdmin
         .from("agent_configs")
@@ -1066,8 +1102,7 @@ export async function handleSarvamAgentRequest(
         return json({ ok: true, recorded: false, error: { code: "CALLER_OPTED_OUT" } });
       }
       if (known.callback_recorded) return json({ ok: true, recorded: true, duplicate: true });
-      const raw =
-        (await dialledNumberForTool(deps, auth, body)) ?? str(body, "caller_number", 200) ?? "";
+      const raw = str(body, "caller_number", 200) ?? "";
       const phone = normalizeCustomerPhone(raw, null);
       if (isTestCaller(raw, phone, auth.testCallerNumbers)) {
         // Test callers follow the success path so conversations can be tested; nothing is saved.

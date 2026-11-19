@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { toast } from "sonner";
@@ -28,6 +28,7 @@ import {
   setNumberDirection,
 } from "@/lib/telephony-admin.functions";
 import { normalizeCustomerPhone } from "@/lib/phone-number";
+import { newRequestKey, REQUEST_KEY_SPENT_MESSAGE } from "@/lib/request-key";
 import { formatMoney } from "@/lib/pricing";
 import { ReasonDialog } from "@/components/admin/ReasonDialog";
 import { CallDetailDialog } from "@/components/admin/CallDetailDialog";
@@ -171,6 +172,8 @@ export function SarvamOutboundPanel({ orgId, agent, numbers, connections, onChan
   const [objective, setObjective] = useState("");
   const [approved, setApproved] = useState(false);
   const [lastCall, setLastCall] = useState<{ callId: string; outcome: string } | null>(null);
+  // One request id per attempt at one number: a double submit or retry returns the same call.
+  const callAttempt = useRef<{ key: string; to: string } | null>(null);
   const [detailCallId, setDetailCallId] = useState<string | null>(null);
 
   const sarvamConnection = connections.find((c) => c.provider === "sarvam");
@@ -993,17 +996,28 @@ export function SarvamOutboundPanel({ orgId, agent, numbers, connections, onChan
           if (!normalizedDestination)
             throw new Error("Enter the destination with its country code, e.g. +91…");
           if (!approved) throw new Error("Tick the approval box to place the call");
-          const result = await placeCall({
-            data: {
-              orgId,
-              phoneNumberId: callNumberId,
-              toE164: normalizedDestination,
-              objective: objective.trim() || undefined,
-              confirmCall: true,
-              reason,
-            },
-          });
+          if (callAttempt.current?.to !== normalizedDestination)
+            callAttempt.current = { key: newRequestKey(), to: normalizedDestination };
+          let result;
+          try {
+            result = await placeCall({
+              data: {
+                orgId,
+                phoneNumberId: callNumberId,
+                toE164: normalizedDestination,
+                objective: objective.trim() || undefined,
+                confirmCall: true,
+                reason,
+                idempotencyKey: callAttempt.current.key,
+              },
+            });
+          } catch (err) {
+            // That attempt was not placed and its id is spent; the next try gets a new one.
+            if ((err as Error).message === REQUEST_KEY_SPENT_MESSAGE) callAttempt.current = null;
+            throw err;
+          }
           setLastCall(result);
+          callAttempt.current = null;
           // Fresh approval and number for the next call: no accidental redial.
           setApproved(false);
           setDestination("");

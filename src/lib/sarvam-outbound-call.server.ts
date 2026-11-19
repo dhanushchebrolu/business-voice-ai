@@ -13,6 +13,11 @@ import { normalizeCustomerPhone } from "./phone-number.ts";
 import { finalizeTerminalCallSafely } from "./telephony/call-finalization.server.ts";
 import { isNumberSuppressed, OPT_OUT_NUMBER_MESSAGE } from "./contact-suppression.server.ts";
 import {
+  hasPriorRelationship,
+  NO_RELATIONSHIP_MESSAGE,
+  staticEligibilityBlocker,
+} from "./outbound-eligibility.server.ts";
+import {
   isOutboundReady,
   OUTBOUND_NOT_READY_MESSAGE,
   outboundBusinessName,
@@ -26,6 +31,65 @@ export interface SendInstantOutboundCallResult {
   interactionId: string | null;
   /** "unknown": Sarvam may or may not have placed the call — see recordSarvamStartFailure. */
   outcome: "started" | "unknown";
+  /** True when this request repeated an earlier one (same idempotency key): nothing was dialled. */
+  duplicate?: boolean;
+}
+
+/**
+ * Per-customer limits on single outbound calls, enforced atomically by
+ * admit_single_outbound_call (migration 20261119090000) under the customer's
+ * row lock, so simultaneous requests can never pass together. Campaign calls
+ * never count. Windows: calls not final yet (last 24 h), started in the last
+ * hour, started in the last 24 h, and to one number in the last 24 h.
+ */
+export const SINGLE_CALL_LIMITS = {
+  inFlight: 3,
+  perHour: 30,
+  perDay: 100,
+  perDestinationDay: 2,
+} as const;
+
+export const TOO_MANY_IN_FLIGHT_MESSAGE = `You already have ${SINGLE_CALL_LIMITS.inFlight} outbound calls in progress. Wait for one to finish before placing another.`;
+export const HOURLY_LIMIT_MESSAGE = `You have reached the limit of ${SINGLE_CALL_LIMITS.perHour} outbound calls an hour. Try again later.`;
+export const DAILY_LIMIT_MESSAGE = `You have reached the limit of ${SINGLE_CALL_LIMITS.perDay} outbound calls a day. Try again tomorrow.`;
+export const DESTINATION_LIMIT_MESSAGE = `This number has already been called ${SINGLE_CALL_LIMITS.perDestinationDay} times in the last 24 hours. Try again tomorrow.`;
+export const INSUFFICIENT_BALANCE_MESSAGE = "Insufficient wallet balance to place this call.";
+export const IDEMPOTENCY_KEY_REUSED_MESSAGE =
+  "This request was already used for a different number. Close the dialog and try again.";
+export { REQUEST_KEY_SPENT_MESSAGE as DUPLICATE_FAILED_MESSAGE } from "./request-key.ts";
+import { REQUEST_KEY_SPENT_MESSAGE } from "./request-key.ts";
+
+/** Why admit_single_outbound_call refused, as the caller is told. */
+export function admissionRefusalMessage(reason: unknown): string {
+  switch (reason) {
+    case "in_flight_limit":
+      return TOO_MANY_IN_FLIGHT_MESSAGE;
+    case "hourly_limit":
+      return HOURLY_LIMIT_MESSAGE;
+    case "daily_limit":
+      return DAILY_LIMIT_MESSAGE;
+    case "destination_daily_limit":
+      return DESTINATION_LIMIT_MESSAGE;
+    case "insufficient_balance":
+      return INSUFFICIENT_BALANCE_MESSAGE;
+    case "destination_busy":
+      return UNRESOLVED_CALL_MESSAGE;
+    case "number_not_owned":
+      return "This phone number is not assigned to this organization.";
+    case "idempotency_key_reused":
+      return IDEMPOTENCY_KEY_REUSED_MESSAGE;
+    case "invalid_destination":
+      return INVALID_DESTINATION_MESSAGE;
+    default:
+      return "This call could not be admitted. Try again, or contact support if it keeps happening.";
+  }
+}
+
+/** A client-supplied idempotency key: 16–100 letters, digits, "_" or "-" (the database's own rule). */
+export const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9_-]{16,100}$/;
+
+function newIdempotencyKey(): string {
+  return `srv_${crypto.randomUUID().replace(/-/g, "")}`;
 }
 
 export type StartFailureOutcome = "failed" | "outcome_unknown" | "superseded";
@@ -269,12 +333,25 @@ export async function sendSarvamInstantOutboundCall(
     objective?: string | undefined;
     /** Extra instructions from the customer; reaches the agent as campaign_instructions. */
     instructions?: string | undefined;
+    /**
+     * The client's request id: a repeat (double click, retry, refresh) returns
+     * the first request's call and dials nothing. Generated when absent.
+     */
+    idempotencyKey?: string | undefined;
+    /** The clock for the calling-hours rule. Defaults to now; tests fix it. */
+    now?: Date | undefined;
   },
 ): Promise<SendInstantOutboundCallResult> {
   // Canonical E.164 before anything is read, written or dialled, so the
   // reserved destination_number is the same string a campaign would use.
   const toE164 = normalizeCustomerPhone(params.toE164, null);
   if (!toE164) throw new Error(INVALID_DESTINATION_MESSAGE);
+  if (params.idempotencyKey !== undefined && !IDEMPOTENCY_KEY_PATTERN.test(params.idempotencyKey))
+    throw new Error("This request is missing a valid request id.");
+  const idempotencyKey = params.idempotencyKey ?? newIdempotencyKey();
+  // Kill switch, destination country, calling hours (outbound-eligibility.server.ts).
+  const blocked = staticEligibilityBlocker(toE164, params.now ?? new Date());
+  if (blocked) throw new Error(blocked);
   if (!isSarvamOutboundDestinationAllowed(toE164)) throw new Error(OUTBOUND_TEST_ALLOWLIST_MESSAGE);
 
   const { data: phoneNumber } = await supabaseAdmin
@@ -304,6 +381,9 @@ export async function sendSarvamInstantOutboundCall(
   // Do-not-call: refused before anything is written or dialled.
   if (await isNumberSuppressed(supabaseAdmin, phoneNumber.organization_id, toE164))
     throw new Error(OPT_OUT_NUMBER_MESSAGE);
+  // No cold calls: the person must already have dealt with this business.
+  if (!(await hasPriorRelationship(supabaseAdmin, phoneNumber.organization_id, toE164)))
+    throw new Error(NO_RELATIONSHIP_MESSAGE);
 
   const adapter = getTelephonyAdapter("sarvam");
   if (!adapter) throw new Error("Sarvam is not connected. Configure SARVAM_API_KEY first.");
@@ -352,7 +432,7 @@ export async function sendSarvamInstantOutboundCall(
   // (isResolvableSarvamCall).
   const { data: unresolved } = await supabaseAdmin
     .from("call_logs")
-    .select("id")
+    .select("id, status, idempotency_key")
     .eq("organization_id", phoneNumber.organization_id)
     .eq("provider", "sarvam")
     .eq("direction", "outbound")
@@ -360,25 +440,45 @@ export async function sendSarvamInstantOutboundCall(
     .in("status", [...UNRESOLVED_SARVAM_STATUSES])
     .limit(1)
     .maybeSingle();
+  // The same request again while its call is still open: that call, nothing dialled.
+  if (unresolved && unresolved.idempotency_key === idempotencyKey)
+    return duplicateResult(unresolved.id, unresolved.status);
   if (unresolved) throw new Error(UNRESOLVED_CALL_MESSAGE);
 
-  const { data: call, error: insertError } = await supabaseAdmin
-    .from("call_logs")
-    .insert({
-      organization_id: phoneNumber.organization_id,
-      phone_number_id: phoneNumber.id,
-      provider: "sarvam",
-      direction: "outbound",
-      caller_number: phoneNumber.e164,
-      destination_number: toE164,
-      status: "initiated",
-      started_at: new Date().toISOString(),
-    })
-    .select("id")
-    .single();
-  // 23505: a concurrent request reserved this number first. Nothing was dialled.
-  if (insertError?.code === "23505") throw new Error(UNRESOLVED_CALL_MESSAGE);
-  if (insertError) throw insertError;
+  // The reservation: limits, wallet, idempotency and the call row, atomically
+  // (admit_single_outbound_call, under the customer's row lock).
+  const rpc = supabaseAdmin.rpc.bind(supabaseAdmin) as unknown as (
+    fn: string,
+    args: Record<string, unknown>,
+  ) => PromiseLike<{ data: unknown; error: { message: string } | null }>;
+  const { data: admission, error: admissionError } = await rpc("admit_single_outbound_call", {
+    _org: phoneNumber.organization_id,
+    _phone_number_id: phoneNumber.id,
+    _destination: toE164,
+    _caller_number: phoneNumber.e164,
+    _idempotency_key: idempotencyKey,
+    _max_in_flight: SINGLE_CALL_LIMITS.inFlight,
+    _max_per_hour: SINGLE_CALL_LIMITS.perHour,
+    _max_per_day: SINGLE_CALL_LIMITS.perDay,
+    _max_per_destination_day: SINGLE_CALL_LIMITS.perDestinationDay,
+  });
+  if (admissionError) throw admissionError;
+  const admitted = (admission ?? {}) as {
+    result?: string;
+    reason?: string;
+    call_id?: string;
+    status?: string;
+  };
+  if (admitted.result === "duplicate" && admitted.call_id)
+    return duplicateResult(admitted.call_id, admitted.status ?? "initiated");
+  if (admitted.result !== "admitted" || !admitted.call_id) {
+    console.info("sarvam_outbound:admission_refused", {
+      organizationId: phoneNumber.organization_id,
+      reason: admitted.reason ?? "unknown",
+    });
+    throw new Error(admissionRefusalMessage(admitted.reason));
+  }
+  const call = { id: admitted.call_id };
 
   try {
     const dialed = await adapter.createInstantOutbound({
@@ -421,4 +521,15 @@ export async function sendSarvamInstantOutboundCall(
       outcome: recorded === "outcome_unknown" ? "unknown" : "started",
     };
   }
+}
+
+/** A repeated request: report the first request's call without dialling again. */
+function duplicateResult(callId: string, status: string): SendInstantOutboundCallResult {
+  if (status === "failed" || status === "cancelled") throw new Error(REQUEST_KEY_SPENT_MESSAGE);
+  return {
+    callId,
+    interactionId: null,
+    outcome: status === "outcome_unknown" ? "unknown" : "started",
+    duplicate: true,
+  };
 }

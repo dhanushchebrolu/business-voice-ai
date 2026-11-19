@@ -88,6 +88,9 @@ export function buildJobHandlers(deps: HandlerDeps): Record<string, JobHandler> 
   return {
     "campaign.dispatch": async () => {
       if (!campaignDispatchEnabled()) return { skipped: "disabled" };
+      // The global outbound kill switch stops campaign dialling as well.
+      const { outboundCallingDisabled } = await import("../outbound-eligibility.server.ts");
+      if (outboundCallingDisabled()) return { skipped: "outbound_disabled" };
       const dispatch =
         deps.dispatchCampaigns ??
         (async (options: { deadline: number }) => {

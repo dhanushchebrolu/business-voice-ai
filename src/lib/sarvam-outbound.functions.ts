@@ -1,7 +1,10 @@
 import { createServerFn } from "@tanstack/react-start";
 import { normalizeCustomerPhone } from "@/lib/phone-number";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
-import { INVALID_DESTINATION_MESSAGE } from "@/lib/sarvam-outbound-call.server";
+import {
+  IDEMPOTENCY_KEY_PATTERN,
+  INVALID_DESTINATION_MESSAGE,
+} from "@/lib/sarvam-outbound-call.server";
 
 /**
  * Sarvam instant-outbound call initiation — the Sarvam-specific counterpart
@@ -25,6 +28,8 @@ interface CreateSarvamInstantOutboundCallInput {
   toE164: string;
   /** Why the call is made; sanitized and capped before it reaches the agent. */
   objective?: string | undefined;
+  /** One per dialog: a repeat of the same request returns the same call, never a second one. */
+  idempotencyKey: string;
 }
 
 export const createSarvamInstantOutboundCall = createServerFn({ method: "POST" })
@@ -35,6 +40,13 @@ export const createSarvamInstantOutboundCall = createServerFn({ method: "POST" }
     // No country is assumed here, so the number must include its country code.
     const toE164 = normalizeCustomerPhone(input.toE164, null);
     if (!toE164) throw new Error(INVALID_DESTINATION_MESSAGE);
+    if (
+      typeof input.idempotencyKey !== "string" ||
+      !IDEMPOTENCY_KEY_PATTERN.test(input.idempotencyKey)
+    )
+      throw new Error("This request is missing a valid request id. Reload the page and try again.");
+    if (input.objective !== undefined && typeof input.objective !== "string")
+      throw new Error("The reason for the call must be text.");
     return { ...input, toE164 };
   })
   .handler(async ({ data, context }) => {
@@ -57,11 +69,12 @@ export const createSarvamInstantOutboundCall = createServerFn({ method: "POST" }
       phoneNumberId: data.phoneNumberId,
       toE164: data.toE164,
       objective: typeof data.objective === "string" ? data.objective : undefined,
+      idempotencyKey: data.idempotencyKey,
     });
 
     // outcome "unknown": Sarvam may have placed the call; it stays unconfirmed
     // in call history until a webhook or an operator resolves it.
-    return { callId: result.callId, outcome: result.outcome };
+    return { callId: result.callId, outcome: result.outcome, duplicate: result.duplicate === true };
   });
 
 /**

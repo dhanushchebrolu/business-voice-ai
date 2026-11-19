@@ -205,7 +205,8 @@ describe("Sarvam result webhook: both outbound paths use the authenticated URL",
     const s = src(single);
     assert.doesNotMatch(s, /sarvamWebhookUrl\(/);
     const check = s.indexOf("const webhook = sarvamOutboundWebhookUrl();");
-    const insert = s.indexOf('.from("call_logs")\n    .insert(', check);
+    // The call row is reserved by admit_single_outbound_call.
+    const insert = s.indexOf('rpc("admit_single_outbound_call"', check);
     const dial = s.indexOf("adapter.createInstantOutbound({", check);
     assert.ok(check > -1 && check < insert && insert < dial);
     assert.match(s.slice(check, insert), /SARVAM_WEBHOOK_SECRET_MISSING_MESSAGE/);

@@ -28,21 +28,7 @@ Entry points:
 - **Customer** (`createSarvamInstantOutboundCall`, Calls page → "Call a number"): an owner or admin of the number's org. Since 2026-11-19 it goes through the same `placeSarvamCallForOrganization` gate as the admin path. The button only appears for a workspace with an active Sarvam number, and the dialog lists why calling is unavailable (`getOutboundCallingStatus`).
 - **Admin test** (`testSarvamOutboundCall`): demo organizations only, so it can't be used for Smile Dental (`is_demo = false`).
 
-Gates in order:
-
-1. Number belongs to the org.
-2. Phone feature unlocked.
-3. Number active with outbound enabled.
-4. Sarvam number.
-5. Call limits (single calls only, last hour): at most 3 not yet final and 30 started.
-6. Wallet can cover 1 minute of this call plus 1 minute per call still in progress.
-7. Valid E.164 destination.
-8. Destination is on the allowlist.
-9. Signed webhook URL can be built.
-10. Destination is not opted out.
-11. Connection and agent belong to the same org.
-12. Agent is mapped, and the **mapped version is confirmed for outbound**.
-13. No unresolved call to the same destination (checked first, then enforced atomically by a unique index).
+Gates: the full, current list is in `docs/outbound-calling.md` §2 (eligibility, do-not-call, prior relationship, readiness, and the atomic admission with limits, wallet and request-id dedupe). That document replaces the list that was here.
 
 Request:
 
@@ -70,9 +56,9 @@ Result: the webhook (identifiers-only `webhook_events`, dedupe on `(provider, ev
 ## 3a. Added 2026-11-19 (`feature/provisioning-phase1`)
 
 - **Opt-outs on single calls go on the do-not-call list.** Before, only campaign calls did this, so a person who said "don't call me again" on a single call could be called again. Finalization now finds or creates the workspace's contact for the dialled number and marks it opted out (`suppressSingleCallOptOut`). It is idempotent, and a failure fails the finalization step so it is retried, not lost.
-- **One gate for both single-call paths, plus per-customer limits** (gates 5–6 above). Previously the customer function had its own copy of the gates.
+- **One gate for both single-call paths, plus per-customer limits.** Previously the customer function had its own copy of the gates. Since the second 2026-11-19 change the limits and wallet check are enforced atomically in SQL (`admit_single_outbound_call`, migration `20261119090000`), with request-id dedupe; see `docs/outbound-calling.md` §4.
 - **Stuck starts are flagged.** A single call still `initiated` with no Sarvam attempt id after 30 minutes becomes `outcome_unknown` ("Unconfirmed") in the 5-minute reconcile sweep. It is never billed or retried; a late Sarvam webhook still resolves it.
-- **Outbound bookings and callbacks use the dialled number.** When a `book_appointment` or `request_callback` tool call carries `clickai_call_id` for one of the customer's own outbound calls, the server uses `call_logs.destination_number`, never the agent's `user_identifier`. This fixes risk 4.5 once the v6 tool bodies send the id (see 4.5).
+- **No bookings or mid-call callbacks on outbound calls.** When a `book_appointment` or `request_callback` tool call carries `clickai_call_id` for one of the customer's own outbound calls, the server refuses it, so the agent's unverified `user_identifier` is never used. A callback is saved once, at finalization, on the dialled number. This fixes risk 4.5 once the v6 tool bodies send the id (see 4.5).
 - **Customer UI:** the "Call a number" dialog shows the price per started minute and the limits, and refuses with the reason when anything blocks. Call history shows the dialled number for outbound calls, a direction icon, plain status labels, the charge, and a note on unconfirmed calls; it refreshes every 10 s while a call is open.
 
 ## 4. Blockers before the supervised call
@@ -85,13 +71,14 @@ Result: the webhook (identifiers-only `webhook_events`, dedupe on `(provider, ev
 2. **Smile Dental isn't remapped to v6.** This is a live change for inbound callers, so an inbound regression check must pass afterwards.
 3. **Outbound readiness isn't confirmed** (`sarvam_outbound_ready_*` is null), and **outbound is off on 0061**.
 4. **Caller ID and outbound permission** for 0061 on its Sarvam connection (ClickAI row `e16a623b`), and Sarvam credit, are unverified.
-5. **Outbound tool phone numbers: fixed in code, needs one v6 tool-body field.** On outbound calls the tools' `customer_phone` / `caller_number` come from Sarvam's `user_identifier`, which is unverified for instant outbound. The server now uses the dialled number when the tool body carries `clickai_call_id`.
+5. **Outbound tool phone numbers: fixed in code, needs one v6 tool-body field.** On outbound calls the tools' `customer_phone` / `caller_number` come from Sarvam's `user_identifier`, which is unverified for instant outbound. The server now refuses booking and mid-call callbacks when the tool body carries `clickai_call_id` for an outbound call.
    - **Sarvam step (v6 draft, before commit):** add body field `clickai_call_id` = `@clickai_call_id` to `book_appointment` and `request_callback`. `record_call_outcome` stays at its 8 fields: its outbound leads are already dropped by exact direction matching.
    - Until that field is added, the v6 prompt's ban on booking and callbacks during outbound calls is the only guard. The supervised call must still check that no booking or callback tool ran.
 
 ## 5. Not built yet (needed before customers, not before the supervised call)
 
-- **Consent and DND.** There's no voice consent record and no NCPR/DND check. The allowlist is the only thing limiting destinations. It must not be removed until a consent/DND design is decided and built.
+- **Consent and DND (legal).** ClickAI now refuses cold calls (prior relationship required), enforces calling hours, Indian numbers only and a per-number daily limit. It still has no NCPR/DND lookup and no recorded legal consent, and the TRAI/DPDP questions in `docs/outbound-calling.md` §3 are open. The allowlist must not be removed until they are answered.
+- **Migration `20261119090000_outbound_call_admission.sql`** must be applied before a Worker with this code is deployed.
 - **The v6 tool-body field** in 4.5.
 
 ## 6. Go-live sequence
@@ -115,4 +102,4 @@ Campaign dispatch, the allowlist removal and Payment Enforcement are not part of
 
 ## 7. Rollback of the 2026-11-19 code
 
-No migration, setting or secret was added; everything is code. To roll back, deploy the previous Worker version (`npx wrangler versions deploy <previous-version-id>@100% --name klyro --yes`). Contacts already marked opted out by a single call stay opted out: that is intended, and only `reverseContactOptOut` (owner or admin, with a reason) can clear one.
+The first 2026-11-19 change was code only. The second adds migration `20261119090000` (rollback: `docs/production-rollback-20261119090000-outbound-call-admission.sql`, run only after the Worker is rolled back). To roll back, deploy the previous Worker version (`npx wrangler versions deploy <previous-version-id>@100% --name klyro --yes`). Contacts already marked opted out by a single call stay opted out: that is intended, and only `reverseContactOptOut` (owner or admin, with a reason) can clear one.

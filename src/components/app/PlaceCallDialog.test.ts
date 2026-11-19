@@ -35,6 +35,23 @@ describe("customer 'Call a number'", () => {
     );
   });
 
+  test("a double click sends one request, and retries reuse the same request id", () => {
+    // Synchronous ref guard, set before the first await.
+    assert.match(
+      dialog,
+      /if \(!toE164 \|\| submitting\.current\) return;\s*submitting\.current = true;/,
+    );
+    // One id per attempt at one number; a new number gets a new id.
+    assert.match(
+      dialog,
+      /if \(attempt\.current\?\.to !== toE164\) attempt\.current = \{ key: newRequestKey\(\), to: toE164 \};/,
+    );
+    assert.match(dialog, /idempotencyKey: attempt\.current\.key/);
+    // Renewed only after success or when the server says the id is spent.
+    assert.match(dialog, /attempt\.current = null;\s*if \(result\.duplicate\)/);
+    assert.match(dialog, /if \(message === REQUEST_KEY_SPENT_MESSAGE\) attempt\.current = null;/);
+  });
+
   test("the reason is capped like the server's objective limit", () => {
     assert.match(dialog, /const OBJECTIVE_MAX = 300;/);
     assert.match(dialog, /maxLength=\{OBJECTIVE_MAX\}/);

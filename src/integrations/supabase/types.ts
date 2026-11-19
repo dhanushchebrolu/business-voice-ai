@@ -532,6 +532,7 @@ export type Database = {
           failure_reason: string | null;
           gross_profit: number | null;
           id: string;
+          idempotency_key: string | null;
           language: string | null;
           lead_score: string | null;
           organization_id: string;
@@ -579,6 +580,7 @@ export type Database = {
           ended_at?: string | null;
           failure_reason?: string | null;
           id?: string;
+          idempotency_key?: string | null;
           language?: string | null;
           lead_score?: string | null;
           organization_id: string;
@@ -626,6 +628,7 @@ export type Database = {
           ended_at?: string | null;
           failure_reason?: string | null;
           id?: string;
+          idempotency_key?: string | null;
           language?: string | null;
           lead_score?: string | null;
           organization_id?: string;

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { Loader2, PhoneOutgoing } from "lucide-react";
@@ -9,6 +9,7 @@ import {
 } from "@/lib/sarvam-outbound.functions";
 import { normalizeCustomerPhone } from "@/lib/phone-number";
 import { formatMoney } from "@/lib/pricing";
+import { newRequestKey, REQUEST_KEY_SPENT_MESSAGE } from "@/lib/request-key";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -44,6 +45,10 @@ export function PlaceCallButton({ organizationId }: { organizationId: string }) 
   const [destination, setDestination] = useState("");
   const [objective, setObjective] = useState("");
   const [placing, setPlacing] = useState(false);
+  // Synchronous guard: a second click before React re-renders never sends a second request.
+  const submitting = useRef(false);
+  // One request id per attempt at one number, reused for retries (the server dedupes it).
+  const attempt = useRef<{ key: string; to: string } | null>(null);
 
   const statusQuery = useQuery({
     queryKey: ["outbound-calling-status", organizationId],
@@ -63,13 +68,25 @@ export function PlaceCallButton({ organizationId }: { organizationId: string }) 
   const canSubmit = blockers.length === 0 && Boolean(toE164) && !placing;
 
   const submit = async () => {
-    if (!toE164) return;
+    if (!toE164 || submitting.current) return;
+    submitting.current = true;
+    if (attempt.current?.to !== toE164) attempt.current = { key: newRequestKey(), to: toE164 };
     setPlacing(true);
     try {
       const result = await placeCall({
-        data: { phoneNumberId: selected.id, toE164, objective: objective.trim() || undefined },
+        data: {
+          phoneNumberId: selected.id,
+          toE164,
+          objective: objective.trim() || undefined,
+          idempotencyKey: attempt.current.key,
+        },
       });
-      if (result.outcome === "unknown")
+      attempt.current = null;
+      if (result.duplicate)
+        toast.info("Already calling", {
+          description: "This call was already placed. It is in your call history.",
+        });
+      else if (result.outcome === "unknown")
         toast.warning("Call not confirmed", {
           description:
             "We couldn't confirm whether the call started. It shows as unconfirmed in your call history until we know, and you won't be charged twice.",
@@ -80,8 +97,12 @@ export function PlaceCallButton({ organizationId }: { organizationId: string }) 
       setDestination("");
       setObjective("");
     } catch (err) {
-      toast.error("Call not placed", { description: (err as Error).message });
+      const message = (err as Error).message;
+      // That attempt was not placed; the next try is a new attempt.
+      if (message === REQUEST_KEY_SPENT_MESSAGE) attempt.current = null;
+      toast.error("Call not placed", { description: message });
     } finally {
+      submitting.current = false;
       setPlacing(false);
       void queryClient.invalidateQueries({ queryKey: ["calls", organizationId] });
       void queryClient.invalidateQueries({
@@ -178,6 +199,8 @@ export function PlaceCallButton({ organizationId }: { organizationId: string }) 
                   ? `${formatMoney(status.ratePerMinute, status.currency)} per started minute, charged to your wallet when the call ends. Unanswered calls are free.`
                   : "Outbound calls are not charged on your plan."}{" "}
                 Up to {status.limits.inFlight} calls at once and {status.limits.perHour} an hour.
+                Calls are placed between 9 AM and 9 PM India time, to people who already know your
+                business. Wallet balance: {formatMoney(status.walletBalance, status.currency)}.
               </p>
             )}
           </div>

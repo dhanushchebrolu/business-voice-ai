@@ -1293,7 +1293,7 @@ describe("inbound admission gate at the HTTP boundary (Phase 5)", () => {
   });
 });
 
-describe("outbound calls: tools use the number ClickAI dialled, never the agent's caller id", () => {
+describe("outbound calls: inbound-only tools refuse, identified by ClickAI's own call id", () => {
   const OUT_ID = "8f14e45f-ceea-467e-a4a9-1c1c1c1c1c1c";
   const DIALLED = "+919811122233";
   const outboundRow = (over: Record<string, unknown> = {}) =>
@@ -1336,14 +1336,18 @@ describe("outbound calls: tools use the number ClickAI dialled, never the agent'
       d,
     );
 
-  test("a booking on an outbound call is saved with the dialled number, whatever the agent sent", async () => {
+  test("an outbound call never books, whatever the agent sent, and the refusal is audited", async () => {
     outboundRow();
     for (const sent of ["", "user-identifier-xyz", "+919000000001"]) {
       const { inputs, d } = booking();
-      await book({ customer_phone: sent, clickai_call_id: OUT_ID }, d);
-      assert.equal(inputs[0]!["customerPhone"], DIALLED, `agent sent "${sent}"`);
+      const res = await book({ customer_phone: sent, clickai_call_id: OUT_ID }, d);
+      const body = (await res.json()) as { result: { success: boolean; error: { code: string } } };
+      assert.equal(body.result.success, false);
+      assert.equal(body.result.error.code, "OUTBOUND_BOOKING_NOT_ALLOWED", `agent sent "${sent}"`);
+      assert.equal(inputs.length, 0, "no calendar call at all");
     }
     const event = db.tables["sarvam_agent_events"]!.find((e) => e["kind"] === "book_appointment")!;
+    assert.equal(event["status"], "rejected");
     assert.equal((event["detail"] as { outbound_call?: boolean }).outbound_call, true);
   });
 
@@ -1363,33 +1367,36 @@ describe("outbound calls: tools use the number ClickAI dialled, never the agent'
     }
   });
 
-  test("a callback on an outbound call is saved on the dialled number", async () => {
+  test("an outbound call records no mid-call callback: it is saved from the call result", async () => {
     outboundRow();
+    const leadsBefore = (db.tables["leads"] ?? []).length;
     const res = await handleSarvamAgentRequest(
       sarvamRequest("tools/request_callback", tokens[ORG_SMILE]!, {
         interaction_id: "20261119/out-2",
-        caller_number: "",
+        caller_number: "+919000000001",
         clickai_call_id: OUT_ID,
         customer_name: "Ravi",
       }),
       "request_callback",
       deps(),
     );
-    assert.deepEqual(await res.json(), { ok: true, recorded: true });
-    const lead = db.tables["leads"]!.at(-1)!;
-    assert.equal(lead["phone"], DIALLED);
+    const body = (await res.json()) as { recorded: boolean; error: { code: string } };
+    assert.equal(body.recorded, false, "never claims a callback it did not save");
+    assert.equal(body.error.code, "OUTBOUND_USE_CALL_RESULT");
+    assert.equal((db.tables["leads"] ?? []).length, leadsBefore, "no lead here");
   });
 
-  test("a dialled number on the test-caller list is still never booked", async () => {
+  test("check_availability still answers on an outbound call (read-only)", async () => {
     outboundRow();
-    db.tables["sarvam_agent_integrations"]!.find((r) => r["organization_id"] === ORG_SMILE)![
-      "test_caller_numbers"
-    ] = [DIALLED];
-    const { inputs, d } = booking();
-    await book({ customer_phone: "+919000000001", clickai_call_id: OUT_ID }, d);
-    assert.deepEqual(
-      inputs.map((i) => i["name"]),
-      ["check_calendar_availability"],
+    const res = await handleSarvamAgentRequest(
+      sarvamRequest("tools/check_availability", tokens[ORG_SMILE]!, {
+        interaction_id: "20261119/out-3",
+        date: "2026-11-14",
+        clickai_call_id: OUT_ID,
+      }),
+      "check_availability",
+      deps(),
     );
+    assert.equal(res.status, 200);
   });
 });

@@ -33,10 +33,86 @@ type Row = Record<string, unknown>;
 class MemoryDb {
   tables: Record<string, Row[]> = {};
   rpcs: { fn: string; args: unknown }[] = [];
+  /** Wallet balance (paise) and outbound price the admission model reads. */
+  walletBalance = 1_000_000;
+  rate = 400;
   rpc = async (fn: string, args: unknown) => {
     this.rpcs.push({ fn, args });
+    if (fn === "admit_single_outbound_call")
+      return { data: this.admit(args as Record<string, unknown>), error: null };
     return { data: null, error: null }; // finalization claim: no lease, nothing runs
   };
+  /**
+   * An in-memory model of admit_single_outbound_call (migration
+   * 20261119090000), so these tests drive the real TypeScript path end to end.
+   * The SQL itself, including its concurrency, is tested against PostgreSQL in
+   * outbound_call_admission.pg.test.ts.
+   */
+  admit(a: Record<string, unknown>) {
+    const calls = (this.tables["call_logs"] ??= []);
+    const org = a["_org"];
+    const to = a["_destination"];
+    const existing = calls.find(
+      (c) => c["organization_id"] === org && c["idempotency_key"] === a["_idempotency_key"],
+    );
+    if (existing)
+      return existing["destination_number"] === to
+        ? { result: "duplicate", call_id: existing["id"], status: existing["status"] }
+        : { result: "refused", reason: "idempotency_key_reused" };
+    const owns = (this.tables["phone_numbers"] ?? []).some(
+      (n) =>
+        n["id"] === a["_phone_number_id"] &&
+        n["organization_id"] === org &&
+        n["status"] === "active",
+    );
+    if (!owns) return { result: "refused", reason: "number_not_owned" };
+    const since = (ms: number) => new Date(Date.now() - ms).toISOString();
+    const recent = calls.filter(
+      (c) =>
+        c["organization_id"] === org &&
+        c["direction"] === "outbound" &&
+        (c["campaign_id"] ?? null) === null &&
+        String(c["started_at"]) > since(24 * 3600_000) &&
+        c["resolution_source"] !== "start_failure",
+    );
+    const open = ["initiated", "ringing", "answered", "in_progress", "outcome_unknown"];
+    const inFlight = recent.filter((c) => open.includes(String(c["status"]))).length;
+    if (inFlight >= Number(a["_max_in_flight"]))
+      return { result: "refused", reason: "in_flight_limit" };
+    const lastHour = recent.filter((c) => String(c["started_at"]) > since(3600_000)).length;
+    if (lastHour >= Number(a["_max_per_hour"]))
+      return { result: "refused", reason: "hourly_limit" };
+    if (recent.length >= Number(a["_max_per_day"]))
+      return { result: "refused", reason: "daily_limit" };
+    const toThem = recent.filter((c) => c["destination_number"] === to).length;
+    if (toThem >= Number(a["_max_per_destination_day"]))
+      return { result: "refused", reason: "destination_daily_limit" };
+    if (this.rate > 0 && this.walletBalance < this.rate * (inFlight + 1))
+      return { result: "refused", reason: "insufficient_balance" };
+    const busy = calls.some(
+      (c) =>
+        c["organization_id"] === org &&
+        c["provider"] === "sarvam" &&
+        c["direction"] === "outbound" &&
+        c["destination_number"] === to &&
+        ["initiated", "outcome_unknown"].includes(String(c["status"])),
+    );
+    if (busy) return { result: "refused", reason: "destination_busy" };
+    const row = {
+      id: randomUUID(),
+      organization_id: org,
+      phone_number_id: a["_phone_number_id"],
+      provider: "sarvam",
+      direction: "outbound",
+      caller_number: a["_caller_number"],
+      destination_number: to,
+      status: "initiated",
+      started_at: new Date().toISOString(),
+      idempotency_key: a["_idempotency_key"],
+    };
+    calls.push(row);
+    return { result: "admitted", call_id: row.id };
+  }
   from = (table: string) => {
     const filters: ((r: Row) => boolean)[] = [];
     let op: "select" | "insert" | "update" = "select";
@@ -89,6 +165,8 @@ class MemoryDb {
   };
 }
 
+/** 11:00 India time: inside the calling window, whenever the suite runs. */
+const DAYTIME = new Date("2026-11-19T05:30:00Z");
 const ORG_A = "org_a";
 const ORG_B = "org_b";
 let db: MemoryDb;
@@ -126,6 +204,10 @@ beforeEach(() => {
   ];
   db.tables["phone_numbers"] = [];
   db.tables["call_logs"] = [];
+  // The people these tests call already know the clinic (prior-relationship rule).
+  db.tables["contacts"] = [
+    { id: "ct_1", organization_id: ORG_A, phone: "+919876543210", opted_out: false },
+  ];
 });
 
 function number(overrides: Row): Row {
@@ -233,7 +315,6 @@ const allowAll: OutboundGates = {
       };
     return { allowed: true, reason: null, phoneNumber: n };
   }) as never,
-  walletCanAffordOutbound: async () => true,
 };
 
 async function withSarvam<T>(
@@ -284,7 +365,7 @@ describe("admin call-on-behalf: gates, dialling and provider errors", () => {
       () =>
         placeSarvamCallForOrganization(
           client(),
-          { orgId: ORG_A, phoneNumberId: n["id"] as string, toE164: "+919876543210" },
+          { now: DAYTIME, orgId: ORG_A, phoneNumberId: n["id"] as string, toE164: "+919876543210" },
           allowAll,
         ),
     );
@@ -307,6 +388,7 @@ describe("admin call-on-behalf: gates, dialling and provider errors", () => {
         placeSarvamCallForOrganization(
           client(),
           {
+            now: DAYTIME,
             orgId: ORG_A,
             phoneNumberId: n["id"] as string,
             toE164: "+919876543210",
@@ -328,7 +410,7 @@ describe("admin call-on-behalf: gates, dialling and provider errors", () => {
     const { requests } = await withSarvam({ status: 200, body: { attempt_id: "att_3" } }, () =>
       placeSarvamCallForOrganization(
         client(),
-        { orgId: ORG_A, phoneNumberId: n["id"] as string, toE164: "+919876543210" },
+        { now: DAYTIME, orgId: ORG_A, phoneNumberId: n["id"] as string, toE164: "+919876543210" },
         allowAll,
       ),
     );
@@ -347,7 +429,7 @@ describe("admin call-on-behalf: gates, dialling and provider errors", () => {
     const { error, requests } = await withSarvam({ status: 200, body: {} }, () =>
       placeSarvamCallForOrganization(
         client(),
-        { orgId: ORG_A, phoneNumberId: n["id"] as string, toE164: "+919876543210" },
+        { now: DAYTIME, orgId: ORG_A, phoneNumberId: n["id"] as string, toE164: "+919876543210" },
         allowAll,
       ),
     );
@@ -361,7 +443,7 @@ describe("admin call-on-behalf: gates, dialling and provider errors", () => {
     const { error, requests } = await withSarvam({ status: 200, body: {} }, () =>
       placeSarvamCallForOrganization(
         client(),
-        { orgId: ORG_A, phoneNumberId: n["id"] as string, toE164: "+919876543210" },
+        { now: DAYTIME, orgId: ORG_A, phoneNumberId: n["id"] as string, toE164: "+919876543210" },
         allowAll,
       ),
     );
@@ -375,19 +457,16 @@ describe("admin call-on-behalf: gates, dialling and provider errors", () => {
       [{ status: "provisioning" }, allowAll, /not active/],
       [{ outbound_enabled: false }, allowAll, /Outbound calling is disabled/],
       [{ provider: "vobiz" }, allowAll, /only applies to Sarvam/],
-      [
-        {},
-        { ...allowAll, walletCanAffordOutbound: async () => false },
-        /Insufficient wallet balance/,
-      ],
+      [{ emptyWallet: true }, allowAll, /Insufficient wallet balance/],
     ];
-    for (const [overrides, gates, expected] of cases) {
+    for (const [{ emptyWallet, ...overrides }, gates, expected] of cases) {
+      db.walletBalance = emptyWallet ? 0 : 1_000_000;
       db.tables["phone_numbers"] = [];
       const n = number(overrides);
       const { error, requests } = await withSarvam({ status: 200, body: {} }, () =>
         placeSarvamCallForOrganization(
           client(),
-          { orgId: ORG_A, phoneNumberId: n["id"] as string, toE164: "+919876543210" },
+          { now: DAYTIME, orgId: ORG_A, phoneNumberId: n["id"] as string, toE164: "+919876543210" },
           gates,
         ),
       );
@@ -402,7 +481,7 @@ describe("admin call-on-behalf: gates, dialling and provider errors", () => {
     const { error } = await withSarvam({ status: 200, body: {} }, () =>
       placeSarvamCallForOrganization(
         client(),
-        { orgId: ORG_A, phoneNumberId: n["id"] as string, toE164: "98765" },
+        { now: DAYTIME, orgId: ORG_A, phoneNumberId: n["id"] as string, toE164: "98765" },
         allowAll,
       ),
     );
@@ -423,7 +502,7 @@ describe("admin call-on-behalf: gates, dialling and provider errors", () => {
     const { error, requests } = await withSarvam({ status: 200, body: {} }, () =>
       placeSarvamCallForOrganization(
         client(),
-        { orgId: ORG_A, phoneNumberId: n["id"] as string, toE164: "+919876543210" },
+        { now: DAYTIME, orgId: ORG_A, phoneNumberId: n["id"] as string, toE164: "+919876543210" },
         allowAll,
       ),
     );
@@ -438,7 +517,7 @@ describe("admin call-on-behalf: gates, dialling and provider errors", () => {
       () =>
         placeSarvamCallForOrganization(
           client(),
-          { orgId: ORG_A, phoneNumberId: n["id"] as string, toE164: "+919876543210" },
+          { now: DAYTIME, orgId: ORG_A, phoneNumberId: n["id"] as string, toE164: "+919876543210" },
           allowAll,
         ),
     );
@@ -458,7 +537,7 @@ describe("admin call-on-behalf: gates, dialling and provider errors", () => {
     const { result, requests } = await withSarvam({ status: 503, body: {} }, () =>
       placeSarvamCallForOrganization(
         client(),
-        { orgId: ORG_A, phoneNumberId: n["id"] as string, toE164: "+919876543210" },
+        { now: DAYTIME, orgId: ORG_A, phoneNumberId: n["id"] as string, toE164: "+919876543210" },
         allowAll,
       ),
     );
@@ -596,11 +675,12 @@ describe("single-call limits per customer", () => {
     started_at: minutesAgo(startedMinutesAgo),
   });
   const place = (gates: OutboundGates = allowAll) => {
+    db.tables["phone_numbers"] = [];
     const n = number({});
     return withSarvam({ status: 200, body: { attempt_id: "att_l" } }, () =>
       placeSarvamCallForOrganization(
         client(),
-        { orgId: ORG_A, phoneNumberId: n["id"] as string, toE164: "+919876543210" },
+        { now: DAYTIME, orgId: ORG_A, phoneNumberId: n["id"] as string, toE164: "+919876543210" },
         gates,
       ),
     );
@@ -636,16 +716,38 @@ describe("single-call limits per customer", () => {
 
   test("the wallet must cover a minute for this call and each call still in progress", async () => {
     db.tables["call_logs"]!.push(pastCall("initiated", 2), pastCall("completed", 5));
-    const asked: number[] = [];
-    const { error } = await place({
-      ...allowAll,
-      walletCanAffordOutbound: async (_org, minutes = 1) => {
-        asked.push(minutes);
-        return false;
-      },
-    });
+    db.walletBalance = 2 * db.rate - 1;
+    const { error, requests } = await place();
     assert.match((error as Error).message, /Insufficient wallet balance/);
-    assert.deepEqual(asked, [2]);
+    assert.equal(requests.length, 0);
+    db.walletBalance = 2 * db.rate;
+    const ok = await place();
+    assert.equal(ok.error, undefined);
+  });
+
+  test("the same request id twice (double click, retry): one call, dialled once", async () => {
+    const n = number({});
+    const once = () =>
+      withSarvam({ status: 200, body: { attempt_id: "att_dup" } }, () =>
+        placeSarvamCallForOrganization(
+          client(),
+          {
+            now: DAYTIME,
+            orgId: ORG_A,
+            phoneNumberId: n["id"] as string,
+            toE164: "+919876543210",
+            idempotencyKey: "req_aaaaaaaaaaaaaaaaaaaa",
+          },
+          allowAll,
+        ),
+      );
+    const first = await once();
+    const second = await once();
+    assert.equal(first.requests.length, 1);
+    assert.equal(second.requests.length, 0, "the repeat never reaches Sarvam");
+    assert.equal(second.result?.callId, first.result?.callId);
+    assert.equal(second.result?.duplicate, true);
+    assert.equal(db.tables["call_logs"]!.length, 1);
   });
 });
 
@@ -654,12 +756,37 @@ describe("loadOutboundCallingStatus: what the customer sees before calling", () 
     checkFeatureAccess: async () => ({ allowed: true, reason: null }),
     walletCanAffordOutbound: async () => true,
     getCallRate: async () => ({ customerAmountPerMinute: 400, currency: "INR" }),
+    now: () => DAYTIME,
     ...over,
+  });
+
+  test("outside calling hours, or with the kill switch on, the preview says so", async () => {
+    number({});
+    const night = await loadOutboundCallingStatus(
+      client(),
+      ORG_A,
+      deps({ now: () => new Date("2026-11-19T17:00:00Z") }),
+    );
+    assert.match(night.blockers.join(" "), /9:00 AM and 9:00 PM/);
+    const prior = process.env["OUTBOUND_CALLING_DISABLED"];
+    process.env["OUTBOUND_CALLING_DISABLED"] = "true";
+    try {
+      const paused = await loadOutboundCallingStatus(client(), ORG_A, deps());
+      assert.match(paused.blockers.join(" "), /paused/);
+    } finally {
+      if (prior === undefined) delete process.env["OUTBOUND_CALLING_DISABLED"];
+      else process.env["OUTBOUND_CALLING_DISABLED"] = prior;
+    }
   });
 
   test("a ready, outbound-enabled number has no blockers; price and limits are reported", async () => {
     const n = number({});
+    db.tables["wallet_balances"] = [
+      { organization_id: ORG_B, balance: 999 },
+      { organization_id: ORG_A, balance: 5000 },
+    ];
     const status = await loadOutboundCallingStatus(client(), ORG_A, deps());
+    assert.equal(status.walletBalance, 5000, "this customer's own balance only");
     assert.deepEqual(status.blockers, []);
     assert.equal(status.numbers.length, 1);
     assert.equal(status.numbers[0]!.id, n["id"]);

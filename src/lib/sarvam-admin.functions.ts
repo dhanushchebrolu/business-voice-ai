@@ -7,6 +7,7 @@ import { SarvamTelephonyAdapter } from "@/lib/telephony/sarvam-provider.server";
 import { TelephonyAdapterError } from "@/lib/telephony/adapter";
 import { createInboundDeploymentForNumbers } from "@/lib/sarvam-inbound-deployment.server";
 import {
+  IDEMPOTENCY_KEY_PATTERN,
   INVALID_DESTINATION_MESSAGE,
   sendSarvamInstantOutboundCall,
 } from "@/lib/sarvam-outbound-call.server";
@@ -1300,6 +1301,8 @@ export interface PlaceAdminSarvamOutboundCallInput {
   /** Must be true: the admin explicitly approved dialling this one number. */
   confirmCall: boolean;
   reason: string;
+  /** One per approval: a repeat of the same request returns the same call, never a second one. */
+  idempotencyKey: string;
 }
 
 /**
@@ -1321,6 +1324,11 @@ export const placeAdminSarvamOutboundCall = createServerFn({ method: "POST" })
     if (input.confirmCall !== true)
       throw new Error("This places a real, billed call — explicit confirmation is required.");
     if (!input.reason?.trim()) throw new Error("A reason is required");
+    if (
+      typeof input.idempotencyKey !== "string" ||
+      !IDEMPOTENCY_KEY_PATTERN.test(input.idempotencyKey)
+    )
+      throw new Error("This request is missing a valid request id. Reload the page and try again.");
     return { ...input, toE164 };
   })
   .handler(async ({ data, context }) => {
@@ -1344,6 +1352,7 @@ export const placeAdminSarvamOutboundCall = createServerFn({ method: "POST" })
         phoneNumberId: data.phoneNumberId,
         toE164: data.toE164,
         objective: typeof data.objective === "string" ? data.objective : undefined,
+        idempotencyKey: data.idempotencyKey,
       });
     } catch (err) {
       // Refused or rejected attempts are audited too: who tried to call whom.

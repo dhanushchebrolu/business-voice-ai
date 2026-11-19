@@ -385,6 +385,19 @@ describe("campaign.dispatch job", () => {
       assert.equal(seen[0]!.deadline, now.getTime() + CAMPAIGN_DISPATCH_CLAIM_WINDOW_MS);
     });
 
+  test("the outbound kill switch stops dispatch even when it is enabled", async () => {
+    const prior = process.env["OUTBOUND_CALLING_DISABLED"];
+    process.env["OUTBOUND_CALLING_DISABLED"] = "true";
+    try {
+      const { result, seen } = await runWithSetting("true");
+      assert.deepEqual(result, { skipped: "outbound_disabled" });
+      assert.equal(seen.length, 0, "the dispatcher is never called");
+    } finally {
+      if (prior === undefined) delete process.env["OUTBOUND_CALLING_DISABLED"];
+      else process.env["OUTBOUND_CALLING_DISABLED"] = prior;
+    }
+  });
+
   test("the claim window leaves room for one Sarvam request inside the job timeout", () => {
     assert.ok(CAMPAIGN_DISPATCH_CLAIM_WINDOW_MS + 15_000 < 20_000);
   });
