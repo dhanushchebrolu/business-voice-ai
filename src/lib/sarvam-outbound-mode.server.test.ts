@@ -254,6 +254,27 @@ describe("admin Sarvam campaign status changes", () => {
     }
   });
 
+  test("the global kill switch refuses starting or resuming, but never stopping", async () => {
+    const prior = process.env["OUTBOUND_CALLING_DISABLED"];
+    process.env["OUTBOUND_CALLING_DISABLED"] = "true";
+    try {
+      const start = await checkSarvamCampaignStatusChange(db(mapped, [readyAgent]), {
+        providerCampaignId: "sv_1",
+        status: "active",
+      });
+      assert.equal(start.ok, false);
+      assert.match((start as { reason: string }).reason, /paused/);
+      const stop = await checkSarvamCampaignStatusChange(db(mapped, [readyAgent]), {
+        providerCampaignId: "sv_1",
+        status: "paused",
+      });
+      assert.equal(stop.ok, true);
+    } finally {
+      if (prior === undefined) delete process.env["OUTBOUND_CALLING_DISABLED"];
+      else process.env["OUTBOUND_CALLING_DISABLED"] = prior;
+    }
+  });
+
   test("starting or resuming needs a mapped campaign whose agent version is outbound-ready", async () => {
     const ok = await checkSarvamCampaignStatusChange(db(mapped, [readyAgent]), {
       providerCampaignId: "sv_1",

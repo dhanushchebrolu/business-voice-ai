@@ -70,6 +70,10 @@ export const launchCampaign = createServerFn({ method: "POST" })
   })
   .handler(async ({ data, context }) => {
     const orgId = await campaignOrgId(context, data.campaignId, true);
+    // The global outbound kill switch: no campaign starts or resumes while it is on.
+    const { outboundCallingDisabled, OUTBOUND_DISABLED_MESSAGE } =
+      await import("@/lib/outbound-eligibility.server");
+    if (outboundCallingDisabled()) throw new Error(OUTBOUND_DISABLED_MESSAGE);
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
     const { data: campaign } = await supabaseAdmin
@@ -228,6 +232,13 @@ async function launchViaSarvamCampaign(
   }[];
 
   const { dialable, excluded } = partitionDoNotCall(typedPending);
+  // Supervised-test allowlist (SARVAM_OUTBOUND_TEST_ALLOWLIST), as on every other
+  // Sarvam outbound path: Sarvam dials the whole cohort, so one number outside
+  // it refuses the upload (fail closed) instead of dialling anyone.
+  const { isSarvamOutboundDestinationAllowed, OUTBOUND_TEST_ALLOWLIST_MESSAGE } =
+    await import("@/lib/sarvam-outbound-call.server");
+  if (dialable.some((cc) => !isSarvamOutboundDestinationAllowed(cc.contacts?.phone ?? "")))
+    throw new Error(OUTBOUND_TEST_ALLOWLIST_MESSAGE);
   if (excluded.length > 0) {
     await supabaseAdmin
       .from("campaign_contacts")

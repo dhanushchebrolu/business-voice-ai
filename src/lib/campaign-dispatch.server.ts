@@ -1,3 +1,4 @@
+import { outboundCallingDisabled } from "./outbound-eligibility.server.ts";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { getTelephonyAdapter, sarvamOutboundWebhookUrl } from "./telephony.server.ts";
@@ -115,6 +116,12 @@ export async function dispatchDueCampaigns(
     campaignsCompleted: 0,
     errors: [],
   };
+  // The global outbound kill switch, here so every trigger (the scheduled job
+  // and the cron route) stops dialling; nothing is read or claimed.
+  if (outboundCallingDisabled()) {
+    console.warn("campaign_dispatch:outbound_disabled");
+    return summary;
+  }
 
   // Only ever dispatches instant_outbound_fallback campaigns (spec "THIRD"):
   // a sarvam_campaign-mode campaign already had its full contact list

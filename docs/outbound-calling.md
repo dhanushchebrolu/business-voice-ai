@@ -38,6 +38,8 @@ processTelephonyEvent → status transition → finalization (billing + opt-out 
 
 Every rule runs server-side. The UI shows the same reasons in advance (`getOutboundCallingStatus`), but nothing depends on it.
 
+**Campaign paths** (off in production) also obey the kill switch: `dispatchDueCampaigns` (both the scheduled job and the cron route), campaign launch, and an admin starting or resuming a Sarvam-side campaign. The Sarvam-cohort upload applies the test allowlist and refuses the whole cohort if any number is outside it. Campaigns do **not** yet apply calling hours, the prior-relationship rule or the call-length billing cap; those must be added before campaigns are switched on.
+
 **No other path dials a single call.** The older generic Vobiz/Exotel server function (`initiateOutboundCall`) is retired: it refuses everything and can no longer dial or write. The LiveKit AI-outbound path (`startAgentOutboundCall`, off unless `VOICE_AGENT_OUTBOUND_ENABLED=true`) applies the same kill switch, calling hours, do-not-call and prior-relationship rules. Campaign dispatch stays off.
 
 ## 2. Safety gate (every single call)
@@ -188,13 +190,26 @@ SELECT c.id, c.duration_seconds, c.customer_charge, -w.amount AS debited
 
 ClickAI sets per call (spread last, so nothing else can override them): `call_direction=outbound`, `clickai_call_id`, `campaign_objective` (≤300 chars, sanitized), `campaign_instructions` (≤1500), plus the opening-line override. Inbound calls pass nothing, so the agent's declared default `call_direction=inbound` applies, and a caller cannot change it.
 
+**v6 draft, read on 2026-11-19 (read-only):**
+
+| Item                                                             | State                                                                                                                                                     |
+| ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `max_interaction_time_seconds`                                   | 900 (15 min) — matches what admins should enter at readiness                                                                                              |
+| `call_direction`                                                 | enum inbound/outbound, default `inbound`, not agent-updatable ✓                                                                                           |
+| `clickai_call_id`, `campaign_objective`, `campaign_instructions` | declared, default empty ✓                                                                                                                                 |
+| `opted_out`, `wrong_number`, `outbound_result`, `interest_level` | declared post-call variables ✓                                                                                                                            |
+| `record_call_outcome` body                                       | 8 fields incl. `opted_out` ✓ (keep at 8)                                                                                                                  |
+| `book_appointment` body                                          | **missing `clickai_call_id`**                                                                                                                             |
+| `request_callback` body                                          | **missing `clickai_call_id`**                                                                                                                             |
+| `send_reminder`                                                  | **still attached and `enabled: true`**, posting to postman-echo and replying "sent"; if the model ever calls it the agent would claim a reminder was sent |
+
 Manual Sarvam configuration still needed on the v6 draft (not done; needs approval):
 
-1. `book_appointment` and `request_callback` tool bodies: add `clickai_call_id` = `@clickai_call_id`. On an outbound call the server then refuses both (`OUTBOUND_BOOKING_NOT_ALLOWED`, `OUTBOUND_USE_CALL_RESULT`): the agent sends the person to the clinic to book, and a callback is saved once at finalization from `outbound_result`, on the dialled number. `check_availability` stays allowed.
-2. Check the version's "Max call length" in Sarvam (v5: 15 min) and enter it when confirming the version for outbound in ClickAI admin (provisioning page). ClickAI cannot read it through Sarvam's public API, so the admin attests it there.
-3. Keep `record_call_outcome` at its 8 fields (its outbound leads are already dropped by exact direction matching).
+1. `book_appointment` and `request_callback`: add the body field `{"name": "clickai_call_id", "type": "agent_variable", "value": {"variable_name": "clickai_call_id"}}`. On an outbound call the server then refuses both (`OUTBOUND_BOOKING_NOT_ALLOWED`, `OUTBOUND_USE_CALL_RESULT`): the agent sends the person to the clinic to book, and a callback is saved once at finalization from `outbound_result`, on the dialled number. `check_availability` stays allowed. On inbound calls the value is empty and nothing changes.
+2. Disable `send_reminder` on the draft (it cannot be deleted: Sarvam returns 409).
+3. Keep "Max call length" at 15 min (or note the new value) and enter it when confirming the version for outbound in ClickAI admin. ClickAI cannot read it through Sarvam's public API, so the admin attests it there.
 
-Verification after the change (text playground, no calls): the generated brief (`getSarvamAgentBrief`) matches the tool bodies; an outbound test conversation's booking audit row shows `outbound_call: true`.
+Verification after the change (text playground, no calls): the generated brief (`getSarvamAgentBrief`) matches the tool bodies; an outbound test conversation's booking audit row shows `outbound_call: true` and status `rejected`.
 
 ## 10. Configuration
 

@@ -159,6 +159,26 @@ describe("campaign dispatch — duplicates and overlap", () => {
   });
 });
 
+describe("campaign dispatch — the global outbound kill switch", () => {
+  test("with OUTBOUND_CALLING_DISABLED=true nothing is claimed or dialled, by any trigger", async () => {
+    const t = setup(3);
+    const prior = process.env["OUTBOUND_CALLING_DISABLED"];
+    process.env["OUTBOUND_CALLING_DISABLED"] = "true";
+    try {
+      const summary = await dispatchDueCampaigns({ deps: t.deps });
+      assert.equal(t.dialed.length, 0);
+      assert.equal(summary.campaignsConsidered, 0);
+      assert.ok(t.table("campaign_contacts").every((c) => c["status"] === "pending"));
+    } finally {
+      if (prior === undefined) delete process.env["OUTBOUND_CALLING_DISABLED"];
+      else process.env["OUTBOUND_CALLING_DISABLED"] = prior;
+    }
+    // Switched back on: the same campaign dials.
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 3);
+  });
+});
+
 describe("campaign dispatch — pause and cancel stop the batch", () => {
   test("a pause during the batch stops further claims; untouched contacts stay pending", async () => {
     const t = setup(5);

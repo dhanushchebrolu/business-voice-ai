@@ -1,5 +1,9 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
+import {
+  OUTBOUND_DISABLED_MESSAGE,
+  outboundCallingDisabled,
+} from "./outbound-eligibility.server.ts";
 
 /**
  * One Sarvam agent per customer answers inbound calls and places outbound
@@ -260,6 +264,9 @@ export async function checkSarvamCampaignStatusChange(
   if (error) throw error;
   const organizationId = rows?.length === 1 ? rows[0]!.organization_id : null;
   if (!status || STOPPING_CAMPAIGN_STATUSES.has(status)) return { ok: true, organizationId };
+  // Starting or resuming is refused while the global outbound kill switch is on.
+  if (outboundCallingDisabled())
+    return { ok: false, organizationId, reason: OUTBOUND_DISABLED_MESSAGE };
 
   if (!rows || rows.length !== 1 || !rows[0]!.agent_config_id)
     return {
