@@ -1025,6 +1025,7 @@ describe("single-call number reservation (concurrent requests and crash recovery
       {
         id: "num_1",
         e164: "+911111111111",
+        outbound_enabled: true,
         organization_id: ORG_ID,
         provider: "sarvam",
         connection_id: "conn_1",
@@ -1277,6 +1278,7 @@ describe("equivalent number formats share one reservation (single call vs campai
       {
         id: "num_1",
         e164: "+911111111111",
+        outbound_enabled: true,
         organization_id: ORG_ID,
         provider: "sarvam",
         connection_id: "conn_1",
@@ -1388,25 +1390,25 @@ describe("equivalent number formats share one reservation (single call vs campai
   });
 });
 
-describe("generic outbound path (telephony-outbound.functions.ts)", () => {
+describe("the retired generic outbound path (telephony-outbound.functions.ts)", () => {
   const src = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "telephony-outbound.functions.ts"),
     "utf8",
   ).replace(/\r\n/g, "\n");
 
-  test("a reservation conflict on insert becomes the friendly refusal, before any dial or call-row update", () => {
-    const conflict = src.indexOf(
-      'if (insertError?.code === "23505") throw new Error(UNRESOLVED_CALL_MESSAGE);',
-    );
-    const rawRethrow = src.indexOf("if (insertError) throw insertError;");
-    const dial = src.indexOf("adapter.initiateOutboundCall(");
-    assert.ok(conflict > -1, "23505 is mapped to UNRESOLVED_CALL_MESSAGE");
-    assert.ok(conflict < rawRethrow, "checked before the raw error is rethrown");
-    assert.ok(rawRethrow < dial, "both happen before anything is dialled");
-    assert.match(
-      src,
-      /import \{[^}]*\bUNRESOLVED_CALL_MESSAGE\b[^}]*\} from "@\/lib\/sarvam-outbound-call\.server";/,
-    );
+  test("it can never dial or write: no adapter, no call row, no provider request, only a refusal", () => {
+    for (const forbidden of [
+      /getTelephonyAdapter/,
+      /initiateOutboundCall\(\{/,
+      /\.from\(/,
+      /\.insert\(/,
+      /supabaseAdmin/,
+      /fetch\(/,
+    ])
+      assert.doesNotMatch(src, forbidden, String(forbidden));
+    assert.match(src, /throw new Error\(GENERIC_OUTBOUND_RETIRED_MESSAGE\);/);
+    // Still authenticated, so an anonymous request is turned away before even that.
+    assert.match(src, /\.middleware\(\[requireSupabaseAuth\]\)/);
   });
 
   test("the message the user sees names the situation, not the database", async () => {
@@ -1414,37 +1416,10 @@ describe("generic outbound path (telephony-outbound.functions.ts)", () => {
     assert.match(UNRESOLVED_CALL_MESSAGE, /earlier call to this number/);
     assert.doesNotMatch(UNRESOLVED_CALL_MESSAGE, /23505|duplicate key|idx_|constraint/i);
   });
-
-  test("a Sarvam number is refused before the wallet check, any call row or any provider request", async () => {
-    const gate = src.indexOf("if (!gate.allowed || !gate.phoneNumber)");
-    const refusal = src.indexOf(
-      'if (gate.phoneNumber.provider === "sarvam")\n      throw new Error(SARVAM_USE_INSTANT_OUTBOUND_MESSAGE);',
-    );
-    const wallet = src.indexOf("await walletCanAffordOutbound(");
-    const insert = src.indexOf('.from("call_logs")\n      .insert(');
-    const dial = src.indexOf("adapter.initiateOutboundCall(");
-    assert.ok(gate > -1 && refusal > gate, "right after the number is known");
-    assert.ok(refusal < wallet && wallet < insert && insert < dial);
-    assert.equal(src.split("SARVAM_USE_INSTANT_OUTBOUND_MESSAGE").length - 1, 2); // import + use
-
-    const { SARVAM_USE_INSTANT_OUTBOUND_MESSAGE } =
-      await import("./sarvam-outbound-call.server.ts");
-    assert.match(SARVAM_USE_INSTANT_OUTBOUND_MESSAGE, /createSarvamInstantOutboundCall/);
-  });
-
-  test("other providers keep the generic path unchanged", () => {
-    // Only Sarvam is refused; Exotel/Vobiz still insert and dial here.
-    assert.equal(src.split('provider === "sarvam"').length - 1, 1);
-    assert.match(src, /provider: gate\.phoneNumber\.provider,/);
-  });
 });
 
 describe("every outbound entry point canonicalizes the destination", () => {
-  for (const file of [
-    "sarvam-outbound.functions.ts",
-    "telephony-outbound.functions.ts",
-    "sarvam-admin.functions.ts",
-  ]) {
+  for (const file of ["sarvam-outbound.functions.ts", "sarvam-admin.functions.ts"]) {
     test(`${file} validates with normalizeCustomerPhone and passes on the canonical value`, () => {
       const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), file), "utf8");
       assert.match(src, /const toE164 = normalizeCustomerPhone\(input\.toE164, null\);/);
@@ -1799,6 +1774,7 @@ describe("campaign dispatch vs the number reservation", () => {
       {
         id: "num_1",
         e164: "+911111111111",
+        outbound_enabled: true,
         organization_id: ORG,
         provider: "sarvam",
         connection_id: "conn_1",

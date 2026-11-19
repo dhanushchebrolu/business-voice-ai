@@ -45,6 +45,8 @@ export function PlaceCallButton({ organizationId }: { organizationId: string }) 
   const [destination, setDestination] = useState("");
   const [objective, setObjective] = useState("");
   const [placing, setPlacing] = useState(false);
+  // The last failure, shown in the dialog too (a toast alone is easy to miss).
+  const [lastError, setLastError] = useState<string | null>(null);
   // Synchronous guard: a second click before React re-renders never sends a second request.
   const submitting = useRef(false);
   // One request id per attempt at one number, reused for retries (the server dedupes it).
@@ -82,6 +84,7 @@ export function PlaceCallButton({ organizationId }: { organizationId: string }) 
         },
       });
       attempt.current = null;
+      setLastError(null);
       if (result.duplicate)
         toast.info("Already calling", {
           description: "This call was already placed. It is in your call history.",
@@ -100,6 +103,7 @@ export function PlaceCallButton({ organizationId }: { organizationId: string }) 
       const message = (err as Error).message;
       // That attempt was not placed; the next try is a new attempt.
       if (message === REQUEST_KEY_SPENT_MESSAGE) attempt.current = null;
+      setLastError(message);
       toast.error("Call not placed", { description: message });
     } finally {
       submitting.current = false;
@@ -113,7 +117,14 @@ export function PlaceCallButton({ organizationId }: { organizationId: string }) 
 
   return (
     <>
-      <Button size="sm" className="h-9" onClick={() => setOpen(true)}>
+      <Button
+        size="sm"
+        className="h-9"
+        onClick={() => {
+          setLastError(null);
+          setOpen(true);
+        }}
+      >
         <PhoneOutgoing className="size-3.5" />
         Call a number
       </Button>
@@ -132,7 +143,7 @@ export function PlaceCallButton({ organizationId }: { organizationId: string }) 
             {status.numbers.length > 1 ? (
               <div className="space-y-1.5">
                 <Label htmlFor="place-call-from">Call from</Label>
-                <Select value={selected.id} onValueChange={setNumberId}>
+                <Select value={selected.id} onValueChange={setNumberId} disabled={placing}>
                   <SelectTrigger id="place-call-from">
                     <SelectValue />
                   </SelectTrigger>
@@ -159,7 +170,11 @@ export function PlaceCallButton({ organizationId }: { organizationId: string }) 
                 autoComplete="off"
                 placeholder="+91 98765 43210"
                 value={destination}
-                onChange={(e) => setDestination(e.target.value)}
+                disabled={placing}
+                onChange={(e) => {
+                  setDestination(e.target.value);
+                  setLastError(null);
+                }}
                 aria-invalid={destination.trim() !== "" && !toE164}
                 aria-describedby="place-call-to-hint"
               />
@@ -177,12 +192,22 @@ export function PlaceCallButton({ organizationId }: { organizationId: string }) 
                 maxLength={OBJECTIVE_MAX}
                 placeholder="For example: remind them about their check-up"
                 value={objective}
+                disabled={placing}
                 onChange={(e) => setObjective(e.target.value)}
               />
               <p className="text-xs text-muted-foreground">
                 Your assistant uses this to explain why it is calling.
               </p>
             </div>
+
+            {lastError ? (
+              <p
+                role="alert"
+                className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm"
+              >
+                Call not placed: {lastError}
+              </p>
+            ) : null}
 
             {blockers.length > 0 ? (
               <ul
@@ -198,6 +223,13 @@ export function PlaceCallButton({ organizationId }: { organizationId: string }) 
                 {status.ratePerMinute > 0
                   ? `${formatMoney(status.ratePerMinute, status.currency)} per started minute, charged to your wallet when the call ends. Unanswered calls are free.`
                   : "Outbound calls are not charged on your plan."}{" "}
+                {status.maxCallMinutes !== null
+                  ? `A call ends after ${status.maxCallMinutes} minutes at most${
+                      status.ratePerMinute > 0
+                        ? `, so one call costs no more than ${formatMoney(status.ratePerMinute * status.maxCallMinutes, status.currency)}`
+                        : ""
+                    }. `
+                  : ""}
                 Up to {status.limits.inFlight} calls at once and {status.limits.perHour} an hour.
                 Calls are placed between 9 AM and 9 PM India time, to people who already know your
                 business. Wallet balance: {formatMoney(status.walletBalance, status.currency)}.

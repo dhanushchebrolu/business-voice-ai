@@ -85,13 +85,53 @@ describe("marking a version outbound-ready", () => {
     const db = setup([
       { id: "a1", organization_id: "org_a", sarvam_app_id: "app_1", sarvam_app_version: 5 },
     ]);
-    const r = await setOutboundReady(db.client, { organizationId: "org_a", ready: true });
-    assert.deepEqual(r, { ok: true, ready: true, appId: "app_1", appVersion: 5 });
-    assert.equal(db.tables["agent_configs"]![0]!["sarvam_outbound_ready_version"], 5);
-    assert.equal(db.tables["agent_configs"]![0]!["sarvam_outbound_ready_app_id"], "app_1");
+    const r = await setOutboundReady(db.client, {
+      organizationId: "org_a",
+      ready: true,
+      maxCallSeconds: 900,
+    });
+    assert.deepEqual(r, {
+      ok: true,
+      ready: true,
+      appId: "app_1",
+      appVersion: 5,
+      maxCallSeconds: 900,
+    });
+    const agent = db.tables["agent_configs"]![0]!;
+    assert.equal(agent["sarvam_outbound_ready_version"], 5);
+    assert.equal(agent["sarvam_outbound_ready_app_id"], "app_1");
+    assert.equal(agent["sarvam_outbound_max_call_seconds"], 900);
     await setOutboundReady(db.client, { organizationId: "org_a", ready: false });
-    assert.equal(db.tables["agent_configs"]![0]!["sarvam_outbound_ready_version"], null);
-    assert.equal(db.tables["agent_configs"]![0]!["sarvam_outbound_ready_app_id"], null);
+    assert.equal(agent["sarvam_outbound_ready_version"], null);
+    assert.equal(agent["sarvam_outbound_ready_app_id"], null);
+    assert.equal(agent["sarvam_outbound_max_call_seconds"], null);
+  });
+
+  test("confirming needs the agent's maximum call length from Sarvam, 1 to 60 whole minutes", async () => {
+    for (const maxCallSeconds of [undefined, 59, 3601, 90.5, Number.NaN]) {
+      const db = setup([
+        { id: "a1", organization_id: "org_a", sarvam_app_id: "app_1", sarvam_app_version: 5 },
+      ]);
+      const r = await setOutboundReady(db.client, {
+        organizationId: "org_a",
+        ready: true,
+        maxCallSeconds,
+      });
+      assert.equal(r.ok, false, String(maxCallSeconds));
+      assert.match((r as { reason: string }).reason, /maximum call length/);
+      assert.equal(db.tables["agent_configs"]![0]!["sarvam_outbound_ready_version"], undefined);
+    }
+    for (const maxCallSeconds of [60, 3600]) {
+      const db = setup([
+        { id: "a1", organization_id: "org_a", sarvam_app_id: "app_1", sarvam_app_version: 5 },
+      ]);
+      const r = await setOutboundReady(db.client, {
+        organizationId: "org_a",
+        ready: true,
+        maxCallSeconds,
+      });
+      assert.equal(r.ok, true, String(maxCallSeconds));
+    }
   });
 
   test("refuses an unmapped agent, and never touches another customer's agent", async () => {
@@ -99,7 +139,11 @@ describe("marking a version outbound-ready", () => {
       { id: "a1", organization_id: "org_a", sarvam_app_id: null, sarvam_app_version: null },
       { id: "b1", organization_id: "org_b", sarvam_app_id: "app_b", sarvam_app_version: 2 },
     ]);
-    const r = await setOutboundReady(db.client, { organizationId: "org_a", ready: true });
+    const r = await setOutboundReady(db.client, {
+      organizationId: "org_a",
+      ready: true,
+      maxCallSeconds: 900,
+    });
     assert.equal(r.ok, false);
     assert.equal(db.tables["agent_configs"]![1]!["sarvam_outbound_ready_version"], undefined);
   });
@@ -115,6 +159,7 @@ describe("marking a version outbound-ready", () => {
       const r = await setOutboundReady(setup(agents).client, {
         organizationId: "org_a",
         ready: true,
+        maxCallSeconds: 900,
       });
       assert.equal(r.ok, false);
     }

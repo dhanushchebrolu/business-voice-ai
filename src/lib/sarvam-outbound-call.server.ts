@@ -53,7 +53,10 @@ export const TOO_MANY_IN_FLIGHT_MESSAGE = `You already have ${SINGLE_CALL_LIMITS
 export const HOURLY_LIMIT_MESSAGE = `You have reached the limit of ${SINGLE_CALL_LIMITS.perHour} outbound calls an hour. Try again later.`;
 export const DAILY_LIMIT_MESSAGE = `You have reached the limit of ${SINGLE_CALL_LIMITS.perDay} outbound calls a day. Try again tomorrow.`;
 export const DESTINATION_LIMIT_MESSAGE = `This number has already been called ${SINGLE_CALL_LIMITS.perDestinationDay} times in the last 24 hours. Try again tomorrow.`;
-export const INSUFFICIENT_BALANCE_MESSAGE = "Insufficient wallet balance to place this call.";
+export const INSUFFICIENT_BALANCE_MESSAGE =
+  "Insufficient wallet balance to place this call. Your balance must cover the longest this call can run, plus any calls still in progress.";
+export const MAX_CALL_LENGTH_NOT_SET_MESSAGE =
+  "This customer's agent has no maximum call length recorded for outbound calls yet.";
 export const IDEMPOTENCY_KEY_REUSED_MESSAGE =
   "This request was already used for a different number. Close the dialog and try again.";
 export { REQUEST_KEY_SPENT_MESSAGE as DUPLICATE_FAILED_MESSAGE } from "./request-key.ts";
@@ -80,6 +83,8 @@ export function admissionRefusalMessage(reason: unknown): string {
       return IDEMPOTENCY_KEY_REUSED_MESSAGE;
     case "invalid_destination":
       return INVALID_DESTINATION_MESSAGE;
+    case "max_call_length_not_set":
+      return MAX_CALL_LENGTH_NOT_SET_MESSAGE;
     default:
       return "This call could not be admitted. Try again, or contact support if it keeps happening.";
   }
@@ -99,10 +104,6 @@ export const INVALID_DESTINATION_MESSAGE =
 
 export const UNRESOLVED_CALL_MESSAGE =
   "An earlier call to this number hasn't finished or has an unconfirmed outcome. Wait for it, or resolve it in call history, before calling again.";
-
-/** Returned by the generic initiateOutboundCall for a Sarvam number. */
-export const SARVAM_USE_INSTANT_OUTBOUND_MESSAGE =
-  "Sarvam numbers place outbound calls through createSarvamInstantOutboundCall, not initiateOutboundCall.";
 
 export const OUTBOUND_TEST_ALLOWLIST_MESSAGE =
   "Sarvam outbound calling is limited to approved test numbers right now.";
@@ -356,10 +357,13 @@ export async function sendSarvamInstantOutboundCall(
 
   const { data: phoneNumber } = await supabaseAdmin
     .from("phone_numbers")
-    .select("id, e164, organization_id, provider, connection_id, agent_config_id")
+    .select("id, e164, organization_id, provider, connection_id, agent_config_id, outbound_enabled")
     .eq("id", params.phoneNumberId)
     .maybeSingle();
   if (!phoneNumber) throw new Error("Phone number not found.");
+  // Every path, including the admin demo test, respects the number's own outbound switch.
+  if (phoneNumber.outbound_enabled !== true)
+    throw new Error("Outbound calling is disabled on this number.");
   if (phoneNumber.provider !== "sarvam")
     throw new Error("This flow only applies to Sarvam-provisioned numbers.");
   if (!phoneNumber.organization_id)

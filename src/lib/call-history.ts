@@ -43,6 +43,12 @@ export function callStatusTone(status: string): CallStatusTone {
   return "idle";
 }
 
+/** The agent's outcome value as words: "callback_requested" -> "Callback requested". */
+export function callOutcomeLabel(outcome: string | null | undefined): string {
+  const words = outcome?.trim().replace(/[_-]+/g, " ");
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : "—";
+}
+
 /** True while a call may still change, so the page keeps refreshing. */
 export function isCallOpen(status: string): boolean {
   return ["initiated", "ringing", "answered", "in_progress"].includes(status);

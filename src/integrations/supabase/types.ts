@@ -130,6 +130,7 @@ export type Database = {
           extra_languages: string[];
           greetings: Json;
           id: string;
+          sarvam_outbound_max_call_seconds: number | null;
           multilingual: boolean;
           objectives: string[];
           organization_id: string;
@@ -159,6 +160,7 @@ export type Database = {
           extra_languages?: string[];
           greetings?: Json;
           id?: string;
+          sarvam_outbound_max_call_seconds?: number | null;
           multilingual?: boolean;
           objectives?: string[];
           organization_id: string;
@@ -188,6 +190,7 @@ export type Database = {
           extra_languages?: string[];
           greetings?: Json;
           id?: string;
+          sarvam_outbound_max_call_seconds?: number | null;
           multilingual?: boolean;
           objectives?: string[];
           organization_id?: string;
@@ -532,6 +535,8 @@ export type Database = {
           failure_reason: string | null;
           gross_profit: number | null;
           id: string;
+          billing_cap_minutes: number | null;
+          billing_rate_per_minute: number | null;
           idempotency_key: string | null;
           language: string | null;
           lead_score: string | null;
@@ -580,6 +585,8 @@ export type Database = {
           ended_at?: string | null;
           failure_reason?: string | null;
           id?: string;
+          billing_cap_minutes?: number | null;
+          billing_rate_per_minute?: number | null;
           idempotency_key?: string | null;
           language?: string | null;
           lead_score?: string | null;
@@ -628,6 +635,8 @@ export type Database = {
           ended_at?: string | null;
           failure_reason?: string | null;
           id?: string;
+          billing_cap_minutes?: number | null;
+          billing_rate_per_minute?: number | null;
           idempotency_key?: string | null;
           language?: string | null;
           lead_score?: string | null;

@@ -2,9 +2,10 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 
 /**
- * Pre-dial eligibility for every single outbound call, enforced inside
- * sendSarvamInstantOutboundCall (the one function that dials a single call),
- * so no endpoint or UI can skip it. Each rule fails closed and returns the
+ * Pre-dial eligibility for every outbound call, enforced inside
+ * sendSarvamInstantOutboundCall (the one function that dials a single Sarvam
+ * call) and the LiveKit path (voice-agent/outbound.server.ts), so no endpoint
+ * or UI can skip it. Each rule fails closed and returns the
  * reason shown to whoever asked. These are ClickAI's own safety controls;
  * see docs/outbound-calling.md for what they do and do not cover legally.
  *
@@ -30,7 +31,7 @@ export const DESTINATION_COUNTRY_MESSAGE = "Calls can only be placed to Indian (
 export const CALLING_HOURS_MESSAGE =
   "Calls can only be placed between 9:00 AM and 9:00 PM India time.";
 export const NO_RELATIONSHIP_MESSAGE =
-  "This number has no history with your business (no contact, call, lead or booking). Your assistant only calls people who already know you. Add them as a contact, with their permission, first.";
+  "Your assistant only calls people who already know your business: a saved contact, someone who called you, a lead or a booking. This number has none of these. If this person is your customer and expects your call, add them as a contact first.";
 
 export const CALLING_HOURS = { startHour: 9, endHour: 21, timeZone: "Asia/Kolkata" } as const;
 
@@ -86,10 +87,22 @@ export function withinCallingHours(now: Date): boolean {
 }
 
 /**
- * True when this workspace already has a relationship with the number: a
- * contact (opted-out contacts are refused earlier), an inbound call from it,
- * a lead or a booking with it. Same organization only. A read error throws,
- * so the call is refused rather than placed unchecked.
+ * PRODUCT POLICY, not a temporary flag: ClickAI's assistant calls only people
+ * who already have a relationship with the business. There is deliberately no
+ * setting that turns this off; ClickAI does not offer cold calling. Each source
+ * is something the person or the business did first:
+ *
+ *   contacts   the business saved the person in its own customer list (manual
+ *              entry or import), stating they are its customer
+ *   call_logs  the person called the business's number (inbound only; ClickAI's
+ *              own outbound calls never create a relationship)
+ *   leads      the person asked for follow-up or left details while enquiring
+ *   bookings   the person has or had an appointment with the business
+ *
+ * Opted-out contacts are refused before this (do-not-call). Same organization
+ * only. A read error throws, so the call is refused rather than placed
+ * unchecked. This is a business-relationship rule, not proof of legal consent:
+ * see docs/outbound-calling.md §3 for the open legal questions.
  */
 export async function hasPriorRelationship(
   admin: Admin,

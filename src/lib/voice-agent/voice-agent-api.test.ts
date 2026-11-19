@@ -970,6 +970,13 @@ function outboundDeps(over: Partial<OutboundDeps> = {}, sessOver: Partial<Sessio
   const clock = { ms: T0 };
   const s = sessionDeps({ now: clockAt(clock), ...sessOver });
   s.db.tables["phone_numbers"] = [structuredClone(PN_OUT)];
+  // The people these tests call already know the business (prior-relationship rule).
+  s.db.tables["contacts"] = [
+    { id: "ct_1", organization_id: ORG_A, phone: OUT_TO, opted_out: false },
+    { id: "ct_2", organization_id: ORG_A, phone: "+919876500000", opted_out: false },
+  ];
+  s.db.tables["leads"] = [];
+  s.db.tables["bookings"] = [];
   const roles: Record<string, string> = {
     [`${USER_OWNER}:${ORG_A}`]: "owner",
     [`u-admin:${ORG_A}`]: "admin",
@@ -996,6 +1003,36 @@ function outboundDeps(over: Partial<OutboundDeps> = {}, sessOver: Partial<Sessio
 }
 const OUT = { userId: USER_OWNER, phoneNumberId: PN_A.id, toE164: OUT_TO, idempotencyKey: KEY };
 const code = (r: { ok: boolean } & Record<string, unknown>) => (r.ok ? "ok" : r["code"]);
+
+describe("AI (LiveKit) outbound applies the central pre-dial rules", () => {
+  test("do-not-call, no prior relationship, calling hours and the kill switch each refuse before any row", async () => {
+    const optedOut = outboundDeps();
+    optedOut.db.tables["contacts"]![0]!["opted_out"] = true;
+    assert.equal(code(await startOutboundAgentCall(optedOut.deps, OUT)), "opted_out");
+    assert.equal(optedOut.calls().length, 0);
+
+    const stranger = outboundDeps();
+    stranger.db.tables["contacts"] = [];
+    assert.equal(code(await startOutboundAgentCall(stranger.deps, OUT)), "no_relationship");
+    assert.equal(stranger.calls().length, 0);
+
+    const night = outboundDeps();
+    night.clock.ms = Date.parse("2026-11-02T17:00:00Z"); // 22:30 India time
+    assert.equal(code(await startOutboundAgentCall(night.deps, OUT)), "not_eligible");
+    assert.equal(night.calls().length, 0);
+
+    const prior = process.env["OUTBOUND_CALLING_DISABLED"];
+    process.env["OUTBOUND_CALLING_DISABLED"] = "true";
+    try {
+      const paused = outboundDeps();
+      assert.equal(code(await startOutboundAgentCall(paused.deps, OUT)), "disabled");
+      assert.equal(paused.dispatched.length, 0);
+    } finally {
+      if (prior === undefined) delete process.env["OUTBOUND_CALLING_DISABLED"];
+      else process.env["OUTBOUND_CALLING_DISABLED"] = prior;
+    }
+  });
+});
 
 /** Creates a dispatched outbound row and returns its id. */
 async function placeOutbound(o: ReturnType<typeof outboundDeps>, key = KEY) {

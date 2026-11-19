@@ -66,6 +66,11 @@ let unregisterSignalCleanup: (() => void) | null = null;
 const OWNER = randomUUID();
 // The platform's outbound_minute rule seeded by 20260902060038.
 const RATE = 400;
+/** Every test agent's recorded maximum call length: 5 minutes. */
+const MAX_SECONDS = 300;
+const CAP = 5;
+/** The most one call can cost, and so what each open call reserves. */
+const PER_CALL = RATE * CAP;
 
 function run(sql: string): RunResult {
   return execSql!(`\\pset format unaligned\n\\pset tuples_only on\nSET ROLE service_role;\n${sql}`);
@@ -144,14 +149,19 @@ const destination = () => `+9198765${String(++destinationSeq).padStart(5, "0")}`
 interface Org {
   id: string;
   number: string;
+  agent: string;
 }
 /** A fresh customer with one active Sarvam number and `balance` paise in the wallet. */
-function newOrg(balance: number): Org {
-  const org = { id: randomUUID(), number: randomUUID() };
+function newOrg(balance: number, maxSeconds: number | null = MAX_SECONDS): Org {
+  const org = { id: randomUUID(), number: randomUUID(), agent: randomUUID() };
   rows(`RESET ROLE;
     INSERT INTO public.organizations (id, name, owner_id) VALUES ('${org.id}', 'Clinic', '${OWNER}');
-    INSERT INTO public.phone_numbers (id, organization_id, e164, provider, status, outbound_enabled)
-      VALUES ('${org.number}', '${org.id}', '+9179${String(++destinationSeq).padStart(8, "0")}', 'sarvam', 'active', true);
+    INSERT INTO public.businesses (id, organization_id, name) VALUES ('${org.id}', '${org.id}', 'Clinic');
+    INSERT INTO public.agent_configs (id, organization_id, business_id, sarvam_app_id, sarvam_app_version,
+        sarvam_outbound_ready_app_id, sarvam_outbound_ready_version, sarvam_outbound_max_call_seconds)
+      VALUES ('${org.agent}', '${org.id}', '${org.id}', 'App-1', 6, 'App-1', 6, ${maxSeconds ?? "NULL"});
+    INSERT INTO public.phone_numbers (id, organization_id, e164, provider, status, outbound_enabled, agent_config_id)
+      VALUES ('${org.number}', '${org.id}', '+9179${String(++destinationSeq).padStart(8, "0")}', 'sarvam', 'active', true, '${org.agent}');
     ${balance > 0 ? `INSERT INTO public.wallet_transactions (organization_id, amount, kind, description) VALUES ('${org.id}', ${balance}, 'topup', 'seed');` : ""}`);
   return org;
 }
@@ -329,12 +339,25 @@ describe("admit_single_outbound_call: one request at a time", () => {
     );
   });
 
-  test("the wallet must hold a minute for this call and one per call not yet final", (t) => {
+  test("the wallet must cover this call's maximum length plus every open call's own reservation", (t) => {
     if (!ready(t)) return;
-    const org = newOrg(2 * RATE);
+    // An open call from before this migration (no locked terms) reserves one minute.
+    const org = newOrg(RATE + 2 * PER_CALL);
     priorCall(org, "initiated");
-    assert.equal(admit(org, destination(), key())["result"], "admitted");
-    assert.equal(admit(org, destination(), key())["reason"], "insufficient_balance");
+    assert.equal(admit(org, destination(), key())["result"], "admitted"); // needs RATE + PER_CALL
+    const third = admit(org, destination(), key()); // needs RATE + 2 * PER_CALL
+    assert.equal(third["result"], "admitted");
+    const fourth = admit(org, destination(), key(), { inFlight: 10 });
+    assert.equal(fourth["reason"], "insufficient_balance");
+    assert.equal(fourth["required"], RATE + 3 * PER_CALL);
+    // An open call older than 24 hours (outside the in-flight limit's window) still reserves.
+    const old = newOrg(PER_CALL);
+    priorCall(old, "outcome_unknown", {
+      started_at: "now() - interval '3 days'",
+      billing_cap_minutes: "1",
+      billing_rate_per_minute: "1",
+    });
+    assert.equal(admit(old, destination(), key())["reason"], "insufficient_balance");
     // A customer whose outbound price is overridden to free needs no balance.
     const free = newOrg(0);
     rows(
@@ -342,13 +365,68 @@ describe("admit_single_outbound_call: one request at a time", () => {
     );
     assert.equal(admit(free, destination(), key())["result"], "admitted");
     // An override raising the price is what is checked, not the platform rule.
-    const pricey = newOrg(RATE);
+    const pricey = newOrg(PER_CALL);
     rows(
       `RESET ROLE; INSERT INTO public.organization_pricing_overrides (organization_id, key, customer_amount) VALUES ('${pricey.id}', 'outbound_minute', ${RATE + 1});`,
     );
     assert.equal(admit(pricey, destination(), key())["reason"], "insufficient_balance");
     const broke = newOrg(0);
     assert.equal(admit(broke, destination(), key())["reason"], "insufficient_balance");
+  });
+
+  test("price and maximum length are locked on the call row at admission", (t) => {
+    if (!ready(t)) return;
+    const org = newOrg(10 * PER_CALL, 61); // 61 seconds rounds up to 2 minutes
+    const r = admit(org, destination(), key());
+    assert.equal(r["result"], "admitted");
+    assert.equal(r["cap_minutes"], 2);
+    assert.equal(r["rate_per_minute"], RATE);
+    assert.deepEqual(
+      rows(
+        `SELECT billing_cap_minutes || '|' || billing_rate_per_minute FROM public.call_logs WHERE id = '${r["call_id"]}';`,
+      ),
+      [`2|${RATE}`],
+    );
+  });
+
+  test("no maximum call length recorded on the agent: refused, nothing written", (t) => {
+    if (!ready(t)) return;
+    const org = newOrg(10 * PER_CALL, null);
+    assert.equal(admit(org, destination(), key())["reason"], "max_call_length_not_set");
+    // Another customer's agent on this number never counts.
+    const other = newOrg(10 * PER_CALL);
+    rows(
+      `RESET ROLE; UPDATE public.phone_numbers SET agent_config_id = '${other.agent}' WHERE id = '${org.number}';`,
+    );
+    assert.equal(admit(org, destination(), key())["reason"], "max_call_length_not_set");
+    assert.equal(callCount(org), 0);
+  });
+
+  test("the limits are checked in SQL: lengths outside 1-60 minutes and broken locks are refused", (t) => {
+    if (!ready(t)) return;
+    const org = newOrg(10 * PER_CALL);
+    for (const v of [59, 3601, 0])
+      assert.notEqual(
+        run(
+          `RESET ROLE; UPDATE public.agent_configs SET sarvam_outbound_max_call_seconds = ${v} WHERE id = '${org.agent}';`,
+        ).status,
+        0,
+        String(v),
+      );
+    for (const [cap, rate] of [
+      ["0", "1"],
+      ["61", "1"],
+      ["5", "-1"],
+      ["5", "NULL"],
+      ["NULL", "5"],
+    ])
+      assert.notEqual(
+        run(
+          `INSERT INTO public.call_logs (organization_id, provider, direction, status, billing_cap_minutes, billing_rate_per_minute) VALUES ('${org.id}', 'sarvam', 'outbound', 'completed', ${cap}, ${rate});`,
+        ).status,
+        0,
+        `${cap}/${rate}`,
+      );
   });
 
   test("an unresolved call to the same number (any source) is reported, not raised", (t) => {
@@ -406,9 +484,9 @@ describe("admit_single_outbound_call: genuinely concurrent requests", () => {
     assert.equal(callCount(org), 1);
   });
 
-  test("simultaneous calls cannot overspend: a wallet for 2 minutes admits exactly 2", async (t) => {
+  test("simultaneous calls cannot overspend: a wallet for 2 worst-case calls admits exactly 2", async (t) => {
     if (!ready(t)) return;
-    const org = newOrg(2 * RATE);
+    const org = newOrg(2 * PER_CALL + PER_CALL - 1);
     const results = await Promise.all(
       Array.from({ length: 6 }, () =>
         runAsync(admitSql(org, destination(), key(), { inFlight: 10 })),
@@ -455,7 +533,14 @@ describe("rollback", () => {
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(
       rows(`SELECT count(*) FROM information_schema.columns
-             WHERE table_schema = 'public' AND table_name = 'call_logs' AND column_name = 'idempotency_key';`),
+             WHERE table_schema = 'public'
+               AND ((table_name = 'call_logs' AND column_name IN ('idempotency_key', 'billing_cap_minutes', 'billing_rate_per_minute'))
+                 OR (table_name = 'agent_configs' AND column_name = 'sarvam_outbound_max_call_seconds'));`),
+      ["0"],
+    );
+    assert.deepEqual(
+      rows(`SELECT count(*) FROM pg_indexes WHERE indexname IN ('idx_call_logs_org_idempotency_key',
+             'idx_call_logs_single_outbound_recent', 'idx_call_logs_single_outbound_open', 'idx_call_logs_inbound_caller');`),
       ["0"],
     );
     assert.deepEqual(
@@ -469,6 +554,12 @@ describe("rollback", () => {
       `BEGIN;\n${readFileSync(join(migrationsDir, MIGRATION), "utf8")}\nCOMMIT;`,
     );
     assert.equal(reapplied.status, 0, reapplied.stderr);
+    // The agent's limit was dropped with the column: nothing is admitted until an admin
+    // records it again (re-confirming the version for outbound).
+    assert.equal(admit(org, destination(), key())["reason"], "max_call_length_not_set");
+    rows(
+      `RESET ROLE; UPDATE public.agent_configs SET sarvam_outbound_max_call_seconds = ${MAX_SECONDS} WHERE id = '${org.agent}';`,
+    );
     assert.equal(admit(org, destination(), key())["result"], "admitted");
   });
 });

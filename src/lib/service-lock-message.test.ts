@@ -181,7 +181,11 @@ describe("route wiring — voice/phone locks are actually surfaced", () => {
       // confirm the existing isLoading ternary still immediately follows
       // it, untouched.
       const serviceLockedIdx = src.indexOf("<ServiceLocked");
-      const isLoadingIdx = src.indexOf("{isLoading ?", serviceLockedIdx);
+      // The Calls page renders its history through <CallsHistory> (same loading/data/empty branch).
+      const isLoadingIdx =
+        file === "app.calls.tsx"
+          ? src.indexOf("<CallsHistory calls={calls} isLoading={isLoading}", serviceLockedIdx)
+          : src.indexOf("{isLoading ?", serviceLockedIdx);
       assert.ok(serviceLockedIdx > -1 && isLoadingIdx > -1, file);
       const between = src.slice(serviceLockedIdx, isLoadingIdx);
       assert.ok(

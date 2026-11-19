@@ -128,8 +128,20 @@ export async function outboundBusinessName(
 }
 
 export type SetOutboundReadyResult =
-  | { ok: true; ready: boolean; appId: string | null; appVersion: number | null }
+  | {
+      ok: true;
+      ready: boolean;
+      appId: string | null;
+      appVersion: number | null;
+      maxCallSeconds: number | null;
+    }
   | { ok: false; reason: string };
+
+/**
+ * The longest call ClickAI accepts for an outbound agent version: Sarvam's
+ * "Max call length" setting allows at most 60 minutes.
+ */
+export const OUTBOUND_MAX_CALL_SECONDS = { min: 60, max: 3600 } as const;
 
 /**
  * Records (or clears) the customer's CURRENT agent version as confirmed for
@@ -138,8 +150,32 @@ export type SetOutboundReadyResult =
  */
 export async function setOutboundReady(
   admin: Admin,
-  input: { organizationId: string; ready: boolean },
+  input: {
+    organizationId: string;
+    ready: boolean;
+    /**
+     * The agent version's maximum call length as set in Sarvam ("Max call
+     * length" / max_interaction_time_seconds), checked there by the admin.
+     * Required to confirm: it bounds every call's charge and the wallet
+     * reservation (admit_single_outbound_call, call finalization).
+     */
+    maxCallSeconds?: number | undefined;
+  },
 ): Promise<SetOutboundReadyResult> {
+  if (input.ready) {
+    const s = input.maxCallSeconds;
+    if (
+      typeof s !== "number" ||
+      !Number.isInteger(s) ||
+      s < OUTBOUND_MAX_CALL_SECONDS.min ||
+      s > OUTBOUND_MAX_CALL_SECONDS.max
+    )
+      return {
+        ok: false,
+        reason:
+          "Enter the agent version's maximum call length from Sarvam (1 to 60 minutes). Set it in Sarvam first if it is not set.",
+      };
+  }
   const { data: agents, error } = await admin
     .from("agent_configs")
     .select("id, organization_id, sarvam_app_id, sarvam_app_version")
@@ -158,8 +194,13 @@ export async function setOutboundReady(
         ? {
             sarvam_outbound_ready_app_id: agent.sarvam_app_id,
             sarvam_outbound_ready_version: agent.sarvam_app_version,
+            sarvam_outbound_max_call_seconds: input.maxCallSeconds!,
           }
-        : { sarvam_outbound_ready_app_id: null, sarvam_outbound_ready_version: null },
+        : {
+            sarvam_outbound_ready_app_id: null,
+            sarvam_outbound_ready_version: null,
+            sarvam_outbound_max_call_seconds: null,
+          },
     )
     .eq("id", agent.id)
     .eq("organization_id", input.organizationId);
@@ -172,8 +213,14 @@ export async function setOutboundReady(
   if (!updated || updated.length === 0)
     return { ok: false, reason: "The agent mapping changed meanwhile. Reload and try again." };
   return input.ready
-    ? { ok: true, ready: true, appId: agent.sarvam_app_id, appVersion: agent.sarvam_app_version }
-    : { ok: true, ready: false, appId: null, appVersion: null };
+    ? {
+        ok: true,
+        ready: true,
+        appId: agent.sarvam_app_id,
+        appVersion: agent.sarvam_app_version,
+        maxCallSeconds: input.maxCallSeconds!,
+      }
+    : { ok: true, ready: false, appId: null, appVersion: null, maxCallSeconds: null };
 }
 
 /**

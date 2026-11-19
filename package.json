@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "test": "node --test"
+    "test": "node --test",
+    "harness:calls": "vite --config dev-harness/calls/vite.config.ts"
   },
   "overrides": {
     "rolldown": "1.2.1"

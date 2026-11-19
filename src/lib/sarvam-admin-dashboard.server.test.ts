@@ -66,6 +66,15 @@ class MemoryDb {
         n["status"] === "active",
     );
     if (!owns) return { result: "refused", reason: "number_not_owned" };
+    const number = (this.tables["phone_numbers"] ?? []).find(
+      (n) => n["id"] === a["_phone_number_id"],
+    );
+    const agent = (this.tables["agent_configs"] ?? []).find(
+      (g) => g["id"] === number?.["agent_config_id"] && g["organization_id"] === org,
+    );
+    const maxSeconds = agent?.["sarvam_outbound_max_call_seconds"] as number | null | undefined;
+    if (!maxSeconds) return { result: "refused", reason: "max_call_length_not_set" };
+    const cap = Math.ceil(maxSeconds / 60);
     const since = (ms: number) => new Date(Date.now() - ms).toISOString();
     const recent = calls.filter(
       (c) =>
@@ -87,7 +96,22 @@ class MemoryDb {
     const toThem = recent.filter((c) => c["destination_number"] === to).length;
     if (toThem >= Number(a["_max_per_destination_day"]))
       return { result: "refused", reason: "destination_daily_limit" };
-    if (this.rate > 0 && this.walletBalance < this.rate * (inFlight + 1))
+    // Worst case: every open single call at its own locked terms, any age, plus this one.
+    const openReserved = calls
+      .filter(
+        (c) =>
+          c["organization_id"] === org &&
+          c["direction"] === "outbound" &&
+          (c["campaign_id"] ?? null) === null &&
+          open.includes(String(c["status"])),
+      )
+      .reduce(
+        (sum, c) =>
+          sum +
+          Number(c["billing_cap_minutes"] ?? 1) * Number(c["billing_rate_per_minute"] ?? this.rate),
+        0,
+      );
+    if ((this.rate > 0 || openReserved > 0) && this.walletBalance < openReserved + this.rate * cap)
       return { result: "refused", reason: "insufficient_balance" };
     const busy = calls.some(
       (c) =>
@@ -109,6 +133,8 @@ class MemoryDb {
       status: "initiated",
       started_at: new Date().toISOString(),
       idempotency_key: a["_idempotency_key"],
+      billing_cap_minutes: cap,
+      billing_rate_per_minute: this.rate,
     };
     calls.push(row);
     return { result: "admitted", call_id: row.id };
@@ -191,6 +217,7 @@ beforeEach(() => {
       sarvam_app_version: 1,
       sarvam_outbound_ready_app_id: "app_a",
       sarvam_outbound_ready_version: 1,
+      sarvam_outbound_max_call_seconds: 300,
     },
     {
       id: "agent_b",
@@ -200,6 +227,7 @@ beforeEach(() => {
       sarvam_app_version: 3,
       sarvam_outbound_ready_app_id: "app_b",
       sarvam_outbound_ready_version: 3,
+      sarvam_outbound_max_call_seconds: 600,
     },
   ];
   db.tables["phone_numbers"] = [];
@@ -714,15 +742,26 @@ describe("single-call limits per customer", () => {
     assert.equal(result?.outcome, "started");
   });
 
-  test("the wallet must cover a minute for this call and each call still in progress", async () => {
+  test("the wallet must cover this call's longest length plus every open call's reservation", async () => {
+    // An open call from before locked terms reserves one minute; this call, 5 minutes (300 s).
     db.tables["call_logs"]!.push(pastCall("initiated", 2), pastCall("completed", 5));
-    db.walletBalance = 2 * db.rate - 1;
+    db.walletBalance = db.rate + 5 * db.rate - 1;
     const { error, requests } = await place();
     assert.match((error as Error).message, /Insufficient wallet balance/);
     assert.equal(requests.length, 0);
-    db.walletBalance = 2 * db.rate;
+    db.walletBalance = db.rate + 5 * db.rate;
     const ok = await place();
     assert.equal(ok.error, undefined);
+    const row = db.tables["call_logs"]!.find((c) => c["id"] === ok.result?.callId)!;
+    assert.equal(row["billing_cap_minutes"], 5, "the cap is locked on the call");
+    assert.equal(row["billing_rate_per_minute"], db.rate, "and so is the price");
+  });
+
+  test("an agent with no maximum call length recorded admits nothing", async () => {
+    db.tables["agent_configs"]![0]!["sarvam_outbound_max_call_seconds"] = null;
+    const { error, requests } = await place();
+    assert.match((error as Error).message, /no maximum call length/);
+    assert.equal(requests.length, 0);
   });
 
   test("the same request id twice (double click, retry): one call, dialled once", async () => {
@@ -808,18 +847,32 @@ describe("loadOutboundCallingStatus: what the customer sees before calling", () 
 
   test("locked phone feature and low balance are workspace-wide blockers", async () => {
     number({});
+    const asked: number[] = [];
     const status = await loadOutboundCallingStatus(
       client(),
       ORG_A,
       deps({
         checkFeatureAccess: async () => ({ allowed: false, reason: "Payment is overdue." }),
-        walletCanAffordOutbound: async () => false,
+        walletCanAffordOutbound: async (_org, minutes = 1) => {
+          asked.push(minutes);
+          return false;
+        },
       }),
     );
     assert.deepEqual(status.blockers, [
       "Payment is overdue.",
-      "Your wallet balance is too low for an outbound call. Add funds to call.",
+      "Your wallet balance is too low: each call needs enough for its longest possible length (5 minutes). Add funds to call.",
     ]);
+    assert.deepEqual(asked, [5], "one call at the agent's 5-minute limit");
+    assert.equal(status.maxCallMinutes, 5);
+  });
+
+  test("an agent with no maximum call length is not ready, and nothing is reserved", async () => {
+    db.tables["agent_configs"]![0]!["sarvam_outbound_max_call_seconds"] = null;
+    number({});
+    const status = await loadOutboundCallingStatus(client(), ORG_A, deps());
+    assert.match(status.numbers[0]!.blockers.join(" "), /not been set up for outbound/);
+    assert.equal(status.maxCallMinutes, null);
   });
 
   test("only this customer's active Sarvam numbers are listed; another customer's agent never counts as ready", async () => {

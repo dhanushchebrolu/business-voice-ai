@@ -8,6 +8,7 @@ import { dirname, join } from "node:path";
 const here = dirname(fileURLToPath(import.meta.url));
 const dialog = readFileSync(join(here, "PlaceCallDialog.tsx"), "utf8");
 const calls = readFileSync(join(here, "..", "..", "routes", "app.calls.tsx"), "utf8");
+const history = readFileSync(join(here, "CallsHistory.tsx"), "utf8");
 
 describe("customer 'Call a number'", () => {
   test("dials only through the gated server function, never a direct table write", () => {
@@ -48,7 +49,10 @@ describe("customer 'Call a number'", () => {
     );
     assert.match(dialog, /idempotencyKey: attempt\.current\.key/);
     // Renewed only after success or when the server says the id is spent.
-    assert.match(dialog, /attempt\.current = null;\s*if \(result\.duplicate\)/);
+    assert.match(
+      dialog,
+      /attempt\.current = null;\s*setLastError\(null\);\s*if \(result\.duplicate\)/,
+    );
     assert.match(dialog, /if \(message === REQUEST_KEY_SPENT_MESSAGE\) attempt\.current = null;/);
   });
 
@@ -62,7 +66,18 @@ describe("customer 'Call a number'", () => {
       calls,
       /!phoneLocked \? \(\s*<PlaceCallButton organizationId=\{ws\.organization\.id\} \/>/,
     );
-    assert.match(calls, /callCounterpart\(call\)/);
-    assert.doesNotMatch(calls, /\{call\.caller_number \?\? "Unknown"\}/);
+    assert.match(calls, /<CallsHistory calls=\{calls\} isLoading=\{isLoading\} query=\{q\} \/>/);
+    assert.match(history, /callCounterpart\(call\)/);
+    assert.doesNotMatch(history, /\{call\.caller_number \?\? "Unknown"\}/);
+  });
+
+  test("while a call is being placed the fields are locked, and a failure is shown in the dialog", () => {
+    assert.equal(
+      (dialog.match(/disabled=\{placing\}/g) ?? []).length,
+      4,
+      "number, reason, caller id and Cancel",
+    );
+    assert.match(dialog, /role="alert"[\s\S]{0,200}Call not placed: \{lastError\}/);
+    assert.match(dialog, /onOpenChange=\{\(next\) => !placing && setOpen\(next\)\}/);
   });
 });

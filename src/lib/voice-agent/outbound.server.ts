@@ -23,6 +23,14 @@
  *   the claim; the sweep closes it only after the claim TTL.
  */
 import { classifyDispatchError } from "./livekit-api.ts";
+import {
+  hasPriorRelationship,
+  NO_RELATIONSHIP_MESSAGE,
+  OUTBOUND_DISABLED_MESSAGE,
+  outboundCallingDisabled,
+  staticEligibilityBlocker,
+} from "../outbound-eligibility.server.ts";
+import { isNumberSuppressed, OPT_OUT_NUMBER_MESSAGE } from "../contact-suppression.server.ts";
 import type { RateLimitDecision } from "./rate-limits.ts";
 import {
   OUTBOUND_CLAIM_TTL_SECONDS,
@@ -55,6 +63,9 @@ export type OutboundFailure =
   | "forbidden"
   | "unsupported_number"
   | "destination_not_allowed"
+  | "not_eligible"
+  | "opted_out"
+  | "no_relationship"
   | "rate_limited"
   | "limit_reached"
   | "insufficient_balance"
@@ -198,6 +209,7 @@ export async function startOutboundAgentCall(
 ): Promise<OutboundResult> {
   if (deps.env("VOICE_AGENT_OUTBOUND_ENABLED") !== "true")
     return fail("disabled", "AI outbound calling is not enabled on this deployment.");
+  if (outboundCallingDisabled()) return fail("disabled", OUTBOUND_DISABLED_MESSAGE);
   if (!deps.env("LIVEKIT_URL") || !deps.env("LIVEKIT_API_KEY") || !deps.env("LIVEKIT_API_SECRET"))
     return fail("not_configured", "AI outbound calling is not configured on this deployment.");
   if (
@@ -278,6 +290,15 @@ export async function startOutboundAgentCall(
 
   const dest = checkDestination(input.toE164, number.e164, deps.env);
   if (!dest.ok) return fail("destination_not_allowed", dest.message);
+
+  // The same pre-dial rules as every Sarvam single call (outbound-eligibility.server.ts):
+  // the global kill switch, India-only calling hours, do-not-call, and no cold calls.
+  const ineligible = staticEligibilityBlocker(input.toE164, deps.session.now());
+  if (ineligible) return fail("not_eligible", ineligible);
+  if (await isNumberSuppressed(deps.session.db, orgId, input.toE164))
+    return fail("opted_out", OPT_OUT_NUMBER_MESSAGE);
+  if (!(await hasPriorRelationship(deps.session.db, orgId, input.toE164)))
+    return fail("no_relationship", NO_RELATIONSHIP_MESSAGE);
 
   for (const [scope, key] of [
     ["outbound_org", orgId],

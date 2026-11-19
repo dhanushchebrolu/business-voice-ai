@@ -236,6 +236,12 @@ export interface OutboundCallingStatus {
   numbers: OutboundCallingNumber[];
   /** Customer price per started minute, in the smallest currency unit. */
   ratePerMinute: number;
+  /**
+   * The longest a call from this workspace can run (the agent's limit in
+   * Sarvam), in minutes, and so the most one call can cost: the amount the
+   * wallet must cover per call. Null when no number can dial.
+   */
+  maxCallMinutes: number | null;
   /** The customer's own wallet balance, same unit. */
   walletBalance: number;
   currency: string;
@@ -296,16 +302,23 @@ export async function loadOutboundCallingStatus(
     ? await supabaseAdmin
         .from("agent_configs")
         .select(
-          "id, organization_id, sarvam_app_id, sarvam_app_version, sarvam_outbound_ready_app_id, sarvam_outbound_ready_version",
+          "id, organization_id, sarvam_app_id, sarvam_app_version, sarvam_outbound_ready_app_id, sarvam_outbound_ready_version, sarvam_outbound_max_call_seconds",
         )
         .in("id", agentIds)
     : { data: [], error: null };
   if (agentError) throw agentError;
-  const readyAgents = new Set(
+  // Ready = confirmed for outbound in its current version, with a maximum call length.
+  const readyAgents = new Map(
     (agents ?? [])
-      .filter((a) => a.organization_id === orgId && isOutboundReady(a))
-      .map((a) => a.id),
+      .filter(
+        (a) =>
+          a.organization_id === orgId && isOutboundReady(a) && a.sarvam_outbound_max_call_seconds,
+      )
+      .map((a) => [a.id, a.sarvam_outbound_max_call_seconds!]),
   );
+
+  const longest = Math.max(0, ...readyAgents.values());
+  const maxCallMinutes = longest > 0 ? Math.ceil(longest / 60) : null;
 
   const blockers: string[] = [];
   if (outboundCallingDisabled()) blockers.push(OUTBOUND_DISABLED_MESSAGE);
@@ -314,8 +327,13 @@ export async function loadOutboundCallingStatus(
   if (!withinCallingHours(deps.now?.() ?? new Date())) blockers.push(CALLING_HOURS_MESSAGE);
   if (counts.inFlight >= SINGLE_CALL_LIMITS.inFlight) blockers.push(TOO_MANY_IN_FLIGHT_MESSAGE);
   else if (counts.lastHour >= SINGLE_CALL_LIMITS.perHour) blockers.push(HOURLY_LIMIT_MESSAGE);
-  else if (!(await deps.walletCanAffordOutbound(orgId, counts.inFlight + 1)))
-    blockers.push("Your wallet balance is too low for an outbound call. Add funds to call.");
+  else if (
+    maxCallMinutes !== null &&
+    !(await deps.walletCanAffordOutbound(orgId, (counts.inFlight + 1) * maxCallMinutes))
+  )
+    blockers.push(
+      `Your wallet balance is too low: each call needs enough for its longest possible length (${maxCallMinutes} minutes). Add funds to call.`,
+    );
 
   return {
     numbers: numbers.map((n) => ({
@@ -330,6 +348,7 @@ export async function loadOutboundCallingStatus(
       ],
     })),
     ratePerMinute: rate.customerAmountPerMinute,
+    maxCallMinutes,
     walletBalance: Number((walletRes.data as { balance?: number } | null)?.balance ?? 0),
     currency: rate.currency,
     limits: SINGLE_CALL_LIMITS,

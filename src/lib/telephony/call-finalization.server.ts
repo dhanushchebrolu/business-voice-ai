@@ -73,6 +73,9 @@ interface FinalizingCall {
   final_agent_variables: unknown;
   billing_applied_at: string | null;
   campaign_applied_at: string | null;
+  /** Locked at admission (admit_single_outbound_call); null on older calls and campaign calls. */
+  billing_cap_minutes?: number | null;
+  billing_rate_per_minute?: number | null;
 }
 
 // Supabase errors are plain objects with a `message`, not Error instances.
@@ -104,7 +107,7 @@ export async function finalizeTerminalCall(
   const { data, error: readError } = await supabaseAdmin
     .from("call_logs")
     .select(
-      "id, organization_id, status, duration_seconds, campaign_id, campaign_contact_id, contact_id, business_id, destination_number, final_agent_variables, billing_applied_at, campaign_applied_at",
+      "id, organization_id, status, duration_seconds, campaign_id, campaign_contact_id, contact_id, business_id, destination_number, final_agent_variables, billing_applied_at, campaign_applied_at, billing_cap_minutes, billing_rate_per_minute",
     )
     .eq("id", callId)
     .single();
@@ -163,19 +166,56 @@ export async function finalizeTerminalCallSafely(
   }
 }
 
+/**
+ * What a call is billed: started minutes (ceil), never more than the minutes
+ * reserved for it at admission, at the price locked at admission. Calls from
+ * before admission locked terms (and campaign calls) bill as before: every
+ * started minute at the current rate. So a single call's charge is at most
+ * billing_cap_minutes x billing_rate_per_minute, exactly what the wallet
+ * check reserved for it.
+ */
+export function billableTerms(
+  durationSeconds: number | null | undefined,
+  currentRatePerMinute: number,
+  locked: { billing_cap_minutes?: number | null; billing_rate_per_minute?: number | null },
+): { minutes: number; customerAmountPerMinute: number; capped: boolean } {
+  const seconds = durationSeconds ?? 0;
+  const started = seconds > 0 ? Math.ceil(seconds / 60) : 0;
+  const cap = locked.billing_cap_minutes ?? null;
+  const minutes = cap !== null ? Math.min(started, cap) : started;
+  return {
+    minutes,
+    customerAmountPerMinute: locked.billing_rate_per_minute ?? currentRatePerMinute,
+    capped: cap !== null && started > cap,
+  };
+}
+
 async function applyBilling(rpc: Rpc, call: FinalizingCall, token: string, deps: FinalizationDeps) {
   const getRate =
     deps.getRate ??
     (async (org, direction) =>
       (await import("../telephony-guard.server.ts")).getCallRate(org, direction));
   const rate = await getRate(call.organization_id, "outbound");
-  const seconds = call.duration_seconds ?? 0;
-  const minutes = seconds > 0 ? Math.ceil(seconds / 60) : 0;
+  const { minutes, customerAmountPerMinute, capped } = billableTerms(
+    call.duration_seconds,
+    rate.customerAmountPerMinute,
+    call,
+  );
+  if (capped)
+    // The provider ran past the agent's limit; ClickAI absorbs the rest, the customer never pays it.
+    console.warn("call_finalization:billing_capped", {
+      callId: call.id,
+      durationSeconds: call.duration_seconds,
+      capMinutes: call.billing_cap_minutes,
+    });
   const result = await rpc("apply_call_billing", {
     _call: call.id,
     _token: token,
-    _amount: minutes * rate.customerAmountPerMinute,
-    _provider_cost: minutes * rate.providerCostPerMinute,
+    _amount: minutes * customerAmountPerMinute,
+    // What the provider charges ClickAI: every started minute, even past the cap.
+    _provider_cost:
+      (call.duration_seconds > 0 ? Math.ceil(call.duration_seconds / 60) : 0) *
+      rate.providerCostPerMinute,
     _currency: rate.currency,
     _minutes: minutes,
     _description: `outbound call · ${minutes} min`,

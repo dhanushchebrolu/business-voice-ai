@@ -1,6 +1,12 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { callCounterpart, callStatusLabel, callStatusTone, isCallOpen } from "./call-history.ts";
+import {
+  callCounterpart,
+  callOutcomeLabel,
+  callStatusLabel,
+  callStatusTone,
+  isCallOpen,
+} from "./call-history.ts";
 
 describe("customer call history", () => {
   test("shows the other party: the caller inbound, the dialled person outbound", () => {
@@ -52,5 +58,15 @@ describe("customer call history", () => {
       assert.ok(isCallOpen(s), s);
     for (const s of ["completed", "failed", "busy", "no_answer", "cancelled", "outcome_unknown"])
       assert.ok(!isCallOpen(s), s);
+  });
+});
+
+describe("call outcomes", () => {
+  test("agent outcome values read as words", () => {
+    assert.equal(callOutcomeLabel("callback_requested"), "Callback requested");
+    assert.equal(callOutcomeLabel("booked"), "Booked");
+    assert.equal(callOutcomeLabel("wrong-number"), "Wrong number");
+    assert.equal(callOutcomeLabel(null), "—");
+    assert.equal(callOutcomeLabel("  "), "—");
   });
 });

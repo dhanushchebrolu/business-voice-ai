@@ -1,7 +1,11 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { finalizeTerminalCall, finalizeTerminalCallSafely } from "./call-finalization.server.ts";
+import {
+  billableTerms,
+  finalizeTerminalCall,
+  finalizeTerminalCallSafely,
+} from "./call-finalization.server.ts";
 import { callLeadId } from "../sarvam-agent-api.server.ts";
 
 /**
@@ -559,5 +563,79 @@ describe("finalizeTerminalCall: do-not-call from a single outbound call", () => 
     await finalizeTerminalCall(f.client, "call_1", { getRate });
     assert.equal(contactInserts(f).length, 0);
     assert.equal(optOutUpdates(f).length, 0);
+  });
+});
+
+describe("billing a single call never exceeds what admission reserved", () => {
+  const locked = { billing_cap_minutes: 5, billing_rate_per_minute: 400 };
+
+  test("started minutes, rounded up, at the locked price", () => {
+    for (const [seconds, minutes] of [
+      [0, 0],
+      [null, 0],
+      [1, 1],
+      [60, 1],
+      [61, 2],
+      [299, 5],
+      [300, 5],
+    ] as const)
+      assert.deepEqual(
+        billableTerms(seconds, 999, locked),
+        {
+          minutes,
+          customerAmountPerMinute: 400,
+          capped: false,
+        },
+        String(seconds),
+      );
+  });
+
+  test("a call that ran past the agent's limit is billed only up to the cap", () => {
+    for (const seconds of [301, 600, 7200])
+      assert.deepEqual(billableTerms(seconds, 999, locked), {
+        minutes: 5,
+        customerAmountPerMinute: 400,
+        capped: true,
+      });
+  });
+
+  test("the charge is at most cap x locked rate for every duration (the admission reserve)", () => {
+    for (let seconds = 0; seconds <= 4000; seconds += 7) {
+      const t = billableTerms(seconds, 999, locked);
+      assert.ok(t.minutes * t.customerAmountPerMinute <= 5 * 400, String(seconds));
+    }
+  });
+
+  test("calls without locked terms (older calls, campaigns) bill as before", () => {
+    assert.deepEqual(billableTerms(7200, 500, {}), {
+      minutes: 120,
+      customerAmountPerMinute: 500,
+      capped: false,
+    });
+    assert.deepEqual(
+      billableTerms(61, 500, { billing_cap_minutes: null, billing_rate_per_minute: null }),
+      { minutes: 2, customerAmountPerMinute: 500, capped: false },
+    );
+  });
+
+  test("finalization debits the capped amount at the locked price; provider cost stays uncapped", async () => {
+    const f = fakeClient({
+      call: {
+        ...CALL,
+        campaign_id: null,
+        campaign_contact_id: null,
+        contact_id: null,
+        duration_seconds: 601, // 11 started minutes, cap 5
+        final_agent_variables: {},
+        ...locked,
+      },
+    });
+    assert.deepEqual(await finalizeTerminalCall(f.client, "call_1", { getRate }), {
+      state: "done",
+    });
+    const billing = f.rpcs.find((r) => r.fn === "apply_call_billing")!.args;
+    assert.equal(billing["_minutes"], 5);
+    assert.equal(billing["_amount"], 2000, "5 x the locked 400, not the current 500");
+    assert.equal(billing["_provider_cost"], 11 * 200, "what the provider charges ClickAI");
   });
 });

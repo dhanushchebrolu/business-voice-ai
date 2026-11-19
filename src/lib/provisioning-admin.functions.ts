@@ -500,12 +500,16 @@ export const clearAdmissionBlock = createServerFn({ method: "POST" })
  */
 export const setSarvamOutboundReady = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((input: { orgId: string; ready: boolean; reason: string }) => {
-    if (!input?.orgId) throw new Error("orgId is required");
-    if (typeof input.ready !== "boolean") throw new Error("ready must be true or false");
-    if (!input.reason?.trim()) throw new Error("A reason is required");
-    return input;
-  })
+  .inputValidator(
+    (input: { orgId: string; ready: boolean; reason: string; maxCallMinutes?: number }) => {
+      if (!input?.orgId) throw new Error("orgId is required");
+      if (typeof input.ready !== "boolean") throw new Error("ready must be true or false");
+      if (input.maxCallMinutes !== undefined && typeof input.maxCallMinutes !== "number")
+        throw new Error("maxCallMinutes must be a number");
+      if (!input.reason?.trim()) throw new Error("A reason is required");
+      return input;
+    },
+  )
   .handler(async ({ data, context }) => {
     const admin = await assertPlatformAdmin(context.supabase, context.userId, "agents.write");
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
@@ -513,6 +517,8 @@ export const setSarvamOutboundReady = createServerFn({ method: "POST" })
     const result = await setOutboundReady(supabaseAdmin, {
       organizationId: data.orgId,
       ready: data.ready,
+      maxCallSeconds:
+        typeof data.maxCallMinutes === "number" ? Math.round(data.maxCallMinutes * 60) : undefined,
     });
     if (!result.ok) throw new Error(result.reason);
     await writeAudit(admin, {
@@ -520,7 +526,12 @@ export const setSarvamOutboundReady = createServerFn({ method: "POST" })
       entityType: "agent_config",
       entityId: null,
       organizationId: data.orgId,
-      newValue: { ready: result.ready, app_id: result.appId, app_version: result.appVersion },
+      newValue: {
+        ready: result.ready,
+        app_id: result.appId,
+        app_version: result.appVersion,
+        max_call_seconds: result.maxCallSeconds,
+      },
       reason: data.reason,
     });
     return result;

@@ -78,6 +78,8 @@ function ProvisioningDetail() {
   const reverifyLive = useServerFn(reverifyLiveDeployment);
   const setOutboundReady = useServerFn(setSarvamOutboundReady);
   const [outboundDialog, setOutboundDialog] = useState<"mark" | "clear" | null>(null);
+  // The agent version's "Max call length" in Sarvam, in minutes (checked there by the admin).
+  const [maxCallMinutes, setMaxCallMinutes] = useState("");
   const updateWebhookToken = useServerFn(updateSarvamWebhookToken);
   const [webhookOpen, setWebhookOpen] = useState(false);
   const [confirmPause, setConfirmPause] = useState(false);
@@ -664,8 +666,41 @@ function ProvisioningDetail() {
             ? "ClickAI stops placing outbound calls (single calls and campaigns) for this customer until a version is confirmed again. Inbound calls are not affected."
             : "Records the customer's current Sarvam agent version as tested for outbound calls. Nothing changes in Sarvam. Mapping the agent to another version later blocks outbound again until that version is confirmed."
         }
+        extra={
+          outboundDialog === "mark" ? (
+            <label className="block space-y-1 text-sm">
+              <span>Max call length set on this version in Sarvam (minutes, 1–60)</span>
+              <Input
+                type="number"
+                inputMode="numeric"
+                min={1}
+                max={60}
+                value={maxCallMinutes}
+                onChange={(e) => setMaxCallMinutes(e.target.value)}
+              />
+              <span className="block text-xs text-muted-foreground">
+                Check it in Sarvam (agent → Settings → Max call length) before confirming. Every
+                call reserves and is billed for at most this many minutes; the agent ends the call
+                there.
+              </span>
+            </label>
+          ) : null
+        }
         onConfirm={async (reason) => {
-          await setOutboundReady({ data: { orgId, ready: outboundDialog === "mark", reason } });
+          const minutes = Number(maxCallMinutes);
+          if (
+            outboundDialog === "mark" &&
+            !(Number.isInteger(minutes) && minutes >= 1 && minutes <= 60)
+          )
+            throw new Error("Enter the max call length from Sarvam, 1 to 60 whole minutes");
+          await setOutboundReady({
+            data: {
+              orgId,
+              ready: outboundDialog === "mark",
+              reason,
+              ...(outboundDialog === "mark" ? { maxCallMinutes: minutes } : {}),
+            },
+          });
           toast.success(
             outboundDialog === "clear" ? "Outbound withdrawn." : "Version confirmed for outbound.",
           );

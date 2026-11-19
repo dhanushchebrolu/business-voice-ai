@@ -208,6 +208,7 @@ const PHONE_NUMBER_ROW = {
   provider: "sarvam",
   connection_id: "conn_1",
   agent_config_id: "agent_1",
+  outbound_enabled: true,
 };
 const CONNECTION_ROW = {
   id: "conn_1",
@@ -1103,7 +1104,7 @@ describe("pre-dial eligibility, idempotency and atomic admission", () => {
   test("no prior relationship with the business: refused before any reservation", async () => {
     const f = ready({ relationship: false });
     const { result, requestBody } = await place(f.client);
-    assert.match(message(result), /no history with your business/);
+    assert.match(message(result), /only calls people who already know your business/);
     assert.equal(requestBody, undefined);
     assert.equal(f.admissions.length, 0);
   });
@@ -1158,5 +1159,30 @@ describe("pre-dial eligibility, idempotency and atomic admission", () => {
     const { result } = await place(f.client, { toE164: "+14155550123" });
     assert.match(message(result), /Indian \(\+91\) numbers/);
     assert.equal(f.calls.length, 0);
+  });
+});
+
+describe("the number's own outbound switch", () => {
+  test("a number with outbound off never dials, on any path that reaches the dial function", async () => {
+    const { client, calls } = makeFakeSupabase({
+      phone_numbers: {
+        select: [{ data: { ...PHONE_NUMBER_ROW, outbound_enabled: false }, error: null }],
+      },
+    });
+    const { result, requestBody } = await withSarvamEnvAndFetch(
+      { status: 200, body: { attempt_id: "att_1" } },
+      () =>
+        sendSarvamInstantOutboundCall(client, {
+          now: DAYTIME,
+          phoneNumberId: "num_1",
+          toE164: "+912222222222",
+        }).then(
+          () => "dialled",
+          (e: Error) => e.message,
+        ),
+    );
+    assert.equal(result, "Outbound calling is disabled on this number.");
+    assert.equal(requestBody, undefined);
+    assert.equal(calls.filter((c) => c.table !== "phone_numbers").length, 0);
   });
 });
