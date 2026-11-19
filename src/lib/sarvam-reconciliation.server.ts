@@ -134,3 +134,40 @@ export async function reconcileSarvamCall(
   });
   return { state: "resolved", outcome: final.outcome, durationSeconds: final.durationSeconds };
 }
+
+/** How long a single call may sit in `initiated` without a Sarvam attempt id. */
+export const START_WITHOUT_ATTEMPT_MAX_AGE_MS = 30 * 60 * 1000;
+
+export const START_NOT_CONFIRMED_REASON =
+  "Sarvam never confirmed this call started (no attempt id and no result). Check Sarvam before resolving it.";
+
+/**
+ * A single outbound call still `initiated` with no attempt id after 30
+ * minutes: the start request never returned (a crash or timeout before
+ * Sarvam answered) and no result webhook came. Nothing can tie it to a Sarvam
+ * attempt, so reconcileSarvamCall cannot help, and leaving it `initiated`
+ * shows customers a call "in progress" forever. It becomes `outcome_unknown`:
+ * shown as unconfirmed, listed for operators, never billed or retried, and a
+ * late Sarvam webhook still resolves it (found by metadata.call_id). Only
+ * while it is still exactly that (a conditional update), and never campaign
+ * calls, whose contact state the dispatcher owns.
+ */
+export async function flagStartsWithoutAttempt(
+  supabaseAdmin: SupabaseClient<Database>,
+  now: Date = new Date(),
+): Promise<number> {
+  const { data, error } = await supabaseAdmin
+    .from("call_logs")
+    .update({ status: "outcome_unknown", failure_reason: START_NOT_CONFIRMED_REASON })
+    .eq("provider", "sarvam")
+    .eq("direction", "outbound")
+    .eq("status", "initiated")
+    .is("provider_call_id", null)
+    .is("campaign_id", null)
+    .lt("started_at", new Date(now.getTime() - START_WITHOUT_ATTEMPT_MAX_AGE_MS).toISOString())
+    .select("id");
+  if (error) throw error;
+  for (const row of data ?? [])
+    console.warn("sarvam_outbound:start_not_confirmed", { callId: row.id });
+  return data?.length ?? 0;
+}

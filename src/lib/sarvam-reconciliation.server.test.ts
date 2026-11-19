@@ -139,3 +139,45 @@ describe("reconcileSarvamCall", () => {
     assert.equal(searched.length, 0);
   });
 });
+
+describe("flagStartsWithoutAttempt: single calls Sarvam never confirmed", () => {
+  const NOW = new Date("2026-11-19T10:00:00Z");
+  const ago = (m: number) => new Date(NOW.getTime() - m * 60_000).toISOString();
+  const row = (over: Record<string, unknown>) => ({
+    id: String(over["id"]),
+    provider: "sarvam",
+    direction: "outbound",
+    status: "initiated",
+    provider_call_id: null,
+    campaign_id: null,
+    started_at: ago(45),
+    ...over,
+  });
+
+  test("only an old, attempt-less, non-campaign Sarvam start becomes outcome_unknown", async () => {
+    const { memorySupabase } = await import("./payments/memory-supabase.test-helper.ts");
+    const db = memorySupabase({
+      tables: {
+        call_logs: [
+          row({ id: "stuck" }),
+          row({ id: "recent", started_at: ago(10) }),
+          row({ id: "has_attempt", provider_call_id: "att_1" }),
+          row({ id: "campaign", campaign_id: "camp_1" }),
+          row({ id: "final", status: "completed" }),
+          row({ id: "inbound", direction: "inbound" }),
+          row({ id: "vobiz", provider: "vobiz" }),
+        ],
+      },
+    });
+    const { flagStartsWithoutAttempt, START_NOT_CONFIRMED_REASON } =
+      await import("./sarvam-reconciliation.server.ts");
+    assert.equal(await flagStartsWithoutAttempt(db.client, NOW), 1);
+    const byId = Object.fromEntries(db.tables["call_logs"]!.map((r) => [r["id"], r]));
+    assert.equal(byId["stuck"]!["status"], "outcome_unknown");
+    assert.equal(byId["stuck"]!["failure_reason"], START_NOT_CONFIRMED_REASON);
+    for (const id of ["recent", "has_attempt", "campaign", "inbound", "vobiz"])
+      assert.equal(byId[id]!["status"], "initiated", id);
+    assert.equal(byId["final"]!["status"], "completed");
+    assert.equal(await flagStartsWithoutAttempt(db.client, NOW), 0, "idempotent");
+  });
+});

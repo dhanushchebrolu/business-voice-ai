@@ -41,9 +41,13 @@ function fakeClient(opts: {
   replies?: Partial<Record<string, RpcReply>>;
   /** Error returned by every insert (e.g. a unique violation on a retried lead). */
   insertError?: { code?: string; message: string } | null;
+  /** The workspace's contact for the dialled number; null = none yet. */
+  existingContact?: Record<string, unknown> | null;
 }) {
   const rpcs: Rpc[] = [];
   const inserts: { table: string; row: Record<string, unknown> }[] = [];
+  const updates: { table: string; patch: Record<string, unknown> }[] = [];
+  let contact = opts.existingContact ?? null;
   const defaults: Record<string, RpcReply> = {
     claim_call_finalization: { data: "token_1" },
     apply_call_billing: { data: "applied" },
@@ -69,22 +73,36 @@ function fakeClient(opts: {
         eq: () => builder,
         single: () => builder,
         maybeSingle: () => builder,
+        in: () => builder,
+        update: (patch: Record<string, unknown>) => {
+          updates.push({ table, patch });
+          return builder;
+        },
         insert: (row: Record<string, unknown>) => {
           inserts.push({ table, row });
+          if (table === "contacts" && !opts.insertError) contact = { id: "ct_new", ...row };
           return {
             then: (resolve: (r: unknown) => void) => resolve({ error: opts.insertError ?? null }),
           };
         },
         then: (resolve: (r: unknown) => void) =>
-          resolve({
-            data: rows[table] ?? null,
-            error: rows[table] ? null : { message: "missing" },
-          }),
+          table === "contacts"
+            ? resolve({ data: contact, error: null })
+            : resolve({
+                data: rows[table] ?? null,
+                error: rows[table] ? null : { message: "missing" },
+              }),
       };
       return builder;
     },
   };
-  return { client: client as never, rpcs, inserts, names: () => rpcs.map((r) => r.fn) };
+  return {
+    client: client as never,
+    rpcs,
+    inserts,
+    updates,
+    names: () => rpcs.map((r) => r.fn),
+  };
 }
 
 const getRate = async () => RATE;
@@ -443,5 +461,103 @@ describe("finalizeTerminalCall: follow-up lead for a single outbound call", () =
     assert.equal(leads(f).length, 0);
     const campaign = f.rpcs.find((r) => r.fn === "apply_call_campaign_outcome")!.args;
     assert.equal(campaign["_create_lead"], true);
+  });
+});
+
+describe("finalizeTerminalCall: do-not-call from a single outbound call", () => {
+  const DIALLED = "+919876500077";
+  const single = (vars: Record<string, unknown>, over: Record<string, unknown> = {}) => ({
+    ...CALL,
+    campaign_id: null,
+    campaign_contact_id: null,
+    contact_id: null,
+    business_id: "biz_1",
+    destination_number: DIALLED,
+    final_agent_variables: vars,
+    ...over,
+  });
+  const contactInserts = (f: ReturnType<typeof fakeClient>) =>
+    f.inserts.filter((i) => i.table === "contacts");
+  const optOutUpdates = (f: ReturnType<typeof fakeClient>) =>
+    f.updates.filter((u) => u.table === "contacts" && u.patch["opted_out"] === true);
+
+  test("an opt-out with no contact yet adds the dialled number to do-not-call, then completes", async () => {
+    for (const vars of [{ opted_out: "yes" }, { do_not_call: "true" }]) {
+      const f = fakeClient({ call: single(vars) });
+      const result = await finalizeTerminalCall(f.client, "call_1", { getRate });
+      assert.deepEqual(result, { state: "done" }, JSON.stringify(vars));
+      const [insert] = contactInserts(f);
+      assert.equal(insert?.row["phone"], DIALLED);
+      assert.equal(insert?.row["organization_id"], CALL.organization_id);
+      assert.equal(insert?.row["opted_out"], true);
+      assert.equal(insert?.row["opted_out_reason"], "Requested during an outbound call");
+    }
+  });
+
+  test("an existing contact is suppressed in place, never duplicated", async () => {
+    const f = fakeClient({
+      call: single({ opted_out: "yes" }),
+      existingContact: { id: "ct_1" },
+    });
+    assert.deepEqual(await finalizeTerminalCall(f.client, "call_1", { getRate }), {
+      state: "done",
+    });
+    assert.equal(contactInserts(f).length, 0);
+    assert.equal(optOutUpdates(f).length, 1);
+    // Its not-yet-dialled campaign enrolments are stopped too.
+    assert.ok(f.updates.some((u) => u.table === "campaign_contacts"));
+  });
+
+  test("a contact created meanwhile (unique violation) is still suppressed", async () => {
+    const f = fakeClient({
+      call: single({ opted_out: "yes" }),
+      insertError: { code: "23505", message: "duplicate key value" },
+    });
+    // The racing writer's row is what the second read finds.
+    const realFrom = (f.client as { from: (t: string) => unknown }).from;
+    let reads = 0;
+    (f.client as { from: (t: string) => unknown }).from = (t: string) => {
+      if (t === "contacts" && f.inserts.some((i) => i.table === "contacts")) reads++;
+      const b = realFrom(t) as Record<string, unknown>;
+      if (t === "contacts" && reads > 0)
+        b["then"] = (resolve: (r: unknown) => void) =>
+          resolve({ data: { id: "ct_race" }, error: null });
+      return b;
+    };
+    assert.deepEqual(await finalizeTerminalCall(f.client, "call_1", { getRate }), {
+      state: "done",
+    });
+    assert.equal(optOutUpdates(f).length, 1);
+  });
+
+  test("any other contact error fails the step, so the opt-out is retried, not lost", async () => {
+    const f = fakeClient({
+      call: single({ opted_out: "yes" }),
+      insertError: { code: "42501", message: "permission denied" },
+    });
+    const result = await finalizeTerminalCall(f.client, "call_1", { getRate });
+    assert.equal(result.state, "failed");
+    assert.ok(!f.names().includes("apply_call_campaign_outcome"), "checkpoint not set");
+  });
+
+  test("no opt-out, a wrong number, or an unusable dialled number adds nothing", async () => {
+    for (const call of [
+      single({ outbound_result: "interested" }),
+      single({ wrong_number: "yes" }),
+      single({ opted_out: "no", do_not_call: "no" }),
+      single({ opted_out: "yes" }, { destination_number: "not-a-number" }),
+    ]) {
+      const f = fakeClient({ call });
+      await finalizeTerminalCall(f.client, "call_1", { getRate });
+      assert.equal(contactInserts(f).length, 0, JSON.stringify(call.final_agent_variables));
+      assert.equal(optOutUpdates(f).length, 0);
+    }
+  });
+
+  test("a campaign call is left to apply_call_campaign_outcome", async () => {
+    const f = fakeClient({ call: { ...CALL, final_agent_variables: { opted_out: "yes" } } });
+    await finalizeTerminalCall(f.client, "call_1", { getRate });
+    assert.equal(contactInserts(f).length, 0);
+    assert.equal(optOutUpdates(f).length, 0);
   });
 });

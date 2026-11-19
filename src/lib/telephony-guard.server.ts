@@ -265,14 +265,18 @@ export async function getCallRate(orgId: string, direction: CallDirection): Prom
   };
 }
 
-/** Pre-dial affordability check for outbound calls (spec §13, first minute must be covered). */
-export async function walletCanAffordOutbound(orgId: string): Promise<boolean> {
+/**
+ * Pre-dial affordability check for outbound calls (spec §13): the wallet must
+ * cover `minutes` minutes — the first minute of this call, plus one for each
+ * of the customer's calls still in progress, which are billed only when they end.
+ */
+export async function walletCanAffordOutbound(orgId: string, minutes = 1): Promise<boolean> {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   const rate = await getCallRate(orgId, "outbound");
   if (rate.customerAmountPerMinute <= 0) return true;
   const { data, error } = await supabaseAdmin.rpc("wallet_can_afford", {
     _org: orgId,
-    _amount: rate.customerAmountPerMinute,
+    _amount: rate.customerAmountPerMinute * Math.max(1, minutes),
   });
   if (error) return false;
   return Boolean(data);

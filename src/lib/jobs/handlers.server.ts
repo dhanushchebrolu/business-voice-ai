@@ -11,7 +11,8 @@ import type { ReconcileDeps } from "../sarvam-reconciliation.server.ts";
  *   campaign.dispatch       dial due contacts of running campaigns (once a
  *                           minute); runs only when CAMPAIGN_DISPATCH_ENABLED=true
  *   sweep.sarvam_reconcile  find unresolved Sarvam outbound calls, enqueue one
- *                           sarvam.reconcile_call each (at most hourly per call)
+ *                           sarvam.reconcile_call each (at most hourly per call);
+ *                           flag single calls Sarvam never confirmed as outcome_unknown
  *   sarvam.reconcile_call   read Sarvam's attempt, resolve only a final outcome
  *   sweep.call_finalization find calls whose billing/campaign finalization is
  *                           due, enqueue one call.finalize each
@@ -123,7 +124,10 @@ export function buildJobHandlers(deps: HandlerDeps): Record<string, JobHandler> 
         });
         if (r.created) enqueued++;
       }
-      return { candidates: data?.length ?? 0, enqueued };
+      // Starts Sarvam never confirmed have nothing to reconcile against; flag them instead.
+      const { flagStartsWithoutAttempt } = await import("../sarvam-reconciliation.server.ts");
+      const unconfirmed = await flagStartsWithoutAttempt(supabaseAdmin, t);
+      return { candidates: data?.length ?? 0, enqueued, unconfirmed };
     },
 
     "sarvam.reconcile_call": async (job) => {

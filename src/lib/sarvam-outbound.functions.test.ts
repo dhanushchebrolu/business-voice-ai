@@ -25,40 +25,36 @@ const src = readFileSync(
   "utf8",
 );
 
-describe("createSarvamInstantOutboundCall — authorization and entitlement gates run before the shared call", () => {
-  test("resolves the number's own organization (owner or admin) and calls checkTelephonyAccess before delegating", () => {
+describe("createSarvamInstantOutboundCall — who may dial, then the one shared gate", () => {
+  test("resolves the number's own organization (owner or admin) before the shared gate", () => {
     const membershipIdx = src.indexOf("await outboundNumberOrganizationForCaller(");
-    const gateIdx = src.indexOf("checkTelephonyAccess(orgId, data.phoneNumberId,");
-    const delegateIdx = src.indexOf("await sendSarvamInstantOutboundCall(");
-    assert.ok(membershipIdx > -1 && gateIdx > -1 && delegateIdx > -1);
-    assert.ok(membershipIdx < gateIdx, "must resolve org membership before the entitlement gate");
-    assert.ok(gateIdx < delegateIdx, "must pass the entitlement gate before delegating");
+    const gateIdx = src.indexOf("await placeSarvamCallForOrganization(supabaseAdmin, {");
+    assert.ok(membershipIdx > -1 && gateIdx > -1);
+    assert.ok(membershipIdx < gateIdx, "must resolve org membership before dialling");
   });
 
-  test("checks wallet affordability before ever delegating to the shared call function", () => {
-    const walletIdx = src.indexOf("walletCanAffordOutbound(orgId)");
-    const delegateIdx = src.indexOf("await sendSarvamInstantOutboundCall(");
-    assert.ok(walletIdx > -1 && delegateIdx > -1);
-    assert.ok(walletIdx < delegateIdx);
-  });
-
-  test("rejects a non-sarvam phone number before delegating", () => {
-    assert.match(src, /gate\.phoneNumber\.provider !== "sarvam"/);
-  });
-
-  test("imports and calls sendSarvamInstantOutboundCall — no second implementation of connection/agent validation, call-log creation, or dial logic", () => {
+  test("dials only through placeSarvamCallForOrganization, with the organization it resolved", () => {
     assert.match(
       src,
-      /import \{[^}]*\bsendSarvamInstantOutboundCall\b[^}]*\} from "@\/lib\/sarvam-outbound-call\.server"/,
+      /await placeSarvamCallForOrganization\(supabaseAdmin, \{\s*orgId,\s*phoneNumberId:\s*data\.phoneNumberId,\s*toE164:\s*data\.toE164,/,
     );
-    assert.match(
-      src,
-      /await sendSarvamInstantOutboundCall\(supabaseAdmin, \{\s*\n\s*phoneNumberId:\s*data\.phoneNumberId,\s*\n\s*toE164:\s*data\.toE164,/,
-    );
-    // The detailed connection/agent-mapping checks, call_logs insert, and
-    // error handling must NOT be reimplemented here.
+    // No second implementation of the gates, the call row or the dial.
+    assert.doesNotMatch(src, /checkTelephonyAccess\(/);
+    assert.doesNotMatch(src, /walletCanAffordOutbound\(/);
+    assert.doesNotMatch(src, /sendSarvamInstantOutboundCall\(/);
     assert.doesNotMatch(src, /adapter\.createInstantOutbound\(/);
     assert.doesNotMatch(src, /\.from\("call_logs"\)/);
     assert.doesNotMatch(src, /\.from\("telephony_connections"\)/);
+  });
+});
+
+describe("getOutboundCallingStatus — members only, dialling for owners and admins", () => {
+  test("refuses a non-member before reading anything, and reports canDial from the role", () => {
+    const fn = src.slice(src.indexOf("export const getOutboundCallingStatus"));
+    const roleIdx = fn.indexOf("await memberRole(supabase, userId, data.orgId)");
+    const refuseIdx = fn.indexOf('if (!role) throw new Error("Workspace not found.")');
+    const loadIdx = fn.indexOf("await loadOutboundCallingStatus(");
+    assert.ok(roleIdx > -1 && refuseIdx > roleIdx && loadIdx > refuseIdx);
+    assert.match(fn, /canDial: OUTBOUND_DIAL_ROLES\.includes\(role\)/);
   });
 });

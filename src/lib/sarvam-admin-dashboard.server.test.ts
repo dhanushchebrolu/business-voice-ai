@@ -7,9 +7,14 @@ import {
   NUMBER_HELD_MESSAGE,
 } from "./phone-number-assignment.server.ts";
 import {
+  HOURLY_LIMIT_MESSAGE,
   loadCallDetail,
+  loadOutboundCallingStatus,
   placeSarvamCallForOrganization,
+  SINGLE_CALL_LIMITS,
+  TOO_MANY_IN_FLIGHT_MESSAGE,
   type OutboundGates,
+  type OutboundStatusDeps,
 } from "./sarvam-admin-calls.server.ts";
 import {
   INVALID_DESTINATION_MESSAGE,
@@ -58,6 +63,7 @@ class MemoryDb {
       neq: (c: string, v: unknown) => (filters.push((r) => r[c] !== v), q),
       is: (c: string, v: unknown) => (filters.push((r) => (r[c] ?? null) === v), q),
       in: (c: string, vs: unknown[]) => (filters.push((r) => vs.includes(r[c])), q),
+      gt: (c: string, v: string) => (filters.push((r) => String(r[c] ?? "") > v), q),
       order: () => q,
       limit: (n: number) => ((limit = n), q),
       maybeSingle: () => ((mode = "maybe"), q),
@@ -575,5 +581,129 @@ describe("call detail for monitoring", () => {
 
   test("an unknown call id is an error", async () => {
     await assert.rejects(loadCallDetail(client(), "nope"), /Call not found/);
+  });
+});
+
+describe("single-call limits per customer", () => {
+  const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000).toISOString();
+  const pastCall = (status: string, startedMinutesAgo: number, org = ORG_A): Row => ({
+    id: randomUUID(),
+    organization_id: org,
+    provider: "sarvam",
+    direction: "outbound",
+    status,
+    destination_number: `+91987650${String(Math.floor(Math.random() * 1e4)).padStart(4, "0")}`,
+    started_at: minutesAgo(startedMinutesAgo),
+  });
+  const place = (gates: OutboundGates = allowAll) => {
+    const n = number({});
+    return withSarvam({ status: 200, body: { attempt_id: "att_l" } }, () =>
+      placeSarvamCallForOrganization(
+        client(),
+        { orgId: ORG_A, phoneNumberId: n["id"] as string, toE164: "+919876543210" },
+        gates,
+      ),
+    );
+  };
+
+  test("too many calls still in progress: refused before anything is written or dialled", async () => {
+    for (let i = 0; i < SINGLE_CALL_LIMITS.inFlight; i++)
+      db.tables["call_logs"]!.push(pastCall(i % 2 ? "outcome_unknown" : "initiated", 2));
+    const { error, requests } = await place();
+    assert.equal((error as Error).message, TOO_MANY_IN_FLIGHT_MESSAGE);
+    assert.equal(requests.length, 0);
+    assert.equal(db.tables["call_logs"]!.length, SINGLE_CALL_LIMITS.inFlight);
+  });
+
+  test("the hourly limit counts every call started in the last hour, final or not", async () => {
+    for (let i = 0; i < SINGLE_CALL_LIMITS.perHour; i++)
+      db.tables["call_logs"]!.push(pastCall("completed", 30));
+    const { error, requests } = await place();
+    assert.equal((error as Error).message, HOURLY_LIMIT_MESSAGE);
+    assert.equal(requests.length, 0);
+  });
+
+  test("older calls, campaign calls and other customers' calls never count", async () => {
+    for (let i = 0; i < SINGLE_CALL_LIMITS.perHour; i++) {
+      db.tables["call_logs"]!.push(pastCall("completed", 90));
+      db.tables["call_logs"]!.push(pastCall("initiated", 2, ORG_B));
+      db.tables["call_logs"]!.push({ ...pastCall("initiated", 2), campaign_id: "camp_1" });
+    }
+    const { error, result } = await place();
+    assert.equal(error, undefined);
+    assert.equal(result?.outcome, "started");
+  });
+
+  test("the wallet must cover a minute for this call and each call still in progress", async () => {
+    db.tables["call_logs"]!.push(pastCall("initiated", 2), pastCall("completed", 5));
+    const asked: number[] = [];
+    const { error } = await place({
+      ...allowAll,
+      walletCanAffordOutbound: async (_org, minutes = 1) => {
+        asked.push(minutes);
+        return false;
+      },
+    });
+    assert.match((error as Error).message, /Insufficient wallet balance/);
+    assert.deepEqual(asked, [2]);
+  });
+});
+
+describe("loadOutboundCallingStatus: what the customer sees before calling", () => {
+  const deps = (over: Partial<OutboundStatusDeps> = {}): OutboundStatusDeps => ({
+    checkFeatureAccess: async () => ({ allowed: true, reason: null }),
+    walletCanAffordOutbound: async () => true,
+    getCallRate: async () => ({ customerAmountPerMinute: 400, currency: "INR" }),
+    ...over,
+  });
+
+  test("a ready, outbound-enabled number has no blockers; price and limits are reported", async () => {
+    const n = number({});
+    const status = await loadOutboundCallingStatus(client(), ORG_A, deps());
+    assert.deepEqual(status.blockers, []);
+    assert.equal(status.numbers.length, 1);
+    assert.equal(status.numbers[0]!.id, n["id"]);
+    assert.deepEqual(status.numbers[0]!.blockers, []);
+    assert.equal(status.ratePerMinute, 400);
+    assert.equal(status.currency, "INR");
+    assert.deepEqual(status.limits, SINGLE_CALL_LIMITS);
+    assert.ok(!("providerCost" in status) && !JSON.stringify(status).includes("provider_cost"));
+  });
+
+  test("outbound off and an agent version not confirmed for outbound are each explained", async () => {
+    number({ outbound_enabled: false });
+    db.tables["agent_configs"]![0]!["sarvam_outbound_ready_version"] = null;
+    const status = await loadOutboundCallingStatus(client(), ORG_A, deps());
+    assert.equal(status.numbers[0]!.blockers.length, 2);
+    assert.match(status.numbers[0]!.blockers.join(" "), /not switched on/);
+    assert.match(status.numbers[0]!.blockers.join(" "), /not been set up for outbound/);
+  });
+
+  test("locked phone feature and low balance are workspace-wide blockers", async () => {
+    number({});
+    const status = await loadOutboundCallingStatus(
+      client(),
+      ORG_A,
+      deps({
+        checkFeatureAccess: async () => ({ allowed: false, reason: "Payment is overdue." }),
+        walletCanAffordOutbound: async () => false,
+      }),
+    );
+    assert.deepEqual(status.blockers, [
+      "Payment is overdue.",
+      "Your wallet balance is too low for an outbound call. Add funds to call.",
+    ]);
+  });
+
+  test("only this customer's active Sarvam numbers are listed; another customer's agent never counts as ready", async () => {
+    number({});
+    number({ e164: "+918000000002", status: "released" });
+    number({ e164: "+918000000003", provider: "vobiz" });
+    number({ e164: "+918000000004", organization_id: ORG_B, connection_id: "conn_b" });
+    const mixed = number({ e164: "+918000000005", agent_config_id: "agent_b" });
+    const status = await loadOutboundCallingStatus(client(), ORG_A, deps());
+    assert.equal(status.numbers.length, 2);
+    const listed = status.numbers.find((x) => x.id === mixed["id"]);
+    assert.match(listed!.blockers.join(" "), /not been set up for outbound/);
   });
 });

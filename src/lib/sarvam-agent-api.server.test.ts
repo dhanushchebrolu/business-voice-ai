@@ -1292,3 +1292,104 @@ describe("inbound admission gate at the HTTP boundary (Phase 5)", () => {
     assert.doesNotMatch(JSON.stringify(ev), new RegExp(tokens[ORG_SMILE]!));
   });
 });
+
+describe("outbound calls: tools use the number ClickAI dialled, never the agent's caller id", () => {
+  const OUT_ID = "8f14e45f-ceea-467e-a4a9-1c1c1c1c1c1c";
+  const DIALLED = "+919811122233";
+  const outboundRow = (over: Record<string, unknown> = {}) =>
+    (db.tables["call_logs"] ??= []).push({
+      id: OUT_ID,
+      organization_id: ORG_SMILE,
+      provider: "sarvam",
+      direction: "outbound",
+      status: "initiated",
+      destination_number: DIALLED,
+      ...over,
+    });
+  const booking = () => {
+    const inputs: Record<string, unknown>[] = [];
+    const d: AgentApiDeps = {
+      ...deps(),
+      executeTool: async (_c, name, input) => {
+        inputs.push({ name, ...input });
+        return {
+          content: JSON.stringify({
+            success: true,
+            bookingOutcome: "confirmed",
+            data: { id: "b" },
+          }),
+        };
+      },
+    };
+    return { inputs, d };
+  };
+  const book = (body: Record<string, unknown>, d: AgentApiDeps) =>
+    handleSarvamAgentRequest(
+      sarvamRequest("tools/book_appointment", tokens[ORG_SMILE]!, {
+        interaction_id: "20261119/out-1",
+        date: "2026-11-14",
+        time: "10:00",
+        customer_name: "Ravi",
+        ...body,
+      }),
+      "book_appointment",
+      d,
+    );
+
+  test("a booking on an outbound call is saved with the dialled number, whatever the agent sent", async () => {
+    outboundRow();
+    for (const sent of ["", "user-identifier-xyz", "+919000000001"]) {
+      const { inputs, d } = booking();
+      await book({ customer_phone: sent, clickai_call_id: OUT_ID }, d);
+      assert.equal(inputs[0]!["customerPhone"], DIALLED, `agent sent "${sent}"`);
+    }
+    const event = db.tables["sarvam_agent_events"]!.find((e) => e["kind"] === "book_appointment")!;
+    assert.equal((event["detail"] as { outbound_call?: boolean }).outbound_call, true);
+  });
+
+  test("another customer's call id, an inbound row or a malformed id changes nothing", async () => {
+    outboundRow({ organization_id: ORG_ABC });
+    (db.tables["call_logs"] ??= []).push({
+      id: "11111111-2222-4333-8444-555555555555",
+      organization_id: ORG_SMILE,
+      provider: "sarvam",
+      direction: "inbound",
+      destination_number: DIALLED,
+    });
+    for (const id of [OUT_ID, "11111111-2222-4333-8444-555555555555", "not-a-uuid", ""]) {
+      const { inputs, d } = booking();
+      await book({ customer_phone: "+919000000001", clickai_call_id: id }, d);
+      assert.equal(inputs[0]!["customerPhone"], "+919000000001", id);
+    }
+  });
+
+  test("a callback on an outbound call is saved on the dialled number", async () => {
+    outboundRow();
+    const res = await handleSarvamAgentRequest(
+      sarvamRequest("tools/request_callback", tokens[ORG_SMILE]!, {
+        interaction_id: "20261119/out-2",
+        caller_number: "",
+        clickai_call_id: OUT_ID,
+        customer_name: "Ravi",
+      }),
+      "request_callback",
+      deps(),
+    );
+    assert.deepEqual(await res.json(), { ok: true, recorded: true });
+    const lead = db.tables["leads"]!.at(-1)!;
+    assert.equal(lead["phone"], DIALLED);
+  });
+
+  test("a dialled number on the test-caller list is still never booked", async () => {
+    outboundRow();
+    db.tables["sarvam_agent_integrations"]!.find((r) => r["organization_id"] === ORG_SMILE)![
+      "test_caller_numbers"
+    ] = [DIALLED];
+    const { inputs, d } = booking();
+    await book({ customer_phone: "+919000000001", clickai_call_id: OUT_ID }, d);
+    assert.deepEqual(
+      inputs.map((i) => i["name"]),
+      ["check_calendar_availability"],
+    );
+  });
+});

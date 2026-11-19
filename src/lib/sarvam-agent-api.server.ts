@@ -524,6 +524,35 @@ async function readCallEvents(
   return data ?? [];
 }
 
+/**
+ * The number ClickAI itself dialled, when this tool call belongs to one of this
+ * customer's outbound calls. The agent sends `clickai_call_id` (the outbound
+ * agent variable ClickAI sets; empty on inbound calls). On an outbound call the
+ * agent's own caller id comes from Sarvam's user_identifier, which is not
+ * verified for instant outbound, so it is never trusted when this is known:
+ * bookings and callbacks get the dialled number instead. Same organization
+ * only; anything else (no id, not a UUID, another customer's call, an inbound
+ * call) is null and the tool behaves exactly as before.
+ */
+export async function dialledNumberForTool(
+  deps: AgentApiDeps,
+  auth: AuthenticatedIntegration,
+  body: Record<string, unknown>,
+): Promise<string | null> {
+  const callId = str(body, "clickai_call_id", 64);
+  if (!callId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(callId))
+    return null;
+  const { data, error } = await deps.supabaseAdmin
+    .from("call_logs")
+    .select("organization_id, provider, direction, destination_number")
+    .eq("id", callId)
+    .eq("organization_id", auth.organizationId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data || data.provider !== "sarvam" || data.direction !== "outbound") return null;
+  return normalizeCustomerPhone(data.destination_number ?? "", null);
+}
+
 /** "yes" / "true" (any case) from Sarvam's opted_out agent variable. */
 export function isOptedOutValue(value: unknown): boolean {
   return typeof value === "string"
@@ -936,7 +965,8 @@ export async function handleSarvamAgentRequest(
       const time = str(body, "time", 5);
       if (!time || !/^\d{2}:\d{2}$/.test(time))
         return json({ ok: false, error: "time must be HH:mm" }, 400);
-      const caller = str(body, "customer_phone", 200) ?? "";
+      const dialled = await dialledNumberForTool(deps, auth, body);
+      const caller = dialled ?? str(body, "customer_phone", 200) ?? "";
       const phone = normalizeCustomerPhone(caller, null);
       const start = zonedWallTimeToUtc(date, time, business.timezone);
       const end = new Date(start.getTime() + duration * 60_000);
@@ -992,6 +1022,7 @@ export async function handleSarvamAgentRequest(
       await audit(deps, auth, "book_appointment", out.isError ? "error" : "ok", interactionId, {
         date,
         time,
+        ...(dialled ? { outbound_call: true } : {}),
         service_id: service?.id ?? null,
         outcome: booked.success ? (booked.bookingOutcome ?? "unknown") : "not_booked",
         booking_id: booked.success ? (booked.data?.id ?? null) : null,
@@ -1035,7 +1066,8 @@ export async function handleSarvamAgentRequest(
         return json({ ok: true, recorded: false, error: { code: "CALLER_OPTED_OUT" } });
       }
       if (known.callback_recorded) return json({ ok: true, recorded: true, duplicate: true });
-      const raw = str(body, "caller_number", 200) ?? "";
+      const raw =
+        (await dialledNumberForTool(deps, auth, body)) ?? str(body, "caller_number", 200) ?? "";
       const phone = normalizeCustomerPhone(raw, null);
       if (isTestCaller(raw, phone, auth.testCallerNumbers)) {
         // Test callers follow the success path so conversations can be tested; nothing is saved.
@@ -1200,6 +1232,7 @@ export function sarvamToolConfiguration(baseUrl: string): {
           service_name: "the configured service name",
           customer_name: "the caller's name",
           customer_phone: "@User Identifier",
+          clickai_call_id: "@clickai_call_id",
           require_service: "true (constant)",
         },
         purpose: 'Books the slot. Say it is booked only when result.bookingOutcome is "confirmed".',
@@ -1213,6 +1246,7 @@ export function sarvamToolConfiguration(baseUrl: string): {
         body: {
           interaction_id: "@Interaction ID",
           caller_number: "@User Identifier",
+          clickai_call_id: "@clickai_call_id",
           customer_name: "the caller's name",
           reason: "what the team should call back about",
         },

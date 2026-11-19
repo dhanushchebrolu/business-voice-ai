@@ -245,15 +245,29 @@ describe("handlers", () => {
       order: () => query,
       limit: async () => ({ data: rows, error: null }),
     };
+    // flagStartsWithoutAttempt's conditional update: one stuck start found.
+    const updates: Record<string, unknown>[] = [];
+    const update = {
+      eq: () => update,
+      is: () => update,
+      lt: () => update,
+      select: async () => ({ data: [{ id: "stuck" }], error: null }),
+    };
     const handlers = buildJobHandlers({
-      supabaseAdmin: { from: () => query } as never,
+      supabaseAdmin: {
+        from: () => ({
+          ...query,
+          update: (patch: Record<string, unknown>) => (updates.push(patch), update),
+        }),
+      } as never,
       store,
       now: () => new Date("2026-11-11T10:20:00Z"),
     });
     const first = await handlers["sweep.sarvam_reconcile"]!({} as Job);
     const again = await handlers["sweep.sarvam_reconcile"]!({} as Job);
-    assert.deepEqual(first, { candidates: 2, enqueued: 2 });
-    assert.deepEqual(again, { candidates: 2, enqueued: 0 });
+    assert.deepEqual(first, { candidates: 2, enqueued: 2, unconfirmed: 1 });
+    assert.deepEqual(again, { candidates: 2, enqueued: 0, unconfirmed: 1 });
+    assert.equal(updates[0]!["status"], "outcome_unknown");
     const job = [...store.jobs.values()].find((j) => j.idempotency_key.includes("c1"))!;
     assert.equal(job.idempotency_key, "sarvam.reconcile_call:c1:2026-11-11T10");
     assert.equal(job.organization_id, "o1");

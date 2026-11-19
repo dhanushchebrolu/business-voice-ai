@@ -7,6 +7,7 @@ import {
 } from "../campaign-outcome.ts";
 import { callLeadId } from "../sarvam-agent-api.server.ts";
 import { normalizeCustomerPhone } from "../phone-number.ts";
+import { suppressContact } from "../contact-suppression.server.ts";
 import {
   finalCallVariables,
   leadNotesFromVariables,
@@ -30,8 +31,8 @@ import {
  * This function only orchestrates: it reads the inputs (rate, retry policy,
  * agent variables), runs every step that isn't done yet — a failed billing
  * step never stops the campaign step, and the reverse — then marks the call
- * done or failed. Nothing retries automatically: a failed call stays visible
- * to admins (Calls → Needs review) and is retried from there.
+ * done or failed. A failed call stays visible to admins (Calls → Needs review);
+ * the sweep.call_finalization job retries pending ones, and admins retry from there.
  *
  * Sarvam inbound, Exotel, Vobiz and LiveKit calls never come here.
  */
@@ -216,9 +217,13 @@ async function applyCampaign(supabaseAdmin: Client, rpc: Rpc, call: FinalizingCa
     );
   }
 
-  // A single (non-campaign) call: a follow-up lead only on an explicit request. Saved before
-  // the step's checkpoint, with a deterministic id, so a retried finalization never doubles it.
-  if (!decision) await saveExplicitCallbackLead(supabaseAdmin, call, vars);
+  // A single (non-campaign) call: an opt-out goes on the do-not-call list, and a follow-up
+  // lead only on an explicit request. Both run before the step's checkpoint and are
+  // idempotent, so a retried finalization never doubles either.
+  if (!decision) {
+    await suppressSingleCallOptOut(supabaseAdmin, call, vars);
+    await saveExplicitCallbackLead(supabaseAdmin, call, vars);
+  }
 
   const interest = typeof vars?.["interest_level"] === "string" ? vars["interest_level"] : null;
   const result = await rpc("apply_call_campaign_outcome", {
@@ -237,6 +242,58 @@ async function applyCampaign(supabaseAdmin: Client, rpc: Rpc, call: FinalizingCa
   if (result.error) throw result.error;
   const outcome = result.data as { result?: string } | null;
   if (outcome?.result === "lease_lost") throw new Error("the lease was lost");
+}
+
+/**
+ * Puts the dialled number of a single (non-campaign) outbound call on the workspace's
+ * do-not-call list when the person opted out on it (opted_out / do_not_call). Campaign
+ * calls do this in apply_call_campaign_outcome; without this, the next single call to
+ * the same person would go through. The number is ClickAI's own dialled number
+ * (call_logs.destination_number), never a caller id the agent reported, so this is the
+ * "contact ClickAI itself resolved" contact-suppression.server.ts requires. Finds or
+ * creates the contact (unique per organization + number), then suppressContact, which is
+ * idempotent and never overwrites an earlier opt-out's time or reason.
+ */
+export async function suppressSingleCallOptOut(
+  supabaseAdmin: Client,
+  call: Pick<FinalizingCall, "organization_id" | "business_id" | "destination_number">,
+  vars: Record<string, unknown> | null,
+): Promise<void> {
+  if (detectSpecialOutcome(vars) !== "opted_out") return;
+  const phone = normalizeCustomerPhone(call.destination_number ?? "", null);
+  if (!phone) return;
+  const reason = "Requested during an outbound call";
+  const findContact = async () => {
+    const { data, error } = await supabaseAdmin
+      .from("contacts")
+      .select("id")
+      .eq("organization_id", call.organization_id)
+      .eq("phone", phone)
+      .maybeSingle();
+    if (error) throw error;
+    return (data as { id?: string } | null)?.id ?? null;
+  };
+  let contactId = await findContact();
+  if (!contactId) {
+    const { error } = await supabaseAdmin.from("contacts").insert({
+      organization_id: call.organization_id,
+      business_id: call.business_id ?? null,
+      phone,
+      source: "outbound_call",
+      opted_out: true,
+      opted_out_at: new Date().toISOString(),
+      opted_out_reason: reason,
+    });
+    // 23505: created meanwhile (another finalization, an import); suppress that one.
+    if (error && (error as { code?: string }).code !== "23505") throw error;
+    contactId = await findContact();
+    if (!contactId) throw new Error("the opted-out contact could not be saved");
+  }
+  await suppressContact(supabaseAdmin, {
+    organizationId: call.organization_id,
+    contactId,
+    reason,
+  });
 }
 
 /**

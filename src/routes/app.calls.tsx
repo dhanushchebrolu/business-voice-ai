@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import { PhoneCall, Search } from "lucide-react";
+import { PhoneCall, PhoneIncoming, PhoneOutgoing, Search } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
 import { workspaceQuery, callsQuery, type CustomerCallRow } from "@/lib/workspace";
 import {
@@ -14,8 +14,11 @@ import {
 import { ServiceLocked } from "@/components/app/ServiceLocked";
 import { featureLocksQuery } from "@/lib/access";
 import { languageLabel } from "@/lib/voices";
+import { formatMoney } from "@/lib/pricing";
 import { Input } from "@/components/ui/input";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { PlaceCallButton } from "@/components/app/PlaceCallDialog";
+import { callCounterpart, callStatusLabel, callStatusTone, isCallOpen } from "@/lib/call-history";
 
 export const Route = createFileRoute("/app/calls")({
   head: () => ({
@@ -33,7 +36,12 @@ type TranscriptTurn = { role?: string; speaker?: string; text?: string; content?
 function CallsPage() {
   const { user } = useAuth();
   const { data: ws } = useQuery(workspaceQuery(user?.id));
-  const { data: calls, isLoading } = useQuery(callsQuery(ws?.organization?.id));
+  const { data: calls, isLoading } = useQuery({
+    ...callsQuery(ws?.organization?.id),
+    // Keep a call that is still going up to date until it ends.
+    refetchInterval: (query) =>
+      (query.state.data ?? []).some((c) => isCallOpen(c.status)) ? 10_000 : false,
+  });
   const { data: locks } = useQuery(featureLocksQuery(ws?.organization?.id));
   const phoneLocked = locks?.["phone"] === true;
   const lifecycle = ws?.organization?.lifecycle_status ?? "not_provisioned";
@@ -44,7 +52,7 @@ function CallsPage() {
     const term = q.trim().toLowerCase();
     if (!term) return calls ?? [];
     return (calls ?? []).filter((c) =>
-      [c.caller_number, c.caller_name, c.summary, c.outcome].some((v) =>
+      [callCounterpart(c), c.caller_name, c.summary, c.outcome].some((v) =>
         v?.toLowerCase().includes(term),
       ),
     );
@@ -56,16 +64,21 @@ function CallsPage() {
     <div className="space-y-6">
       <PageHeader
         title="Calls"
-        description="Every call your receptionist handled, with duration, language, outcome and full transcript."
+        description="Every call your receptionist handled or placed, with duration, language, outcome and full transcript."
         actions={
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="Search calls"
-              className="h-9 w-56 pl-8"
-            />
+          <div className="flex items-center gap-2">
+            {ws?.organization?.id && !phoneLocked ? (
+              <PlaceCallButton organizationId={ws.organization.id} />
+            ) : null}
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder="Search calls"
+                className="h-9 w-56 pl-8"
+              />
+            </div>
           </div>
         }
       />
@@ -83,7 +96,7 @@ function CallsPage() {
             <table className="w-full min-w-[720px] text-sm">
               <thead>
                 <tr className="border-b border-border text-left text-[11px] uppercase tracking-wider text-muted-foreground">
-                  <th className="px-5 py-2 font-medium">Caller</th>
+                  <th className="px-5 py-2 font-medium">Contact</th>
                   <th className="px-3 py-2 font-medium">Started</th>
                   <th className="px-3 py-2 font-medium">Duration</th>
                   <th className="px-3 py-2 font-medium">Language</th>
@@ -99,7 +112,20 @@ function CallsPage() {
                     className="cursor-pointer border-b border-border/60 transition-colors hover:bg-accent/40"
                   >
                     <td className="px-5 py-2.5">
-                      <p className="font-medium">{call.caller_number ?? "Unknown"}</p>
+                      <p className="flex items-center gap-1.5 font-medium">
+                        {call.direction === "outbound" ? (
+                          <PhoneOutgoing
+                            className="size-3.5 text-muted-foreground"
+                            aria-label="Outbound"
+                          />
+                        ) : (
+                          <PhoneIncoming
+                            className="size-3.5 text-muted-foreground"
+                            aria-label="Inbound"
+                          />
+                        )}
+                        {callCounterpart(call)}
+                      </p>
                       <p className="truncate text-xs text-muted-foreground">
                         {call.summary ?? "No summary"}
                       </p>
@@ -115,17 +141,8 @@ function CallsPage() {
                     </td>
                     <td className="px-3 py-2.5 text-xs">{call.outcome ?? "—"}</td>
                     <td className="px-5 py-2.5">
-                      <StatusPill
-                        tone={
-                          call.status === "completed"
-                            ? "live"
-                            : call.status === "failed"
-                              ? "error"
-                              : "idle"
-                        }
-                        dot={false}
-                      >
-                        {call.status === "outcome_unknown" ? "Unconfirmed" : call.status}
+                      <StatusPill tone={callStatusTone(call.status)} dot={false}>
+                        {callStatusLabel(call.status)}
                       </StatusPill>
                     </td>
                   </tr>
@@ -149,7 +166,7 @@ function CallsPage() {
       <Sheet open={Boolean(selected)} onOpenChange={(open) => !open && setSelected(null)}>
         <SheetContent className="w-full overflow-y-auto sm:max-w-lg">
           <SheetHeader>
-            <SheetTitle>{selected?.caller_number ?? "Call detail"}</SheetTitle>
+            <SheetTitle>{selected ? callCounterpart(selected) : "Call detail"}</SheetTitle>
           </SheetHeader>
           {selected ? (
             <div className="space-y-5 px-4 pb-8">
@@ -157,6 +174,7 @@ function CallsPage() {
                 <Meta label="Started" value={new Date(selected.started_at).toLocaleString()} />
                 <Meta label="Duration" value={formatDuration(selected.duration_seconds)} />
                 <Meta label="Direction" value={selected.direction} />
+                <Meta label="Status" value={callStatusLabel(selected.status)} />
                 <Meta
                   label="Language"
                   value={selected.language ? languageLabel(selected.language) : "—"}
@@ -166,7 +184,20 @@ function CallsPage() {
                   label="Agent version"
                   value={selected.agent_version ? `v${selected.agent_version}` : "—"}
                 />
+                {selected.customer_charge != null ? (
+                  <Meta
+                    label="Charge"
+                    value={formatMoney(selected.customer_charge, selected.currency ?? "INR")}
+                  />
+                ) : null}
               </dl>
+
+              {selected.status === "outcome_unknown" ? (
+                <p className="rounded-md border border-warning/30 bg-warning/10 p-3 text-sm">
+                  We couldn't confirm whether this call went through. Our team checks it with the
+                  phone provider; you are only charged if it connected.
+                </p>
+              ) : null}
 
               {selected.summary ? (
                 <div className="rounded-md border border-border bg-surface/50 p-3 text-sm">

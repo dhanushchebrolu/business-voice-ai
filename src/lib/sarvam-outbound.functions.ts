@@ -1,11 +1,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { normalizeCustomerPhone } from "@/lib/phone-number";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
-import { checkTelephonyAccess, walletCanAffordOutbound } from "@/lib/telephony-guard.server";
-import {
-  INVALID_DESTINATION_MESSAGE,
-  sendSarvamInstantOutboundCall,
-} from "@/lib/sarvam-outbound-call.server";
+import { INVALID_DESTINATION_MESSAGE } from "@/lib/sarvam-outbound-call.server";
 
 /**
  * Sarvam instant-outbound call initiation — the Sarvam-specific counterpart
@@ -15,15 +11,13 @@ import {
  * confirmed to come back synchronously, while InitiatedCall.providerCallId
  * is non-optional — see SarvamTelephonyAdapter.initiateOutboundCall's doc).
  *
- * The actual validation/dial/call-log logic lives in
- * sarvam-outbound-call.server.ts's sendSarvamInstantOutboundCall — the
- * admin-only test action (sarvam-admin.functions.ts's testSarvamOutboundCall)
- * calls that exact same function, so this customer path and the admin test
- * path can never drift into two different implementations of "place a
- * Sarvam outbound call." This handler's own job is its authorization spine:
- * own-org membership -> checkTelephonyAccess entitlement/lock/payment/
- * number-status gate -> wallet affordability, all before the shared
- * function is ever called.
+ * This handler's own job is who may dial: an owner or admin of the caller
+ * number's organization. Everything else is the shared
+ * placeSarvamCallForOrganization (sarvam-admin-calls.server.ts) — the same
+ * gate the admin's call-on-behalf uses: entitlement/lock/payment, number
+ * state, call limits, wallet, then sendSarvamInstantOutboundCall (readiness,
+ * do-not-call, per-destination reservation, the dial itself). One path, so
+ * the customer and admin flows can never drift apart.
  */
 
 interface CreateSarvamInstantOutboundCallInput {
@@ -55,16 +49,11 @@ export const createSarvamInstantOutboundCall = createServerFn({ method: "POST" }
       data.phoneNumberId,
     );
 
-    const gate = await checkTelephonyAccess(orgId, data.phoneNumberId, "outbound");
-    if (!gate.allowed || !gate.phoneNumber)
-      throw new Error(gate.reason ?? "Outbound calling is not available.");
-    if (gate.phoneNumber.provider !== "sarvam")
-      throw new Error("This flow only applies to Sarvam-provisioned numbers.");
-
-    const affordable = await walletCanAffordOutbound(orgId);
-    if (!affordable) throw new Error("Insufficient wallet balance to place this call.");
-
-    const result = await sendSarvamInstantOutboundCall(supabaseAdmin, {
+    // The same gate as the admin's call-on-behalf: entitlement, number state, call limits,
+    // wallet, then the shared sendSarvamInstantOutboundCall.
+    const { placeSarvamCallForOrganization } = await import("@/lib/sarvam-admin-calls.server");
+    const result = await placeSarvamCallForOrganization(supabaseAdmin, {
+      orgId,
       phoneNumberId: data.phoneNumberId,
       toE164: data.toE164,
       objective: typeof data.objective === "string" ? data.objective : undefined,
@@ -73,4 +62,33 @@ export const createSarvamInstantOutboundCall = createServerFn({ method: "POST" }
     // outcome "unknown": Sarvam may have placed the call; it stays unconfirmed
     // in call history until a webhook or an operator resolves it.
     return { callId: result.callId, outcome: result.outcome };
+  });
+
+/**
+ * What the Calls page needs before showing "Call a number": the workspace's
+ * Sarvam numbers and why each cannot dial yet, the per-minute price and the
+ * call limits. Any member may read it; only owners and admins may dial
+ * (canDial). A preview only: the call itself re-checks everything.
+ */
+export const getOutboundCallingStatus = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { orgId: string }) => {
+    if (!input?.orgId) throw new Error("orgId is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const { supabase, userId } = context;
+    const { memberRole, OUTBOUND_DIAL_ROLES } = await import("@/lib/outbound-authorization.server");
+    const role = await memberRole(supabase, userId, data.orgId);
+    if (!role) throw new Error("Workspace not found.");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { loadOutboundCallingStatus } = await import("@/lib/sarvam-admin-calls.server");
+    const { checkFeatureAccess } = await import("@/lib/feature-gate.server");
+    const { walletCanAffordOutbound, getCallRate } = await import("@/lib/telephony-guard.server");
+    const status = await loadOutboundCallingStatus(supabaseAdmin, data.orgId, {
+      checkFeatureAccess,
+      walletCanAffordOutbound,
+      getCallRate,
+    });
+    return { ...status, canDial: OUTBOUND_DIAL_ROLES.includes(role) };
   });
