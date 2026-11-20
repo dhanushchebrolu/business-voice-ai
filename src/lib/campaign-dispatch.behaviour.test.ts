@@ -293,7 +293,7 @@ describe("campaign dispatch — start results", () => {
   });
 });
 
-describe("campaign dispatch — the customer's one agent in outbound mode", () => {
+describe("campaign dispatch — only the customer's outbound agent", () => {
   test("a version not confirmed for outbound dials nothing and claims nothing", async () => {
     const t = setup(3);
     t.table("agent_configs")[0]!["sarvam_outbound_ready_version"] = 1; // remapped to v2 since
@@ -308,6 +308,33 @@ describe("campaign dispatch — the customer's one agent in outbound mode", () =
     assert.ok(
       t.table("campaign_contacts").every((c) => c["status"] === "pending" && c["attempts"] === 0),
     );
+  });
+
+  test("never falls back to the inbound agent: inbound-only or misregistered agents dial nothing", async () => {
+    for (const over of [
+      // The old one-agent model: the inbound agent confirmed, no outbound agent.
+      {
+        sarvam_outbound_app_id: null,
+        sarvam_outbound_app_version: null,
+        sarvam_outbound_ready_app_id: "app_1",
+        sarvam_outbound_ready_version: 2,
+      },
+      // An outbound registration that is the inbound agent itself.
+      { sarvam_outbound_app_id: "app_1", sarvam_outbound_ready_app_id: "app_1" },
+    ]) {
+      const t = setup(2);
+      Object.assign(t.table("agent_configs")[0]!, over);
+      const original = console.error;
+      console.error = () => {};
+      try {
+        await dispatchDueCampaigns({ deps: t.deps });
+      } finally {
+        console.error = original;
+      }
+      assert.equal(t.requests.length, 0, JSON.stringify(over));
+      assert.equal(t.table("call_logs").length, 0, "nothing reserved");
+      assert.ok(t.table("campaign_contacts").every((c) => c["status"] === "pending"));
+    }
   });
 
   test("each call uses the same agent mapping, marks itself outbound and carries the campaign objective", async () => {
