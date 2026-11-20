@@ -117,6 +117,7 @@ jobs:
             supabase/migrations/contact_opt_out_guard.pg.test.ts \
             supabase/migrations/provider_metadata_cleanup.pg.test.ts \
             supabase/migrations/outbound_call_admission.pg.test.ts \
+            supabase/migrations/dual_agent_provisioning.pg.test.ts \
             2>&1 | tee pg-test-output.log
           skipped=$(grep -oP '(?<=^# skipped )\d+' pg-test-output.log | tail -1)
           todo=$(grep -oP '(?<=^# todo )\d+' pg-test-output.log | tail -1)

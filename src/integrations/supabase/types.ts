@@ -140,6 +140,10 @@ export type Database = {
           sarvam_app_version: number | null;
           sarvam_outbound_ready_app_id: string | null;
           sarvam_outbound_ready_version: number | null;
+          sarvam_outbound_app_id: string | null;
+          sarvam_outbound_app_version: number | null;
+          sarvam_outbound_registered_at: string | null;
+          sarvam_outbound_registered_by: string | null;
           speaking_pace: number;
           status: string;
           transfer_number: string | null;
@@ -170,6 +174,10 @@ export type Database = {
           sarvam_app_version?: number | null;
           sarvam_outbound_ready_app_id?: string | null;
           sarvam_outbound_ready_version?: number | null;
+          sarvam_outbound_app_id?: string | null;
+          sarvam_outbound_app_version?: number | null;
+          sarvam_outbound_registered_at?: string | null;
+          sarvam_outbound_registered_by?: string | null;
           speaking_pace?: number;
           status?: string;
           transfer_number?: string | null;
@@ -200,6 +208,10 @@ export type Database = {
           sarvam_app_version?: number | null;
           sarvam_outbound_ready_app_id?: string | null;
           sarvam_outbound_ready_version?: number | null;
+          sarvam_outbound_app_id?: string | null;
+          sarvam_outbound_app_version?: number | null;
+          sarvam_outbound_registered_at?: string | null;
+          sarvam_outbound_registered_by?: string | null;
           speaking_pace?: number;
           status?: string;
           transfer_number?: string | null;
@@ -2442,6 +2454,7 @@ export type Database = {
           token_hash: string;
           token_prefix: string;
           test_caller_numbers: string[];
+          role: string;
           updated_at: string;
         };
         Insert: {
@@ -2459,6 +2472,7 @@ export type Database = {
           token_hash: string;
           token_prefix: string;
           test_caller_numbers?: string[];
+          role?: string;
           updated_at?: string;
         };
         Update: {
@@ -2476,6 +2490,7 @@ export type Database = {
           token_hash?: string;
           token_prefix?: string;
           test_caller_numbers?: string[];
+          role?: string;
           updated_at?: string;
         };
         Relationships: [];
