@@ -11,6 +11,7 @@ import {
   workspaceQuery,
   numbersQuery,
   provisioningStatusLabel,
+  customerSetupSteps,
   type AccountStatus,
 } from "@/lib/workspace";
 import { SectionCard, StatusPill } from "./primitives";
@@ -67,6 +68,21 @@ export function AccountStatusPanel({ showChannels = true }: { showChannels?: boo
           outboundEnabled: Boolean(candidateNumber?.outbound_enabled),
         })
       : ACCOUNT_STATUS_LABEL[status];
+  // Both of the customer's agents and the phone line, in plain words (no ids or errors).
+  const setupSteps =
+    status === "setup_in_progress"
+      ? customerSetupSteps({
+          agentExists: Boolean(ws?.agent),
+          inboundAgentReady: Boolean(ws?.agent?.sarvam_app_id && ws?.agent?.sarvam_app_version),
+          outboundAgentReady: Boolean(
+            ws?.agent?.sarvam_outbound_app_id && ws?.agent?.sarvam_outbound_app_version,
+          ),
+          hasNumber: Boolean(candidateNumber),
+          numberActive: candidateNumber?.status === "active",
+          inboundEnabled: Boolean(candidateNumber?.inbound_enabled),
+          needsAttention: meta.tone === "error",
+        })
+      : null;
 
   const channels: {
     icon: typeof PhoneCall;
@@ -171,6 +187,38 @@ export function AccountStatusPanel({ showChannels = true }: { showChannels?: boo
           </div>
         )}
       </div>
+
+      {setupSteps ? (
+        <ol className="mt-5 grid gap-1.5 text-sm" data-testid="customer-setup-steps">
+          {setupSteps.map((s) => (
+            <li key={s.label} className="flex items-center gap-2">
+              <StatusPill
+                tone={
+                  s.status === "done"
+                    ? "live"
+                    : s.status === "attention"
+                      ? "error"
+                      : s.status === "in_progress"
+                        ? "ready"
+                        : "idle"
+                }
+                dot={false}
+              >
+                {s.status === "done"
+                  ? "Done"
+                  : s.status === "attention"
+                    ? "Our team is on it"
+                    : s.status === "in_progress"
+                      ? "In progress"
+                      : "Next"}
+              </StatusPill>
+              <span className={s.status === "pending" ? "text-muted-foreground" : ""}>
+                {s.label}
+              </span>
+            </li>
+          ))}
+        </ol>
+      ) : null}
 
       {showChannels ? (
         <div className="mt-5 grid gap-2.5 sm:grid-cols-2 xl:grid-cols-4">

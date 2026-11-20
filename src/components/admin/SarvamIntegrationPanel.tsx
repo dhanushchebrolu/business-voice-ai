@@ -58,7 +58,7 @@ export function SarvamIntegrationPanel({ orgId }: { orgId: string }) {
 
   return (
     <SectionCard
-      title="Sarvam agent data integration"
+      title="Inbound agent data integration"
       description="Lets this customer's Sarvam agent read their live ClickAI business data (hours, services, prices, availability) and book appointments, authenticated with a credential that belongs only to this customer."
     >
       {state.isLoading ? (
@@ -291,7 +291,7 @@ export function SarvamIntegrationPanel({ orgId }: { orgId: string }) {
         }
         confirmLabel={integration?.status === "active" ? "Rotate" : "Generate"}
         onConfirm={async (reason) => {
-          const r = await issue({ data: { orgId, reason } });
+          const r = await issue({ data: { orgId, reason, role: "inbound" } });
           setNewToken(r.token);
           void state.refetch();
         }}
@@ -328,7 +328,7 @@ export function SarvamIntegrationPanel({ orgId }: { orgId: string }) {
         description="The credential stops working immediately; the Sarvam agent can no longer read this customer's data or book. Calls and deployments are not affected."
         confirmLabel="Disconnect"
         onConfirm={async (reason) => {
-          await disable({ data: { orgId, reason } });
+          await disable({ data: { orgId, reason, role: "inbound" } });
           toast.success("Integration disconnected");
           void state.refetch();
         }}

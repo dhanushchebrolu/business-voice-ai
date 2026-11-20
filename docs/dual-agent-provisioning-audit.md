@@ -47,6 +47,31 @@ Options for the agent-creation step itself:
 - **B. Ask Sarvam** for a supported app-authoring API (clone app, set tools, commit) or an enterprise extension; then step 4 becomes automatic with the same schema and routing.
 - **C. Drive the Sarvam MCP server from ClickAI** — not recommended: undocumented as a server API, user-OAuth bound, and still cannot attach the ClickAI credential to tools.
 
-## 4. Not changed
+## 4. Implemented: Option A (2026-11-20, feature branch only)
 
-No migration was written or applied, no Sarvam agent or deployment was created or modified, no number was remapped, outbound and campaigns remain off, Payment Enforcement unchanged.
+Option A was approved. Nothing below is deployed or applied to production.
+
+**Schema** (`supabase/migrations/20261120090000_dual_agent_provisioning.sql`, additive; rollback `docs/production-rollback-20261120090000-dual-agent-provisioning.sql`; real-PostgreSQL test `dual_agent_provisioning.pg.test.ts`):
+
+- `agent_configs.sarvam_outbound_app_id/_version/_registered_at/_registered_by`, set together or not at all; unique per outbound agent; trigger `agent_configs_sarvam_role_guard` refuses an outbound agent that is the same or any customer's inbound agent or shared application, and the reverse.
+- `sarvam_agent_integrations.role` (`inbound` default | `outbound`); one active credential per agent **and role**. Existing rows become `inbound`; no live mapping changes.
+
+**Templates** (`src/lib/agent-roles.ts`, `universal-agent-config.ts`, `sarvam-agent-api.server.ts`): inbound template unchanged (fingerprint unchanged). Outbound template `buildOutboundAgentConfig` + `sarvamToolConfiguration(base, "outbound")`: only `clickai_business_context`, `get_business_info`, `check_availability`, `record_call_outcome`; declares `call_direction`, `clickai_call_id`, `campaign_objective`, `campaign_instructions`; outputs `opted_out`. Same voice and languages as the inbound agent.
+
+**Enforcement (backend, not prompt):** an `outbound` credential can call only the context, `get_business_info`, `check_availability` and `record_call_outcome`; `book_appointment` and `request_callback` return 403 `forbidden_for_outbound_agent`, audited as `OUTBOUND_AGENT_TOOL_FORBIDDEN`, before the body is read. Unknown roles get 401. The outbound credential is admitted only while the customer's outbound agent is registered and the customer is not suspended (`checkOutboundAgentAdmission`). The older `clickai_call_id` refusals stay as a second layer.
+
+**Routing:** `outboundAgentTarget()` is the only selector. Single calls, the campaign dispatcher, campaign launch and Sarvam-campaign status changes dial only the registered outbound agent, in the version confirmed after a supervised call (`sarvam_outbound_ready_*` must equal it), never `sarvam_app_id`; there is no fallback. A Sarvam console campaign must report the same `app_id`/`app_version` before any cohort upload. Inbound routing (number → deployment → inbound agent) is unchanged.
+
+**Provisioning:** pipeline steps 11 (outbound credential) and 12 (outbound agent registered, not the inbound agent or a master). Inbound goes live at step 10 regardless; the run completes only after step 12. Steps are read-first, so a retry after partial success re-reads the live inbound side and never creates a second deployment, credential or registration. Registering never confirms outbound calling.
+
+**Operator workflow** (Admin → Provisioning → customer → _Outbound agent_): issue the outbound credential (shown once), copy the outbound template, create and commit the agent in Sarvam, register its id and version (gate + server checks: own customer, not inbound, not a master, not used by anyone else). Then, separately and after a supervised call, _Confirm the outbound agent for outbound calls_. Checklist steps 11–13 show progress and failures.
+
+**Customer view:** the account panel shows plain steps (business information, inbound agent, outbound agent, phone number, phone line, ready) with "Our team is on it" instead of errors or ids.
+
+**Still manual:** creating and committing both agents in Sarvam (no API), storing each credential as that agent's Sarvam secret, confirming numbers in Sarvam, and the supervised-call confirmation. New env var: `SARVAM_OUTBOUND_MASTER_AGENT_APP_ID` (optional, the outbound master template's id).
+
+**Before production, in order (each needs approval):** apply migration `20261120090000` (after `20261119090000`); deploy the Worker; for Smile Dental issue an outbound credential, create and commit its outbound agent in Sarvam, register it; one supervised outbound call; confirm it for outbound; switch outbound on for 0061. Until then outbound stays impossible: no customer has an outbound agent, so `outboundAgentTarget` returns nothing.
+
+## 5. Not changed
+
+A migration was written but not applied; no Sarvam agent or deployment was created or modified, no number was remapped, outbound and campaigns remain off, Payment Enforcement unchanged.

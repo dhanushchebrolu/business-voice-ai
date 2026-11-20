@@ -17,10 +17,12 @@ import {
 import { retryProvisioning } from "@/lib/telephony-admin.functions";
 import {
   activationGate,
+  outboundChecklist,
   provisioningChecklist,
   queueStatus,
   queueStatusTone,
   type ChecklistInput,
+  type OutboundChecklistInput,
 } from "@/lib/provisioning-view";
 import {
   ErrorState,
@@ -30,6 +32,7 @@ import {
   StatusPill,
 } from "@/components/app/primitives";
 import { SarvamIntegrationPanel } from "@/components/admin/SarvamIntegrationPanel";
+import { OutboundAgentPanel } from "@/components/admin/OutboundAgentPanel";
 import { VoiceLanguagePanel } from "@/components/admin/VoiceLanguagePanel";
 import { ReasonDialog } from "@/components/admin/ReasonDialog";
 import { Button } from "@/components/ui/button";
@@ -109,7 +112,12 @@ function ProvisioningDetail() {
     );
 
   const gateInput: ChecklistInput = { ...data.gateInput, now: new Date(data.gateInput.now) };
-  const checklist = provisioningChecklist(gateInput);
+  const outboundGate: OutboundChecklistInput = {
+    ...data.outboundGateInput,
+    now: new Date(data.outboundGateInput.now),
+  };
+  // Inbound steps 1-10, then the outbound agent's steps 11-13.
+  const checklist = [...provisioningChecklist(gateInput), ...outboundChecklist(outboundGate)];
   const activation = activationGate(gateInput);
   const latest = data.runs[0] ?? null;
   // A failure before verification (e.g. deployment creation) must be explained here too,
@@ -151,7 +159,7 @@ function ProvisioningDetail() {
 
       <SectionCard
         title="Checklist"
-        description="Steps 5 and 6 are done by the ClickAI team in the Sarvam console; there is no API for them."
+        description="Steps 5, 6 and 12 are done by the ClickAI team in the Sarvam console; Sarvam has no API to create agents. Steps 1-10 set up the inbound agent and number, steps 11-13 the separate outbound agent."
       >
         <ol className="space-y-1.5 text-sm" data-testid="provisioning-checklist">
           {checklist.map((c) => (
@@ -386,6 +394,16 @@ function ProvisioningDetail() {
 
       <SarvamIntegrationPanel orgId={orgId} />
 
+      <OutboundAgentPanel
+        orgId={orgId}
+        gate={outboundGate}
+        credential={data.outboundCredential}
+        config={data.outboundConfig}
+        template={data.templates?.outbound ?? null}
+        registeredAt={data.agent?.sarvam_outbound_registered_at ?? null}
+        onChanged={() => refresh()}
+      />
+
       <SectionCard
         title="Manual Sarvam setup"
         description="Sarvam has no API to create or configure agents, so these steps are done by hand."
@@ -431,19 +449,21 @@ function ProvisioningDetail() {
         >
           <span>Outbound calls:</span>
           <code className="text-xs">
-            {data.agent?.sarvam_app_id &&
-            data.agent.sarvam_outbound_ready_app_id === data.agent.sarvam_app_id &&
-            data.agent.sarvam_outbound_ready_version === data.agent.sarvam_app_version
-              ? `confirmed for v${data.agent.sarvam_outbound_ready_version}`
-              : "not confirmed for this version"}
+            {data.agent?.sarvam_outbound_app_id &&
+            data.agent.sarvam_outbound_ready_app_id === data.agent.sarvam_outbound_app_id &&
+            data.agent.sarvam_outbound_ready_version === data.agent.sarvam_outbound_app_version
+              ? `confirmed for outbound agent ${data.agent.sarvam_outbound_app_id} v${data.agent.sarvam_outbound_ready_version}`
+              : data.agent?.sarvam_outbound_app_id
+                ? "outbound agent not confirmed for this version"
+                : "no outbound agent registered"}
           </code>
           <Button
             size="sm"
             variant="outline"
             onClick={() => setOutboundDialog("mark")}
-            disabled={!data.agent?.sarvam_app_id}
+            disabled={!data.agent?.sarvam_outbound_app_id}
           >
-            Confirm this version for outbound
+            Confirm the outbound agent for outbound calls
           </Button>
           {data.agent?.sarvam_outbound_ready_version ? (
             <Button size="sm" variant="outline" onClick={() => setOutboundDialog("clear")}>
@@ -452,10 +472,9 @@ function ProvisioningDetail() {
           ) : null}
         </div>
         <p className="mt-1 text-xs text-muted-foreground">
-          The same agent handles inbound and outbound calls. Confirm only a committed version that
-          declares call_direction (default inbound), clickai_call_id, campaign_objective and
-          campaign_instructions and carries the outbound section, after a supervised outbound call
-          and an inbound check.
+          Outbound calls use only the separate outbound agent (above), never this inbound agent.
+          Confirm only its committed version that declares call_direction, clickai_call_id,
+          campaign_objective and campaign_instructions, after a supervised outbound call.
         </p>
         {!data.masterAgentConfigured ? (
           <p className="mt-2 text-xs text-muted-foreground">
@@ -659,12 +678,12 @@ function ProvisioningDetail() {
         title={
           outboundDialog === "clear"
             ? "Withdraw outbound calling"
-            : "Confirm this agent version for outbound"
+            : "Confirm the outbound agent for outbound calls"
         }
         description={
           outboundDialog === "clear"
-            ? "ClickAI stops placing outbound calls (single calls and campaigns) for this customer until a version is confirmed again. Inbound calls are not affected."
-            : "Records the customer's current Sarvam agent version as tested for outbound calls. Nothing changes in Sarvam. Mapping the agent to another version later blocks outbound again until that version is confirmed."
+            ? "ClickAI stops placing outbound calls (single calls and campaigns) for this customer until the outbound agent is confirmed again. Inbound calls are not affected."
+            : "Records the customer's registered OUTBOUND agent version as tested for outbound calls. Nothing changes in Sarvam. Registering another outbound agent or version later blocks outbound again until that one is confirmed."
         }
         extra={
           outboundDialog === "mark" ? (
@@ -679,9 +698,9 @@ function ProvisioningDetail() {
                 onChange={(e) => setMaxCallMinutes(e.target.value)}
               />
               <span className="block text-xs text-muted-foreground">
-                Check it in Sarvam (agent → Settings → Max call length) before confirming. Every
-                call reserves and is billed for at most this many minutes; the agent ends the call
-                there.
+                Check it on the outbound agent in Sarvam (Settings → Max call length) before
+                confirming. Every call reserves and is billed for at most this many minutes; the
+                agent ends the call there.
               </span>
             </label>
           ) : null
