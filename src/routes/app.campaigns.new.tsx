@@ -42,8 +42,8 @@ function NewCampaignPage() {
 
   const [name, setName] = useState("");
   const [phoneNumberId, setPhoneNumberId] = useState("");
-  const [objective, setObjective] = useState("");
-  const [instructions, setInstructions] = useState("");
+  const [description, setDescription] = useState("");
+  const [budgetRupees, setBudgetRupees] = useState("");
   const [language, setLanguage] = useState<string>("");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
@@ -71,6 +71,15 @@ function NewCampaignPage() {
       toast.error("Choose which number the AI should call from.");
       return;
     }
+    if (!description.trim()) {
+      toast.error("Describe why you are calling these people.");
+      return;
+    }
+    const budget = budgetRupees.trim() ? Math.round(Number(budgetRupees) * 100) : null;
+    if (budget !== null && !(Number.isFinite(budget) && budget > 0)) {
+      toast.error("Enter the budget in rupees, or leave it empty for no limit.");
+      return;
+    }
     setSaving(true);
     try {
       const { data, error } = await supabase
@@ -81,8 +90,8 @@ function NewCampaignPage() {
           agent_config_id: ws.agent.id,
           phone_number_id: phoneNumberId,
           name: name.trim(),
-          objective: objective.trim() || null,
-          call_instructions: instructions.trim() || null,
+          description: description.trim(),
+          budget_limit: budget,
           language: language || null,
           schedule: {
             startDate: startDate || undefined,
@@ -102,7 +111,7 @@ function NewCampaignPage() {
         toast.error(describeQueryError(error, "Could not create this campaign."));
         return;
       }
-      toast.success("Campaign created. Add contacts next.");
+      toast.success("Campaign created. Review what the AI will say, then add contacts.");
       navigate({ to: "/app/campaigns/$campaignId", params: { campaignId: data.id } });
     } catch (err) {
       toast.error(describeQueryError(err, "Could not create this campaign."));
@@ -163,22 +172,19 @@ function NewCampaignPage() {
       >
         <div className="space-y-4">
           <div className="space-y-1.5">
-            <Label>Campaign objective</Label>
+            <Label>Describe the campaign</Label>
             <Textarea
-              value={objective}
-              onChange={(e) => setObjective(e.target.value)}
-              placeholder="Remind customers about their upcoming appointment."
-              rows={2}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="Call customers who haven't visited in six months. Introduce yourself, ask if they would like a check-up, answer questions about our services, check availability if they are interested, and tell them how to confirm. Don't pressure anyone; if they decline, end politely."
+              rows={6}
+              maxLength={4000}
             />
-          </div>
-          <div className="space-y-1.5">
-            <Label>Call instructions</Label>
-            <Textarea
-              value={instructions}
-              onChange={(e) => setInstructions(e.target.value)}
-              placeholder="Call the customer and remind them about their appointment. Confirm whether they are attending. If they want to reschedule, collect their preferred date. Be polite and concise."
-              rows={5}
-            />
+            <p className="text-xs text-muted-foreground">
+              Next you'll review the structured version ClickAI prepares from this before any call
+              is made. The AI can share information and check availability; it cannot book, schedule
+              callbacks or send messages.
+            </p>
           </div>
           <div className="space-y-1.5">
             <Label>Language</Label>
@@ -231,6 +237,28 @@ function NewCampaignPage() {
               </label>
             ))}
           </div>
+        </div>
+      </SectionCard>
+
+      <SectionCard
+        title="Budget (optional)"
+        description="ClickAI stops calling and pauses the campaign before spending more than this."
+      >
+        <div className="space-y-1.5">
+          <Label>Campaign budget (₹)</Label>
+          <Input
+            type="number"
+            min={1}
+            step="1"
+            inputMode="numeric"
+            className="w-56"
+            value={budgetRupees}
+            onChange={(e) => setBudgetRupees(e.target.value)}
+            placeholder="No limit"
+          />
+          <p className="text-xs text-muted-foreground">
+            Each call reserves its maximum cost (5 minutes) until it is billed.
+          </p>
         </div>
       </SectionCard>
 

@@ -21,6 +21,7 @@ import {
   ErrorState,
 } from "@/components/app/primitives";
 import { describeQueryError } from "@/lib/query-error";
+import { CampaignContextPanel, CampaignInsights } from "@/components/app/CampaignContextPanel";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -68,6 +69,8 @@ const CONTACT_STATUS_TONE: Record<string, "live" | "ready" | "idle" | "error"> =
   opted_out: "error",
   wrong_number: "error",
   cancelled: "error",
+  excluded: "error",
+  outcome_unknown: "idle",
 };
 
 function CampaignDetailPage() {
@@ -108,6 +111,8 @@ function CampaignDetailPage() {
     await Promise.all([
       qc.invalidateQueries({ queryKey: ["campaign", campaignId] }),
       qc.invalidateQueries({ queryKey: ["campaign-contacts", campaignId] }),
+      qc.invalidateQueries({ queryKey: ["campaign-eligibility", campaignId] }),
+      qc.invalidateQueries({ queryKey: ["campaign-stats", campaignId] }),
     ]);
   }
 
@@ -168,7 +173,12 @@ function CampaignDetailPage() {
   const doResume = () =>
     runAction(() => resumeCampaign({ data: { campaignId } }), "Campaign resumed.");
   const doCancel = () => {
-    if (!confirm("Cancel this campaign? Contacts not yet called will not be dialed.")) return;
+    if (
+      !confirm(
+        "Cancel this campaign? Contacts not yet called will not be dialed. Calls already in progress are not hung up; they finish normally.",
+      )
+    )
+      return;
     void runAction(() => cancelCampaign({ data: { campaignId } }), "Campaign cancelled.");
   };
 
@@ -211,6 +221,10 @@ function CampaignDetailPage() {
           </div>
         }
       />
+
+      <CampaignContextPanel campaign={campaign} onSaved={invalidate} />
+
+      <CampaignInsights campaignId={campaignId} />
 
       <SectionCard title="Progress" description={`${total} contacts enrolled`}>
         <div className="flex flex-wrap gap-2">
