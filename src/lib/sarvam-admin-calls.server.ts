@@ -302,7 +302,7 @@ export async function loadOutboundCallingStatus(
     ? await supabaseAdmin
         .from("agent_configs")
         .select(
-          "id, organization_id, sarvam_app_id, sarvam_app_version, sarvam_outbound_ready_app_id, sarvam_outbound_ready_version, sarvam_outbound_max_call_seconds",
+          "id, organization_id, sarvam_app_id, sarvam_outbound_app_id, sarvam_outbound_app_version, sarvam_outbound_ready_app_id, sarvam_outbound_ready_version, sarvam_outbound_max_call_seconds",
         )
         .in("id", agentIds)
     : { data: [], error: null };

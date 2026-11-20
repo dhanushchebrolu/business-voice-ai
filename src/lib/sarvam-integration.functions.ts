@@ -1,13 +1,25 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { assertPlatformAdmin, writeAudit } from "@/lib/platform-admin.server";
+import { isAgentRole, type AgentRole } from "@/lib/agent-roles";
 
 /**
  * Platform-admin control of a customer's Sarvam agent integration: the
  * credential its Sarvam HTTP tools use to call ClickAI. The raw token is
  * returned only by issueSarvamIntegrationCredential, once, and is never
  * stored or returned again (only its hash and a display prefix are kept).
+ *
+ * Each customer has one credential per agent role (agent-roles.ts): the
+ * inbound agent's and the outbound agent's. ClickAI's agent API refuses every
+ * write tool for the outbound one, so the two must never be swapped.
  */
+
+/** Optional role input; absent means "inbound" (what existed before dual agents). */
+function roleOf(input: { role?: unknown }): AgentRole {
+  if (input.role === undefined) return "inbound";
+  if (!isAgentRole(input.role)) throw new Error("role must be inbound or outbound");
+  return input.role;
+}
 
 async function customerAgent(orgId: string) {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
@@ -28,27 +40,34 @@ export const getSarvamIntegration = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     await assertPlatformAdmin(context.supabase, context.userId, "customers.read");
     const { supabaseAdmin, agent } = await customerAgent(data.orgId);
-    if (!agent) return { agent: null, integration: null, recentEvents: [] };
-    const [{ data: integration }, { data: events }] = await Promise.all([
+    if (!agent)
+      return { agent: null, integration: null, outboundIntegration: null, recentEvents: [] };
+    const latest = (role: AgentRole) =>
       supabaseAdmin
         .from("sarvam_agent_integrations")
         .select(
-          "id, status, token_prefix, created_at, rotated_at, last_used_at, expires_at, disabled_at, disabled_reason, test_caller_numbers",
+          "id, role, status, token_prefix, created_at, rotated_at, last_used_at, expires_at, disabled_at, disabled_reason, test_caller_numbers",
         )
         .eq("agent_config_id", agent.id)
+        .eq("role", role)
         .order("created_at", { ascending: false })
         .limit(1)
-        .maybeSingle(),
-      supabaseAdmin
-        .from("sarvam_agent_events")
-        .select("kind, status, interaction_id, created_at")
-        .eq("organization_id", data.orgId)
-        .order("created_at", { ascending: false })
-        .limit(10),
-    ]);
+        .maybeSingle();
+    const [{ data: integration }, { data: outboundIntegration }, { data: events }] =
+      await Promise.all([
+        latest("inbound"),
+        latest("outbound"),
+        supabaseAdmin
+          .from("sarvam_agent_events")
+          .select("kind, status, interaction_id, created_at")
+          .eq("organization_id", data.orgId)
+          .order("created_at", { ascending: false })
+          .limit(10),
+      ]);
     return {
       agent: { sarvamAppId: agent.sarvam_app_id, sarvamAppVersion: agent.sarvam_app_version },
       integration: integration ?? null,
+      outboundIntegration: outboundIntegration ?? null,
       recentEvents: events ?? [],
     };
   });
@@ -57,6 +76,8 @@ interface IssueInput {
   orgId: string;
   reason: string;
   expiresInDays?: number | undefined;
+  /** Which agent the credential is for; default inbound. */
+  role?: AgentRole | undefined;
 }
 
 /** Creates the integration, or rotates its credential (the old token stops working at once). */
@@ -72,12 +93,13 @@ export const issueSarvamIntegrationCredential = createServerFn({ method: "POST" 
         input.expiresInDays > 730)
     )
       throw new Error("expiresInDays must be 1-730");
-    return input;
+    return { ...input, role: roleOf(input) };
   })
   .handler(async ({ data, context }) => {
     const admin = await assertPlatformAdmin(context.supabase, context.userId, "agents.write");
     const { supabaseAdmin, agent } = await customerAgent(data.orgId);
     if (!agent) throw new Error("This customer has no agent yet.");
+    const role = data.role;
     const { generateIntegrationToken } = await import("@/lib/sarvam-agent-api.server");
     const { token, hash, prefix } = await generateIntegrationToken();
     const expiresAt = data.expiresInDays
@@ -88,6 +110,7 @@ export const issueSarvamIntegrationCredential = createServerFn({ method: "POST" 
       .from("sarvam_agent_integrations")
       .select("id")
       .eq("agent_config_id", agent.id)
+      .eq("role", role)
       .eq("status", "active")
       .maybeSingle();
     let integrationId: string;
@@ -101,6 +124,7 @@ export const issueSarvamIntegrationCredential = createServerFn({ method: "POST" 
           expires_at: expiresAt,
         })
         .eq("id", active.id)
+        .eq("role", role)
         .eq("status", "active");
       if (error) throw error;
       integrationId = active.id;
@@ -114,6 +138,7 @@ export const issueSarvamIntegrationCredential = createServerFn({ method: "POST" 
           token_prefix: prefix,
           expires_at: expiresAt,
           created_by: context.userId,
+          role,
         })
         .select("id")
         .single();
@@ -125,24 +150,26 @@ export const issueSarvamIntegrationCredential = createServerFn({ method: "POST" 
       entityType: "sarvam_agent_integration",
       entityId: integrationId,
       organizationId: data.orgId,
-      newValue: { token_prefix: prefix, expires_at: expiresAt },
+      newValue: { token_prefix: prefix, expires_at: expiresAt, role },
       reason: data.reason,
     });
     // The only time the raw token leaves the server.
-    return { token, tokenPrefix: prefix, rotated: Boolean(active), expiresAt };
+    return { token, tokenPrefix: prefix, rotated: Boolean(active), expiresAt, role };
   });
 
 export const disableSarvamIntegration = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((input: { orgId: string; reason: string }) => {
+  .inputValidator((input: { orgId: string; reason: string; role?: AgentRole | undefined }) => {
     if (!input?.orgId) throw new Error("orgId is required");
     if (!input.reason?.trim()) throw new Error("A reason is required");
+    // No role: disconnect both agents (what "disconnect" meant before dual agents).
+    if (input.role !== undefined) roleOf(input);
     return input;
   })
   .handler(async ({ data, context }) => {
     const admin = await assertPlatformAdmin(context.supabase, context.userId, "agents.write");
     const { supabaseAdmin } = await customerAgent(data.orgId);
-    const { data: disabled, error } = await supabaseAdmin
+    let disable = supabaseAdmin
       .from("sarvam_agent_integrations")
       .update({
         status: "disabled",
@@ -150,8 +177,9 @@ export const disableSarvamIntegration = createServerFn({ method: "POST" })
         disabled_reason: data.reason,
       })
       .eq("organization_id", data.orgId)
-      .eq("status", "active")
-      .select("id");
+      .eq("status", "active");
+    if (data.role) disable = disable.eq("role", data.role);
+    const { data: disabled, error } = await disable.select("id");
     if (error) throw error;
     if (!disabled?.length) throw new Error("No active integration to disconnect.");
     await writeAudit(admin, {
@@ -159,7 +187,7 @@ export const disableSarvamIntegration = createServerFn({ method: "POST" })
       entityType: "sarvam_agent_integration",
       entityId: disabled[0]!.id,
       organizationId: data.orgId,
-      newValue: { status: "disabled" },
+      newValue: { status: "disabled", role: data.role ?? "all", count: disabled.length },
       reason: data.reason,
     });
     return { ok: true as const };
@@ -195,6 +223,7 @@ export const setSarvamTestCallers = createServerFn({ method: "POST" })
       .from("sarvam_agent_integrations")
       .select("id, test_caller_numbers")
       .eq("organization_id", data.orgId)
+      .eq("role", "inbound")
       .eq("status", "active")
       .maybeSingle();
     if (!before) throw new Error("No active integration for this customer.");

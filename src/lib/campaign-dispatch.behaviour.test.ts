@@ -70,7 +70,9 @@ function setup(contactCount: number) {
           organization_id: ORG,
           sarvam_app_id: "app_1",
           sarvam_app_version: 2,
-          sarvam_outbound_ready_app_id: "app_1",
+          sarvam_outbound_app_id: "app_1-out",
+          sarvam_outbound_app_version: 2,
+          sarvam_outbound_ready_app_id: "app_1-out",
           sarvam_outbound_ready_version: 2,
         },
       ],
@@ -320,7 +322,7 @@ describe("campaign dispatch — the customer's one agent in outbound mode", () =
     };
     await dispatchDueCampaigns({ deps: t.deps });
     const req = t.requests[0]!;
-    assert.equal(req["appId"], "app_1");
+    assert.equal(req["appId"], "app_1-out", "the outbound agent, never the inbound one");
     assert.equal(req["appVersion"], 2);
     const vars = req["agentVariables"] as Record<string, unknown>;
     assert.equal(vars["call_direction"], "outbound");

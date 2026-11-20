@@ -18,7 +18,8 @@ import {
   staticEligibilityBlocker,
 } from "./outbound-eligibility.server.ts";
 import {
-  isOutboundReady,
+  OUTBOUND_AGENT_COLUMNS,
+  outboundAgentTarget,
   OUTBOUND_NOT_READY_MESSAGE,
   outboundBusinessName,
   outboundCallVariables,
@@ -407,17 +408,15 @@ export async function sendSarvamInstantOutboundCall(
 
   const { data: agentConfig } = await supabaseAdmin
     .from("agent_configs")
-    .select(
-      `id, organization_id, sarvam_app_id, sarvam_app_version, sarvam_outbound_ready_app_id, sarvam_outbound_ready_version, ${TEMPLATE_AGENT_COLUMNS}`,
-    )
+    .select(`id, organization_id, ${OUTBOUND_AGENT_COLUMNS}, ${TEMPLATE_AGENT_COLUMNS}`)
     .eq("id", phoneNumber.agent_config_id)
     .maybeSingle();
   if (!agentConfig || agentConfig.organization_id !== phoneNumber.organization_id)
     throw new Error("This number's agent does not belong to this organization.");
-  if (!agentConfig.sarvam_app_id || !agentConfig.sarvam_app_version)
-    throw new Error("This number's agent has not been mapped to a Sarvam app yet.");
-  // The customer's one agent dials only in a version confirmed for outbound.
-  if (!isOutboundReady(agentConfig)) throw new Error(OUTBOUND_NOT_READY_MESSAGE);
+  // Only the customer's registered outbound agent, in its confirmed version.
+  // Never the inbound agent (sarvam_app_id): there is no fallback.
+  const target = outboundAgentTarget(agentConfig);
+  if (!target) throw new Error(OUTBOUND_NOT_READY_MESSAGE);
   // Read before the call row is reserved, so a missing profile dials nothing.
   const templateVariables = await templateCallVariables(
     supabaseAdmin,
@@ -486,8 +485,8 @@ export async function sendSarvamInstantOutboundCall(
 
   try {
     const dialed = await adapter.createInstantOutbound({
-      appId: agentConfig.sarvam_app_id,
-      appVersion: agentConfig.sarvam_app_version,
+      appId: target.appId,
+      appVersion: target.appVersion,
       connectionId: connection.provider_connection_id,
       fromE164: phoneNumber.e164,
       toE164,

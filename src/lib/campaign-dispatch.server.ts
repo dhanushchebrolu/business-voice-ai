@@ -22,7 +22,8 @@ import {
   suppressContact,
 } from "./contact-suppression.server.ts";
 import {
-  isOutboundReady,
+  OUTBOUND_AGENT_COLUMNS,
+  outboundAgentTarget,
   outboundBusinessName,
   outboundCallVariables,
   outboundOpeningLine,
@@ -197,22 +198,18 @@ async function dispatchOneCampaign(
       : Promise.resolve({ data: null }),
     supabaseAdmin
       .from("agent_configs")
-      .select(
-        `organization_id, sarvam_app_id, sarvam_app_version, sarvam_outbound_ready_app_id, sarvam_outbound_ready_version, ${TEMPLATE_AGENT_COLUMNS}`,
-      )
+      .select(`organization_id, ${OUTBOUND_AGENT_COLUMNS}, ${TEMPLATE_AGENT_COLUMNS}`)
       .eq("id", campaign.agent_config_id)
       .eq("organization_id", campaign.organization_id)
       .maybeSingle(),
   ]);
-  if (
-    !connection?.provider_connection_id ||
-    !agentConfig?.sarvam_app_id ||
-    !agentConfig.sarvam_app_version
-  ) {
+  if (!connection?.provider_connection_id || !agentConfig) {
     return { dialed: 0, skipped: 0, completed: false };
   }
-  // The customer's one agent dials only in a version confirmed for outbound.
-  if (!isOutboundReady(agentConfig)) {
+  // Only the customer's registered outbound agent, in its confirmed version;
+  // never the inbound agent (no fallback).
+  const target = outboundAgentTarget(agentConfig);
+  if (!target) {
     console.error("campaign_dispatch:agent_not_outbound_ready", campaign.id);
     return { dialed: 0, skipped: 0, completed: false };
   }
@@ -464,8 +461,8 @@ async function dispatchOneCampaign(
 
     try {
       const result = await adapter.createInstantOutbound({
-        appId: agentConfig.sarvam_app_id,
-        appVersion: agentConfig.sarvam_app_version,
+        appId: target.appId,
+        appVersion: target.appVersion,
         connectionId: connection.provider_connection_id,
         fromE164: gate.phoneNumber.e164,
         toE164: destination,

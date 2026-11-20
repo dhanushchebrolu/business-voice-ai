@@ -44,10 +44,25 @@ function snapshot(caps: Record<string, boolean> = { capture_lead: true }): Agent
   };
 }
 
-/** A customer at the end of onboarding: business + agent, connection, assigned number, credential. */
+/**
+ * A customer at the end of onboarding: business + agent, connection, assigned
+ * number, inbound credential, and (unless outbound: false) the separate
+ * outbound agent with its own credential.
+ */
 function world(
-  over: { appId?: string | null; numberStatus?: string; deploymentId?: string | null } = {},
+  over: {
+    appId?: string | null;
+    numberStatus?: string;
+    deploymentId?: string | null;
+    outbound?: false | "no_agent" | "inbound_agent";
+  } = {},
 ) {
+  const outboundAppId =
+    over.outbound === false || over.outbound === "no_agent"
+      ? null
+      : over.outbound === "inbound_agent"
+        ? "Customer-app-1"
+        : "Customer-out-1";
   return memorySupabase({
     uniques: [
       {
@@ -70,6 +85,8 @@ function world(
           business_id: "biz_new",
           sarvam_app_id: over.appId === undefined ? "Customer-app-1" : over.appId,
           sarvam_app_version: 1,
+          sarvam_outbound_app_id: outboundAppId,
+          sarvam_outbound_app_version: outboundAppId ? 1 : null,
         },
         {
           id: "agent_other",
@@ -120,7 +137,24 @@ function world(
         },
       ],
       sarvam_agent_integrations: [
-        { id: "int_new", agent_config_id: "agent_new", status: "active", expires_at: null },
+        {
+          id: "int_new",
+          agent_config_id: "agent_new",
+          status: "active",
+          expires_at: null,
+          role: "inbound",
+        },
+        ...(over.outbound === false
+          ? []
+          : [
+              {
+                id: "int_new_out",
+                agent_config_id: "agent_new",
+                status: "active",
+                expires_at: null,
+                role: "outbound",
+              },
+            ]),
       ],
       agent_voice_language_settings: [
         {
@@ -218,7 +252,7 @@ describe("provisioning pipeline — the ten steps", () => {
     const { d, calls } = deps(db);
     const r = await runProvisioningPipeline(db.client, ORG, d);
     assert.equal(r.state, "active", r.note);
-    assert.equal(r.step, 10);
+    assert.equal(r.step, 12, "inbound live (10) and the outbound agent registered (11-12)");
     assert.equal(calls.create, 1);
     assert.equal(r.deploymentId, "dep-new");
     assert.ok(r.deploymentVerifiedAt);
@@ -802,5 +836,88 @@ describe("Phase 5 fix 2: reusing an existing deployment safely (mocked Sarvam)",
     assert.equal(r.step, 2);
     assert.match(r.note, /2 Sarvam numbers/);
     assert.equal(calls.create + calls.get, 0);
+  });
+});
+
+describe("dual-agent provisioning: the outbound agent (steps 11-12)", () => {
+  test("inbound goes live even without the outbound agent; the run waits for its credential", async () => {
+    const db = world({ outbound: false });
+    const { d, calls } = deps(db);
+    const r = await runProvisioningPipeline(db.client, ORG, d);
+    assert.equal(r.state, "waiting_for_outbound_credential", r.note);
+    assert.equal(r.step, 11);
+    assert.match(r.note, /\+917900000002 is live/);
+    assert.equal(num(db, "num_new")["status"], "active", "inbound is not held back");
+    assert.equal(calls.create, 1);
+  });
+
+  test("with the outbound credential but no outbound agent, the run waits for the operator", async () => {
+    const db = world({ outbound: "no_agent" });
+    const r = await runProvisioningPipeline(db.client, ORG, deps(db).d);
+    assert.equal(r.state, "waiting_for_outbound_agent", r.note);
+    assert.equal(r.step, 12);
+    assert.match(r.note, /outbound template/);
+  });
+
+  test("an outbound agent that is the inbound agent or a master template fails the run", async () => {
+    const same = world({ outbound: "inbound_agent" });
+    const r1 = await runProvisioningPipeline(same.client, ORG, deps(same).d);
+    assert.equal(r1.state, "failed");
+    assert.equal(r1.step, 12);
+    const master = world();
+    master.tables["agent_configs"]![0]!["sarvam_outbound_app_id"] = "Outbound-master";
+    const r2 = await runProvisioningPipeline(
+      master.client,
+      ORG,
+      deps(master, { outboundMasterAgentAppId: "Outbound-master" }).d,
+    );
+    assert.equal(r2.state, "failed");
+    assert.match(r2.note, /master template/);
+  });
+
+  test("an expired or inbound-role credential does not count as the outbound credential", async () => {
+    const db = world();
+    const out = db.tables["sarvam_agent_integrations"]!.find((r) => r["id"] === "int_new_out")!;
+    out["expires_at"] = "2026-11-01T00:00:00Z";
+    const r = await runProvisioningPipeline(db.client, ORG, deps(db).d);
+    assert.equal(r.state, "waiting_for_outbound_credential");
+    out["expires_at"] = null;
+    out["role"] = "inbound";
+    out["status"] = "disabled";
+    const again = await runProvisioningPipeline(db.client, ORG, deps(db).d);
+    assert.equal(again.state, "waiting_for_outbound_credential");
+  });
+
+  test("partial success then retry: the live inbound side is only re-read, never recreated", async () => {
+    const db = world({ outbound: "no_agent" });
+    const { d, calls } = deps(db);
+    const first = await runProvisioningPipeline(db.client, ORG, d);
+    assert.equal(first.state, "waiting_for_outbound_agent");
+    assert.equal(calls.create, 1);
+    const resumesAfterFirst = calls.resume;
+
+    // The operator registers the outbound agent; the next run completes.
+    Object.assign(db.tables["agent_configs"]![0]!, {
+      sarvam_outbound_app_id: "Customer-out-1",
+      sarvam_outbound_app_version: 2,
+    });
+    const second = await runProvisioningPipeline(db.client, ORG, d);
+    assert.equal(second.state, "active", second.note);
+    assert.equal(second.step, 12);
+    assert.match(second.note, /Customer-out-1 v2/);
+    assert.equal(calls.create, 1, "no second deployment");
+    assert.equal(calls.resume, resumesAfterFirst, "the live deployment is not resumed again");
+    assert.equal(num(db, "num_new")["status"], "active");
+    assert.equal(db.tables["agent_configs"]![0]!["sarvam_app_id"], "Customer-app-1");
+  });
+
+  test("registering the outbound agent never switches outbound calling on", async () => {
+    const db = world();
+    const r = await runProvisioningPipeline(db.client, ORG, deps(db).d);
+    assert.equal(r.state, "active");
+    assert.match(r.note, /outbound calling stays off/);
+    const agent = db.tables["agent_configs"]![0]!;
+    assert.equal(agent["sarvam_outbound_ready_app_id"], undefined);
+    assert.equal(num(db, "num_new")["outbound_enabled"], undefined);
   });
 });

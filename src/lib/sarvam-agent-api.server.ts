@@ -8,9 +8,18 @@ import type { ToolExecutionContext } from "./ai-tools.server.ts";
 import { zonedWallTimeToUtc } from "./calendar/timezone.ts";
 import { normalizeCustomerPhone } from "./phone-number.ts";
 import { UNRESOLVED_SARVAM_STATUSES } from "./sarvam-call-review.ts";
-import { checkInboundAdmission } from "./sarvam-inbound-admission.server.ts";
+import {
+  checkInboundAdmission,
+  checkOutboundAgentAdmission,
+} from "./sarvam-inbound-admission.server.ts";
 import { UNIVERSAL_CAPABILITIES } from "./universal-agent-config.ts";
 import { customGreetingFor, renderGreeting } from "./agent-greeting.ts";
+import {
+  isAgentRole,
+  OUTBOUND_AGENT_TOOLS,
+  roleAllowsAgentApi,
+  type AgentRole,
+} from "./agent-roles.ts";
 
 /**
  * ClickAI's agent API for a customer's manually created Sarvam Voice Agent.
@@ -79,6 +88,8 @@ export interface AuthenticatedIntegration {
   businessId: string;
   /** E.164 caller numbers whose calls are tests: no booking is written and no lead is created. */
   testCallerNumbers: string[];
+  /** Which of the customer's two Sarvam agents holds this credential (agent-roles.ts). */
+  role: AgentRole;
 }
 
 type Client = SupabaseClient<Database>;
@@ -107,10 +118,12 @@ export async function authenticateIntegration(
     return { ok: false, status: 401 };
   const { data: row } = await supabaseAdmin
     .from("sarvam_agent_integrations")
-    .select("id, organization_id, agent_config_id, status, expires_at, test_caller_numbers")
+    .select("id, organization_id, agent_config_id, status, expires_at, test_caller_numbers, role")
     .eq("token_hash", await hashIntegrationToken(token))
     .maybeSingle();
   if (!row || row.status !== "active") return { ok: false, status: 401 };
+  // An unknown role fails closed rather than defaulting to the wider inbound rights.
+  if (!isAgentRole(row.role)) return { ok: false, status: 401 };
   if (row.expires_at && new Date(row.expires_at).getTime() <= now.getTime())
     return { ok: false, status: 401 };
   const { data: agent } = await supabaseAdmin
@@ -128,6 +141,7 @@ export async function authenticateIntegration(
       agentConfigId: row.agent_config_id,
       businessId: agent.business_id,
       testCallerNumbers: row.test_caller_numbers ?? [],
+      role: row.role,
     },
   };
 }
@@ -825,12 +839,38 @@ export async function handleSarvamAgentRequest(
       });
   }
 
+  // Role gate: an outbound agent's credential can never book, request a
+  // callback or reach any other write tool, whatever the agent sends. Checked
+  // before admission and before the body is read, so nothing else runs.
+  if (!roleAllowsAgentApi(auth.role, tool)) {
+    await audit(deps, auth, tool ?? "context", "rejected", undefined, {
+      error_code: "OUTBOUND_AGENT_TOOL_FORBIDDEN",
+      role: auth.role,
+    });
+    return json(
+      {
+        ok: false,
+        error: "forbidden_for_outbound_agent",
+        guidance:
+          "This call cannot book appointments, arrange callbacks or send messages. Give the clinic phone number from the business facts instead.",
+      },
+      403,
+    );
+  }
+
   // Admission gate: no business data or tool action unless this customer's
-  // number is ACTIVE with a verified deployment mapping. Fails closed.
-  const admission = await checkInboundAdmission(deps.supabaseAdmin, {
-    organizationId: auth.organizationId,
-    agentConfigId: auth.agentConfigId,
-  });
+  // number is ACTIVE with a verified deployment mapping (inbound agent), or
+  // the customer's own outbound agent is registered (outbound agent). Fails closed.
+  const admission =
+    auth.role === "outbound"
+      ? await checkOutboundAgentAdmission(deps.supabaseAdmin, {
+          organizationId: auth.organizationId,
+          agentConfigId: auth.agentConfigId,
+        })
+      : await checkInboundAdmission(deps.supabaseAdmin, {
+          organizationId: auth.organizationId,
+          agentConfigId: auth.agentConfigId,
+        });
   if (!admission.admitted) {
     await audit(deps, auth, tool ?? "context", "rejected", undefined, {
       error_code: "NOT_ADMITTED",
@@ -1182,13 +1222,53 @@ export interface SarvamToolSpec {
  * (User Identifier, Interaction ID) and agent variables inserted with `@`,
  * and "save reply into variables" for on_start.
  */
-export function sarvamToolConfiguration(baseUrl: string): {
+export interface SarvamToolConfiguration {
+  role: AgentRole;
   tools: SarvamToolSpec[];
   inputVariables: { name: string; defaultValue: string }[];
   outputVariables: { name: string; type: string; extractionPrompt: string }[];
   promptGuard: string;
   allowlistIps: string[];
-} {
+}
+
+/**
+ * The configuration for one of the customer's two agents. The outbound agent
+ * gets only OUTBOUND_AGENT_TOOLS (agent-roles.ts), the variables ClickAI sets
+ * on every outbound call, and an opt-out output; ClickAI's API refuses
+ * anything else from its credential anyway.
+ */
+export function sarvamToolConfiguration(
+  baseUrl: string,
+  role: AgentRole = "inbound",
+): SarvamToolConfiguration {
+  const inbound = inboundToolConfiguration(baseUrl);
+  if (role === "inbound") return { role, ...inbound };
+  const allowed = new Set<string>(OUTBOUND_AGENT_TOOLS);
+  return {
+    role,
+    tools: inbound.tools.filter((t) => allowed.has(t.name)),
+    inputVariables: [
+      ...inbound.inputVariables,
+      { name: "call_direction", defaultValue: "outbound" },
+      { name: "clickai_call_id", defaultValue: "" },
+      { name: "campaign_objective", defaultValue: "" },
+      { name: "campaign_instructions", defaultValue: "" },
+    ],
+    outputVariables: [
+      ...inbound.outputVariables,
+      {
+        name: "opted_out",
+        type: "Enum: yes, no",
+        extractionPrompt:
+          "yes only if the person clearly asked not to be called again or to be removed; otherwise no.",
+      },
+    ],
+    promptGuard: `This agent only makes outbound calls for the business. Business facts come only from the ClickAI variables or the get_business_info tool. It may check availability, but it never books, holds a time, arranges a callback or sends a message: for any of those it gives the business phone number (business_phone). If the person asks not to be called again, it apologises and ends the call at once.`,
+    allowlistIps: inbound.allowlistIps,
+  };
+}
+
+function inboundToolConfiguration(baseUrl: string): Omit<SarvamToolConfiguration, "role"> {
   const auth = "Bearer token: the Sarvam secret holding this customer's ClickAI integration token";
   const base = `${baseUrl.replace(/\/+$/, "")}/api/public/sarvam/agent`;
   const contextVars = [

@@ -33,6 +33,7 @@ const AUTH: AuthenticatedIntegration = {
   agentConfigId: "agent_1",
   businessId: "biz_1",
   testCallerNumbers: [],
+  role: "inbound",
 };
 
 function setup(calls: Row[], events: Row[] = []) {
@@ -46,6 +47,7 @@ function setup(calls: Row[], events: Row[] = []) {
           status: "active",
           expires_at: null,
           test_caller_numbers: ["+919999999999"],
+          role: "inbound",
         },
       ],
       agent_configs: [{ id: "agent_1", organization_id: ORG, business_id: "biz_1" }],
@@ -382,6 +384,7 @@ describe("reconciliation enforces the inbound admission gate", () => {
       status: "active",
       expires_at: null,
       test_caller_numbers: [],
+      role: "inbound",
     });
     s.t("agent_configs").push({ id: "agent_b", organization_id: ORG_B, business_id: "biz_b" });
     return s;

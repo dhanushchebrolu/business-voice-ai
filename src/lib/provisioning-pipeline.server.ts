@@ -26,13 +26,24 @@ import { buildUniversalAgentConfig, type UniversalAgentConfig } from "./universa
  *                                 the verified ids are saved while the number stays inactive
  *  10  activate                   resume, read back and re-verify, and only then mark the ClickAI
  *                                 number ACTIVE; any failure leaves it inactive
+ *  11  outbound credential        an active credential with role "outbound" (separate from the
+ *                                 inbound one; ClickAI refuses every write tool for it)
+ *  12  outbound agent registered  agent_configs.sarvam_outbound_app_id/version: the customer's own
+ *                                 outbound agent, never a master template or the inbound agent
+ *
+ * The inbound number goes live at step 10 whatever happens to the outbound
+ * agent; steps 11-12 only decide whether the run is complete. Registering the
+ * outbound agent never switches outbound calling on: that still needs the
+ * separate confirmation after a supervised call (setOutboundReady).
  *
  * The admission gate (sarvam-inbound-admission.server.ts) serves business
  * data only to ACTIVE numbers whose saved verified ids match the mapping.
  *
- * Steps 4-6 need a person (Sarvam has no unattended agent-authoring API and
- * the raw credential is shown once to an admin), so the pipeline stops there
- * with a "waiting" state and resumes on the next run. It never throws for
+ * Steps 4-6 and 11-12 need a person (Sarvam has no unattended agent-authoring
+ * API and the raw credential is shown once to an admin), so the pipeline stops
+ * there with a "waiting" state and resumes on the next run. Every step reads
+ * what is already done first, so a retry after a partial success never
+ * creates a second deployment, credential or agent registration. It never throws for
  * provider or data problems: those come back as a state plus a note; only
  * unexpected database errors throw (provisioning-runs.server.ts records them).
  */
@@ -79,6 +90,8 @@ export interface PipelineDeps {
   syncDeployments: (admin: Admin, agentConfigId: string) => Promise<unknown>;
   /** The universal master agent's Sarvam app id; a customer may never be mapped to it. */
   masterAgentAppId: string | null;
+  /** The outbound master template's Sarvam app id; never a customer's outbound agent. */
+  outboundMasterAgentAppId?: string | null;
   now: () => Date;
 }
 
@@ -218,6 +231,7 @@ export async function defaultPipelineDeps(): Promise<PipelineDeps> {
     setDeploymentStatus: async (id, action) => sarvamAdapter().setDeploymentStatus(id, action),
     syncDeployments: syncAgentDeployments,
     masterAgentAppId: process.env["SARVAM_MASTER_AGENT_APP_ID"]?.trim() || null,
+    outboundMasterAgentAppId: process.env["SARVAM_OUTBOUND_MASTER_AGENT_APP_ID"]?.trim() || null,
     now: () => new Date(),
   };
 }
@@ -275,7 +289,9 @@ export async function runProvisioningPipeline(
 
   const { data: agent, error: agentError } = await admin
     .from("agent_configs")
-    .select("id, organization_id, business_id, sarvam_app_id, sarvam_app_version")
+    .select(
+      "id, organization_id, business_id, sarvam_app_id, sarvam_app_version, sarvam_outbound_app_id, sarvam_outbound_app_version",
+    )
     .eq("organization_id", organizationId)
     .maybeSingle();
   if (agentError) throw agentError;
@@ -394,6 +410,7 @@ export async function runProvisioningPipeline(
     .from("sarvam_agent_integrations")
     .select("id, expires_at")
     .eq("agent_config_id", agent.id)
+    .eq("role", "inbound")
     .eq("status", "active")
     .maybeSingle();
   if (credError) throw credError;
@@ -647,7 +664,7 @@ export async function runProvisioningPipeline(
     return done(9, "verification_failed", "the number changed during verification; run again.");
 
   if (numberLive)
-    return done(10, "active", `${number.e164} is live on deployment ${deploymentId}.`, verifiedAt);
+    return outboundSteps(`${number.e164} is live on deployment ${deploymentId}.`, verifiedAt);
 
   // 10. Resume in Sarvam, read it back, and only then mark ClickAI's number
   // ACTIVE. Any failure leaves the ClickAI number inactive and re-pauses.
@@ -716,5 +733,53 @@ export async function runProvisioningPipeline(
       verifiedAt,
     );
   }
-  return done(10, "active", `${number.e164} is live on deployment ${deploymentId}.`, verifiedAt);
+  return outboundSteps(`${number.e164} is live on deployment ${deploymentId}.`, verifiedAt);
+
+  // 11 + 12. The outbound agent. Read-only checks: nothing here can disturb
+  // the live inbound number, and a retry repeats nothing that is done.
+  async function outboundSteps(inboundNote: string, at: string | null): Promise<PipelineResult> {
+    const { data: outboundCredential, error: outboundCredError } = await admin
+      .from("sarvam_agent_integrations")
+      .select("id, expires_at")
+      .eq("agent_config_id", agent!.id)
+      .eq("role", "outbound")
+      .eq("status", "active")
+      .maybeSingle();
+    if (outboundCredError) throw outboundCredError;
+    const outboundLive =
+      outboundCredential &&
+      (!outboundCredential.expires_at || new Date(outboundCredential.expires_at) > deps.now());
+    if (!outboundLive)
+      return done(
+        11,
+        "waiting_for_outbound_credential",
+        `${inboundNote} Next: issue the outbound agent's credential (role outbound) and put it in the outbound agent's Sarvam secret.`,
+        at,
+      );
+    const outAppId = agent!.sarvam_outbound_app_id;
+    const outVersion = agent!.sarvam_outbound_app_version;
+    if (!outAppId || !outVersion)
+      return done(
+        12,
+        "waiting_for_outbound_agent",
+        `${inboundNote} Next: create the customer's outbound agent in Sarvam from the outbound template, commit it, and register its agent id and version.`,
+        at,
+      );
+    if (
+      outAppId === agent!.sarvam_app_id ||
+      [deps.masterAgentAppId, deps.outboundMasterAgentAppId].some((m) => m && m === outAppId)
+    )
+      return done(
+        12,
+        "failed",
+        `${inboundNote} The registered outbound agent ${outAppId} is the inbound agent or a master template; register the customer's own outbound agent.`,
+        at,
+      );
+    return done(
+      12,
+      "active",
+      `${inboundNote} Outbound agent ${outAppId} v${outVersion} is registered; outbound calling stays off until it is confirmed after a supervised call.`,
+      at,
+    );
+  }
 }

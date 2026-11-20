@@ -120,6 +120,7 @@ async function integrationFor(
     .from("sarvam_agent_integrations")
     .select("id, organization_id, agent_config_id, status, expires_at, test_caller_numbers")
     .eq("organization_id", organizationId)
+    .eq("role", "inbound")
     .eq("status", "active")
     .maybeSingle();
   if (error) throw error;
@@ -138,6 +139,7 @@ async function integrationFor(
     agentConfigId: row.agent_config_id,
     businessId: agent.business_id,
     testCallerNumbers: row.test_caller_numbers ?? [],
+    role: "inbound",
   };
 }
 

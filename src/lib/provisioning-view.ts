@@ -276,3 +276,82 @@ export function activationGate(i: ChecklistInput): Gate {
     );
   return { allowed: reasons.length === 0, reasons };
 }
+
+/* ------------------------------------------------------------------ */
+/* Outbound agent (steps 11-13; agent-roles.ts)                          */
+/* ------------------------------------------------------------------ */
+
+export interface OutboundChecklistInput {
+  /** The inbound agent's id: the outbound agent must be a different agent. */
+  inboundAppId: string | null;
+  credential: { status: string; expiresAt: string | null } | null;
+  appId: string | null;
+  appVersion: number | null;
+  readyAppId: string | null;
+  readyVersion: number | null;
+  /** Inbound and outbound master template ids (never a customer's agent). */
+  masterAgentAppIds: (string | null)[];
+  /** Missing onboarding data (the outbound configuration cannot be generated yet). */
+  blockers: string[];
+  voiceLanguageProblem: string | null;
+  now: Date;
+}
+
+const isMasterId = (ids: (string | null)[], appId: string | null) =>
+  Boolean(appId && ids.some((m) => m && m === appId));
+
+/** The outbound agent's three steps, shown after the inbound ten. */
+export function outboundChecklist(o: OutboundChecklistInput): ChecklistItem[] {
+  const live = credentialLive(o.credential, o.now);
+  const registered = Boolean(o.appId && o.appVersion);
+  const wrongAgent =
+    registered && (o.appId === o.inboundAppId || isMasterId(o.masterAgentAppIds, o.appId));
+  const confirmed =
+    registered && !wrongAgent && o.readyAppId === o.appId && o.readyVersion === o.appVersion;
+  return [
+    {
+      step: 11,
+      label: "Outbound credential issued",
+      status: live ? "done" : "todo",
+      detail: live
+        ? "An active outbound credential exists. ClickAI refuses booking, callbacks and every other write tool for it."
+        : "Issue the outbound credential, then store it as the Sarvam secret on the outbound agent (never the inbound agent's secret).",
+    },
+    {
+      step: 12,
+      label: "Outbound agent created in Sarvam and registered",
+      status: wrongAgent ? "failed" : registered ? "done" : "todo",
+      detail: wrongAgent
+        ? `${o.appId} is the inbound agent or a master template. Register the customer's own outbound agent.`
+        : registered
+          ? `${o.appId} v${o.appVersion}.`
+          : "Create the outbound agent from the outbound template below (only the tools listed), commit it, then register its id and version.",
+      manual: true,
+    },
+    {
+      step: 13,
+      label: "Confirmed for outbound calling (after a supervised call)",
+      status: confirmed ? "done" : "todo",
+      detail: confirmed
+        ? "ClickAI may dial this outbound agent version."
+        : registered
+          ? "Not confirmed: ClickAI dials nothing for this customer. Confirm only after a supervised call."
+          : "Register the outbound agent first.",
+    },
+  ];
+}
+
+/** Registering the customer's outbound agent (step 12). The server re-checks every rule. */
+export function outboundRegistrationGate(o: OutboundChecklistInput, appId: string): Gate {
+  const reasons: string[] = [];
+  const id = appId.trim();
+  if (o.blockers.length)
+    reasons.push("Onboarding is incomplete; the outbound configuration cannot be generated yet.");
+  if (o.voiceLanguageProblem) reasons.push("Save valid voice & language settings first.");
+  if (!credentialLive(o.credential, o.now)) reasons.push("Issue the outbound credential first.");
+  if (id && id === o.inboundAppId)
+    reasons.push("That is this customer's inbound agent; the outbound agent must be separate.");
+  if (isMasterId(o.masterAgentAppIds, id))
+    reasons.push("That is a master template, not the customer's own outbound agent.");
+  return { allowed: reasons.length === 0, reasons };
+}

@@ -54,6 +54,7 @@ function setup(calls: Row[]) {
           status: "active",
           expires_at: null,
           test_caller_numbers: [],
+          role: "inbound",
         },
       ],
       agent_configs: [{ id: "agent_1", organization_id: ORG, business_id: "biz_1" }],

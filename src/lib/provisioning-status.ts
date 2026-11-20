@@ -91,3 +91,50 @@ export function provisioningStatusLabel(input: ProvisioningStatusInput): Provisi
   }
   return { label: "Waiting for phone number", tone: "ready" };
 }
+
+export interface CustomerSetupInput {
+  /** The customer's agent row exists (onboarding saved the business and agent). */
+  agentExists: boolean;
+  /** agent_configs.sarvam_app_id && sarvam_app_version. */
+  inboundAgentReady: boolean;
+  /** agent_configs.sarvam_outbound_app_id && sarvam_outbound_app_version. */
+  outboundAgentReady: boolean;
+  hasNumber: boolean;
+  numberActive: boolean;
+  inboundEnabled: boolean;
+  /** provisioningStatusLabel said "Setup needs admin attention". */
+  needsAttention: boolean;
+}
+
+export type CustomerSetupStepStatus = "done" | "in_progress" | "attention" | "pending";
+
+export interface CustomerSetupStep {
+  label: string;
+  status: CustomerSetupStepStatus;
+}
+
+/**
+ * The customer's setup progress in plain words (dual-agent provisioning). No
+ * Sarvam id, error text or internal field ever appears: only which step is
+ * done, which one is under way, and whether the ClickAI team is needed. The
+ * first unfinished step is "in_progress" (or "attention"); later ones are
+ * "pending". Outbound calling itself is switched on separately by ClickAI.
+ */
+export function customerSetupSteps(i: CustomerSetupInput): CustomerSetupStep[] {
+  const steps: [string, boolean][] = [
+    ["Business information received", i.agentExists],
+    ["Creating your inbound AI agent", i.inboundAgentReady],
+    ["Creating your outbound AI agent", i.outboundAgentReady],
+    ["Assigning your phone number", i.hasNumber],
+    ["Connecting your phone line", i.numberActive && i.inboundEnabled],
+  ];
+  const allDone = steps.every(([, done]) => done);
+  steps.push(["Ready", allDone]);
+  let current = false;
+  return steps.map(([label, done]) => {
+    if (done) return { label, status: "done" as const };
+    if (current) return { label, status: "pending" as const };
+    current = true;
+    return { label, status: i.needsAttention ? ("attention" as const) : ("in_progress" as const) };
+  });
+}

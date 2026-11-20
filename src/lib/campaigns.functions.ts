@@ -116,16 +116,13 @@ export const launchCampaign = createServerFn({ method: "POST" })
       const { data: agentConfig } = await supabaseAdmin
         .from("agent_configs")
         .select(
-          "organization_id, sarvam_app_id, sarvam_app_version, sarvam_outbound_ready_app_id, sarvam_outbound_ready_version",
+          "organization_id, sarvam_app_id, sarvam_outbound_app_id, sarvam_outbound_app_version, sarvam_outbound_ready_app_id, sarvam_outbound_ready_version",
         )
         .eq("id", campaign.agent_config_id)
         .maybeSingle();
       if (!agentConfig || agentConfig.organization_id !== orgId)
         throw new Error("This campaign's agent does not belong to this organization.");
-      if (!agentConfig.sarvam_app_id || !agentConfig.sarvam_app_version)
-        throw new Error(
-          "This campaign's agent has not been mapped to a Sarvam app yet — contact support.",
-        );
+      // Only the customer's registered, confirmed outbound agent (never the inbound one).
       const { isOutboundReady, OUTBOUND_NOT_READY_MESSAGE } =
         await import("@/lib/sarvam-outbound-mode.server");
       if (!isOutboundReady(agentConfig)) throw new Error(OUTBOUND_NOT_READY_MESSAGE);
@@ -230,6 +227,31 @@ async function launchViaSarvamCampaign(
     variables: unknown;
     contacts: { phone: string; opted_out: boolean } | null;
   }[];
+
+  // The Sarvam campaign was created in Sarvam's console; it must run this
+  // customer's confirmed OUTBOUND agent, never the inbound one (fail closed).
+  const { data: campaignAgent } = await supabaseAdmin
+    .from("campaigns")
+    .select(
+      "agent_configs(organization_id, sarvam_app_id, sarvam_outbound_app_id, sarvam_outbound_app_version, sarvam_outbound_ready_app_id, sarvam_outbound_ready_version)",
+    )
+    .eq("id", campaign.id)
+    .eq("organization_id", orgId)
+    .maybeSingle();
+  const agentRow = (campaignAgent as { agent_configs?: unknown } | null)?.agent_configs as
+    | (import("@/lib/sarvam-outbound-mode.server").OutboundReadiness & { organization_id: string })
+    | null
+    | undefined;
+  const { outboundAgentTarget, sarvamCampaignUsesAgent, OUTBOUND_NOT_READY_MESSAGE } =
+    await import("@/lib/sarvam-outbound-mode.server");
+  const target =
+    agentRow && agentRow.organization_id === orgId ? outboundAgentTarget(agentRow) : null;
+  if (!target) throw new Error(OUTBOUND_NOT_READY_MESSAGE);
+  const sarvamCampaign = await adapter.getCampaign(campaign.provider_campaign_id!);
+  if (!sarvamCampaignUsesAgent(sarvamCampaign.raw, target))
+    throw new Error(
+      "This Sarvam campaign does not run the customer's confirmed outbound agent. Set it to that agent and version in Sarvam before launching.",
+    );
 
   const { dialable, excluded } = partitionDoNotCall(typedPending);
   // Supervised-test allowlist (SARVAM_OUTBOUND_TEST_ALLOWLIST), as on every other

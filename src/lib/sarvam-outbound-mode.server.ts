@@ -6,8 +6,12 @@ import {
 } from "./outbound-eligibility.server.ts";
 
 /**
- * One Sarvam agent per customer answers inbound calls and places outbound
- * calls. The direction is set explicitly for every outbound call:
+ * Every customer has two Sarvam agents (agent-roles.ts): the inbound agent
+ * answers the customer's number; the OUTBOUND agent, registered separately
+ * (agent_configs.sarvam_outbound_app_id/_version), is the only one ClickAI
+ * dials. outboundAgentTarget() is the one place that picks it, and there is
+ * no fallback to the inbound agent. The direction is still set explicitly
+ * for every outbound call:
  *
  *   - ClickAI passes call_direction = "outbound", its own call id and the
  *     campaign objective/instructions as agent variables, and overrides the
@@ -18,16 +22,16 @@ import {
  *     agent's declared default call_direction ("inbound") applies. Stored
  *     campaign data never switches an inbound call to outbound.
  *
- * Sarvam drops variables an agent does not declare, so only an agent version
- * confirmed to declare them (and to carry the outbound section) is dialled:
- * agent_configs.sarvam_outbound_ready_app_id/_version must equal the agent's
- * current mapping. See OUTBOUND_AGENT_VARIABLES for what the agent declares.
+ * Sarvam drops variables an agent does not declare, so only an outbound agent
+ * version confirmed after a supervised call is dialled:
+ * agent_configs.sarvam_outbound_ready_app_id/_version must equal the
+ * registered outbound agent. See OUTBOUND_AGENT_VARIABLES for what it declares.
  */
 
 type Admin = SupabaseClient<Database>;
 
 export const OUTBOUND_NOT_READY_MESSAGE =
-  "This customer's Sarvam agent version has not been confirmed for outbound calls yet.";
+  "This customer's outbound Sarvam agent has not been registered and confirmed for outbound calls yet.";
 
 /** Variables the customer's agent declares for outbound calls (template requirement). */
 export const OUTBOUND_AGENT_VARIABLES = {
@@ -54,21 +58,55 @@ export function withoutReservedOutboundVariables<T>(
   return out;
 }
 
+/** agent_configs columns every outbound path reads. */
+export const OUTBOUND_AGENT_COLUMNS =
+  "sarvam_app_id, sarvam_outbound_app_id, sarvam_outbound_app_version, sarvam_outbound_ready_app_id, sarvam_outbound_ready_version";
+
 export interface OutboundReadiness {
+  /** The inbound agent: read only to make sure it is never dialled. */
   sarvam_app_id: string | null;
-  sarvam_app_version: number | null;
+  sarvam_outbound_app_id: string | null;
+  sarvam_outbound_app_version: number | null;
   sarvam_outbound_ready_app_id: string | null;
   sarvam_outbound_ready_version: number | null;
 }
 
-/** True only when the confirmed outbound version is exactly the agent's current mapping. */
+/**
+ * The Sarvam agent and version an outbound call dials, or null (refuse).
+ * Only the customer's registered OUTBOUND agent, only in the version confirmed
+ * for outbound, and never an agent that is also the inbound one. There is
+ * deliberately no fallback to sarvam_app_id.
+ */
+export function outboundAgentTarget(
+  agent: OutboundReadiness,
+): { appId: string; appVersion: number } | null {
+  const appId = agent.sarvam_outbound_app_id;
+  const appVersion = agent.sarvam_outbound_app_version;
+  if (!appId || !appVersion || appVersion < 1) return null;
+  if (appId === agent.sarvam_app_id) return null;
+  if (agent.sarvam_outbound_ready_app_id !== appId) return null;
+  if (agent.sarvam_outbound_ready_version !== appVersion) return null;
+  return { appId, appVersion };
+}
+
+/** True only when outboundAgentTarget would dial something. */
 export function isOutboundReady(agent: OutboundReadiness): boolean {
-  return (
-    Boolean(agent.sarvam_app_id) &&
-    Boolean(agent.sarvam_app_version) &&
-    agent.sarvam_outbound_ready_app_id === agent.sarvam_app_id &&
-    agent.sarvam_outbound_ready_version === agent.sarvam_app_version
-  );
+  return outboundAgentTarget(agent) !== null;
+}
+
+/**
+ * A Sarvam campaign (created in Sarvam's console) must run the customer's
+ * outbound agent in its confirmed version before ClickAI uploads anyone to it.
+ * Reads app_id / app_version from Sarvam's campaign record; anything missing
+ * or different refuses (fail closed).
+ */
+export function sarvamCampaignUsesAgent(
+  raw: Record<string, unknown>,
+  target: { appId: string; appVersion: number },
+): boolean {
+  const appId = raw["app_id"];
+  const version = Number(raw["app_version"]);
+  return appId === target.appId && version === target.appVersion;
 }
 
 /** Customer-written text for the model: no control characters, single spaces, capped. */
@@ -148,9 +186,10 @@ export type SetOutboundReadyResult =
 export const OUTBOUND_MAX_CALL_SECONDS = { min: 60, max: 3600 } as const;
 
 /**
- * Records (or clears) the customer's CURRENT agent version as confirmed for
- * outbound calls. The write is conditional on the mapping it read, so a
- * concurrent remap can never be marked ready by mistake.
+ * Records (or clears) the customer's registered OUTBOUND agent version as
+ * confirmed for outbound calls. The write is conditional on the outbound
+ * mapping it read, so a concurrent re-registration can never be marked ready
+ * by mistake. The inbound agent can never be confirmed for outbound.
  */
 export async function setOutboundReady(
   admin: Admin,
@@ -182,22 +221,29 @@ export async function setOutboundReady(
   }
   const { data: agents, error } = await admin
     .from("agent_configs")
-    .select("id, organization_id, sarvam_app_id, sarvam_app_version")
+    .select(
+      "id, organization_id, sarvam_app_id, sarvam_outbound_app_id, sarvam_outbound_app_version",
+    )
     .eq("organization_id", input.organizationId);
   if (error) throw error;
   const own = (agents ?? []).filter((a) => a.organization_id === input.organizationId);
   if (own.length !== 1) return { ok: false, reason: "This customer must have exactly one agent." };
   const agent = own[0]!;
-  if (input.ready && (!agent.sarvam_app_id || !agent.sarvam_app_version))
-    return { ok: false, reason: "This customer's agent is not mapped to a Sarvam agent version." };
+  if (input.ready && (!agent.sarvam_outbound_app_id || !agent.sarvam_outbound_app_version))
+    return {
+      ok: false,
+      reason: "Register this customer's outbound Sarvam agent before confirming outbound calls.",
+    };
+  if (input.ready && agent.sarvam_outbound_app_id === agent.sarvam_app_id)
+    return { ok: false, reason: "The outbound agent must not be the inbound agent." };
 
   let query = admin
     .from("agent_configs")
     .update(
       input.ready
         ? {
-            sarvam_outbound_ready_app_id: agent.sarvam_app_id,
-            sarvam_outbound_ready_version: agent.sarvam_app_version,
+            sarvam_outbound_ready_app_id: agent.sarvam_outbound_app_id,
+            sarvam_outbound_ready_version: agent.sarvam_outbound_app_version,
             sarvam_outbound_max_call_seconds: input.maxCallSeconds!,
           }
         : {
@@ -210,8 +256,8 @@ export async function setOutboundReady(
     .eq("organization_id", input.organizationId);
   if (input.ready)
     query = query
-      .eq("sarvam_app_id", agent.sarvam_app_id!)
-      .eq("sarvam_app_version", agent.sarvam_app_version!);
+      .eq("sarvam_outbound_app_id", agent.sarvam_outbound_app_id!)
+      .eq("sarvam_outbound_app_version", agent.sarvam_outbound_app_version!);
   const { data: updated, error: updateError } = await query.select("id");
   if (updateError) throw updateError;
   if (!updated || updated.length === 0)
@@ -220,8 +266,8 @@ export async function setOutboundReady(
     ? {
         ok: true,
         ready: true,
-        appId: agent.sarvam_app_id,
-        appVersion: agent.sarvam_app_version,
+        appId: agent.sarvam_outbound_app_id,
+        appVersion: agent.sarvam_outbound_app_version,
         maxCallSeconds: input.maxCallSeconds!,
       }
     : { ok: true, ready: false, appId: null, appVersion: null, maxCallSeconds: null };
@@ -277,9 +323,7 @@ export async function checkSarvamCampaignStatusChange(
   const campaign = rows[0]!;
   const { data: agent, error: agentError } = await admin
     .from("agent_configs")
-    .select(
-      "organization_id, sarvam_app_id, sarvam_app_version, sarvam_outbound_ready_app_id, sarvam_outbound_ready_version",
-    )
+    .select(`organization_id, ${OUTBOUND_AGENT_COLUMNS}`)
     .eq("id", campaign.agent_config_id!)
     .maybeSingle();
   if (agentError) throw agentError;

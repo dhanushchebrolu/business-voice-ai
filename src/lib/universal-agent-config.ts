@@ -1,6 +1,7 @@
 import type { AgentSnapshot } from "./agent-instructions.ts";
 import { normalizeCustomerPhone } from "./phone-number.ts";
 import { sarvamAgentConfigPatch, validateVoiceLanguageSettings } from "./sarvam-voice-catalog.ts";
+import { OUTBOUND_AGENT_TOOLS, OUTBOUND_FORBIDDEN_TOOLS } from "./agent-roles.ts";
 
 /**
  * The customer-specific configuration of ClickAI's ONE universal Sarvam
@@ -165,14 +166,14 @@ function missingFor(
 }
 
 /** FNV-1a over a canonical JSON string — deterministic, no crypto needed. */
-function fingerprintOf(value: unknown): string {
+function fingerprintOf(value: unknown, prefix = `u${UNIVERSAL_AGENT_TEMPLATE_VERSION}`): string {
   const text = JSON.stringify(value);
   let h = 0x811c9dc5;
   for (let i = 0; i < text.length; i++) {
     h ^= text.charCodeAt(i);
     h = Math.imul(h, 0x01000193) >>> 0;
   }
-  return `u${UNIVERSAL_AGENT_TEMPLATE_VERSION}-${h.toString(16).padStart(8, "0")}`;
+  return `${prefix}-${h.toString(16).padStart(8, "0")}`;
 }
 
 /** A saved agent_voice_language_settings row, as the generator needs it. */
@@ -291,4 +292,58 @@ export function capabilityAllowsTool(
   tool: MasterAgentTool,
 ): boolean {
   return config.tools.enable.includes(tool);
+}
+
+/* ------------------------------------------------------------------ */
+/* Outbound agent (agent-roles.ts)                                       */
+/* ------------------------------------------------------------------ */
+
+/** Bump when the outbound template's tool set, variables or prompt contract change. */
+export const OUTBOUND_AGENT_TEMPLATE_VERSION = 1;
+
+/**
+ * The customer's OUTBOUND agent: the same business data (read live by the
+ * on-start hook) and the same voice and languages as the inbound agent, but a
+ * fixed tool set that does not depend on capabilities. Booking, callbacks,
+ * reminders and transfer are never on it, whatever the customer enables.
+ */
+export interface OutboundAgentConfig {
+  role: "outbound";
+  templateVersion: number;
+  businessType: string;
+  tools: { enable: string[]; forbidden: string[] };
+  /** Agent variables ClickAI sets on every outbound call; the agent must declare them. */
+  callVariables: string[];
+  blockers: string[];
+  voiceLanguage: VoiceLanguageConfig | null;
+  voiceLanguageProblem: string | null;
+  fingerprint: string;
+}
+
+export function buildOutboundAgentConfig(
+  s: AgentSnapshot,
+  voiceLanguage?: SavedVoiceLanguage | null,
+): OutboundAgentConfig {
+  const blockers: string[] = [];
+  if (!s.business.name?.trim()) blockers.push("Business name is missing.");
+  const vl =
+    voiceLanguage === undefined
+      ? { config: null, problem: null }
+      : voiceLanguageConfig(voiceLanguage);
+  const core = {
+    role: "outbound" as const,
+    templateVersion: OUTBOUND_AGENT_TEMPLATE_VERSION,
+    businessType: s.business.business_type,
+    tools: { enable: [...OUTBOUND_AGENT_TOOLS], forbidden: [...OUTBOUND_FORBIDDEN_TOOLS] },
+    callVariables: [
+      "call_direction",
+      "clickai_call_id",
+      "campaign_objective",
+      "campaign_instructions",
+    ],
+    blockers,
+    voiceLanguage: vl.config,
+    voiceLanguageProblem: vl.problem,
+  };
+  return { ...core, fingerprint: fingerprintOf(core, `o${OUTBOUND_AGENT_TEMPLATE_VERSION}`) };
 }

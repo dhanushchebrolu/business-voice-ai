@@ -1046,7 +1046,9 @@ describe("single-call number reservation (concurrent requests and crash recovery
         organization_id: ORG_ID,
         sarvam_app_id: "app_1",
         sarvam_app_version: 2,
-        sarvam_outbound_ready_app_id: "app_1",
+        sarvam_outbound_app_id: "app_1-out",
+        sarvam_outbound_app_version: 2,
+        sarvam_outbound_ready_app_id: "app_1-out",
         sarvam_outbound_ready_version: 2,
       },
     ];
@@ -1299,7 +1301,9 @@ describe("equivalent number formats share one reservation (single call vs campai
         organization_id: ORG_ID,
         sarvam_app_id: "app_1",
         sarvam_app_version: 2,
-        sarvam_outbound_ready_app_id: "app_1",
+        sarvam_outbound_app_id: "app_1-out",
+        sarvam_outbound_app_version: 2,
+        sarvam_outbound_ready_app_id: "app_1-out",
         sarvam_outbound_ready_version: 2,
       },
     ];
@@ -1790,7 +1794,9 @@ describe("campaign dispatch vs the number reservation", () => {
         organization_id: ORG,
         sarvam_app_id: "app",
         sarvam_app_version: 1,
-        sarvam_outbound_ready_app_id: "app",
+        sarvam_outbound_app_id: "app-out",
+        sarvam_outbound_app_version: 1,
+        sarvam_outbound_ready_app_id: "app-out",
         sarvam_outbound_ready_version: 1,
       },
     ];

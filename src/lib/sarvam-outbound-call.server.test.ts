@@ -221,7 +221,9 @@ const AGENT_CONFIG_ROW = {
   organization_id: "org_1",
   sarvam_app_id: "app_1",
   sarvam_app_version: 2,
-  sarvam_outbound_ready_app_id: "app_1",
+  sarvam_outbound_app_id: "app_1-out",
+  sarvam_outbound_app_version: 2,
+  sarvam_outbound_ready_app_id: "app_1-out",
   sarvam_outbound_ready_version: 2,
 };
 
@@ -249,7 +251,11 @@ describe("sendSarvamInstantOutboundCall — happy path", () => {
     );
 
     assert.deepEqual(result, { callId: "call_1", interactionId: "int_1", outcome: "started" });
-    assert.equal((requestBody as { app_config: { app_id: string } }).app_config.app_id, "app_1");
+    // The customer's OUTBOUND agent, never the inbound one (app_1).
+    assert.equal(
+      (requestBody as { app_config: { app_id: string } }).app_config.app_id,
+      "app_1-out",
+    );
     assert.equal(
       (requestBody as { user_config: { user_phone_number: string } }).user_config.user_phone_number,
       "+912222222222",
@@ -398,12 +404,21 @@ describe("sendSarvamInstantOutboundCall — validation before ever dialing", () 
     );
   });
 
-  test("rejects when the agent has not been mapped to a Sarvam app", async () => {
+  test("rejects when no outbound Sarvam agent is registered (the inbound one is never used)", async () => {
     const { client } = makeFakeSupabase({
       phone_numbers: { select: [{ data: PHONE_NUMBER_ROW, error: null }] },
       telephony_connections: { select: [{ data: CONNECTION_ROW, error: null }] },
       agent_configs: {
-        select: [{ data: { ...AGENT_CONFIG_ROW, sarvam_app_id: null }, error: null }],
+        select: [
+          {
+            data: {
+              ...AGENT_CONFIG_ROW,
+              sarvam_outbound_app_id: null,
+              sarvam_outbound_app_version: null,
+            },
+            error: null,
+          },
+        ],
       },
     });
     await assert.rejects(
@@ -414,7 +429,7 @@ describe("sendSarvamInstantOutboundCall — validation before ever dialing", () 
           toE164: "+912222222222",
         }),
       ),
-      /has not been mapped to a Sarvam app yet/i,
+      /outbound Sarvam agent has not been registered/i,
     );
   });
 });
@@ -841,6 +856,26 @@ describe("sendSarvamInstantOutboundCall — one agent, outbound mode set per cal
       "remapped to a version not yet confirmed",
       { ...AGENT_CONFIG_ROW, sarvam_outbound_ready_version: 1 },
     ],
+    // No fallback to the inbound agent, even when the inbound agent was
+    // confirmed for outbound under the old one-agent model.
+    [
+      "only the inbound agent (no outbound agent registered)",
+      {
+        ...AGENT_CONFIG_ROW,
+        sarvam_outbound_app_id: null,
+        sarvam_outbound_app_version: null,
+        sarvam_outbound_ready_app_id: "app_1",
+        sarvam_outbound_ready_version: 2,
+      },
+    ],
+    [
+      "registered as the inbound agent itself",
+      {
+        ...AGENT_CONFIG_ROW,
+        sarvam_outbound_app_id: "app_1",
+        sarvam_outbound_ready_app_id: "app_1",
+      },
+    ],
   ] as const)
     test(`refused when the agent version is ${label}: nothing reserved, nothing dialled`, async () => {
       const { client, calls } = scriptUntilDial(row);
@@ -854,7 +889,7 @@ describe("sendSarvamInstantOutboundCall — one agent, outbound mode set per cal
           (e: Error) => e.message,
         ),
       );
-      assert.match(String(result), /not been confirmed for outbound/);
+      assert.match(String(result), /confirmed for outbound/);
       assert.equal(requestBody, undefined, "no request to Sarvam");
       assert.equal(
         calls.filter((c) => c.table === "call_logs" && c.type !== "select").length,
@@ -863,7 +898,7 @@ describe("sendSarvamInstantOutboundCall — one agent, outbound mode set per cal
       );
     });
 
-  test("dials the customer's ONE agent mapping with direction, call id, objective and the outbound opening line", async () => {
+  test("dials the customer's OUTBOUND agent with direction, call id, objective and the outbound opening line", async () => {
     const { client } = scriptUntilDial(
       { ...AGENT_CONFIG_ROW, business_id: "biz_1" },
       {
@@ -891,7 +926,7 @@ describe("sendSarvamInstantOutboundCall — one agent, outbound mode set per cal
         }),
     );
     const appConfig = (requestBody as { app_config: Record<string, unknown> }).app_config;
-    assert.equal(appConfig["app_id"], "app_1", "the same agent the inbound deployment uses");
+    assert.equal(appConfig["app_id"], "app_1-out", "the outbound agent, never the inbound one");
     assert.equal(appConfig["app_version"], 2);
     assert.deepEqual(appConfig["agent_variables"], {
       note: "kept",

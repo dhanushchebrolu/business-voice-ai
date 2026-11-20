@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   isOutboundReady,
+  outboundAgentTarget,
+  sarvamCampaignUsesAgent,
   outboundCallVariables,
   outboundOpeningLine,
   OUTBOUND_TEXT_LIMITS,
@@ -12,22 +14,29 @@ import {
 } from "./sarvam-outbound-mode.server.ts";
 import { memorySupabase } from "./payments/memory-supabase.test-helper.ts";
 
-const mapped = (over: Record<string, unknown> = {}) => ({
-  sarvam_app_id: "app_1",
-  sarvam_app_version: 5,
-  sarvam_outbound_ready_app_id: "app_1",
-  sarvam_outbound_ready_version: 5,
-  ...over,
-});
+const mapped = (over: Record<string, unknown> = {}) =>
+  ({
+    sarvam_app_id: "app_1",
+    sarvam_outbound_app_id: "app_1-out",
+    sarvam_outbound_app_version: 5,
+    sarvam_outbound_ready_app_id: "app_1-out",
+    sarvam_outbound_ready_version: 5,
+    ...over,
+  }) as Parameters<typeof isOutboundReady>[0];
 
-describe("outbound readiness (one agent per customer)", () => {
-  test("ready only when the confirmed outbound version is the agent's current mapping", () => {
+describe("outbound readiness (a separate outbound agent per customer)", () => {
+  test("ready only when the registered outbound agent's version is the confirmed one", () => {
     assert.equal(isOutboundReady(mapped()), true);
-    assert.equal(isOutboundReady(mapped({ sarvam_app_version: 6 })), false, "remapped to v6");
+    assert.deepEqual(outboundAgentTarget(mapped()), { appId: "app_1-out", appVersion: 5 });
     assert.equal(
-      isOutboundReady(mapped({ sarvam_app_id: "app_2" })),
+      isOutboundReady(mapped({ sarvam_outbound_app_version: 6 })),
       false,
-      "another agent, same version",
+      "re-registered as v6",
+    );
+    assert.equal(
+      isOutboundReady(mapped({ sarvam_outbound_app_id: "app_2-out" })),
+      false,
+      "another outbound agent, same version",
     );
     assert.equal(
       isOutboundReady(
@@ -37,10 +46,49 @@ describe("outbound readiness (one agent per customer)", () => {
       "never confirmed",
     );
     assert.equal(
-      isOutboundReady(mapped({ sarvam_app_id: null, sarvam_outbound_ready_app_id: null })),
+      isOutboundReady(
+        mapped({
+          sarvam_outbound_app_id: null,
+          sarvam_outbound_app_version: null,
+          sarvam_outbound_ready_app_id: null,
+        }),
+      ),
       false,
-      "unmapped agent",
+      "no outbound agent registered",
     );
+  });
+
+  test("never falls back to the inbound agent", () => {
+    // The old one-agent model: the inbound agent confirmed for outbound, no outbound agent.
+    assert.equal(
+      outboundAgentTarget(
+        mapped({
+          sarvam_outbound_app_id: null,
+          sarvam_outbound_app_version: null,
+          sarvam_outbound_ready_app_id: "app_1",
+          sarvam_outbound_ready_version: 5,
+        }),
+      ),
+      null,
+    );
+    // An outbound registration that is the inbound agent is refused too.
+    assert.equal(
+      outboundAgentTarget(
+        mapped({ sarvam_outbound_app_id: "app_1", sarvam_outbound_ready_app_id: "app_1" }),
+      ),
+      null,
+    );
+    // The inbound agent changing version does not matter to outbound.
+    assert.equal(isOutboundReady(mapped({ sarvam_app_id: "app_9" })), true);
+  });
+
+  test("a Sarvam campaign must run exactly the confirmed outbound agent and version", () => {
+    const target = { appId: "app_1-out", appVersion: 5 };
+    assert.equal(sarvamCampaignUsesAgent({ app_id: "app_1-out", app_version: 5 }, target), true);
+    assert.equal(sarvamCampaignUsesAgent({ app_id: "app_1-out", app_version: "5" }, target), true);
+    assert.equal(sarvamCampaignUsesAgent({ app_id: "app_1", app_version: 5 }, target), false);
+    assert.equal(sarvamCampaignUsesAgent({ app_id: "app_1-out", app_version: 4 }, target), false);
+    assert.equal(sarvamCampaignUsesAgent({}, target), false, "missing fields fail closed");
   });
 });
 
@@ -81,10 +129,18 @@ describe("marking a version outbound-ready", () => {
   const setup = (agents: Record<string, unknown>[]) =>
     memorySupabase({ tables: { agent_configs: agents } });
 
-  test("records exactly the current app id and version; clearing removes both", async () => {
-    const db = setup([
-      { id: "a1", organization_id: "org_a", sarvam_app_id: "app_1", sarvam_app_version: 5 },
-    ]);
+  const withOutbound = (over: Record<string, unknown> = {}) => ({
+    id: "a1",
+    organization_id: "org_a",
+    sarvam_app_id: "app_1",
+    sarvam_app_version: 5,
+    sarvam_outbound_app_id: "app_1-out",
+    sarvam_outbound_app_version: 3,
+    ...over,
+  });
+
+  test("records exactly the registered outbound agent and version; clearing removes both", async () => {
+    const db = setup([withOutbound()]);
     const r = await setOutboundReady(db.client, {
       organizationId: "org_a",
       ready: true,
@@ -93,13 +149,13 @@ describe("marking a version outbound-ready", () => {
     assert.deepEqual(r, {
       ok: true,
       ready: true,
-      appId: "app_1",
-      appVersion: 5,
+      appId: "app_1-out",
+      appVersion: 3,
       maxCallSeconds: 900,
     });
     const agent = db.tables["agent_configs"]![0]!;
-    assert.equal(agent["sarvam_outbound_ready_version"], 5);
-    assert.equal(agent["sarvam_outbound_ready_app_id"], "app_1");
+    assert.equal(agent["sarvam_outbound_ready_version"], 3);
+    assert.equal(agent["sarvam_outbound_ready_app_id"], "app_1-out");
     assert.equal(agent["sarvam_outbound_max_call_seconds"], 900);
     await setOutboundReady(db.client, { organizationId: "org_a", ready: false });
     assert.equal(agent["sarvam_outbound_ready_version"], null);
@@ -109,9 +165,7 @@ describe("marking a version outbound-ready", () => {
 
   test("confirming needs the agent's maximum call length from Sarvam, 1 to 60 whole minutes", async () => {
     for (const maxCallSeconds of [undefined, 59, 3601, 90.5, Number.NaN]) {
-      const db = setup([
-        { id: "a1", organization_id: "org_a", sarvam_app_id: "app_1", sarvam_app_version: 5 },
-      ]);
+      const db = setup([withOutbound()]);
       const r = await setOutboundReady(db.client, {
         organizationId: "org_a",
         ready: true,
@@ -122,9 +176,7 @@ describe("marking a version outbound-ready", () => {
       assert.equal(db.tables["agent_configs"]![0]!["sarvam_outbound_ready_version"], undefined);
     }
     for (const maxCallSeconds of [60, 3600]) {
-      const db = setup([
-        { id: "a1", organization_id: "org_a", sarvam_app_id: "app_1", sarvam_app_version: 5 },
-      ]);
+      const db = setup([withOutbound()]);
       const r = await setOutboundReady(db.client, {
         organizationId: "org_a",
         ready: true,
@@ -134,10 +186,26 @@ describe("marking a version outbound-ready", () => {
     }
   });
 
+  test("refuses without a registered outbound agent: the inbound agent is never confirmed", async () => {
+    for (const row of [
+      withOutbound({ sarvam_outbound_app_id: null, sarvam_outbound_app_version: null }),
+      withOutbound({ sarvam_outbound_app_id: "app_1" }),
+    ]) {
+      const db = setup([row]);
+      const r = await setOutboundReady(db.client, {
+        organizationId: "org_a",
+        ready: true,
+        maxCallSeconds: 900,
+      });
+      assert.equal(r.ok, false);
+      assert.equal(db.tables["agent_configs"]![0]!["sarvam_outbound_ready_app_id"], undefined);
+    }
+  });
+
   test("refuses an unmapped agent, and never touches another customer's agent", async () => {
     const db = setup([
       { id: "a1", organization_id: "org_a", sarvam_app_id: null, sarvam_app_version: null },
-      { id: "b1", organization_id: "org_b", sarvam_app_id: "app_b", sarvam_app_version: 2 },
+      withOutbound({ id: "b1", organization_id: "org_b", sarvam_app_id: "app_b" }),
     ]);
     const r = await setOutboundReady(db.client, {
       organizationId: "org_a",
@@ -166,7 +234,7 @@ describe("marking a version outbound-ready", () => {
   });
 });
 
-describe("inbound is untouched and no second agent is created", () => {
+describe("inbound is untouched and outbound code never creates or maps an agent", () => {
   const read = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
 
   test("the inbound deployment request never carries outbound variables or an opening-line override", () => {
@@ -232,7 +300,9 @@ describe("admin Sarvam campaign status changes", () => {
     organization_id: "org_a",
     sarvam_app_id: "app_a",
     sarvam_app_version: 3,
-    sarvam_outbound_ready_app_id: "app_a",
+    sarvam_outbound_app_id: "app_a-out",
+    sarvam_outbound_app_version: 3,
+    sarvam_outbound_ready_app_id: "app_a-out",
     sarvam_outbound_ready_version: 3,
   };
   const mapped = [
@@ -283,11 +353,11 @@ describe("admin Sarvam campaign status changes", () => {
     assert.deepEqual(ok, { ok: true, organizationId: "org_a" });
 
     const notReady = await checkSarvamCampaignStatusChange(
-      db(mapped, [{ ...readyAgent, sarvam_app_version: 4 }]),
+      db(mapped, [{ ...readyAgent, sarvam_outbound_app_version: 4 }]),
       { providerCampaignId: "sv_1", status: "resumed" },
     );
     assert.equal(notReady.ok, false);
-    assert.match((notReady as { reason: string }).reason, /not been confirmed for outbound/);
+    assert.match((notReady as { reason: string }).reason, /confirmed for outbound/);
   });
 
   test("fails closed: unknown, ambiguous or cross-tenant mappings are refused", async () => {

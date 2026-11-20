@@ -48,6 +48,7 @@ export type AdmissionDenial =
   | "blocked"
   | "deployment_shared"
   | "identifier_mismatch"
+  | "outbound_agent_not_registered"
   | "lookup_failed";
 
 export type AdmissionResult =
@@ -72,6 +73,43 @@ export async function checkInboundAdmission(
 ): Promise<AdmissionResult> {
   try {
     return await evaluate(admin, input);
+  } catch {
+    return { admitted: false, reason: "lookup_failed" };
+  }
+}
+
+/**
+ * Admission for the customer's OUTBOUND agent credential. The outbound agent
+ * has no deployment or number of its own (ClickAI dials it through instant
+ * outbound), so the inbound number checks do not apply. It is admitted only
+ * while the customer is not suspended/cancelled/archived and has its own
+ * outbound agent registered. What it may call is already limited to reads and
+ * the call outcome by roleAllowsAgentApi (agent-roles.ts). Fails closed.
+ */
+export async function checkOutboundAgentAdmission(
+  admin: Admin,
+  input: Pick<AdmissionInput, "organizationId" | "agentConfigId">,
+): Promise<AdmissionResult> {
+  try {
+    const { data: agent, error } = await admin
+      .from("agent_configs")
+      .select("id, organization_id, sarvam_outbound_app_id, sarvam_outbound_app_version")
+      .eq("id", input.agentConfigId)
+      .maybeSingle();
+    if (error) return { admitted: false, reason: "lookup_failed" };
+    if (!agent || agent.organization_id !== input.organizationId)
+      return { admitted: false, reason: "agent_not_found" };
+    if (!agent.sarvam_outbound_app_id || !agent.sarvam_outbound_app_version)
+      return { admitted: false, reason: "outbound_agent_not_registered" };
+    const { data: org, error: orgError } = await admin
+      .from("organizations")
+      .select("id, lifecycle_status")
+      .eq("id", input.organizationId)
+      .maybeSingle();
+    if (orgError) return { admitted: false, reason: "lookup_failed" };
+    if (!org || INACTIVE_ORG.includes(org.lifecycle_status))
+      return { admitted: false, reason: "organization_inactive" };
+    return { admitted: true, numberIds: [], deploymentIds: [] };
   } catch {
     return { admitted: false, reason: "lookup_failed" };
   }

@@ -76,6 +76,8 @@ const PROVISIONING_STATE_LABEL: Record<
   waiting_for_voice_language: { label: "Waiting for voice & language", tone: "ready" },
   waiting_for_number_confirmation: { label: "Confirm number in Sarvam", tone: "ready" },
   manual_action_required: { label: "Manual Sarvam action needed", tone: "error" },
+  waiting_for_outbound_credential: { label: "Waiting for outbound credential", tone: "ready" },
+  waiting_for_outbound_agent: { label: "Waiting for outbound agent", tone: "ready" },
 };
 
 /** Tone for the Klyro-owned Exotel runtime's readiness state — labels come from KLYRO_RUNTIME_STATE_LABEL itself. */

@@ -2,9 +2,11 @@ import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { assertPlatformAdmin, writeAudit } from "@/lib/platform-admin.server";
 import {
+  outboundRegistrationGate,
   registrationGate,
   queueStatus,
   type ChecklistInput,
+  type OutboundChecklistInput,
   type QueueStatus,
 } from "@/lib/provisioning-view";
 
@@ -20,7 +22,7 @@ import {
 
 /** Columns safe to show admins; never token_hash. */
 export const INTEGRATION_SAFE_COLUMNS =
-  "id, status, token_prefix, expires_at, last_used_at, rotated_at, created_at, disabled_at, disabled_reason";
+  "id, role, status, token_prefix, expires_at, last_used_at, rotated_at, created_at, disabled_at, disabled_reason";
 
 const RUN_COLUMNS =
   "id, organization_id, trigger, status, current_step, attempts, last_error, last_error_at, note, phone_number_id, sarvam_deployment_id, agent_config_fingerprint, deployment_verified_at, verification, started_at, finished_at, created_at, updated_at";
@@ -108,7 +110,8 @@ export const listProvisioningQueue = createServerFn({ method: "POST" })
 /** Loads everything the detail page and the registration gate need, for one customer. */
 async function loadDetail(orgId: string) {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-  const { masterAgentAppId } = await import("@/lib/sarvam-agent-registration.server");
+  const { masterAgentAppId, outboundMasterAgentAppId } =
+    await import("@/lib/sarvam-agent-registration.server");
 
   const { data: org, error: orgError } = await supabaseAdmin
     .from("organizations")
@@ -122,7 +125,7 @@ async function loadDetail(orgId: string) {
     supabaseAdmin
       .from("agent_configs")
       .select(
-        "id, business_id, sarvam_app_id, sarvam_app_version, sarvam_outbound_ready_app_id, sarvam_outbound_ready_version",
+        "id, business_id, sarvam_app_id, sarvam_app_version, sarvam_outbound_ready_app_id, sarvam_outbound_ready_version, sarvam_outbound_app_id, sarvam_outbound_app_version, sarvam_outbound_registered_at",
       )
       .eq("organization_id", orgId)
       .maybeSingle(),
@@ -158,15 +161,22 @@ async function loadDetail(orgId: string) {
   for (const r of [agentRes, numbersRes, connRes, runsRes, auditRes]) if (r.error) throw r.error;
   const agent = agentRes.data;
 
-  const { data: credential, error: credError } = agent
-    ? await supabaseAdmin
-        .from("sarvam_agent_integrations")
-        .select(INTEGRATION_SAFE_COLUMNS)
-        .eq("agent_config_id", agent.id)
-        .eq("status", "active")
-        .maybeSingle()
-    : { data: null, error: null };
+  const activeCredential = (role: "inbound" | "outbound") =>
+    agent
+      ? supabaseAdmin
+          .from("sarvam_agent_integrations")
+          .select(INTEGRATION_SAFE_COLUMNS)
+          .eq("agent_config_id", agent.id)
+          .eq("role", role)
+          .eq("status", "active")
+          .maybeSingle()
+      : Promise.resolve({ data: null, error: null });
+  const [
+    { data: credential, error: credError },
+    { data: outboundCredential, error: outboundCredError },
+  ] = await Promise.all([activeCredential("inbound"), activeCredential("outbound")]);
   if (credError) throw credError;
+  if (outboundCredError) throw outboundCredError;
 
   const { data: voiceLanguage, error: vlError } = agent
     ? await supabaseAdmin
@@ -182,13 +192,26 @@ async function loadDetail(orgId: string) {
 
   let business: { name: string; business_type: string } | null = null;
   let config: import("@/lib/universal-agent-config").UniversalAgentConfig | null = null;
+  let outboundConfig: import("@/lib/universal-agent-config").OutboundAgentConfig | null = null;
   if (agent?.business_id) {
     const { loadSnapshot } = await import("@/lib/agent-service.server");
-    const { buildUniversalAgentConfig } = await import("@/lib/universal-agent-config");
+    const { buildUniversalAgentConfig, buildOutboundAgentConfig } =
+      await import("@/lib/universal-agent-config");
     const snapshot = await loadSnapshot(supabaseAdmin, agent.business_id);
     business = { name: snapshot.business.name, business_type: snapshot.business.business_type };
     config = buildUniversalAgentConfig(snapshot, voiceLanguage ?? null);
+    outboundConfig = buildOutboundAgentConfig(snapshot, voiceLanguage ?? null);
   }
+  // What the operator copies into Sarvam for each agent (no secrets: the
+  // credential is referenced by name, its value is shown once at issue time).
+  const base = process.env["TELEPHONY_WEBHOOK_BASE_URL"]?.replace(/\/+$/, "");
+  const { sarvamToolConfiguration } = await import("@/lib/sarvam-agent-api.server");
+  const templates = base
+    ? {
+        inbound: sarvamToolConfiguration(base, "inbound"),
+        outbound: sarvamToolConfiguration(base, "outbound"),
+      }
+    : null;
 
   const number = (numbersRes.data ?? []).find((n) => n.provider === "sarvam") ?? null;
   const runs = runsRes.data ?? [];
@@ -229,6 +252,25 @@ async function loadDetail(orgId: string) {
     now: new Date(),
   };
 
+  const outboundGateInput: OutboundChecklistInput = {
+    inboundAppId: agent?.sarvam_app_id ?? null,
+    credential: outboundCredential
+      ? { status: outboundCredential.status, expiresAt: outboundCredential.expires_at }
+      : null,
+    appId: agent?.sarvam_outbound_app_id ?? null,
+    appVersion: agent?.sarvam_outbound_app_version ?? null,
+    readyAppId: agent?.sarvam_outbound_ready_app_id ?? null,
+    readyVersion: agent?.sarvam_outbound_ready_version ?? null,
+    masterAgentAppIds: [masterAgentAppId(), outboundMasterAgentAppId()],
+    blockers: outboundConfig
+      ? outboundConfig.blockers
+      : ["The customer has not finished onboarding (no business profile or agent yet)."],
+    voiceLanguageProblem: outboundConfig
+      ? outboundConfig.voiceLanguageProblem
+      : "Voice and languages are not set for this customer yet.",
+    now: gateInput.now,
+  };
+
   return {
     org,
     business,
@@ -242,8 +284,11 @@ async function loadDetail(orgId: string) {
         }
       : null,
     credential,
+    outboundCredential,
     voiceLanguage,
     config,
+    outboundConfig,
+    templates,
     runs,
     audit: auditRes.data ?? [],
     webhookRecovery: await (
@@ -251,6 +296,13 @@ async function loadDetail(orgId: string) {
     ).loadRecoveryMarker(supabaseAdmin, orgId),
     masterAgentConfigured: Boolean(gateInput.masterAgentAppId),
     gateInput: { ...gateInput, now: gateInput.now.toISOString(), masterAgentAppId: null },
+    // Master ids are not sent to the browser; the server re-checks them on registration.
+    outboundGateInput: {
+      ...outboundGateInput,
+      now: outboundGateInput.now.toISOString(),
+      masterAgentAppIds: [],
+    },
+    _outboundGate: outboundGateInput,
     _gate: gateInput,
   };
 }
@@ -263,8 +315,9 @@ export const getProvisioningDetail = createServerFn({ method: "POST" })
   })
   .handler(async ({ data, context }) => {
     await assertPlatformAdmin(context.supabase, context.userId, "customers.read");
-    const { _gate, ...detail } = await loadDetail(data.orgId);
+    const { _gate, _outboundGate, ...detail } = await loadDetail(data.orgId);
     void _gate;
+    void _outboundGate;
     return detail;
   });
 
@@ -404,6 +457,73 @@ export const registerCustomerSarvamAgent = createServerFn({ method: "POST" })
       reverify = { state: run.result?.state ?? null, note: run.result?.note ?? null };
     }
     return { ok: true as const, deploymentSync, reverify };
+  });
+
+/**
+ * Step 12: records the customer's own OUTBOUND agent (created by an operator
+ * in Sarvam from the outbound template). Refused while onboarding is
+ * incomplete, without a live outbound credential, for a master template, for
+ * the customer's inbound agent, or for any agent another customer uses
+ * (applySarvamOutboundAgentMapping; the database enforces the same rules).
+ * Registering never switches outbound calling on. Safe to repeat.
+ */
+export const registerCustomerSarvamOutboundAgent = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator(
+    (input: { orgId: string; sarvamAppId: string; sarvamAppVersion: number; reason: string }) => {
+      if (!input?.orgId) throw new Error("orgId is required");
+      if (!input.sarvamAppId?.trim()) throw new Error("The Sarvam agent id is required");
+      if (!Number.isInteger(input.sarvamAppVersion) || input.sarvamAppVersion < 1)
+        throw new Error("The Sarvam agent version must be a positive whole number");
+      if (!input.reason?.trim()) throw new Error("A reason is required");
+      return input;
+    },
+  )
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "agents.write");
+    const detail = await loadDetail(data.orgId);
+    if (!detail.agent) throw new Error("This customer has no agent yet.");
+    const gate = outboundRegistrationGate(detail._outboundGate, data.sarvamAppId);
+    if (!gate.allowed) throw new Error(gate.reasons.join(" "));
+
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { applySarvamOutboundAgentMapping } =
+      await import("@/lib/sarvam-agent-registration.server");
+    const result = await applySarvamOutboundAgentMapping(supabaseAdmin, {
+      agentConfigId: detail.agent.id,
+      organizationId: data.orgId,
+      sarvamAppId: data.sarvamAppId,
+      sarvamAppVersion: data.sarvamAppVersion,
+      masterAgentAppIds: detail._outboundGate.masterAgentAppIds,
+      registeredBy: context.userId,
+      now: new Date(),
+    });
+    await writeAudit(admin, {
+      action: "SARVAM_OUTBOUND_AGENT_REGISTERED",
+      entityType: "agent_config",
+      entityId: detail.agent.id,
+      organizationId: data.orgId,
+      oldValue: result.before,
+      newValue: {
+        sarvam_outbound_app_id: data.sarvamAppId.trim(),
+        sarvam_outbound_app_version: data.sarvamAppVersion,
+        outbound_config_fingerprint: detail.outboundConfig?.fingerprint ?? null,
+        outbound_confirmation_cleared: result.outboundConfirmationCleared,
+      },
+      reason: data.reason,
+    });
+    // Resume the provisioning run (steps 11-12 are read-only for a live customer).
+    const { runProvisioning } = await import("@/lib/provisioning-runs.server");
+    const run = await runProvisioning(supabaseAdmin, {
+      organizationId: data.orgId,
+      trigger: "admin_retry",
+      createdBy: admin.userId,
+    });
+    return {
+      ok: true as const,
+      outboundConfirmationCleared: result.outboundConfirmationCleared,
+      run: { state: run.result?.state ?? null, note: run.result?.note ?? null },
+    };
   });
 
 /**

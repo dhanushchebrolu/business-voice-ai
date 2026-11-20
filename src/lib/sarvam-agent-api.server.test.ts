@@ -216,6 +216,7 @@ async function seed() {
       token_prefix: prefix,
       status: "active",
       expires_at: null,
+      role: "inbound",
     });
   };
   await tenant(ORG_SMILE, "Smile Dental", "20:00", 500, "Dr. Meera Rao");
@@ -1398,5 +1399,134 @@ describe("outbound calls: inbound-only tools refuse, identified by ClickAI's own
       deps(),
     );
     assert.equal(res.status, 200);
+  });
+});
+
+describe("dual agents: the outbound agent's credential is limited by role", () => {
+  /** Gives a customer a second, OUTBOUND credential (and optionally registers its outbound agent). */
+  async function outboundCredential(
+    org: string,
+    opts: { registered?: boolean; role?: string } = {},
+  ) {
+    const { token, hash, prefix } = await generateIntegrationToken();
+    db.tables["sarvam_agent_integrations"]!.push({
+      id: `int-out-${org}`,
+      organization_id: org,
+      agent_config_id: `agent-${org}`,
+      token_hash: hash,
+      token_prefix: prefix,
+      status: "active",
+      expires_at: null,
+      role: opts.role ?? "outbound",
+    });
+    if (opts.registered !== false) {
+      const agent = db.tables["agent_configs"]!.find((a) => a["organization_id"] === org)!;
+      Object.assign(agent, {
+        sarvam_outbound_app_id: `Out-${org}`,
+        sarvam_outbound_app_version: 1,
+      });
+    }
+    return token;
+  }
+  const rejectedEvents = () =>
+    (db.tables["sarvam_agent_events"] ?? []).filter(
+      (e) =>
+        e["status"] === "rejected" &&
+        (e["detail"] as Record<string, unknown> | null)?.["error_code"] ===
+          "OUTBOUND_AGENT_TOOL_FORBIDDEN",
+    );
+
+  test("booking and callbacks are refused for the outbound credential, whatever the body says", async () => {
+    const token = await outboundCredential(ORG_SMILE);
+    for (const [tool, body] of [
+      ["book_appointment", { date: "2026-11-12", time: "10:00", customer_name: "A" }],
+      ["request_callback", { customer_name: "A", reason: "book", call_direction: "inbound" }],
+    ] as const) {
+      const r = await call(`tools/${tool}`, token, body);
+      assert.equal(r.status, 403, tool);
+      assert.equal(r.body["error"], "forbidden_for_outbound_agent");
+      assert.doesNotMatch(JSON.stringify(r.body), /CONFIRMED|RECORDED/);
+    }
+    assert.equal(toolCalls.length, 0, "no booking or callback tool ever ran");
+    assert.equal(rejectedEvents().length, 2, "each refusal is audited");
+    assert.equal(
+      rejectedEvents().every((e) => e["organization_id"] === ORG_SMILE),
+      true,
+      "audited under the credential's own customer",
+    );
+  });
+
+  test("the outbound credential may read business data, check availability and record the outcome", async () => {
+    const token = await outboundCredential(ORG_SMILE);
+    const ctx = await call("context", token);
+    assert.equal(ctx.status, 200);
+    assert.equal(ctx.body["business_name"], "Smile Dental");
+    const info = await call("tools/get_business_info", token, { organization_id: ORG_ABC });
+    assert.equal(info.body["business_name"], "Smile Dental", "never another customer's data");
+    assert.doesNotMatch(JSON.stringify(info.body), /ABC Dental|₹700/);
+    const avail = await call("tools/check_availability", token, { date: "2026-11-12" });
+    assert.equal(avail.status, 200);
+    assert.equal(toolCalls.length, 1);
+    assert.equal(toolCalls[0]!.ctx.organizationId, ORG_SMILE);
+    assert.notEqual(toolCalls[0]!.name, "book_appointment");
+    const outcome = await call("tools/record_call_outcome", token, {
+      interaction_id: "20261111/out-1",
+      outcome: "not_interested",
+      opted_out: "yes",
+    });
+    assert.equal(outcome.status, 200);
+    assert.equal(rejectedEvents().length, 0);
+  });
+
+  test("an outbound credential without a registered outbound agent gets no data", async () => {
+    const token = await outboundCredential(ORG_SMILE, { registered: false });
+    const r = await call("context", token);
+    assert.equal(r.status, 403);
+    assert.equal(r.body["error"], "not_admitted");
+    assert.doesNotMatch(JSON.stringify(r.body), /Smile Dental/);
+  });
+
+  test("an unknown role fails closed (no inbound rights by default)", async () => {
+    const token = await outboundCredential(ORG_SMILE, { role: "admin" });
+    const r = await call("tools/book_appointment", token, { date: "2026-11-12", time: "10:00" });
+    assert.equal(r.status, 401);
+    assert.equal(toolCalls.length, 0);
+  });
+
+  test("the inbound credential keeps its tools (inbound bookings are not affected)", async () => {
+    await outboundCredential(ORG_SMILE);
+    const r = await call("tools/check_availability", tokens[ORG_SMILE]!, { date: "2026-11-12" });
+    assert.equal(r.status, 200);
+    assert.equal(toolCalls.length, 1);
+  });
+
+  test("the outbound template carries only the allowed tools and the outbound call variables", () => {
+    const cfg = sarvamToolConfiguration("https://clickai.in", "outbound");
+    assert.deepEqual(cfg.tools.map((t) => t.name).sort(), [
+      "check_availability",
+      "clickai_business_context",
+      "get_business_info",
+      "record_call_outcome",
+    ]);
+    const names = cfg.inputVariables.map((v) => v.name);
+    for (const v of [
+      "call_direction",
+      "clickai_call_id",
+      "campaign_objective",
+      "campaign_instructions",
+    ])
+      assert.ok(names.includes(v), v);
+    assert.ok(cfg.outputVariables.some((v) => v.name === "opted_out"));
+    assert.doesNotMatch(JSON.stringify(cfg), /book_appointment|request_callback|send_reminder/);
+    // The inbound template is unchanged by the role parameter.
+    assert.deepEqual(
+      sarvamToolConfiguration("https://clickai.in"),
+      sarvamToolConfiguration("https://clickai.in", "inbound"),
+    );
+    assert.ok(
+      sarvamToolConfiguration("https://clickai.in").tools.some(
+        (t) => t.name === "book_appointment",
+      ),
+    );
   });
 });
