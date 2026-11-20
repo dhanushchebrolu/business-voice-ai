@@ -38,3 +38,30 @@
 - **Tests**: unit (context, compiler, separation, outcomes, eligibility), dispatcher behaviour (hours, +91, budget, wallet, in-flight, context per campaign), PostgreSQL (admission function).
 
 Not changed: the Sarvam agent, its prompt and tools; no deploy, no migration applied to production, no calls.
+
+## 4. Production safety audit fixes (2026-11-20)
+
+| Finding                      | Fix                                                                                                                                                                                                                                                                                    |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| B1 opt-outs outside contacts | `isNumberSuppressed` also refuses a number with a lead marked `do_not_contact` (inbound opt-outs included); an outbound agent's end-of-call opt-out now writes contact do-not-call at once, only for a number ClickAI dialled in the last hour (`recordCallOutcome`)                   |
+| B2 orphaned campaign starts  | `flagStartsWithoutAttempt` now includes campaign calls and moves their contact to `outcome_unknown`; in-flight counts only calls started in the last 15 minutes, so an unresolved start cannot block a customer forever (its wallet and number reservations still hold until resolved) |
+| H1 unbilled calls            | both admissions reserve the wallet for calls that ended but are not billed (`finalization_state` pending/failed)                                                                                                                                                                       |
+| H2 Sarvam cohort mode        | removed; launch refuses `dispatch_mode = 'sarvam_campaign'`                                                                                                                                                                                                                            |
+| H3 emergency stop            | `platform_settings` key `outbound.calling_paused` = `{"enabled": true}` refuses every new admission (single and campaign) immediately, no deploy; the dispatcher also re-checks the env kill switch before every contact                                                               |
+| H4 stop races                | campaign admission share-locks the campaign row; launch, pause and cancel update only from the expected status; a stop that lands after admission records the call as never started and dials nothing                                                                                  |
+| H5 resume                    | `resumeCampaign` is `launchCampaign` (every readiness check)                                                                                                                                                                                                                           |
+| H6 per-customer limit        | single-call in-flight counts campaign calls too                                                                                                                                                                                                                                        |
+| M1 stuck claims              | `releaseOrphanedCampaignClaims` (every 5 minutes) returns a `calling` contact with no call row after 15 minutes to `pending`                                                                                                                                                           |
+| M2 budget while paused       | `setCampaignBudget` (owner/admin, draft/scheduled/paused) and a budget control on the campaign page                                                                                                                                                                                    |
+| M3 enrolment                 | adding contacts to a campaign needs an owner or admin                                                                                                                                                                                                                                  |
+
+Emergency stop (operator, production SQL, with approval):
+
+```sql
+INSERT INTO public.platform_settings (key, value, description, is_public)
+VALUES ('outbound.calling_paused', '{"enabled": true}', 'Emergency stop: no new outbound calls', false)
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+-- clear: UPDATE public.platform_settings SET value = '{"enabled": false}', updated_at = now() WHERE key = 'outbound.calling_paused';
+```
+
+Still true: calls already in progress cannot be ended by ClickAI (no Sarvam hang-up API); each ends at Sarvam's 300 s limit.

@@ -13,7 +13,6 @@ const src = readFileSync(new URL("./campaigns.functions.ts", import.meta.url), "
   "\n",
 );
 const launch = src.slice(src.indexOf("export const launchCampaign"));
-const cohort = src.slice(src.indexOf("async function launchViaSarvamCampaign"));
 
 describe("campaign launch and cohort upload obey the outbound safety switches", () => {
   test("the kill switch refuses a launch before the campaign is read or anything is uploaded", () => {
@@ -26,13 +25,16 @@ describe("campaign launch and cohort upload obey the outbound safety switches", 
     assert.ok(kill < read && read < running);
   });
 
-  test("a cohort with any number outside the test allowlist is refused before upload", () => {
-    const allow = cohort.indexOf(
-      'if (dialable.some((cc) => !isSarvamOutboundDestinationAllowed(cc.contacts?.phone ?? "")))',
-    );
-    const upload = cohort.indexOf("adapter.uploadCohort(");
-    assert.ok(allow > -1, "allowlist checked");
-    assert.ok(allow < upload, "before Sarvam is asked to dial anyone");
-    assert.match(cohort.slice(allow, upload), /throw new Error\(OUTBOUND_TEST_ALLOWLIST_MESSAGE\)/);
+  test("no cohort is ever uploaded: every campaign call goes through ClickAI's own dispatcher", () => {
+    assert.doesNotMatch(src, /uploadCohort\(/);
+    const refuse = launch.indexOf('if (campaign.dispatch_mode === "sarvam_campaign")');
+    assert.ok(refuse > -1 && refuse < launch.indexOf('status: "running"'));
+  });
+
+  test("resume re-runs every launch check; pause, launch and cancel only move from the expected status", () => {
+    assert.match(src, /export const resumeCampaign = launchCampaign;/);
+    assert.match(src, /\.in\("status", fromStatuses\)\s*\.select\("id"\)/);
+    assert.match(src, /\.in\("status", \["draft", "scheduled", "paused"\]\)\s*\.select\("id"\)/);
+    assert.match(src, /\.not\("status", "in", "\(completed,cancelled\)"\)/);
   });
 });

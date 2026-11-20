@@ -18,7 +18,7 @@ import {
   prepareCampaignContext,
   saveCampaignContext,
 } from "@/lib/campaign-context.functions";
-import { getCampaignStats } from "@/lib/campaigns.functions";
+import { getCampaignStats, setCampaignBudget } from "@/lib/campaigns.functions";
 import { EXCLUSION_LABEL, RESULT_LABEL, type CampaignResult } from "@/lib/campaign-results";
 
 interface CampaignForContext {
@@ -234,7 +234,36 @@ export function CampaignContextPanel({
 const money = (paise: number) => `₹${(paise / 100).toFixed(2)}`;
 
 /** Who will be called, and what happened: results, spend and budget. */
-export function CampaignInsights({ campaignId }: { campaignId: string }) {
+export function CampaignInsights({
+  campaignId,
+  status,
+  onChanged,
+}: {
+  campaignId: string;
+  status: string;
+  onChanged: () => Promise<void> | void;
+}) {
+  const [budgetRupees, setBudgetRupees] = useState("");
+  const [savingBudget, setSavingBudget] = useState(false);
+  async function saveBudget() {
+    if (savingBudget) return;
+    const budget = budgetRupees.trim() ? Math.round(Number(budgetRupees) * 100) : null;
+    if (budget !== null && !(Number.isFinite(budget) && budget > 0)) {
+      toast.error("Enter the budget in rupees, or leave it empty for no limit.");
+      return;
+    }
+    setSavingBudget(true);
+    try {
+      await setCampaignBudget({ data: { campaignId, budgetLimit: budget } });
+      toast.success("Budget saved.");
+      setBudgetRupees("");
+      await onChanged();
+    } catch (err) {
+      toast.error((err as Error).message);
+    } finally {
+      setSavingBudget(false);
+    }
+  }
   const eligibility = useQuery({
     queryKey: ["campaign-eligibility", campaignId],
     queryFn: () => getCampaignEligibility({ data: { campaignId } }),
@@ -283,6 +312,27 @@ export function CampaignInsights({ campaignId }: { campaignId: string }) {
               <p className="text-xs text-muted-foreground">
                 Budget: {s.budgetLimit ? money(s.budgetLimit) : "no limit"}
               </p>
+              {EDITABLE.includes(status) ? (
+                <div className="mt-2 flex items-center gap-2">
+                  <Input
+                    type="number"
+                    min={1}
+                    inputMode="numeric"
+                    className="h-8 w-32"
+                    placeholder="New budget ₹"
+                    value={budgetRupees}
+                    onChange={(e) => setBudgetRupees(e.target.value)}
+                  />
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={saveBudget}
+                    disabled={savingBudget}
+                  >
+                    Save budget
+                  </Button>
+                </div>
+              ) : null}
             </>
           ) : (
             <p className="text-xs text-muted-foreground">Loading…</p>

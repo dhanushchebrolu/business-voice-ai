@@ -253,20 +253,30 @@ describe("handlers", () => {
       lt: () => update,
       select: async () => ({ data: [{ id: "stuck" }], error: null }),
     };
+    // releaseOrphanedCampaignClaims: no abandoned claims here.
+    const noClaims = {
+      select: () => noClaims,
+      eq: () => noClaims,
+      lt: () => noClaims,
+      limit: async () => ({ data: [], error: null }),
+    };
     const handlers = buildJobHandlers({
       supabaseAdmin: {
-        from: () => ({
-          ...query,
-          update: (patch: Record<string, unknown>) => (updates.push(patch), update),
-        }),
+        from: (table: string) =>
+          table === "campaign_contacts"
+            ? noClaims
+            : {
+                ...query,
+                update: (patch: Record<string, unknown>) => (updates.push(patch), update),
+              },
       } as never,
       store,
       now: () => new Date("2026-11-11T10:20:00Z"),
     });
     const first = await handlers["sweep.sarvam_reconcile"]!({} as Job);
     const again = await handlers["sweep.sarvam_reconcile"]!({} as Job);
-    assert.deepEqual(first, { candidates: 2, enqueued: 2, unconfirmed: 1 });
-    assert.deepEqual(again, { candidates: 2, enqueued: 0, unconfirmed: 1 });
+    assert.deepEqual(first, { candidates: 2, enqueued: 2, unconfirmed: 1, releasedClaims: 0 });
+    assert.deepEqual(again, { candidates: 2, enqueued: 0, unconfirmed: 1, releasedClaims: 0 });
     assert.equal(updates[0]!["status"], "outcome_unknown");
     const job = [...store.jobs.values()].find((j) => j.idempotency_key.includes("c1"))!;
     assert.equal(job.idempotency_key, "sarvam.reconcile_call:c1:2026-11-11T10");

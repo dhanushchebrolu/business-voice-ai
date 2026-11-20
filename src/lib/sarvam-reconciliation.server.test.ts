@@ -140,7 +140,7 @@ describe("reconcileSarvamCall", () => {
   });
 });
 
-describe("flagStartsWithoutAttempt: single calls Sarvam never confirmed", () => {
+describe("flagStartsWithoutAttempt: starts Sarvam never confirmed", () => {
   const NOW = new Date("2026-11-19T10:00:00Z");
   const ago = (m: number) => new Date(NOW.getTime() - m * 60_000).toISOString();
   const row = (over: Record<string, unknown>) => ({
@@ -154,7 +154,7 @@ describe("flagStartsWithoutAttempt: single calls Sarvam never confirmed", () => 
     ...over,
   });
 
-  test("only an old, attempt-less, non-campaign Sarvam start becomes outcome_unknown", async () => {
+  test("only an old, attempt-less Sarvam start becomes outcome_unknown; a campaign contact follows", async () => {
     const { memorySupabase } = await import("./payments/memory-supabase.test-helper.ts");
     const db = memorySupabase({
       tables: {
@@ -162,22 +162,89 @@ describe("flagStartsWithoutAttempt: single calls Sarvam never confirmed", () => 
           row({ id: "stuck" }),
           row({ id: "recent", started_at: ago(10) }),
           row({ id: "has_attempt", provider_call_id: "att_1" }),
-          row({ id: "campaign", campaign_id: "camp_1" }),
+          row({ id: "campaign", campaign_id: "camp_1", campaign_contact_id: "cc_1" }),
           row({ id: "final", status: "completed" }),
           row({ id: "inbound", direction: "inbound" }),
           row({ id: "vobiz", provider: "vobiz" }),
+        ],
+        campaign_contacts: [
+          { id: "cc_1", status: "calling", current_call_id: "campaign" },
+          { id: "cc_2", status: "calling", current_call_id: "other" },
         ],
       },
     });
     const { flagStartsWithoutAttempt, START_NOT_CONFIRMED_REASON } =
       await import("./sarvam-reconciliation.server.ts");
-    assert.equal(await flagStartsWithoutAttempt(db.client, NOW), 1);
+    assert.equal(await flagStartsWithoutAttempt(db.client, NOW), 2);
     const byId = Object.fromEntries(db.tables["call_logs"]!.map((r) => [r["id"], r]));
-    assert.equal(byId["stuck"]!["status"], "outcome_unknown");
-    assert.equal(byId["stuck"]!["failure_reason"], START_NOT_CONFIRMED_REASON);
-    for (const id of ["recent", "has_attempt", "campaign", "inbound", "vobiz"])
+    for (const id of ["stuck", "campaign"]) {
+      assert.equal(byId[id]!["status"], "outcome_unknown", id);
+      assert.equal(byId[id]!["failure_reason"], START_NOT_CONFIRMED_REASON);
+    }
+    const cc = Object.fromEntries(db.tables["campaign_contacts"]!.map((r) => [r["id"], r]));
+    assert.equal(cc["cc_1"]!["status"], "outcome_unknown", "never redialled, shown as unconfirmed");
+    assert.equal(cc["cc_2"]!["status"], "calling", "another call's contact is left alone");
+    for (const id of ["recent", "has_attempt", "inbound", "vobiz"])
       assert.equal(byId[id]!["status"], "initiated", id);
     assert.equal(byId["final"]!["status"], "completed");
     assert.equal(await flagStartsWithoutAttempt(db.client, NOW), 0, "idempotent");
+  });
+});
+
+describe("releaseOrphanedCampaignClaims: claims the Worker abandoned before admission", () => {
+  const NOW = new Date("2026-11-19T10:00:00Z");
+  const ago = (m: number) => new Date(NOW.getTime() - m * 60_000).toISOString();
+
+  test("an old claim with no call row returns to pending with its attempt restored; others are left alone", async () => {
+    const { memorySupabase } = await import("./payments/memory-supabase.test-helper.ts");
+    const db = memorySupabase({
+      tables: {
+        campaign_contacts: [
+          {
+            id: "orphan",
+            status: "calling",
+            attempts: 2,
+            current_call_id: "never_written",
+            updated_at: ago(30),
+          },
+          {
+            id: "has_call",
+            status: "calling",
+            attempts: 1,
+            current_call_id: "call_1",
+            updated_at: ago(30),
+          },
+          {
+            id: "recent",
+            status: "calling",
+            attempts: 1,
+            current_call_id: "x",
+            updated_at: ago(5),
+          },
+          {
+            id: "done",
+            status: "completed",
+            attempts: 1,
+            current_call_id: "y",
+            updated_at: ago(30),
+          },
+        ],
+        call_logs: [{ id: "call_1", status: "initiated" }],
+      },
+    });
+    const { releaseOrphanedCampaignClaims } = await import("./sarvam-reconciliation.server.ts");
+    assert.equal(await releaseOrphanedCampaignClaims(db.client, NOW), 1);
+    const cc = Object.fromEntries(db.tables["campaign_contacts"]!.map((r) => [r["id"], r]));
+    assert.deepEqual(
+      {
+        status: cc["orphan"]!["status"],
+        attempts: cc["orphan"]!["attempts"],
+        call: cc["orphan"]!["current_call_id"],
+      },
+      { status: "pending", attempts: 1, call: null },
+    );
+    assert.equal(cc["has_call"]!["status"], "calling", "a call exists: finalization owns it");
+    assert.equal(cc["recent"]!["status"], "calling", "may still be in progress");
+    assert.equal(await releaseOrphanedCampaignClaims(db.client, NOW), 0, "idempotent");
   });
 });

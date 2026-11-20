@@ -157,8 +157,15 @@ class MemoryDb {
           this.tables[table] = rows.filter((r) => !matches(r));
           return resolve({ data: null, error: null });
         }
+        // Every number has an earlier lead (the prior-relationship check), never one
+        // marked do_not_contact (the do-not-call check).
         if (table === "leads" && op === "select")
-          return resolve({ data: [{ id: "earlier_lead" }], error: null });
+          return resolve({
+            data: filters.some((f) => f.col === "status" && f.val === "do_not_contact")
+              ? []
+              : [{ id: "earlier_lead" }],
+            error: null,
+          });
         const hit = rows.filter(matches);
         if (op === "update") {
           for (const r of hit) Object.assign(r, payload);

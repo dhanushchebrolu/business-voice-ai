@@ -224,7 +224,7 @@ function CampaignDetailPage() {
 
       <CampaignContextPanel campaign={campaign} onSaved={invalidate} />
 
-      <CampaignInsights campaignId={campaignId} />
+      <CampaignInsights campaignId={campaignId} status={campaign.status} onChanged={invalidate} />
 
       <SectionCard title="Progress" description={`${total} contacts enrolled`}>
         <div className="flex flex-wrap gap-2">

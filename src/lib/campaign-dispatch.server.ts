@@ -312,7 +312,7 @@ async function dispatchOneCampaign(
   };
 
   for (const cc of due ?? []) {
-    if (deps.now() >= deadline || !(await stillRunning())) break;
+    if (deps.now() >= deadline || outboundCallingDisabled() || !(await stillRunning())) break;
     const { data: contact, error: contactError } = await supabaseAdmin
       .from("contacts")
       .select("id, phone, opted_out")
@@ -516,6 +516,27 @@ async function dispatchOneCampaign(
       break;
     }
     const call = { id: admission.call_id };
+
+    // A pause, cancel or stop that landed after admission: the call is recorded
+    // as never started (no charge, no budget), and nothing is dialled.
+    const stillOn =
+      !outboundCallingDisabled() &&
+      (await stillRunning().catch((err: Error) => {
+        console.error("campaign_dispatch:status_check_failed", campaign.id, err.message);
+        return false;
+      }));
+    if (!stillOn) {
+      await recordCampaignStartFailure(
+        supabaseAdmin,
+        { callId: call.id, campaignContactId: cc.id },
+        new Error("Stopped before dialling"),
+        async () => {
+          await deps.finalize(call.id);
+        },
+      );
+      skipped++;
+      break;
+    }
 
     const agentVariables: Record<string, unknown> = {
       ...withoutReservedOutboundVariables(cc.variables as Record<string, unknown> | null),

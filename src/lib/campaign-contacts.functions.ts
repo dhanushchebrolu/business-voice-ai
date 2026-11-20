@@ -39,7 +39,7 @@ export interface ImportCsvResult {
 
 type CallerContext = { supabase: unknown; userId: string };
 
-/** The campaign's own organization, once the caller is a member of it. */
+/** The campaign's own organization, once the caller may decide who it calls (owner or admin). */
 async function campaignOrgId(context: CallerContext, campaignId: string): Promise<string> {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   const { campaignOrganizationForCaller } = await import("@/lib/outbound-authorization.server");
@@ -47,7 +47,7 @@ async function campaignOrgId(context: CallerContext, campaignId: string): Promis
     { supabase: context.supabase as typeof supabaseAdmin, supabaseAdmin },
     context.userId,
     campaignId,
-    { dial: false, notFoundMessage: "Campaign not found for this organization." },
+    { dial: true, notFoundMessage: "Campaign not found for this organization." },
   );
 }
 

@@ -83,23 +83,13 @@ describe("campaign dispatcher — architecture invariants", () => {
   });
 });
 
-describe("sarvam_campaign dispatch mode — never armed silently", () => {
-  test("the platform-wide kill switch defaults closed and is the only thing that can arm sarvam_campaign mode", () => {
-    assert.match(campaignsFn, /KLYRO_DISPATCH_MODE.*===\s*"sarvam_campaign"/);
-    assert.match(campaignsFn, /sarvamCampaignModeArmed\(\)/);
-  });
-
-  test("a campaign requesting sarvam_campaign mode while it is not armed fails launch loudly, it does not silently fall back", () => {
-    assert.match(campaignsFn, /is not armed on this platform/);
-  });
-
-  test("a sarvam_campaign launch requires an admin-mapped provider_campaign_id — it never invents one", () => {
-    assert.match(campaignsFn, /provider_campaign_id/);
-    assert.match(campaignsFn, /An admin must create the campaign in Sarvam's dashboard/);
-  });
-
-  test("re-launching a paused sarvam_campaign-mode campaign never re-uploads (and re-dials) the same cohort", () => {
-    assert.match(campaignsFn, /if \(campaign\.provider_cohort_id\) return;/);
+describe("sarvam_campaign dispatch mode — removed", () => {
+  test("launch refuses it outright and nothing uploads a cohort to Sarvam", () => {
+    assert.match(
+      campaignsFn,
+      /if \(campaign\.dispatch_mode === "sarvam_campaign"\)\s*throw new Error\(/,
+    );
+    assert.doesNotMatch(campaignsFn, /uploadCohort|launchViaSarvamCampaign|KLYRO_DISPATCH_MODE/);
   });
 
   test("the cohort-upload client function is documented as unverified, not claimed as a confirmed contract", () => {
@@ -145,7 +135,8 @@ describe("campaign lifecycle server functions — tenant isolation", () => {
   test("launching or resuming dials, so it needs an owner or admin; pause, cancel and stats need membership", () => {
     assert.match(campaignsFn, /campaignOrgId\(context, data\.campaignId, true\)/);
     assert.match(campaignsFn, /simpleTransition\(\["running"\], "paused", "paused_at", false\)/);
-    assert.match(campaignsFn, /simpleTransition\(\["paused"\], "running", null, true\)/);
+    // Resume is launch: the same owner/admin check and every readiness check.
+    assert.match(campaignsFn, /export const resumeCampaign = launchCampaign;/);
   });
 
   test("launch re-validates entitlement/billing/readiness — it does not just flip a status column", () => {

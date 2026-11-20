@@ -743,6 +743,35 @@ export async function recordCallOutcome(
     suppressedLeadId = updated?.[0]?.id ?? null;
   }
 
+  // An opt-out on an outbound call goes on the do-not-call list now, not only
+  // through the end-of-call webhook (which may be lost) - and only for a number
+  // ClickAI itself dialled in the last hour, so a test chat or a forged
+  // caller_number cannot suppress anyone else.
+  if (optedOut && auth.role === "outbound" && callerPhone && !testCall) {
+    const since = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const { data: dialled, error: dialledError } = await deps.supabaseAdmin
+      .from("call_logs")
+      .select("id")
+      .eq("organization_id", auth.organizationId)
+      .eq("direction", "outbound")
+      .eq("destination_number", callerPhone)
+      .gt("started_at", since)
+      .limit(1);
+    if (dialledError) throw dialledError;
+    if (dialled?.length) {
+      const { suppressSingleCallOptOut } = await import("./telephony/call-finalization.server.ts");
+      await suppressSingleCallOptOut(
+        deps.supabaseAdmin,
+        {
+          organization_id: auth.organizationId,
+          business_id: auth.businessId,
+          destination_number: callerPhone,
+        },
+        { opted_out: "yes" },
+      );
+    }
+  }
+
   // A lead is a follow-up for the team: callback requests, and enquiries where the caller
   // named themself or a service. Booked calls already have a booking; a summary alone never
   // qualifies; a callback already saved mid-call (request_callback) is not saved twice.

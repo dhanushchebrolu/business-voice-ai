@@ -15,6 +15,7 @@ import { isNumberSuppressed, OPT_OUT_NUMBER_MESSAGE } from "./contact-suppressio
 import {
   hasPriorRelationship,
   NO_RELATIONSHIP_MESSAGE,
+  OUTBOUND_DISABLED_MESSAGE,
   staticEligibilityBlocker,
 } from "./outbound-eligibility.server.ts";
 import {
@@ -86,6 +87,8 @@ export function admissionRefusalMessage(reason: unknown): string {
       return INVALID_DESTINATION_MESSAGE;
     case "max_call_length_not_set":
       return MAX_CALL_LENGTH_NOT_SET_MESSAGE;
+    case "outbound_paused":
+      return OUTBOUND_DISABLED_MESSAGE;
     default:
       return "This call could not be admitted. Try again, or contact support if it keeps happening.";
   }

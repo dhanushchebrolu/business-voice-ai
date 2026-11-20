@@ -417,12 +417,8 @@ describe("wiring (source checks)", () => {
     }
   });
 
-  test("a Sarvam campaign is checked to run the outbound agent before any cohort upload", () => {
-    const src = read("./campaigns.functions.ts");
-    const fn = src.slice(src.indexOf("async function launchViaSarvamCampaign"));
-    const check = fn.indexOf("sarvamCampaignUsesAgent(sarvamCampaign.raw, target)");
-    const upload = fn.indexOf("adapter.uploadCohort(");
-    assert.ok(check > -1 && check < upload);
+  test("no Sarvam cohort is uploaded at all: campaigns dial only through the outbound-agent dispatcher", () => {
+    assert.doesNotMatch(read("./campaigns.functions.ts"), /uploadCohort\(/);
   });
 
   test("outbound registration and credentials are platform-admin only and audited", () => {

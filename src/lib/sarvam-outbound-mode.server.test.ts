@@ -399,11 +399,9 @@ describe("admin Sarvam campaign status changes", () => {
     assert.match(body, /SARVAM_CAMPAIGN_UPDATE_REFUSED/);
   });
 
-  test("sarvam_campaign mode stays off by default and its cohort rows always come from buildOutboundCohortRows", () => {
+  test("sarvam_campaign mode is refused at launch; no cohort is ever uploaded", () => {
     const src = readFileSync(new URL("./campaigns.functions.ts", import.meta.url), "utf8");
-    assert.match(src, /process\.env\["KLYRO_DISPATCH_MODE"\] === "sarvam_campaign"/);
-    const launch = src.slice(src.indexOf("async function launchViaSarvamCampaign"));
-    assert.match(launch, /buildOutboundCohortRows\(/);
-    assert.ok(launch.indexOf("buildOutboundCohortRows(") < launch.indexOf("buildCohortPayload("));
+    assert.match(src, /campaign\.dispatch_mode === "sarvam_campaign"/);
+    assert.doesNotMatch(src, /uploadCohort\(/);
   });
 });

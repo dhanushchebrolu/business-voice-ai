@@ -656,3 +656,55 @@ describe("reconciliation past one run's page budget (rotating keyset)", () => {
     assert.equal(s.t("sarvam_agent_events").length, 0);
   });
 });
+
+describe("an opt-out from the outbound agent's end-of-call tool reaches do-not-call", () => {
+  const OUTBOUND: AuthenticatedIntegration = {
+    ...AUTH,
+    integrationId: "int_out",
+    role: "outbound",
+  };
+  const dialled = (to: string, startedAt = new Date().toISOString()): Row => ({
+    id: `call_${to}`,
+    organization_id: ORG,
+    provider: "sarvam",
+    direction: "outbound",
+    status: "in_progress",
+    destination_number: to,
+    started_at: startedAt,
+  });
+
+  test("a number ClickAI dialled in the last hour is put on do-not-call at once", async () => {
+    const s = setup([dialled(CALLER)]);
+    await recordCallOutcome({ supabaseAdmin: s.db.client }, OUTBOUND, "i-out", {
+      outcome: "not_interested",
+      callerNumber: CALLER,
+      optedOut: "yes",
+      source: "tool",
+    });
+    const contact = s.t("contacts").find((c) => c["phone"] === CALLER);
+    assert.equal(contact?.["opted_out"], true);
+  });
+
+  test("never for a number ClickAI did not dial (a test chat or a forged caller number)", async () => {
+    const old = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const s = setup([dialled("+919876500001"), dialled(CALLER, old)]);
+    await recordCallOutcome({ supabaseAdmin: s.db.client }, OUTBOUND, "i-out2", {
+      outcome: "not_interested",
+      callerNumber: CALLER,
+      optedOut: "yes",
+      source: "tool",
+    });
+    assert.equal(s.t("contacts").length, 0);
+  });
+
+  test("an inbound opt-out marks the lead; the number check reads it (no contact is created)", async () => {
+    const s = setup([dialled(CALLER)]);
+    await recordCallOutcome({ supabaseAdmin: s.db.client }, AUTH, "i-in", {
+      outcome: "not_interested",
+      callerNumber: CALLER,
+      optedOut: "yes",
+      source: "tool",
+    });
+    assert.equal(s.t("contacts").length, 0);
+  });
+});

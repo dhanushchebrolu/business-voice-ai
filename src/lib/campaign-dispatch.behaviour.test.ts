@@ -796,3 +796,41 @@ describe("campaign dispatch — platform rules and the reviewed context", () => 
     );
   });
 });
+
+describe("campaign dispatch — stops that land after admission", () => {
+  test("a pause right after admission: the call is recorded as never started and nothing is dialled", async () => {
+    const t = setup(2);
+    const admit = t.deps.admitCampaignCall;
+    t.deps.admitCampaignCall = async (req) => {
+      const r = await admit(req);
+      setCampaignStatus(t, "paused");
+      return r;
+    };
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 0);
+    const call = t.table("call_logs")[0]!;
+    assert.equal(call["status"], "failed");
+    assert.equal(
+      call["resolution_source"],
+      "start_failure",
+      "costs nothing and counts against no budget",
+    );
+    assert.equal(t.table("call_logs").length, 1, "the batch stops");
+  });
+
+  test("the kill switch turned on mid-run stops the next contact", async () => {
+    const t = setup(3);
+    const prior = process.env["OUTBOUND_CALLING_DISABLED"];
+    t.onDial.fn = () => {
+      process.env["OUTBOUND_CALLING_DISABLED"] = "true";
+    };
+    try {
+      await dispatchDueCampaigns({ deps: t.deps });
+    } finally {
+      if (prior === undefined) delete process.env["OUTBOUND_CALLING_DISABLED"];
+      else process.env["OUTBOUND_CALLING_DISABLED"] = prior;
+    }
+    assert.equal(t.dialed.length, 1);
+    assert.equal(t.table("campaign_contacts").filter((c) => c["status"] === "pending").length, 2);
+  });
+});

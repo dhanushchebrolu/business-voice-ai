@@ -259,6 +259,17 @@ describe("future campaigns and imports exclude opted-out contacts", () => {
     );
   });
 
+  test("a lead the person asked not to be contacted about suppresses the number, in that workspace only", async () => {
+    const s = setup();
+    s.db.tables["leads"] = [
+      { id: "l1", organization_id: ORG_A, phone: PHONE, status: "do_not_contact" },
+      { id: "l2", organization_id: ORG_A, phone: "+919876500009", status: "new" },
+    ];
+    assert.equal(await isNumberSuppressed(s.db.client, ORG_A, PHONE), true);
+    assert.equal(await isNumberSuppressed(s.db.client, ORG_B, PHONE), false);
+    assert.equal(await isNumberSuppressed(s.db.client, ORG_A, "+919876500009"), false);
+  });
+
   test("single calls are refused for a number this workspace has on do-not-call, only in that workspace", async () => {
     const s = setup();
     s.row("contacts", "c_a")["opted_out"] = true;

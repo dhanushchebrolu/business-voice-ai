@@ -149,8 +149,9 @@ export const START_NOT_CONFIRMED_REASON =
  * shows customers a call "in progress" forever. It becomes `outcome_unknown`:
  * shown as unconfirmed, listed for operators, never billed or retried, and a
  * late Sarvam webhook still resolves it (found by metadata.call_id). Only
- * while it is still exactly that (a conditional update), and never campaign
- * calls, whose contact state the dispatcher owns.
+ * while it is still exactly that (a conditional update). A campaign call's
+ * contact follows into outcome_unknown (never redialled automatically; an
+ * operator resolves it), so the campaign shows it instead of "calling".
  */
 export async function flagStartsWithoutAttempt(
   supabaseAdmin: SupabaseClient<Database>,
@@ -163,11 +164,74 @@ export async function flagStartsWithoutAttempt(
     .eq("direction", "outbound")
     .eq("status", "initiated")
     .is("provider_call_id", null)
-    .is("campaign_id", null)
     .lt("started_at", new Date(now.getTime() - START_WITHOUT_ATTEMPT_MAX_AGE_MS).toISOString())
-    .select("id");
+    .select("id, campaign_contact_id");
   if (error) throw error;
-  for (const row of data ?? [])
+  for (const row of (data ?? []) as { id: string; campaign_contact_id?: string | null }[]) {
     console.warn("sarvam_outbound:start_not_confirmed", { callId: row.id });
+    if (!row.campaign_contact_id) continue;
+    const { error: ccError } = await supabaseAdmin
+      .from("campaign_contacts")
+      .update({ status: "outcome_unknown", next_attempt_at: null })
+      .eq("id", row.campaign_contact_id)
+      .eq("status", "calling")
+      .eq("current_call_id", row.id);
+    if (ccError) throw ccError;
+  }
   return data?.length ?? 0;
+}
+
+/** A claim older than this with no call row was abandoned (the Worker stopped between claim and admission). */
+export const ORPHANED_CLAIM_MAX_AGE_MS = 15 * 60 * 1000;
+
+/**
+ * Gives back campaign contacts left `calling` with no call row: the Worker
+ * stopped after claiming them and before admission wrote the call. Nothing was
+ * dialled (admission writes the row before any dial), so the contact returns
+ * to `pending` with its attempt count restored. Conditional on the exact
+ * claim, so a contact that moved on meanwhile is left alone.
+ */
+export async function releaseOrphanedCampaignClaims(
+  supabaseAdmin: SupabaseClient<Database>,
+  now: Date = new Date(),
+): Promise<number> {
+  const { data, error } = await supabaseAdmin
+    .from("campaign_contacts")
+    .select("id, attempts, current_call_id")
+    .eq("status", "calling")
+    .lt("updated_at", new Date(now.getTime() - ORPHANED_CLAIM_MAX_AGE_MS).toISOString())
+    .limit(100);
+  if (error) throw error;
+  let released = 0;
+  for (const cc of (data ?? []) as {
+    id: string;
+    attempts: number;
+    current_call_id: string | null;
+  }[]) {
+    if (cc.current_call_id) {
+      const { data: call, error: callError } = await supabaseAdmin
+        .from("call_logs")
+        .select("id")
+        .eq("id", cc.current_call_id)
+        .maybeSingle();
+      if (callError) throw callError;
+      if (call) continue; // a call exists: finalization or reconciliation owns it
+    }
+    let release = supabaseAdmin
+      .from("campaign_contacts")
+      .update({ status: "pending", attempts: Math.max(cc.attempts - 1, 0), current_call_id: null })
+      .eq("id", cc.id)
+      .eq("status", "calling")
+      .eq("attempts", cc.attempts);
+    release = cc.current_call_id
+      ? release.eq("current_call_id", cc.current_call_id)
+      : release.is("current_call_id", null);
+    const { data: done, error: releaseError } = await release.select("id");
+    if (releaseError) throw releaseError;
+    if (done?.length) {
+      released++;
+      console.warn("campaign_dispatch:orphaned_claim_released", { campaignContactId: cc.id });
+    }
+  }
+  return released;
 }

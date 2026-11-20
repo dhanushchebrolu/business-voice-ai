@@ -128,9 +128,11 @@ export function buildJobHandlers(deps: HandlerDeps): Record<string, JobHandler> 
         if (r.created) enqueued++;
       }
       // Starts Sarvam never confirmed have nothing to reconcile against; flag them instead.
-      const { flagStartsWithoutAttempt } = await import("../sarvam-reconciliation.server.ts");
+      const { flagStartsWithoutAttempt, releaseOrphanedCampaignClaims } =
+        await import("../sarvam-reconciliation.server.ts");
       const unconfirmed = await flagStartsWithoutAttempt(supabaseAdmin, t);
-      return { candidates: data?.length ?? 0, enqueued, unconfirmed };
+      const releasedClaims = await releaseOrphanedCampaignClaims(supabaseAdmin, t);
+      return { candidates: data?.length ?? 0, enqueued, unconfirmed, releasedClaims };
     },
 
     "sarvam.reconcile_call": async (job) => {

@@ -72,15 +72,27 @@ export async function isNumberSuppressed(
   // cannot be normalized is never dialled, so it counts as suppressed.
   const e164 = normalizeCustomerPhone(phone, null);
   if (!e164) return true;
-  const { data, error } = await admin
-    .from("contacts")
-    .select("id")
-    .eq("organization_id", organizationId)
-    .eq("phone", e164)
-    .eq("opted_out", true)
-    .limit(1);
-  if (error) throw error;
-  return (data?.length ?? 0) > 0;
+  // A contact on do-not-call, or a lead the person asked not to be contacted
+  // about (an opt-out said on any call, inbound included).
+  const [contacts, leads] = await Promise.all([
+    admin
+      .from("contacts")
+      .select("id")
+      .eq("organization_id", organizationId)
+      .eq("phone", e164)
+      .eq("opted_out", true)
+      .limit(1),
+    admin
+      .from("leads")
+      .select("id")
+      .eq("organization_id", organizationId)
+      .eq("phone", e164)
+      .eq("status", "do_not_contact")
+      .limit(1),
+  ]);
+  if (contacts.error) throw contacts.error;
+  if (leads.error) throw leads.error;
+  return (contacts.data?.length ?? 0) > 0 || (leads.data?.length ?? 0) > 0;
 }
 
 export const OPT_OUT_NUMBER_MESSAGE =
