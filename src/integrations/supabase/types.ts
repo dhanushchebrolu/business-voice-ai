@@ -729,6 +729,12 @@ export type Database = {
           agent_config_id: string | null;
           business_id: string | null;
           call_instructions: string | null;
+          budget_limit: number | null;
+          context: Json | null;
+          context_reviewed_at: string | null;
+          context_reviewed_by: string | null;
+          context_version: number | null;
+          description: string | null;
           cancelled_at: string | null;
           completed_at: string | null;
           created_at: string;
@@ -758,6 +764,12 @@ export type Database = {
           agent_config_id?: string | null;
           business_id?: string | null;
           call_instructions?: string | null;
+          budget_limit?: number | null;
+          context?: Json | null;
+          context_reviewed_at?: string | null;
+          context_reviewed_by?: string | null;
+          context_version?: number | null;
+          description?: string | null;
           cancelled_at?: string | null;
           completed_at?: string | null;
           created_at?: string;
@@ -787,6 +799,12 @@ export type Database = {
           agent_config_id?: string | null;
           business_id?: string | null;
           call_instructions?: string | null;
+          budget_limit?: number | null;
+          context?: Json | null;
+          context_reviewed_at?: string | null;
+          context_reviewed_by?: string | null;
+          context_version?: number | null;
+          description?: string | null;
           cancelled_at?: string | null;
           completed_at?: string | null;
           created_at?: string;
@@ -852,6 +870,7 @@ export type Database = {
           updated_at: string;
           variables: Json;
           current_call_id: string | null;
+          excluded_reason: string | null;
         };
         Insert: {
           attempts?: number;
@@ -868,6 +887,7 @@ export type Database = {
           updated_at?: string;
           variables?: Json;
           current_call_id?: string | null;
+          excluded_reason?: string | null;
         };
         Update: {
           attempts?: number;
@@ -884,6 +904,7 @@ export type Database = {
           updated_at?: string;
           variables?: Json;
           current_call_id?: string | null;
+          excluded_reason?: string | null;
         };
         Relationships: [
           {
