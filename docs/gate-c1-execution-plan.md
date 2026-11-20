@@ -1,8 +1,21 @@
 # GATE C1 — production migration 20261121090000 (campaign context engine)
 
-Status: **prepared, not executed.** Nothing in this document has been run
-against production. Every step below needs explicit approval from the owner in
-chat.
+Status: **executed 2026-11-20 (owner-approved).**
+
+- Migration applied with `docs/gate-c1-execute-20261121090000.sql` (SHA-256
+  `678a1b69…2d6e`): result row returned, existing data and policies unchanged;
+  verification `all_pass` (34/34).
+- Worker built from `5a519a8` and deployed as klyro
+  `ecc01a98-7069-4218-a0b4-c0e7ad3a0c66` at 100% (2026-11-20 18:08:35 UTC);
+  28 bindings, same set as `4832430f`; `CAMPAIGN_DISPATCH_ENABLED`,
+  `KLYRO_DISPATCH_MODE`, `OUTBOUND_CALLING_DISABLED` unset. After deploy:
+  `campaign.dispatch` reports `skipped: disabled` every minute, 0 calls,
+  0 campaigns, stop `{"enabled": false}`, verification `all_pass`.
+- Worker rollback:
+  `npx wrangler versions deploy 4832430f-fdc6-4188-87e1-b5362923bdd4@100% --name klyro --yes`.
+- One verification run during a dispatch job returned
+  `dispatch_reports_disabled: false` (the job row was mid-run); the next run
+  passed. Run it again if that check alone is false.
 
 ## 1. The package
 
