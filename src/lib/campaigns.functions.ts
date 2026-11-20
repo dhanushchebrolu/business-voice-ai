@@ -86,6 +86,9 @@ export const launchCampaign = createServerFn({ method: "POST" })
       throw new Error(`Campaign is already ${campaign.status}.`);
 
     if (!campaign.agent_config_id) throw new Error("Choose an AI voice agent before launching.");
+    // Every call says only what the customer reviewed; the dispatcher refuses otherwise too.
+    if (!campaign.context_reviewed_at)
+      throw new Error("Review and save what the AI should say on these calls before launching.");
     if (!campaign.phone_number_id) throw new Error("Choose a caller number before launching.");
 
     // 1. Number is entitled + active + outbound-enabled (spec §24 steps 5-6),
@@ -390,6 +393,13 @@ export const cancelCampaign = createServerFn({ method: "POST" })
 export interface CampaignStats {
   totalContacts: number;
   byStatus: Record<string, number>;
+  report: import("@/lib/campaign-results").CampaignReport;
+  /** Paise: what billed calls cost, and the worst case still reserved by open calls. */
+  spent: number;
+  reserved: number;
+  budgetLimit: number | null;
+  /** The outbound agent cannot book; bookings are never reported as campaign conversions. */
+  bookingCapable: false;
 }
 
 export const getCampaignStats = createServerFn({ method: "GET" })
@@ -403,19 +413,40 @@ export const getCampaignStats = createServerFn({ method: "GET" })
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const { data: campaign } = await supabaseAdmin
       .from("campaigns")
-      .select("id, organization_id")
+      .select("id, organization_id, budget_limit")
       .eq("id", data.campaignId)
       .maybeSingle();
     if (!campaign || campaign.organization_id !== orgId) throw new Error("Campaign not found.");
 
-    const { data: rows } = await supabaseAdmin
-      .from("campaign_contacts")
-      .select("status")
-      .eq("campaign_id", data.campaignId);
+    const [{ data: rows }, { data: calls }] = await Promise.all([
+      supabaseAdmin
+        .from("campaign_contacts")
+        .select("status, attempts, excluded_reason, output_variables")
+        .eq("campaign_id", data.campaignId)
+        .eq("organization_id", orgId),
+      supabaseAdmin
+        .from("call_logs")
+        .select(
+          "status, customer_charge, billing_applied_at, billing_cap_minutes, billing_rate_per_minute, resolution_source",
+        )
+        .eq("campaign_id", data.campaignId)
+        .eq("organization_id", orgId),
+    ]);
 
     const byStatus: Record<string, number> = {};
     for (const row of rows ?? []) {
       byStatus[row.status] = (byStatus[row.status] ?? 0) + 1;
     }
-    return { totalContacts: rows?.length ?? 0, byStatus };
+    const { buildCampaignReport } = await import("@/lib/campaign-results");
+    const { campaignSpend } = await import("@/lib/campaign-results");
+    const spend = campaignSpend(calls ?? []);
+    return {
+      totalContacts: rows?.length ?? 0,
+      byStatus,
+      report: buildCampaignReport(rows ?? []),
+      spent: spend.spent,
+      reserved: spend.reserved,
+      budgetLimit: campaign.budget_limit ?? null,
+      bookingCapable: false,
+    };
   });

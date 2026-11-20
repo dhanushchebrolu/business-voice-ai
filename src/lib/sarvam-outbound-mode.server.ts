@@ -4,7 +4,7 @@ import {
   OUTBOUND_DISABLED_MESSAGE,
   outboundCallingDisabled,
 } from "./outbound-eligibility.server.ts";
-import { OUTBOUND_MAX_CALL_SECONDS_CAP } from "./agent-roles.ts";
+import { OUTBOUND_MAX_CALL_SECONDS_CAP, OUTBOUND_TEXT_LIMITS } from "./agent-roles.ts";
 
 /**
  * Every customer has two Sarvam agents (agent-roles.ts): the inbound agent
@@ -44,7 +44,7 @@ export const OUTBOUND_AGENT_VARIABLES = {
   campaign_instructions: "string, extra instructions from the customer",
 } as const;
 
-export const OUTBOUND_TEXT_LIMITS = { objective: 300, instructions: 1500, businessName: 120 };
+export { OUTBOUND_TEXT_LIMITS };
 
 /**
  * The outbound variable names only ClickAI sets. They are removed from any

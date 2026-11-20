@@ -1750,25 +1750,32 @@ describe("campaign dispatch vs the number reservation", () => {
       "utf8",
     ).replace(/\r\n/g, "\n");
     assert.match(dispatch, /\.select\("id, contact_id, status, attempts, variables"\)/);
-    const onError = dispatch.slice(dispatch.indexOf("if (insertError) {"));
-    const release = onError.indexOf("await releaseCampaignClaim(supabaseAdmin, {");
-    const conflict = onError.indexOf('if (insertError.code === "23505") {');
-    const rethrow = onError.indexOf("throw insertError;");
+    // The call row is now written by admit_campaign_outbound_call (one atomic
+    // step with the in-flight, wallet and budget checks); its unique-violation is
+    // reported as destination_busy. Same order as before: undo the claim first,
+    // then defer a busy number, and stop (never dial) on anything else.
+    const onRefusal = dispatch.slice(dispatch.indexOf('if (admission.result !== "admitted") {'));
+    const release = onRefusal.indexOf("await releaseCampaignClaim(supabaseAdmin, {");
+    const busy = onRefusal.indexOf('if (admission.reason === "destination_busy") {');
+    const stop = onRefusal.indexOf("break;");
     assert.ok(
-      release > -1 && release < conflict && conflict < rethrow,
-      "undo the claim first, then defer or rethrow",
+      release > -1 && release < busy && busy < stop,
+      "undo the claim first, then defer or stop",
     );
-    assert.match(onError.slice(conflict, rethrow), /skipped\+\+;\s*continue;/);
-    assert.match(onError, /previousStatus: cc\.status,\s*previousAttempts: cc\.attempts,/);
+    assert.match(onRefusal.slice(busy, stop), /continue;/);
+    assert.match(onRefusal, /previousStatus: cc\.status,\s*previousAttempts: cc\.attempts,/);
     const normalize = dispatch.indexOf(
       "const destination = normalizeCustomerPhone(contact.phone, null);",
     );
     const claim = dispatch.indexOf('.update({ status: "calling"');
+    const admit = dispatch.indexOf(".admitCampaignCall({");
     assert.ok(normalize > -1 && normalize < claim, "the number is canonicalized before the claim");
-    assert.match(dispatch, /destination_number: destination,/);
+    assert.ok(claim > -1 && claim < admit, "admission only for a claimed contact");
+    assert.match(dispatch, /\s+destination,\n\s+retryAttempt: attempts - 1,/);
     assert.match(dispatch, /toE164: destination,/);
-    assert.match(onError, /campaignId: campaign\.id,/);
-    assert.doesNotMatch(dispatch, /if \(insertError\) throw insertError;/);
+    assert.match(onRefusal, /campaignId: campaign\.id,/);
+    // An admission error is never a dial: it is a refusal.
+    assert.match(dispatch, /\.catch\(\(err: Error\): CampaignAdmission => \{/);
   });
 
   test("a single call and a campaign insert racing for the same number: exactly one call row", async () => {

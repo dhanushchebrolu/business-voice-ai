@@ -164,14 +164,14 @@ export const claude = {
    */
   async runConversation(
     messages: ChatMessage[],
-    options?: { tools?: ClaudeTool[] },
+    options?: { tools?: ClaudeTool[]; maxTokens?: number },
   ): Promise<{ reply: string; usage: { input_tokens: number; output_tokens: number } }> {
     const { system, messages: turns } = toAnthropicRequest(messages);
     const data = await call({
       model: model(),
       system,
       messages: turns,
-      max_tokens: 400,
+      max_tokens: options?.maxTokens ?? 400,
       temperature: 0.3,
       top_p: 0.9,
       ...(options?.tools ? { tools: options.tools } : {}),

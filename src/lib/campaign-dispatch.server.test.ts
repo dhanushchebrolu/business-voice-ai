@@ -32,8 +32,11 @@ describe("campaign dispatcher — architecture invariants", () => {
     assert.match(dispatch, /checkTelephonyAccess\(/);
   });
 
-  test("reuses the existing wallet affordability check, never a second billing system", () => {
-    assert.match(dispatch, /walletCanAffordOutbound\(/);
+  test("admits every call atomically in the database (wallet, budget, in-flight), never a client-side check", () => {
+    assert.match(dispatch, /rpc\("admit_campaign_outbound_call"/);
+    assert.doesNotMatch(dispatch, /walletCanAffordOutbound/);
+    // The call row is written only by admission, never inserted here.
+    assert.doesNotMatch(dispatch, /from\("call_logs"\)\s*\.insert/);
   });
 
   test("only ever dials through the existing, shared Sarvam adapter method", () => {

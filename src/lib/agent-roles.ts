@@ -68,6 +68,12 @@ export function roleAllowsAgentApi(role: AgentRole, tool: string | undefined): b
  */
 export const OUTBOUND_MAX_CALL_SECONDS_CAP = 300;
 
+/**
+ * Lengths of the per-call outbound agent variables (campaign_objective,
+ * campaign_instructions) and of the business name in the opening line.
+ */
+export const OUTBOUND_TEXT_LIMITS = { objective: 300, instructions: 1500, businessName: 120 };
+
 export const ROLE_LABEL: Record<AgentRole, string> = {
   inbound: "Inbound agent",
   outbound: "Outbound agent",

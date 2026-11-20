@@ -1,12 +1,12 @@
-import { outboundCallingDisabled } from "./outbound-eligibility.server.ts";
+import {
+  isDestinationCountryAllowed,
+  outboundCallingDisabled,
+  withinCallingHours,
+} from "./outbound-eligibility.server.ts";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { getTelephonyAdapter, sarvamOutboundWebhookUrl } from "./telephony.server.ts";
-import {
-  checkTelephonyAccess,
-  getCallRate,
-  walletCanAffordOutbound,
-} from "./telephony-guard.server.ts";
+import { checkTelephonyAccess } from "./telephony-guard.server.ts";
 import { OUTBOUND_MAX_CALL_SECONDS_CAP } from "./agent-roles.ts";
 import { SarvamTelephonyAdapter } from "./telephony/sarvam-provider.server.ts";
 import { TEMPLATE_AGENT_COLUMNS, templateCallVariables } from "./sarvam-tenant-variables.server.ts";
@@ -21,6 +21,7 @@ import {
 } from "./sarvam-outbound-call.server.ts";
 import { finalizeTerminalCallSafely } from "./telephony/call-finalization.server.ts";
 import { retainCallVariables } from "./call-variables.ts";
+import { compileCampaignContext, validateCampaignContext } from "./campaign-context.ts";
 import {
   isContactSuppressed,
   isNumberSuppressed,
@@ -42,10 +43,11 @@ import {
  * Sarvam API for creating a provider-side "campaign" or streaming a cohort
  * has ever been confirmed (see the Sarvam API verification audit). This is
  * the deliberate, honest alternative to inventing one: Klyro owns
- * scheduling/pacing/retries entirely, and every dial still goes through the
- * exact same authorization/billing gate (checkTelephonyAccess,
- * walletCanAffordOutbound) the existing single-call outbound flow already
- * uses — no second, competing authorization or billing system.
+ * scheduling/pacing/retries entirely. Every dial goes through the same number
+ * gate as single calls (checkTelephonyAccess), the platform rules (calling
+ * hours, allowed countries, kill switch, test allowlist, do-not-call) and an
+ * atomic database admission (admit_campaign_outbound_call: in-flight limit,
+ * wallet worst case over every open call, the campaign budget, the call row).
  *
  * Invoked once a minute by the Worker's own scheduler (the `campaign.dispatch`
  * job, src/lib/jobs/handlers.server.ts), and by the cron-authenticated route
@@ -61,6 +63,32 @@ import {
 
 const MAX_CONTACTS_PER_CAMPAIGN_PER_TICK = 20;
 
+/**
+ * The most outbound calls (single and campaign) one customer may have open at
+ * once while a campaign dials; checked atomically by admit_campaign_outbound_call.
+ */
+export const CAMPAIGN_MAX_IN_FLIGHT = 3;
+
+/** admit_campaign_outbound_call's answer. */
+export type CampaignAdmission =
+  | {
+      result: "admitted";
+      call_id: string;
+      caller_number: string;
+      cap_minutes: number;
+      rate_per_minute: number;
+    }
+  | { result: "refused"; reason: string };
+
+export interface CampaignAdmissionRequest {
+  campaignId: string;
+  campaignContactId: string;
+  callId: string;
+  destination: string;
+  retryAttempt: number;
+  maxInFlight: number;
+}
+
 export interface DispatchSummary {
   campaignsConsidered: number;
   campaignsDialed: number;
@@ -74,7 +102,12 @@ export interface DispatchSummary {
 export interface DispatchDeps {
   supabaseAdmin: SupabaseClient<Database>;
   checkTelephonyAccess: typeof checkTelephonyAccess;
-  walletCanAffordOutbound: typeof walletCanAffordOutbound;
+  /**
+   * Atomic admission (admit_campaign_outbound_call): campaign still running and
+   * reviewed, in-flight limit, wallet worst case over every open call, the
+   * campaign budget, then the call row.
+   */
+  admitCampaignCall: (request: CampaignAdmissionRequest) => Promise<CampaignAdmission>;
   /** The Sarvam adapter, or null when Sarvam is not configured. */
   adapter: Pick<SarvamTelephonyAdapter, "createInstantOutbound"> | null;
   webhookUrl: ReturnType<typeof sarvamOutboundWebhookUrl>;
@@ -84,8 +117,6 @@ export interface DispatchDeps {
   ) => Promise<Record<string, unknown>>;
   finalize: (callId: string) => Promise<unknown>;
   now: () => number;
-  /** The customer's outbound price per minute (paise); defaults to getCallRate. */
-  outboundRate?: (organizationId: string) => Promise<number>;
 }
 
 export interface DispatchOptions {
@@ -100,7 +131,7 @@ async function defaultDispatchDeps(): Promise<DispatchDeps> {
   return {
     supabaseAdmin,
     checkTelephonyAccess,
-    walletCanAffordOutbound,
+    admitCampaignCall: (request) => admitCampaignCall(supabaseAdmin, request),
     adapter: adapter instanceof SarvamTelephonyAdapter ? adapter : null,
     webhookUrl: sarvamOutboundWebhookUrl(),
     templateVariables: (agentConfig, organizationId) =>
@@ -130,6 +161,9 @@ export async function dispatchDueCampaigns(
     console.warn("campaign_dispatch:outbound_disabled");
     return summary;
   }
+  // The platform calling hours (09:00-21:00 India time) bound every campaign's
+  // own schedule, exactly as they bound single calls.
+  if (!withinCallingHours(new Date(deps.now()))) return summary;
 
   // Only ever dispatches instant_outbound_fallback campaigns (spec "THIRD"):
   // a sarvam_campaign-mode campaign already had its full contact list
@@ -166,8 +200,8 @@ async function dispatchOneCampaign(
     organization_id: string;
     phone_number_id: string | null;
     agent_config_id: string | null;
-    objective: string | null;
-    call_instructions: string | null;
+    context: unknown;
+    context_reviewed_at: string | null;
     schedule: unknown;
     max_attempts: number;
     retry_after_minutes: number;
@@ -184,6 +218,14 @@ async function dispatchOneCampaign(
   if (!campaign.phone_number_id || !campaign.agent_config_id) {
     return { dialed: 0, skipped: 0, completed: false };
   }
+  // Only what the customer reviewed is ever said: the stored, reviewed context,
+  // compiled here (never the free-text columns, which stay editable).
+  const reviewed = campaign.context_reviewed_at ? validateCampaignContext(campaign.context) : null;
+  if (!reviewed?.ok) {
+    console.error("campaign_dispatch:context_not_reviewed", campaign.id);
+    return { dialed: 0, skipped: 0, completed: false };
+  }
+  const compiledContext = compileCampaignContext(reviewed.context);
 
   const gate = await deps.checkTelephonyAccess(
     campaign.organization_id,
@@ -223,18 +265,13 @@ async function dispatchOneCampaign(
     return { dialed: 0, skipped: 0, completed: false };
   }
   // Every campaign call is capped like a single call: billed for at most the
-  // confirmed maximum length, at the price locked now, and dialled only while the
-  // wallet covers that worst case. No recorded maximum: nothing is dialled.
+  // confirmed maximum length, at the price locked at admission. No recorded
+  // maximum: nothing is dialled (admission re-checks this under its lock).
   const maxCallSeconds = agentConfig.sarvam_outbound_max_call_seconds;
   if (!maxCallSeconds || maxCallSeconds < 60 || maxCallSeconds > OUTBOUND_MAX_CALL_SECONDS_CAP) {
     console.error("campaign_dispatch:max_call_length_not_set", campaign.id);
     return { dialed: 0, skipped: 0, completed: false };
   }
-  const capMinutes = Math.ceil(maxCallSeconds / 60);
-  const ratePerMinute = await (
-    deps.outboundRate ??
-    (async (org: string) => (await getCallRate(org, "outbound")).customerAmountPerMinute)
-  )(campaign.organization_id);
 
   const adapter = deps.adapter;
   if (!adapter) {
@@ -322,22 +359,28 @@ async function dispatchOneCampaign(
       continue;
     }
 
+    // Countries ClickAI may call (+91 unless configured narrower): never dialled,
+    // never retried, and reported with its reason.
+    if (!isDestinationCountryAllowed(destination)) {
+      await supabaseAdmin
+        .from("campaign_contacts")
+        .update({
+          status: "excluded",
+          excluded_reason: "country_not_allowed",
+          next_attempt_at: null,
+        })
+        .eq("id", cc.id)
+        .in("status", ["pending", "retry_scheduled"]);
+      skipped++;
+      continue;
+    }
+
     // Supervised-test allowlist (SARVAM_OUTBOUND_TEST_ALLOWLIST): any other
     // number is left exactly as it is — not claimed, nothing written or dialled.
     if (!isSarvamOutboundDestinationAllowed(destination)) {
       console.error("campaign_dispatch:destination_not_allowlisted", campaign.id, cc.id);
       skipped++;
       continue;
-    }
-
-    // Re-check affordability per contact, not once per campaign — a
-    // campaign can run out of wallet balance mid-run, and every remaining
-    // contact must simply stay "pending" (never marked failed) until
-    // there's balance again, exactly like the single-call path's own gate.
-    const affordable = await deps.walletCanAffordOutbound(campaign.organization_id, capMinutes);
-    if (!affordable) {
-      skipped++;
-      break; // no point trying the rest of this campaign's batch this tick
     }
 
     // Atomic claim (spec "SEVENTH" — no duplicate dispatch): the UPDATE's
@@ -430,46 +473,49 @@ async function dispatchOneCampaign(
       continue;
     }
 
-    const { data: call, error: insertError } = await supabaseAdmin
-      .from("call_logs")
-      .insert({
-        id: callId,
-        organization_id: campaign.organization_id,
-        campaign_id: campaign.id,
-        campaign_contact_id: cc.id,
-        contact_id: contact.id,
-        phone_number_id: campaign.phone_number_id,
-        provider: "sarvam",
-        direction: "outbound",
-        caller_number: gate.phoneNumber.e164,
-        destination_number: destination,
-        status: "initiated",
-        started_at: new Date().toISOString(),
-        retry_attempt: attempts - 1,
-        billing_cap_minutes: capMinutes,
-        billing_rate_per_minute: ratePerMinute,
+    // Admission, atomically under the customer's lock: campaign still running and
+    // reviewed, in-flight limit, wallet worst case over every open call, the
+    // campaign budget, then the call row. Anything refused dials nothing and
+    // gives the contact back exactly as it was.
+    const admission = await deps
+      .admitCampaignCall({
+        campaignId: campaign.id,
+        campaignContactId: cc.id,
+        callId,
+        destination,
+        retryAttempt: attempts - 1,
+        maxInFlight: CAMPAIGN_MAX_IN_FLIGHT,
       })
-      .select("id")
-      .single();
-    if (insertError) {
-      // Nothing was dialled: give the contact back exactly as it was, so it is
-      // never stranded in `calling` without a call row.
+      .catch((err: Error): CampaignAdmission => {
+        console.error("campaign_dispatch:admission_failed", campaign.id, cc.id, err.message);
+        return { result: "refused", reason: "admission_error" };
+      });
+    if (admission.result !== "admitted") {
       await releaseCampaignClaim(supabaseAdmin, {
         campaignId: campaign.id,
         campaignContactId: cc.id,
         previousStatus: cc.status,
         previousAttempts: cc.attempts,
       });
-      // 23505: an unresolved Sarvam call to this number (a single call or
-      // another campaign's) holds the number reservation. Defer this contact
-      // to a later run and keep dispatching the rest.
-      if (insertError.code === "23505") {
+      skipped++;
+      // An unresolved call to this number elsewhere: try the next contact.
+      if (admission.reason === "destination_busy") {
         console.info("campaign_dispatch:number_reserved", campaign.id, cc.id);
-        skipped++;
         continue;
       }
-      throw insertError;
+      console.info("campaign_dispatch:admission_refused", campaign.id, admission.reason);
+      // The budget is spent: pause, so the customer decides (raise it or stop).
+      if (admission.reason === "budget_exhausted") {
+        await supabaseAdmin
+          .from("campaigns")
+          .update({ status: "paused", paused_at: new Date().toISOString() })
+          .eq("id", campaign.id)
+          .eq("status", "running");
+      }
+      // Wallet, in-flight limit, budget, pause: nothing more this run.
+      break;
     }
+    const call = { id: admission.call_id };
 
     const agentVariables: Record<string, unknown> = {
       ...withoutReservedOutboundVariables(cc.variables as Record<string, unknown> | null),
@@ -478,8 +524,8 @@ async function dispatchOneCampaign(
       // Direction, call id and objective last, so no contact column can change them.
       ...outboundCallVariables({
         callId: call.id,
-        objective: campaign.objective,
-        instructions: campaign.call_instructions,
+        objective: compiledContext.objective,
+        instructions: compiledContext.instructions,
       }),
     };
 
@@ -488,7 +534,7 @@ async function dispatchOneCampaign(
         appId: target.appId,
         appVersion: target.appVersion,
         connectionId: connection.provider_connection_id,
-        fromE164: gate.phoneNumber.e164,
+        fromE164: admission.caller_number,
         toE164: destination,
         agentVariables,
         appOverrides: { initialBotMessage: openingLine },
@@ -614,4 +660,28 @@ export async function maybeCompleteCampaign(
     .update({ status: "completed", completed_at: new Date().toISOString() })
     .eq("id", campaignId);
   return true;
+}
+
+/** admit_campaign_outbound_call through the service client. */
+export async function admitCampaignCall(
+  supabaseAdmin: SupabaseClient<Database>,
+  request: CampaignAdmissionRequest,
+): Promise<CampaignAdmission> {
+  const rpc = supabaseAdmin.rpc.bind(supabaseAdmin) as unknown as (
+    fn: string,
+    args: Record<string, unknown>,
+  ) => PromiseLike<{ data: unknown; error: { message: string } | null }>;
+  const { data, error } = await rpc("admit_campaign_outbound_call", {
+    _campaign: request.campaignId,
+    _campaign_contact: request.campaignContactId,
+    _call: request.callId,
+    _destination: request.destination,
+    _retry_attempt: request.retryAttempt,
+    _max_in_flight: request.maxInFlight,
+  });
+  if (error) throw new Error(error.message);
+  const answer = (data ?? {}) as Record<string, unknown>;
+  if (answer["result"] === "admitted" && typeof answer["call_id"] === "string")
+    return answer as unknown as CampaignAdmission;
+  return { result: "refused", reason: String(answer["reason"] ?? "unknown") };
 }
