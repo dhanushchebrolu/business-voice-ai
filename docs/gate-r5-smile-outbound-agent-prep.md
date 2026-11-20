@@ -348,3 +348,14 @@ All 11 checks PASS; nothing was enabled, confirmed, deployed or called.
 | 11  | Inbound            | PASS   | `Conversatio-9c6a04cd-3334` v5; …0061 → `Smile-Denta-be071be0-703e`, verified v5, inbound on                                                                                                                                      |
 
 Notes: a supervised test must start before 21:00 IST. The database CHECK still allows up to 3600 s if written directly; the only write path (admin confirmation) enforces ≤ 300.
+
+## 12. GATE R7-B: supervised outbound call (2026-11-20, user-approved)
+
+- 13:04:44 UTC `SARVAM_OUTBOUND_READY_SET`: outbound agent `Smile-Denta-a17cec18-1c23` v2 confirmed, max 300 s.
+- 13:05:34 UTC `NUMBER_OUTBOUND_SET`: outbound on for …0061 (inbound and deployment unchanged).
+- 13:11:36 UTC `SARVAM_ADMIN_OUTBOUND_CALL`: one call …0061 → the single allowlisted number (+91, the clinic's own phone, user present). Call `92efe5aa-22e9-4ca4-85a5-048144f534e1`.
+- Result: completed, 79 s; billing cap 5 min, rate ₹4.00 locked; charged ₹8.00 (2 started minutes, wallet ₹536.00 → ₹528.00, one `call_usage` row); no campaign.
+- Agent API during the call: 3 events, all via the **outbound** credential: `context` ok, `check_availability` ok, `call_outcome` ok. No booking or callback request.
+- Extracted: `outbound_result` interested, `interest_level` high, `opted_out` no, `wrong_number` no, `call_outcome` enquiry_answered, interest Root Canal Treatment, requested 2026-11-21 08:00. 0 bookings, 0 leads (correct: only `callback_requested` creates a lead).
+- State after: 0 open outbound calls; 1 outbound call ever; …0061 outbound **still on**.
+- Observations: `call_direction` / `clickai_call_id` are absent from the stored final variables (inputs, not post-call outputs; the call is linked by id and provider call id); the admin dialog's "Agent:" label shows the inbound app (display only). Worker logs were not tailed during the call; evidence is the database and audit trail.
