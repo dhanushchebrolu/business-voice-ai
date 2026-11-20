@@ -243,7 +243,7 @@ Rollback, at any point, none of which touches inbound:
 
 ## 9. R5 follow-up (2026-11-20): final configuration and manual checklist
 
-Code: commit `8a6e5fb` on `feature/provisioning-phase1` (CI below). **Not deployed**: production still runs `71f671d4` = `bde6726` until a separate deployment approval. Nothing in Sarvam was created or changed; no credential issued; no calls.
+Code: commit `8a6e5fb` on `feature/provisioning-phase1`, CI green. **Deployed (GATE R5.5, user-approved) 2026-11-20 11:37:52 UTC** as klyro `4832430f-fdc6-4188-87e1-b5362923bdd4` at 100%; 28 bindings identical to `71f671d4` (fingerprint `e38cdeca`). Post-deploy: 154/154 requests ok in a 4-min tail (0 errors/warnings/5xx); Smile inbound context `ok` via the `role=inbound` credential (text chat); `campaign.dispatch` `skipped: disabled`; 0 calls, bookings, leads, wallet or settings changes; Payment Enforcement off. Rollback: `npx wrangler versions deploy 71f671d4-36cc-427e-90ac-b460ff74636b@100% --name klyro --yes` (no outbound credential exists; if one is issued later, disable it before rolling back past `71f671d4`). Nothing in Sarvam was created or changed; no credential issued; no calls.
 
 ### 9.1 What changed in ClickAI
 
@@ -274,7 +274,7 @@ Saving is a ClickAI-only write (`agent_voice_language_settings`, status `pending
 ### 9.3 Manual Sarvam creation checklist (each step only after its approval)
 
 1. ~~ClickAI admin → Smile Dental → Voice & language: save §9.2.~~ Done 2026-11-20.
-2. Deploy `8a6e5fb` (or later) to production — separate approval. Required before step 13: the deployed confirmation still accepts up to 3600 s.
+2. ~~Deploy `8a6e5fb` to production.~~ Done 2026-11-20 (GATE R5.5, `4832430f`): confirmation now refuses more than 300 s.
 3. ClickAI admin → Outbound agent → Generate outbound credential; copy once.
 4. Sarvam → Settings → Secrets: create `CLICKAI_OUTBOUND_API_KEY`. Do not reuse or edit `CLICKAI_API_KEY`.
 5. Sarvam → Agents → New agent (single state) `Smile Dental Outbound`. Do not duplicate `Conversatio-9c6a04cd-3334`.
