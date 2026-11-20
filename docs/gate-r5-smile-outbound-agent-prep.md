@@ -294,3 +294,19 @@ Saving is a ClickAI-only write (`agent_voice_language_settings`, status `pending
 3. **Voicemail safety depends on classification.** No-retry relies on Sarvam's voicemail detection or the LLM setting `outbound_result = voicemail`. A missed detection on a `no_answer` attempt can still be retried under the campaign policy (max 3 attempts, 120 min apart). Single calls stay limited to 2 per destination per 24 h.
 4. **Campaign wallet check is per dial**, not across concurrent in-flight campaign calls; the per-call cap bounds each call, but several in-flight calls can together exceed the balance by up to (in-flight × 5 min × rate). Campaigns remain disabled (`campaign.dispatch` skipped: disabled).
 5. **Callback** lead creation depends on the LLM setting `callback_requested`; a missed classification creates no lead (fail-safe: nothing is promised on the call).
+
+## 10. GATE R6 progress (2026-11-20)
+
+Preflight (read-only) passed: Worker `4832430f`, no code since `8a6e5fb`; 72 migrations; 1 inbound credential, 0 outbound; 0 outbound agents registered or confirmed; 0 numbers `outbound_enabled`; 0 campaigns; Payment Enforcement off; voice & language saved (pending).
+
+Sarvam limits found: its tools cannot attach a stored credential to a tool ("auth on a tool is refused") and there is no agent delete. With the user's approval the agent was created first; the credential steps are manual.
+
+**Created (draft v1, not committed, not deployed): `Smile-Denta-a17cec18-1c23` "Smile Dental Outbound"**, from the blank single-state template (not a copy of the inbound agent). Read back:
+
+- Call handling: `max_interaction_time_seconds` 300; voicemail detection on, message `This is the virtual assistant from Smile Dental. Sorry we missed you. Thank you.`; no call transfer; interruptions on; agent can end; nudges 20 s / 20 s, end after nudges.
+- Voice `01a0e8fc-9b0d-7595-b5b6-4ba0d403c566` pace 1.05; English default; English, Hindi, Telugu, Gujarati (LID always, saarika-v4, min 1 s).
+- Prompt §2.3 (6 sections, `prompt_sha` `1ee2f4599e89aee4`); intro §2.1.
+- Variables: 25 inputs + 9 outputs exactly as §2.4 (including `wrong_number`, `interest_level`, `outbound_result`).
+- Tools: `clickai_business_context` (on start), `get_business_info`, `check_availability`, `record_call_outcome` (on end) — **no auth yet**; core `end_interaction`, `change_output_language`, `handle_voicemail` on; `call_transfer`, `query_knowledge_base` off. No `book_appointment`, `request_callback`, `send_reminder`.
+
+Remaining (user, then Claude): generate the outbound credential in ClickAI; create Sarvam secret `CLICKAI_OUTBOUND_API_KEY`; select it as Bearer on the four tools; then read-back, text tests, commit, register, negative tests.
