@@ -74,6 +74,7 @@ function setup(contactCount: number) {
           sarvam_outbound_app_version: 2,
           sarvam_outbound_ready_app_id: "app_1-out",
           sarvam_outbound_ready_version: 2,
+          sarvam_outbound_max_call_seconds: 300,
         },
       ],
       contacts,
@@ -107,6 +108,7 @@ function setup(contactCount: number) {
   const onDial: { fn?: ((n: number) => void | Promise<void>) | undefined } = {};
   const onWalletCheck: { fn?: () => void } = {};
   const failDial: { err?: Error | undefined } = {};
+  const walletMinutes: number[] = [];
   const deps: DispatchDeps = {
     supabaseAdmin: db.client,
     checkTelephonyAccess: async () =>
@@ -115,7 +117,8 @@ function setup(contactCount: number) {
         reason: null,
         phoneNumber: { provider: "sarvam", e164: "+911111111111", connection_id: "conn_1" },
       }) as never,
-    walletCanAffordOutbound: async () => {
+    walletCanAffordOutbound: async (_org, minutes) => {
+      walletMinutes.push(minutes ?? 1);
       onWalletCheck.fn?.();
       return true;
     },
@@ -135,12 +138,24 @@ function setup(contactCount: number) {
     templateVariables: async () => ({}),
     finalize: async () => undefined,
     now: () => clock,
+    outboundRate: async () => 400,
   };
   const table = (name: string) => db.tables[name] ?? [];
   const advance = (ms: number) => {
     clock += ms;
   };
-  return { db, deps, dialed, requests, table, onDial, onWalletCheck, failDial, advance };
+  return {
+    db,
+    deps,
+    dialed,
+    requests,
+    table,
+    onDial,
+    onWalletCheck,
+    failDial,
+    advance,
+    walletMinutes,
+  };
 }
 
 const setCampaignStatus = (t: ReturnType<typeof setup>, status: string) => {
@@ -517,5 +532,51 @@ describe("campaign dispatch — read failure is not an opt-out", () => {
       "opted_out",
     );
     assert.equal(t.table("contacts")[0]!["opted_out"], true);
+  });
+});
+
+describe("campaign dispatch — the hard maximum call length", () => {
+  const quiet = async (fn: () => Promise<unknown>) => {
+    const original = console.error;
+    console.error = () => {};
+    try {
+      await fn();
+    } finally {
+      console.error = original;
+    }
+  };
+
+  test("each campaign call locks the confirmed cap and price; the wallet must cover the worst case", async () => {
+    const t = setup(2);
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.requests.length, 2);
+    for (const call of t.table("call_logs")) {
+      assert.equal(call["billing_cap_minutes"], 5, "300 s = 5 billed minutes at most");
+      assert.equal(call["billing_rate_per_minute"], 400);
+    }
+    assert.ok(t.walletMinutes.length > 0);
+    assert.ok(
+      t.walletMinutes.every((m) => m === 5),
+      "affordability checked for the 5-minute worst case",
+    );
+  });
+
+  test("no recorded maximum, or one above the 300 s hard maximum: nothing is claimed or dialled", async () => {
+    for (const max of [null, 0, 59, 301, 3600]) {
+      const t = setup(2);
+      t.table("agent_configs")[0]!["sarvam_outbound_max_call_seconds"] = max;
+      await quiet(() => dispatchDueCampaigns({ deps: t.deps }));
+      assert.equal(t.requests.length, 0, String(max));
+      assert.equal(t.table("call_logs").length, 0);
+      assert.ok(t.table("campaign_contacts").every((c) => c["status"] === "pending"));
+    }
+  });
+
+  test("a wallet that cannot cover the worst case leaves every contact pending", async () => {
+    const t = setup(2);
+    t.deps.walletCanAffordOutbound = async (_org, minutes) => (minutes ?? 1) < 5;
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.requests.length, 0);
+    assert.ok(t.table("campaign_contacts").every((c) => c["status"] === "pending"));
   });
 });

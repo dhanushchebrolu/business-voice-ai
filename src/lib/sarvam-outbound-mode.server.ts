@@ -4,6 +4,7 @@ import {
   OUTBOUND_DISABLED_MESSAGE,
   outboundCallingDisabled,
 } from "./outbound-eligibility.server.ts";
+import { OUTBOUND_MAX_CALL_SECONDS_CAP } from "./agent-roles.ts";
 
 /**
  * Every customer has two Sarvam agents (agent-roles.ts): the inbound agent
@@ -180,10 +181,11 @@ export type SetOutboundReadyResult =
   | { ok: false; reason: string };
 
 /**
- * The longest call ClickAI accepts for an outbound agent version: Sarvam's
- * "Max call length" setting allows at most 60 minutes.
+ * The call lengths ClickAI accepts when confirming an outbound agent version:
+ * at least 1 minute, at most the platform's hard maximum
+ * (OUTBOUND_MAX_CALL_SECONDS_CAP, 5 minutes). Sarvam allows up to 60.
  */
-export const OUTBOUND_MAX_CALL_SECONDS = { min: 60, max: 3600 } as const;
+export const OUTBOUND_MAX_CALL_SECONDS = { min: 60, max: OUTBOUND_MAX_CALL_SECONDS_CAP } as const;
 
 /**
  * Records (or clears) the customer's registered OUTBOUND agent version as
@@ -216,7 +218,7 @@ export async function setOutboundReady(
       return {
         ok: false,
         reason:
-          "Enter the agent version's maximum call length from Sarvam (1 to 60 minutes). Set it in Sarvam first if it is not set.",
+          "Enter the agent version's maximum call length from Sarvam (1 to 5 minutes). Set it in Sarvam first; outbound calls may last at most 5 minutes.",
       };
   }
   const { data: agents, error } = await admin

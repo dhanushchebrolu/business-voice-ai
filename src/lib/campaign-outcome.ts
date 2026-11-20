@@ -69,6 +69,11 @@ export function decideCampaignContactOutcome(
   const special = detectSpecialOutcome(agentVariables);
   if (special) return { status: special, nextAttemptAt: null };
 
+  // A message was already left on an answering machine: calling again would leave
+  // another one, so the attempt is final even if the provider reported no_answer.
+  if (agentVariables?.["outbound_result"] === "voicemail")
+    return { status: terminalStatus, nextAttemptAt: null };
+
   const isRetryable = policy.retryStatuses.includes(terminalStatus);
   if (isRetryable && attempts < policy.maxAttempts) {
     const next = new Date(now.getTime() + policy.retryAfterMinutes * 60_000);

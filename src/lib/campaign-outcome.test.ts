@@ -65,3 +65,39 @@ describe("detectSpecialOutcome (also gates campaign leads)", () => {
     assert.equal(detectSpecialOutcome(null), null);
   });
 });
+
+describe("voicemail is never retried", () => {
+  test("a voicemail attempt is final even when the provider reported a retryable status", () => {
+    for (const status of ["no_answer", "busy", "failed", "completed"] as const)
+      assert.deepEqual(
+        decideCampaignContactOutcome(status, 1, policy, { outbound_result: "voicemail" }),
+        { status, nextAttemptAt: null },
+        status,
+      );
+  });
+
+  test("an opt-out or wrong number on the same call still takes precedence", () => {
+    assert.equal(
+      decideCampaignContactOutcome("no_answer", 1, policy, {
+        outbound_result: "voicemail",
+        opted_out: "yes",
+      }).status,
+      "opted_out",
+    );
+    assert.equal(
+      decideCampaignContactOutcome("no_answer", 1, policy, {
+        outbound_result: "voicemail",
+        wrong_number: "yes",
+      }).status,
+      "wrong_number",
+    );
+  });
+
+  test("other results keep the normal retry policy", () => {
+    assert.equal(
+      decideCampaignContactOutcome("no_answer", 1, policy, { outbound_result: "no_conversation" })
+        .status,
+      "retry_scheduled",
+    );
+  });
+});

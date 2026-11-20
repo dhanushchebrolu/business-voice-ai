@@ -17,7 +17,15 @@ import {
   outboundRegistrationGate,
   type OutboundChecklistInput,
 } from "./provisioning-view.ts";
-import { buildOutboundAgentConfig, buildUniversalAgentConfig } from "./universal-agent-config.ts";
+import {
+  buildOutboundAgentConfig,
+  buildUniversalAgentConfig,
+  outboundVoicemailMessage,
+} from "./universal-agent-config.ts";
+import { OUTBOUND_MAX_CALL_SECONDS_CAP } from "./agent-roles.ts";
+import { OUTBOUND_MAX_CALL_SECONDS } from "./sarvam-outbound-mode.server.ts";
+import { OUTBOUND_RETAINED_VARIABLES } from "./call-variables.ts";
+import { sarvamToolConfiguration } from "./sarvam-agent-api.server.ts";
 import { customerSetupSteps } from "./provisioning-status.ts";
 import { AGENT_TOOLS } from "./sarvam-agent-api.server.ts";
 import type { AgentSnapshot } from "./agent-instructions.ts";
@@ -135,7 +143,7 @@ describe("central templates", () => {
   test("fingerprints: stable, role-specific, and the inbound one is unchanged by dual agents", () => {
     const a = buildOutboundAgentConfig(snapshot({}), VOICE);
     assert.equal(a.fingerprint, buildOutboundAgentConfig(snapshot({}), VOICE).fingerprint);
-    assert.match(a.fingerprint, /^o1-[0-9a-f]{8}$/);
+    assert.match(a.fingerprint, /^o2-[0-9a-f]{8}$/, "outbound template version 2");
     assert.match(buildUniversalAgentConfig(snapshot({}), VOICE).fingerprint, /^u1-[0-9a-f]{8}$/);
   });
 });
@@ -440,5 +448,68 @@ describe("wiring (source checks)", () => {
       const src = read(p);
       assert.match(src, /\.eq\("role", "inbound"\)/, p);
     }
+  });
+});
+
+describe("outbound template v2: post-call variables and call settings", () => {
+  const outbound = sarvamToolConfiguration("https://clickai.in", "outbound");
+  const outputs = new Map(outbound.outputVariables.map((v) => [v.name, v]));
+
+  test("declares every post-call variable outbound finalization reads (G1)", () => {
+    // do_not_call is an alias ClickAI also honours; opted_out is the one the agent sets.
+    for (const name of OUTBOUND_RETAINED_VARIABLES.filter((n) => n !== "do_not_call"))
+      assert.ok(outputs.has(name), name);
+  });
+
+  test("outbound_result offers exactly the values finalization understands", () => {
+    const type = outputs.get("outbound_result")!.type;
+    for (const v of [
+      "interested",
+      "not_interested",
+      "callback_requested",
+      "opted_out",
+      "wrong_person",
+      "voicemail",
+      "no_conversation",
+    ])
+      assert.match(type, new RegExp(`\\b${v}\\b`), v);
+    assert.doesNotMatch(type, /\bbooked\b/, "an outbound agent can never book");
+    assert.match(outputs.get("wrong_number")!.type, /yes, no/);
+    assert.match(outputs.get("interest_level")!.type, /high, medium, low, none/);
+  });
+
+  test("the inbound template is not given the outbound-only variables", () => {
+    const inbound = new Set(
+      sarvamToolConfiguration("https://clickai.in").outputVariables.map((v) => v.name),
+    );
+    for (const name of ["wrong_number", "interest_level", "outbound_result"])
+      assert.ok(!inbound.has(name), name);
+  });
+
+  test("call settings: 300 s hard maximum, voicemail detection with a fixed message, no transfer", () => {
+    const c = buildOutboundAgentConfig(snapshot({}), VOICE);
+    assert.equal(c.templateVersion, 2);
+    assert.deepEqual(c.callHandling, {
+      maxCallSeconds: 300,
+      voicemailDetection: true,
+      voicemailMessage:
+        "This is the virtual assistant from Smile Dental. Sorry we missed you. Thank you.",
+      callTransfer: false,
+    });
+    assert.equal(OUTBOUND_MAX_CALL_SECONDS_CAP, 300);
+    assert.equal(OUTBOUND_MAX_CALL_SECONDS.max, 300, "confirmation refuses anything longer");
+  });
+
+  test("the voicemail message carries the business name only, never variables or personal details", () => {
+    assert.equal(
+      outboundVoicemailMessage("  Smile\n Dental  "),
+      "This is the virtual assistant from Smile Dental. Sorry we missed you. Thank you.",
+    );
+    assert.equal(
+      outboundVoicemailMessage(""),
+      "This is a virtual assistant. Sorry we missed you. Thank you.",
+    );
+    assert.doesNotMatch(outboundVoicemailMessage("Smile Dental"), /\{\{|@|\d{6,}/);
+    assert.ok(outboundVoicemailMessage("x".repeat(500)).length < 200);
   });
 });

@@ -1,7 +1,11 @@
 import type { AgentSnapshot } from "./agent-instructions.ts";
 import { normalizeCustomerPhone } from "./phone-number.ts";
 import { sarvamAgentConfigPatch, validateVoiceLanguageSettings } from "./sarvam-voice-catalog.ts";
-import { OUTBOUND_AGENT_TOOLS, OUTBOUND_FORBIDDEN_TOOLS } from "./agent-roles.ts";
+import {
+  OUTBOUND_AGENT_TOOLS,
+  OUTBOUND_FORBIDDEN_TOOLS,
+  OUTBOUND_MAX_CALL_SECONDS_CAP,
+} from "./agent-roles.ts";
 
 /**
  * The customer-specific configuration of ClickAI's ONE universal Sarvam
@@ -299,7 +303,7 @@ export function capabilityAllowsTool(
 /* ------------------------------------------------------------------ */
 
 /** Bump when the outbound template's tool set, variables or prompt contract change. */
-export const OUTBOUND_AGENT_TEMPLATE_VERSION = 1;
+export const OUTBOUND_AGENT_TEMPLATE_VERSION = 2;
 
 /**
  * The customer's OUTBOUND agent: the same business data (read live by the
@@ -314,6 +318,18 @@ export interface OutboundAgentConfig {
   tools: { enable: string[]; forbidden: string[] };
   /** Agent variables ClickAI sets on every outbound call; the agent must declare them. */
   callVariables: string[];
+  /**
+   * Sarvam call settings for the agent. maxCallSeconds is the hard maximum (Sarvam
+   * ends the call there; ClickAI confirms nothing longer). Voicemail detection is
+   * safe to switch on because this agent never takes inbound calls; the message is
+   * plain text (Sarvam reads variables in it literally) with no personal details.
+   */
+  callHandling: {
+    maxCallSeconds: number;
+    voicemailDetection: true;
+    voicemailMessage: string;
+    callTransfer: false;
+  };
   blockers: string[];
   voiceLanguage: VoiceLanguageConfig | null;
   voiceLanguageProblem: string | null;
@@ -341,9 +357,23 @@ export function buildOutboundAgentConfig(
       "campaign_objective",
       "campaign_instructions",
     ],
+    callHandling: {
+      maxCallSeconds: OUTBOUND_MAX_CALL_SECONDS_CAP,
+      voicemailDetection: true as const,
+      voicemailMessage: outboundVoicemailMessage(s.business.name),
+      callTransfer: false as const,
+    },
     blockers,
     voiceLanguage: vl.config,
     voiceLanguageProblem: vl.problem,
   };
   return { ...core, fingerprint: fingerprintOf(core, `o${OUTBOUND_AGENT_TEMPLATE_VERSION}`) };
+}
+
+/** The fixed voicemail message: business name only, nothing about the person. */
+export function outboundVoicemailMessage(businessName: string | null | undefined): string {
+  const name = (businessName ?? "").replace(/\s+/g, " ").trim().slice(0, 120);
+  return name
+    ? `This is the virtual assistant from ${name}. Sorry we missed you. Thank you.`
+    : "This is a virtual assistant. Sorry we missed you. Thank you.";
 }

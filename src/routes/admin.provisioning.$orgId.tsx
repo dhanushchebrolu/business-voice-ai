@@ -688,12 +688,12 @@ function ProvisioningDetail() {
         extra={
           outboundDialog === "mark" ? (
             <label className="block space-y-1 text-sm">
-              <span>Max call length set on this version in Sarvam (minutes, 1–60)</span>
+              <span>Max call length set on this version in Sarvam (minutes, 1–5)</span>
               <Input
                 type="number"
                 inputMode="numeric"
                 min={1}
-                max={60}
+                max={5}
                 value={maxCallMinutes}
                 onChange={(e) => setMaxCallMinutes(e.target.value)}
               />
@@ -709,9 +709,9 @@ function ProvisioningDetail() {
           const minutes = Number(maxCallMinutes);
           if (
             outboundDialog === "mark" &&
-            !(Number.isInteger(minutes) && minutes >= 1 && minutes <= 60)
+            !(Number.isInteger(minutes) && minutes >= 1 && minutes <= 5)
           )
-            throw new Error("Enter the max call length from Sarvam, 1 to 60 whole minutes");
+            throw new Error("Enter the max call length from Sarvam, 1 to 5 whole minutes");
           await setOutboundReady({
             data: {
               orgId,

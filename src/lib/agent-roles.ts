@@ -59,6 +59,15 @@ export function roleAllowsAgentApi(role: AgentRole, tool: string | undefined): b
   );
 }
 
+/**
+ * Hard maximum length of any outbound call, in seconds (decision D2, 2026-11-20).
+ * Sarvam's instant-outbound API has no per-call duration override, so the call
+ * itself is ended by the outbound agent's own "Max call length" setting; ClickAI
+ * refuses to confirm an agent version for more than this, and every call's
+ * billing cap and wallet reservation follow from the confirmed value.
+ */
+export const OUTBOUND_MAX_CALL_SECONDS_CAP = 300;
+
 export const ROLE_LABEL: Record<AgentRole, string> = {
   inbound: "Inbound agent",
   outbound: "Outbound agent",

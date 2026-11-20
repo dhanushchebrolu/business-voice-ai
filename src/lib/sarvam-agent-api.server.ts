@@ -1262,6 +1262,26 @@ export function sarvamToolConfiguration(
         extractionPrompt:
           "yes only if the person clearly asked not to be called again or to be removed; otherwise no.",
       },
+      // Read by outbound call finalization (call-variables.ts OUTBOUND_RETAINED_VARIABLES):
+      // campaign decisions, the lead score and the one explicit-callback lead.
+      {
+        name: "wrong_number",
+        type: "Enum: yes, no",
+        extractionPrompt:
+          "yes only if the person said it is the wrong number or that they are not the person the clinic meant to reach; otherwise no.",
+      },
+      {
+        name: "interest_level",
+        type: "Enum: high, medium, low, none",
+        extractionPrompt:
+          "none if the person asked not to be called again, was the wrong person, was an answering machine, declined, or there was no real conversation. Otherwise high (wanted an appointment), medium (asked questions or wanted to be contacted later), low (listened but undecided).",
+      },
+      {
+        name: "outbound_result",
+        type: "Enum: interested, not_interested, callback_requested, opted_out, wrong_person, voicemail, no_conversation",
+        extractionPrompt:
+          "Answer in order and stop at the first yes: asked not to be called or contacted again → opted_out; wrong number or not the person meant → wrong_person; answering machine, beep or recorded greeting → voicemail; no real conversation → no_conversation; explicitly asked to be contacted later → callback_requested; clearly declined → not_interested; otherwise interested.",
+      },
     ],
     promptGuard: `This agent only makes outbound calls for the business. Business facts come only from the ClickAI variables or the get_business_info tool. It may check availability, but it never books, holds a time, arranges a callback or sends a message: for any of those it gives the business phone number (business_phone). If the person asks not to be called again, it apologises and ends the call at once.`,
     allowlistIps: inbound.allowlistIps,

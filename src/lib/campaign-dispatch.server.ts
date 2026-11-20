@@ -2,7 +2,12 @@ import { outboundCallingDisabled } from "./outbound-eligibility.server.ts";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { getTelephonyAdapter, sarvamOutboundWebhookUrl } from "./telephony.server.ts";
-import { checkTelephonyAccess, walletCanAffordOutbound } from "./telephony-guard.server.ts";
+import {
+  checkTelephonyAccess,
+  getCallRate,
+  walletCanAffordOutbound,
+} from "./telephony-guard.server.ts";
+import { OUTBOUND_MAX_CALL_SECONDS_CAP } from "./agent-roles.ts";
 import { SarvamTelephonyAdapter } from "./telephony/sarvam-provider.server.ts";
 import { TEMPLATE_AGENT_COLUMNS, templateCallVariables } from "./sarvam-tenant-variables.server.ts";
 import { isWithinCallingWindow, type CampaignSchedule } from "./campaign-schedule.ts";
@@ -79,6 +84,8 @@ export interface DispatchDeps {
   ) => Promise<Record<string, unknown>>;
   finalize: (callId: string) => Promise<unknown>;
   now: () => number;
+  /** The customer's outbound price per minute (paise); defaults to getCallRate. */
+  outboundRate?: (organizationId: string) => Promise<number>;
 }
 
 export interface DispatchOptions {
@@ -198,7 +205,9 @@ async function dispatchOneCampaign(
       : Promise.resolve({ data: null }),
     supabaseAdmin
       .from("agent_configs")
-      .select(`organization_id, ${OUTBOUND_AGENT_COLUMNS}, ${TEMPLATE_AGENT_COLUMNS}`)
+      .select(
+        `organization_id, sarvam_outbound_max_call_seconds, ${OUTBOUND_AGENT_COLUMNS}, ${TEMPLATE_AGENT_COLUMNS}`,
+      )
       .eq("id", campaign.agent_config_id)
       .eq("organization_id", campaign.organization_id)
       .maybeSingle(),
@@ -213,6 +222,19 @@ async function dispatchOneCampaign(
     console.error("campaign_dispatch:agent_not_outbound_ready", campaign.id);
     return { dialed: 0, skipped: 0, completed: false };
   }
+  // Every campaign call is capped like a single call: billed for at most the
+  // confirmed maximum length, at the price locked now, and dialled only while the
+  // wallet covers that worst case. No recorded maximum: nothing is dialled.
+  const maxCallSeconds = agentConfig.sarvam_outbound_max_call_seconds;
+  if (!maxCallSeconds || maxCallSeconds < 60 || maxCallSeconds > OUTBOUND_MAX_CALL_SECONDS_CAP) {
+    console.error("campaign_dispatch:max_call_length_not_set", campaign.id);
+    return { dialed: 0, skipped: 0, completed: false };
+  }
+  const capMinutes = Math.ceil(maxCallSeconds / 60);
+  const ratePerMinute = await (
+    deps.outboundRate ??
+    (async (org: string) => (await getCallRate(org, "outbound")).customerAmountPerMinute)
+  )(campaign.organization_id);
 
   const adapter = deps.adapter;
   if (!adapter) {
@@ -312,7 +334,7 @@ async function dispatchOneCampaign(
     // campaign can run out of wallet balance mid-run, and every remaining
     // contact must simply stay "pending" (never marked failed) until
     // there's balance again, exactly like the single-call path's own gate.
-    const affordable = await deps.walletCanAffordOutbound(campaign.organization_id);
+    const affordable = await deps.walletCanAffordOutbound(campaign.organization_id, capMinutes);
     if (!affordable) {
       skipped++;
       break; // no point trying the rest of this campaign's batch this tick
@@ -424,6 +446,8 @@ async function dispatchOneCampaign(
         status: "initiated",
         started_at: new Date().toISOString(),
         retry_attempt: attempts - 1,
+        billing_cap_minutes: capMinutes,
+        billing_rate_per_minute: ratePerMinute,
       })
       .select("id")
       .single();

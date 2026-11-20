@@ -404,7 +404,15 @@ describe("finalizeTerminalCall: follow-up lead for a single outbound call", () =
   });
 
   test("booking interest alone (the agent sent them to the clinic) never creates a lead", async () => {
-    for (const outbound_result of ["interested", "not_interested", "booked", undefined, ""]) {
+    for (const outbound_result of [
+      "interested",
+      "not_interested",
+      "booked",
+      "voicemail",
+      "no_conversation",
+      undefined,
+      "",
+    ]) {
       const f = fakeClient({
         call: single({
           // The inbound-taxonomy outcome Sarvam picks for a refused outbound booking.

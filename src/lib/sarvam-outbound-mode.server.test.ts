@@ -144,27 +144,27 @@ describe("marking a version outbound-ready", () => {
     const r = await setOutboundReady(db.client, {
       organizationId: "org_a",
       ready: true,
-      maxCallSeconds: 900,
+      maxCallSeconds: 300,
     });
     assert.deepEqual(r, {
       ok: true,
       ready: true,
       appId: "app_1-out",
       appVersion: 3,
-      maxCallSeconds: 900,
+      maxCallSeconds: 300,
     });
     const agent = db.tables["agent_configs"]![0]!;
     assert.equal(agent["sarvam_outbound_ready_version"], 3);
     assert.equal(agent["sarvam_outbound_ready_app_id"], "app_1-out");
-    assert.equal(agent["sarvam_outbound_max_call_seconds"], 900);
+    assert.equal(agent["sarvam_outbound_max_call_seconds"], 300);
     await setOutboundReady(db.client, { organizationId: "org_a", ready: false });
     assert.equal(agent["sarvam_outbound_ready_version"], null);
     assert.equal(agent["sarvam_outbound_ready_app_id"], null);
     assert.equal(agent["sarvam_outbound_max_call_seconds"], null);
   });
 
-  test("confirming needs the agent's maximum call length from Sarvam, 1 to 60 whole minutes", async () => {
-    for (const maxCallSeconds of [undefined, 59, 3601, 90.5, Number.NaN]) {
+  test("confirming needs the agent's maximum call length, 1 minute up to the 300 s hard maximum", async () => {
+    for (const maxCallSeconds of [undefined, 59, 301, 900, 3600, 3601, 90.5, Number.NaN]) {
       const db = setup([withOutbound()]);
       const r = await setOutboundReady(db.client, {
         organizationId: "org_a",
@@ -175,7 +175,7 @@ describe("marking a version outbound-ready", () => {
       assert.match((r as { reason: string }).reason, /maximum call length/);
       assert.equal(db.tables["agent_configs"]![0]!["sarvam_outbound_ready_version"], undefined);
     }
-    for (const maxCallSeconds of [60, 3600]) {
+    for (const maxCallSeconds of [60, 300]) {
       const db = setup([withOutbound()]);
       const r = await setOutboundReady(db.client, {
         organizationId: "org_a",
@@ -195,7 +195,7 @@ describe("marking a version outbound-ready", () => {
       const r = await setOutboundReady(db.client, {
         organizationId: "org_a",
         ready: true,
-        maxCallSeconds: 900,
+        maxCallSeconds: 300,
       });
       assert.equal(r.ok, false);
       assert.equal(db.tables["agent_configs"]![0]!["sarvam_outbound_ready_app_id"], undefined);
@@ -210,7 +210,7 @@ describe("marking a version outbound-ready", () => {
     const r = await setOutboundReady(db.client, {
       organizationId: "org_a",
       ready: true,
-      maxCallSeconds: 900,
+      maxCallSeconds: 300,
     });
     assert.equal(r.ok, false);
     assert.equal(db.tables["agent_configs"]![1]!["sarvam_outbound_ready_version"], undefined);
@@ -227,7 +227,7 @@ describe("marking a version outbound-ready", () => {
       const r = await setOutboundReady(setup(agents).client, {
         organizationId: "org_a",
         ready: true,
-        maxCallSeconds: 900,
+        maxCallSeconds: 300,
       });
       assert.equal(r.ok, false);
     }
