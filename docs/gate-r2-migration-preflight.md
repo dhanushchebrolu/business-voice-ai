@@ -2,13 +2,13 @@
 
 Migrations: `20261119090000_outbound_call_admission.sql` (M1) and `20261120090000_dual_agent_provisioning.sql` (M2), branch `feature/provisioning-phase1` at `05b727c`. Everything below was read from production inside `begin transaction read only … rollback` (`transaction_read_only = on` confirmed). Nothing was applied, written or deployed.
 
-**Recommendation: NO-GO until blocker B1 is closed** (see §10). Everything else is ready.
+**Recommendation: GO**, with the §8 procedure (updated 2026-11-20 after B1 was closed by testing on PostgreSQL 17.6; see §10).
 
 ## 1. Production PostgreSQL
 
 `PostgreSQL 17.6 on x86_64-pc-linux-gnu` (`server_version_num` 170006). Session defaults for the CLI role: `lock_timeout = 0` (wait forever), `statement_timeout = 2min`.
 
-The migrations' PostgreSQL tests ran on **PostgreSQL 18** only (CI runner image and the local test server, 18.6). See B1.
+Both migrations, both rollbacks and the §9 verification SQL were tested on **PostgreSQL 17.6**, the same version as production (local embedded build `@embedded-postgres/windows-x64@17.6.0-beta.15`), as well as on 18 in CI. See §10.
 
 ## 2. Migration history
 
@@ -67,7 +67,7 @@ Run in reverse order: M2 rollback, then M1 rollback, each only after the Worker 
 
 **M1 rollback:** drops the function, four indexes, two CHECKs and three `call_logs` columns, the agent CHECK and column, and the history row. Data lost: request ids and locked billing terms on calls made after M1, and agents' recorded max call length. Safe while no outbound call has been made under M1 (production has made **0 outbound calls ever**). After any call, run the pre-check in the file: an open call losing its cap would be billed uncapped at finalization. `DROP COLUMN` takes ACCESS EXCLUSIVE briefly (catalog only).
 
-Both rollback files are explicit `BEGIN … COMMIT` and were tested forward → rollback → re-apply on PostgreSQL 18 (not 17, see B1).
+Both rollback files are explicit `BEGIN … COMMIT` and were tested forward → rollback → re-apply on PostgreSQL 17.6 and 18.
 
 ## 6. Preconditions (all met at 2026-11-20 preflight)
 
@@ -96,7 +96,7 @@ Both rollback files are explicit `BEGIN … COMMIT` and were tested forward → 
 
 ## 9. Verification SQL
 
-Checked: §9.1 was run against production (read-only) and returned exactly the expected values below. §9.2 and §9.3 were run on a scratch local database (PostgreSQL 18) after applying all 72 migrations, then both rollbacks (M2 first); both returned the expected shape.
+Checked: §9.1 was run against production (read-only) and returned exactly the expected values below. §9.2 and §9.3 were run on scratch local databases (PostgreSQL 17.6 and 18) after applying all 72 migrations, then both rollbacks (M2 first); both returned the expected shape on both versions.
 
 ### 9.1 Pre-migration (read-only)
 
@@ -188,8 +188,8 @@ Expected: `history` null, `leftover_columns` null, `leftover_objects 0`, `old_in
 
 ## 10. Blockers
 
-- **B1, PostgreSQL 17 not tested (blocker).** Production runs 17.6; both migrations and both rollbacks were only exercised on 18 (CI and local). Nothing in them is 18-specific to my reading (partial and unique indexes, plpgsql, `ADD COLUMN … DEFAULT`, `pg_advisory_xact_lock`, `hashtext` all exist in 17), but that is a judgement, not a test. To close: run `dual_agent_provisioning.pg.test.ts` and `outbound_call_admission.pg.test.ts` against a PostgreSQL 17 server (local embedded PostgreSQL 17, or a CI job with a `postgres:17` service). Needs your approval because it downloads PostgreSQL 17 binaries or changes CI.
+- **B1, PostgreSQL 17 not tested: CLOSED (2026-11-20).** On a local PostgreSQL 17.6 server (same version as production): `outbound_call_admission.pg.test.ts` 19/19 (including the genuinely concurrent admission cases, run through the local psql stand-in), `dual_agent_provisioning.pg.test.ts` 5/5 (forward, re-apply, data untouched, role rules, credential index, rollback, re-apply after rollback), and the full chain of 72 migrations → §9.2 → both rollbacks → §9.3 with the expected results. A first run showed 4 concurrency failures caused by the local harness (`spawn psql ENOENT`, no native psql on Windows), not by PostgreSQL; with the same stand-in used for the PostgreSQL 18 runs they all pass.
 - **Conditions for the execution step (not blockers, they are steps in §8):** set `lock_timeout` (production default is 0); check activity right before applying; confirm the push lists exactly the two migrations; apply before any Worker deploy; post-migration checks before GATE R3.
 - **Not verifiable read-only:** whether the migration runner wraps each file in a transaction. The SQL is re-runnable, so either behaviour is recoverable.
 
-**GO/NO-GO: NO-GO for now.** The only open item is B1, a test-coverage gap on the exact production PostgreSQL major version. Once both migration tests pass on PostgreSQL 17, the evidence above supports **GO**, with the §8 procedure.
+**GO/NO-GO: GO.** No blocker remains: the migrations and rollbacks pass on the exact production PostgreSQL version, every precondition in §6 holds, and neither migration can change outbound calling, campaigns, payment enforcement or live mappings. Execute only with the §8 procedure (lock timeout, activity check, exactly these two migrations in order, post-migration checks), re-run §9.1 immediately before, and keep the Worker on `e48ff18` until §9.2 passes.
