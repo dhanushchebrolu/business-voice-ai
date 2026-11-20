@@ -269,11 +269,11 @@ Validated with ClickAI's own `validateVoiceLanguageSettings`: accepted, no warni
 | Auto language switch    | on                                                                                                                                                                                         |
 | Sarvam patch it implies | `initial_language_name` English; `supported_languages` = `lid_supported_languages` = English, Hindi, Telugu, Gujarati; identification on; TTS `config_version` 2.0, `internal_id` as above |
 
-Saving is a ClickAI-only write (`agent_voice_language_settings`, status `pending`, audited `VOICE_LANGUAGE_SETTINGS_SAVED`); it makes no Sarvam call and does not touch the inbound agent. Status: **not yet saved** — needs a platform-admin session (admin → Smile Dental → Voice & language, reason "R5 D1: outbound agent voice").
+Saving is a ClickAI-only write (`agent_voice_language_settings`, status `pending`, audited `VOICE_LANGUAGE_SETTINGS_SAVED`); it makes no Sarvam call and does not touch the inbound agent. Status: **saved 2026-11-20 11:32 UTC** (status `pending`, 1 `VOICE_LANGUAGE_SETTINGS_SAVED` audit row; verified read-only). Inbound agent still `Conversatio-9c6a04cd-3334` v5; Sarvam unchanged.
 
 ### 9.3 Manual Sarvam creation checklist (each step only after its approval)
 
-1. ClickAI admin → Smile Dental → Voice & language: save §9.2.
+1. ~~ClickAI admin → Smile Dental → Voice & language: save §9.2.~~ Done 2026-11-20.
 2. Deploy `8a6e5fb` (or later) to production — separate approval. Required before step 13: the deployed confirmation still accepts up to 3600 s.
 3. ClickAI admin → Outbound agent → Generate outbound credential; copy once.
 4. Sarvam → Settings → Secrets: create `CLICKAI_OUTBOUND_API_KEY`. Do not reuse or edit `CLICKAI_API_KEY`.
