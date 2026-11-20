@@ -11,7 +11,8 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "test": "node --test",
-    "harness:calls": "vite --config dev-harness/calls/vite.config.ts"
+    "harness:calls": "vite --config dev-harness/calls/vite.config.ts",
+    "harness:provisioning": "vite --config dev-harness/provisioning/vite.config.ts"
   },
   "overrides": {
     "rolldown": "1.2.1"
