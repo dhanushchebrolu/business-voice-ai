@@ -153,6 +153,8 @@ function setup(contactCount: number) {
       if (camp?.["status"] !== "running")
         return { result: "refused", reason: "campaign_not_running" };
       if (admission.refuse) return { result: "refused", reason: admission.refuse };
+      if (camp["context_reviewed_at"] !== req.contextReviewedAt)
+        return { result: "refused", reason: "context_changed" };
       const cc = (db.tables["campaign_contacts"] ?? []).find(
         (c) => c["id"] === req.campaignContactId,
       )!;
@@ -177,6 +179,14 @@ function setup(contactCount: number) {
         retry_attempt: req.retryAttempt,
         billing_cap_minutes: 5,
         billing_rate_per_minute: 400,
+        campaign_context_snapshot: {
+          reviewed_at: req.contextReviewedAt,
+          context: camp["context"],
+          sent: {
+            campaign_objective: req.sentObjective,
+            campaign_instructions: req.sentInstructions,
+          },
+        },
       });
       if (error) {
         if (error.code === "23505") return { result: "refused", reason: "destination_busy" };
@@ -832,5 +842,115 @@ describe("campaign dispatch — stops that land after admission", () => {
     }
     assert.equal(t.dialed.length, 1);
     assert.equal(t.table("campaign_contacts").filter((c) => c["status"] === "pending").length, 2);
+  });
+});
+
+describe("campaign dispatch — M4: the context each call was admitted with", () => {
+  test("admission records exactly the text the call sends, and the reviewed version it came from", async () => {
+    const t = setup(2);
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.requests.length, 2);
+    for (const [i, req] of t.admission.requests.entries()) {
+      const vars = t.requests[i]!["agentVariables"] as Record<string, string>;
+      assert.equal(req.sentObjective, vars["campaign_objective"]);
+      assert.equal(req.sentInstructions, vars["campaign_instructions"]);
+      assert.equal(req.contextReviewedAt, t.table("campaigns")[0]!["context_reviewed_at"]);
+    }
+  });
+
+  test("a retry after the context was edited and re-reviewed uses the new version; the first call keeps its own", async () => {
+    const t = setup(1);
+    await dispatchDueCampaigns({ deps: t.deps });
+    const first = t.table("call_logs")[0]!;
+    const firstSnapshot = structuredClone(first["campaign_context_snapshot"]);
+    // The call ended with no answer and is due again; the customer edited and re-reviewed meanwhile.
+    first["status"] = "no_answer";
+    Object.assign(t.table("campaign_contacts")[0]!, {
+      status: "retry_scheduled",
+      next_attempt_at: null,
+    });
+    Object.assign(t.table("campaigns")[0]!, {
+      context: { ...REVIEWED_CONTEXT, objective: "Edited objective" },
+      context_reviewed_at: "2026-11-17T09:30:00Z",
+    });
+    await dispatchDueCampaigns({ deps: t.deps });
+    const calls = t.table("call_logs");
+    assert.equal(calls.length, 2);
+    assert.deepEqual(
+      calls[0]!["campaign_context_snapshot"],
+      firstSnapshot,
+      "history is not rewritten",
+    );
+    const retry = calls[1]!["campaign_context_snapshot"] as {
+      reviewed_at: string;
+      sent: Record<string, string>;
+    };
+    assert.equal(retry.reviewed_at, "2026-11-17T09:30:00Z");
+    assert.equal(retry.sent["campaign_objective"], "Edited objective");
+    assert.equal(
+      (t.requests[1]!["agentVariables"] as Record<string, string>)["campaign_objective"],
+      "Edited objective",
+    );
+  });
+
+  test("a context edit between the dispatcher's read and admission: refused, nothing dialled, contact given back", async () => {
+    const t = setup(1);
+    const admit = t.deps.admitCampaignCall;
+    t.deps.admitCampaignCall = async (req) => {
+      t.table("campaigns")[0]!["context_reviewed_at"] = "2026-11-17T09:59:00Z";
+      return admit(req);
+    };
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 0);
+    assert.equal(t.table("call_logs").length, 0);
+    assert.equal(t.table("campaign_contacts")[0]!["status"], "pending");
+  });
+});
+
+describe("campaign dispatch — M5: the 21:00 India-time cutoff around admission", () => {
+  // 15:29:59Z = 20:59:59 IST
+  const atCutoff = Date.parse("2026-11-17T15:29:59Z") - Date.parse("2026-11-17T10:00:00Z");
+
+  test("dispatched before the cutoff, admitted after it (admission refuses): nothing dialled, contact given back", async () => {
+    const t = setup(2);
+    t.advance(atCutoff);
+    t.admission.refuse = "outside_calling_hours";
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 0);
+    assert.equal(t.table("call_logs").length, 0);
+    assert.ok(
+      t.table("campaign_contacts").every((c) => c["status"] === "pending" && c["attempts"] === 0),
+    );
+  });
+
+  test("admitted before the cutoff, about to dial after it: recorded as never started, nothing dialled", async () => {
+    const t = setup(2);
+    t.advance(atCutoff);
+    const admit = t.deps.admitCampaignCall;
+    t.deps.admitCampaignCall = async (req) => {
+      const r = await admit(req);
+      t.advance(2_000); // 21:00:01 IST before the dial
+      return r;
+    };
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 0);
+    const call = t.table("call_logs")[0]!;
+    assert.equal(call["status"], "failed");
+    assert.equal(call["resolution_source"], "start_failure");
+  });
+
+  test("08:59 and 21:00 India time: nothing is read or dialled; 09:00 and 20:59 dial", async () => {
+    const cases: [string, number][] = [
+      ["2026-11-17T03:29:00Z", 0], // 08:59
+      ["2026-11-17T03:30:00Z", 1], // 09:00
+      ["2026-11-17T15:29:00Z", 1], // 20:59
+      ["2026-11-17T15:30:00Z", 0], // 21:00
+    ];
+    for (const [iso, expected] of cases) {
+      const t = setup(1);
+      t.advance(Date.parse(iso) - Date.parse("2026-11-17T10:00:00Z"));
+      await dispatchDueCampaigns({ deps: t.deps });
+      assert.equal(t.dialed.length, expected, iso);
+    }
   });
 });

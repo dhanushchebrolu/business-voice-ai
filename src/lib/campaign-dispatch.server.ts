@@ -87,6 +87,11 @@ export interface CampaignAdmissionRequest {
   destination: string;
   retryAttempt: number;
   maxInFlight: number;
+  /** The reviewed context version the call's text was compiled from. */
+  contextReviewedAt: string;
+  /** Exactly what the agent receives (stored on the call, immutable). */
+  sentObjective: string;
+  sentInstructions: string;
 }
 
 export interface DispatchSummary {
@@ -477,6 +482,12 @@ async function dispatchOneCampaign(
     // reviewed, in-flight limit, wallet worst case over every open call, the
     // campaign budget, then the call row. Anything refused dials nothing and
     // gives the contact back exactly as it was.
+    // The exact campaign text this call sends, recorded on the call by admission.
+    const outboundVars = outboundCallVariables({
+      callId,
+      objective: compiledContext.objective,
+      instructions: compiledContext.instructions,
+    });
     const admission = await deps
       .admitCampaignCall({
         campaignId: campaign.id,
@@ -485,6 +496,9 @@ async function dispatchOneCampaign(
         destination,
         retryAttempt: attempts - 1,
         maxInFlight: CAMPAIGN_MAX_IN_FLIGHT,
+        contextReviewedAt: campaign.context_reviewed_at!,
+        sentObjective: outboundVars["campaign_objective"] ?? "",
+        sentInstructions: outboundVars["campaign_instructions"] ?? "",
       })
       .catch((err: Error): CampaignAdmission => {
         console.error("campaign_dispatch:admission_failed", campaign.id, cc.id, err.message);
@@ -517,10 +531,12 @@ async function dispatchOneCampaign(
     }
     const call = { id: admission.call_id };
 
-    // A pause, cancel or stop that landed after admission: the call is recorded
-    // as never started (no charge, no budget), and nothing is dialled.
+    // A pause, cancel or stop that landed after admission, or the calling hours
+    // ending meanwhile: the call is recorded as never started (no charge, no
+    // budget), and nothing is dialled.
     const stillOn =
       !outboundCallingDisabled() &&
+      withinCallingHours(new Date(deps.now())) &&
       (await stillRunning().catch((err: Error) => {
         console.error("campaign_dispatch:status_check_failed", campaign.id, err.message);
         return false;
@@ -543,11 +559,7 @@ async function dispatchOneCampaign(
       // The customer's own business identity wins over contact columns.
       ...templateVariables,
       // Direction, call id and objective last, so no contact column can change them.
-      ...outboundCallVariables({
-        callId: call.id,
-        objective: compiledContext.objective,
-        instructions: compiledContext.instructions,
-      }),
+      ...outboundVars,
     };
 
     try {
@@ -699,6 +711,9 @@ export async function admitCampaignCall(
     _destination: request.destination,
     _retry_attempt: request.retryAttempt,
     _max_in_flight: request.maxInFlight,
+    _context_reviewed_at: request.contextReviewedAt,
+    _sent_objective: request.sentObjective,
+    _sent_instructions: request.sentInstructions,
   });
   if (error) throw new Error(error.message);
   const answer = (data ?? {}) as Record<string, unknown>;

@@ -38,3 +38,25 @@ describe("campaign launch and cohort upload obey the outbound safety switches", 
     assert.match(src, /\.not\("status", "in", "\(completed,cancelled\)"\)/);
   });
 });
+
+describe("single calls: the calling hours are re-checked between admission and the dial", () => {
+  test("a call admitted at 20:59 that would dial after 21:00 is recorded as never started", () => {
+    const single = readFileSync(
+      new URL("./sarvam-outbound-call.server.ts", import.meta.url),
+      "utf8",
+    ).replace(/\r\n/g, "\n");
+    const fn = single.slice(single.indexOf("export async function sendSarvamInstantOutboundCall"));
+    const admit = fn.indexOf('rpc("admit_single_outbound_call"');
+    const hours = fn.indexOf("if (!withinCallingHours(params.now ?? new Date())) {");
+    const dial = fn.indexOf("adapter.createInstantOutbound(");
+    assert.ok(
+      admit > -1 && admit < hours && hours < dial,
+      "admission, then the hours, then the dial",
+    );
+    assert.match(
+      fn.slice(hours, dial),
+      /recordSarvamStartFailure\(supabaseAdmin, call\.id, new Error\(CALLING_HOURS_MESSAGE\)\);\s*throw new Error\(CALLING_HOURS_MESSAGE\);/,
+    );
+    assert.match(single, /case "outside_calling_hours":\s*return CALLING_HOURS_MESSAGE;/);
+  });
+});

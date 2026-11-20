@@ -13,10 +13,12 @@ import { normalizeCustomerPhone } from "./phone-number.ts";
 import { finalizeTerminalCallSafely } from "./telephony/call-finalization.server.ts";
 import { isNumberSuppressed, OPT_OUT_NUMBER_MESSAGE } from "./contact-suppression.server.ts";
 import {
+  CALLING_HOURS_MESSAGE,
   hasPriorRelationship,
   NO_RELATIONSHIP_MESSAGE,
   OUTBOUND_DISABLED_MESSAGE,
   staticEligibilityBlocker,
+  withinCallingHours,
 } from "./outbound-eligibility.server.ts";
 import {
   OUTBOUND_AGENT_COLUMNS,
@@ -89,6 +91,8 @@ export function admissionRefusalMessage(reason: unknown): string {
       return MAX_CALL_LENGTH_NOT_SET_MESSAGE;
     case "outbound_paused":
       return OUTBOUND_DISABLED_MESSAGE;
+    case "outside_calling_hours":
+      return CALLING_HOURS_MESSAGE;
     default:
       return "This call could not be admitted. Try again, or contact support if it keeps happening.";
   }
@@ -485,6 +489,13 @@ export async function sendSarvamInstantOutboundCall(
     throw new Error(admissionRefusalMessage(admitted.reason));
   }
   const call = { id: admitted.call_id };
+
+  // Admitted just before the calling hours ended, about to dial after: the call
+  // is recorded as never started and nothing is dialled.
+  if (!withinCallingHours(params.now ?? new Date())) {
+    await recordSarvamStartFailure(supabaseAdmin, call.id, new Error(CALLING_HOURS_MESSAGE));
+    throw new Error(CALLING_HOURS_MESSAGE);
+  }
 
   try {
     const dialed = await adapter.createInstantOutbound({

@@ -65,3 +65,9 @@ ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
 ```
 
 Still true: calls already in progress cannot be ended by ClickAI (no Sarvam hang-up API); each ends at Sarvam's 300 s limit.
+
+## 5. M4 context attribution and M5 calling-hours admission (2026-11-20)
+
+- **M4.** Campaign admission writes `call_logs.campaign_context_snapshot` once, from the campaign row read under its share lock: `{version, reviewed_at, context, sent: {campaign_objective, campaign_instructions}}`, where `sent` is exactly the variables the dispatcher then sends (built before admission from the same compiled context). A trigger refuses any later change to it. Admission refuses `context_changed` when the dispatcher compiled another reviewed version than the campaign holds. Each retry is a new call with its own snapshot; recovery (outcome_unknown, finalization) never touches it.
+- **M5.** `within_outbound_calling_hours(t)`: 09:00 ≤ local time < 21:00 in `Asia/Kolkata`, independent of the session time zone. Both admissions check it at the moment of the decision (`clock_timestamp()`; the session setting `clickai.admission_now` replaces it in tests only). A call admitted before 21:00 whose dial would happen after it is recorded as never started (campaign dispatcher and single calls re-check the hours just before dialling). A repeated single-call request after the cutoff still returns its own earlier call.
+- A configured narrower window (`OUTBOUND_CALLING_HOURS`) is enforced in the application only; the database enforces the platform's 09:00–21:00.
