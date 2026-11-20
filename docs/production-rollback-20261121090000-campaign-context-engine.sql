@@ -16,7 +16,13 @@ ALTER TABLE public.campaign_contacts ADD CONSTRAINT campaign_contacts_status_che
 ));
 ALTER TABLE public.campaign_contacts DROP COLUMN IF EXISTS excluded_reason;
 
+DROP FUNCTION IF EXISTS public.admit_campaign_outbound_call(uuid, uuid, uuid, text, integer, integer, timestamptz, text, text);
 DROP FUNCTION IF EXISTS public.admit_campaign_outbound_call(uuid, uuid, uuid, text, integer, integer);
+
+-- Per-call context snapshots are lost with the column (calls themselves survive).
+DROP TRIGGER IF EXISTS trg_call_logs_context_snapshot_immutable ON public.call_logs;
+DROP FUNCTION IF EXISTS public.call_logs_context_snapshot_immutable();
+ALTER TABLE public.call_logs DROP COLUMN IF EXISTS campaign_context_snapshot;
 
 REVOKE INSERT (description, budget_limit), UPDATE (description, budget_limit) ON public.campaigns FROM authenticated;
 ALTER TABLE public.campaigns DROP CONSTRAINT IF EXISTS campaigns_context_reviewed;
@@ -32,5 +38,8 @@ ALTER TABLE public.campaigns
 COMMIT;
 
 -- admit_single_outbound_call: re-apply its definition from
--- 20261119090000_outbound_call_admission.sql (section 3) to restore the
--- single-calls-only wallet reservation. Keeping the stricter version is also safe.
+-- 20261119090000_outbound_call_admission.sql (section 3) FIRST, then drop the
+-- calling-hours helpers it uses:
+--   DROP FUNCTION IF EXISTS public.within_outbound_calling_hours(timestamptz);
+--   DROP FUNCTION IF EXISTS public.outbound_admission_now();
+-- Keeping the stricter single admission (and the helpers) is also safe.

@@ -535,6 +535,7 @@ export type Database = {
           caller_name: string | null;
           caller_number: string | null;
           campaign_contact_id: string | null;
+          campaign_context_snapshot: Json | null;
           campaign_id: string | null;
           contact_id: string | null;
           created_at: string;
@@ -586,6 +587,7 @@ export type Database = {
           caller_name?: string | null;
           caller_number?: string | null;
           campaign_contact_id?: string | null;
+          campaign_context_snapshot?: Json | null;
           campaign_id?: string | null;
           contact_id?: string | null;
           created_at?: string;
@@ -636,6 +638,7 @@ export type Database = {
           caller_name?: string | null;
           caller_number?: string | null;
           campaign_contact_id?: string | null;
+          campaign_context_snapshot?: Json | null;
           campaign_id?: string | null;
           contact_id?: string | null;
           created_at?: string;

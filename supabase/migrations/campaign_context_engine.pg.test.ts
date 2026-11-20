@@ -70,8 +70,12 @@ const RATE = 400; // the platform's outbound_minute rule
 const PER_CALL = RATE * 5; // 300 s confirmed maximum -> 5 billed minutes at most
 const CONTEXT = `'{"version":1,"objective":"Invite for a check-up"}'::jsonb`;
 
+/** Admission's clock for every test unless a test sets its own: midday India time. */
+const MIDDAY = "SET clickai.admission_now = '2026-11-20 12:00:00+05:30';";
 function run(sql: string): RunResult {
-  return execSql!(`\\pset format unaligned\n\\pset tuples_only on\nSET ROLE service_role;\n${sql}`);
+  return execSql!(
+    `\\pset format unaligned\n\\pset tuples_only on\nSET ROLE service_role;\n${MIDDAY}\n${sql}`,
+  );
 }
 function rows(sql: string): string[] {
   const r = run(sql);
@@ -118,7 +122,7 @@ function runAsync(sql: string): Promise<RunResult> {
     child.stdout.on("data", (d: Buffer) => (stdout += d.toString()));
     child.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
     child.on("close", (code) => resolve({ status: code ?? 1, stdout, stderr }));
-    child.stdin.write(`SET ROLE service_role;\n${sql}`);
+    child.stdin.write(`SET ROLE service_role;\n${MIDDAY}\n${sql}`);
     child.stdin.end();
   });
 }
@@ -179,7 +183,8 @@ const admitSql = (
   maxInFlight = 10,
   campaign = org.campaign,
 ) =>
-  `SELECT public.admit_campaign_outbound_call('${campaign}', '${c.cc}', '${c.call}', '${c.to}', 0, ${maxInFlight});`;
+  `SELECT public.admit_campaign_outbound_call('${campaign}', '${c.cc}', '${c.call}', '${c.to}', 0, ${maxInFlight},
+     (SELECT context_reviewed_at FROM public.campaigns WHERE id = '${campaign}'), 'Sent objective', 'Sent instructions');`;
 function admit(...args: Parameters<typeof admitSql>): Record<string, unknown> {
   return JSON.parse(rows(admitSql(...args))[0]!) as Record<string, unknown>;
 }
@@ -541,6 +546,151 @@ describe("audit fixes: emergency stop, in-flight window, unbilled reservations, 
   });
 });
 
+describe("M5: calling hours inside both admissions (09:00-21:00 Asia/Kolkata)", () => {
+  const at = (ist: string) => `SET clickai.admission_now = '2026-11-20 ${ist}+05:30';`;
+  const singleAt = (org: Org, ist: string) =>
+    JSON.parse(
+      rows(
+        `${at(ist)} SELECT public.admit_single_outbound_call('${org.id}', '${org.number}', '${phone()}', '+917900000001', 'k_${randomUUID().replace(/-/g, "")}', 3, 30, 100, 2);`,
+      )[0]!,
+    ) as Record<string, unknown>;
+  const campaignAt = (org: Org, ist: string) =>
+    JSON.parse(rows(`${at(ist)} ${admitSql(org, claimed(org))}`)[0]!) as Record<string, unknown>;
+
+  test("the boundary: 08:59 and 21:00 are refused, 09:00 and 20:59 admitted, for single and campaign calls", (t) => {
+    if (!ready(t)) return;
+    for (const [ist, ok] of [
+      ["08:59:59", false],
+      ["09:00:00", true],
+      ["20:59:59", true],
+      ["21:00:00", false],
+      ["23:30:00", false],
+    ] as const) {
+      const org = newOrg(1_000_000);
+      const expect = ok ? "admitted" : "outside_calling_hours";
+      const c = campaignAt(org, ist);
+      assert.equal(
+        c["result"] === "admitted" ? "admitted" : c["reason"],
+        expect,
+        `campaign ${ist}`,
+      );
+      const s1 = singleAt(org, ist);
+      assert.equal(
+        s1["result"] === "admitted" ? "admitted" : s1["reason"],
+        expect,
+        `single ${ist}`,
+      );
+    }
+  });
+
+  test("the hours are India time whatever the session time zone", (t) => {
+    if (!ready(t)) return;
+    assert.deepEqual(
+      rows(`SET TIME ZONE 'America/New_York';
+            SELECT public.within_outbound_calling_hours('2026-11-20 03:30:00+00'),
+                   public.within_outbound_calling_hours('2026-11-20 03:29:59+00'),
+                   public.within_outbound_calling_hours('2026-11-20 15:29:59+00'),
+                   public.within_outbound_calling_hours('2026-11-20 15:30:00+00');`),
+      ["t|f|t|f"],
+    );
+  });
+
+  test("dispatched before the cutoff, admitted after it: refused, nothing written", (t) => {
+    if (!ready(t)) return;
+    const org = newOrg(1_000_000);
+    // The dispatcher passed its own check at 20:59:59; admission runs a moment later.
+    const r = campaignAt(org, "21:00:00.001");
+    assert.equal(r["reason"], "outside_calling_hours");
+    assert.equal(callCount(org), 0);
+  });
+
+  test("a repeated single-call request after the cutoff still returns its own earlier call", (t) => {
+    if (!ready(t)) return;
+    const org = newOrg(1_000_000);
+    const key = `k_${randomUUID().replace(/-/g, "")}`;
+    const to = phone();
+    const sql = (ist: string) =>
+      `${at(ist)} SELECT public.admit_single_outbound_call('${org.id}', '${org.number}', '${to}', '+917900000001', '${key}', 3, 30, 100, 2);`;
+    const first = JSON.parse(rows(sql("20:59:00"))[0]!) as Record<string, unknown>;
+    const again = JSON.parse(rows(sql("21:05:00"))[0]!) as Record<string, unknown>;
+    assert.equal(first["result"], "admitted");
+    assert.equal(again["result"], "duplicate");
+    assert.equal(again["call_id"], first["call_id"]);
+  });
+});
+
+describe("M4: each campaign call keeps the exact reviewed context it was admitted with", () => {
+  const snapshot = (call: string) =>
+    JSON.parse(
+      rows(`SELECT campaign_context_snapshot FROM public.call_logs WHERE id = '${call}';`)[0]!,
+    ) as Record<string, unknown>;
+
+  test("the snapshot holds the version, review time, structured context and the text sent", (t) => {
+    if (!ready(t)) return;
+    const org = newOrg(1_000_000);
+    const c = claimed(org);
+    assert.equal(admit(org, c)["result"], "admitted");
+    const snap = snapshot(c.call);
+    assert.equal(snap["version"], 1);
+    assert.equal(
+      snap["reviewed_at"],
+      JSON.parse(
+        rows(
+          `SELECT to_jsonb(context_reviewed_at) FROM public.campaigns WHERE id = '${org.campaign}';`,
+        )[0]!,
+      ),
+    );
+    assert.deepEqual(snap["context"], { version: 1, objective: "Invite for a check-up" });
+    assert.deepEqual(snap["sent"], {
+      campaign_objective: "Sent objective",
+      campaign_instructions: "Sent instructions",
+    });
+  });
+
+  test("a context compiled from another reviewed version is refused, nothing written", (t) => {
+    if (!ready(t)) return;
+    const org = newOrg(1_000_000);
+    const c = claimed(org);
+    const stale = `SELECT public.admit_campaign_outbound_call('${org.campaign}', '${c.cc}', '${c.call}', '${c.to}', 0, 10,
+      '2020-01-01T00:00:00Z', 'old', 'old');`;
+    assert.equal(
+      (JSON.parse(rows(stale)[0]!) as Record<string, unknown>)["reason"],
+      "context_changed",
+    );
+    assert.equal(callCount(org), 0);
+  });
+
+  test("later edits never change a past call; a retry records the new version; the snapshot cannot be rewritten", (t) => {
+    if (!ready(t)) return;
+    const org = newOrg(1_000_000);
+    const first = claimed(org);
+    assert.equal(admit(org, first)["result"], "admitted");
+    const before = snapshot(first.call);
+    // The call ends; the customer pauses, edits and re-reviews, resumes; the contact is retried.
+    rows(`RESET ROLE;
+      UPDATE public.call_logs SET status = 'no_answer' WHERE id = '${first.call}';
+      UPDATE public.campaigns SET context = '{"version":1,"objective":"Second version"}'::jsonb,
+             context_reviewed_at = now() + interval '1 minute' WHERE id = '${org.campaign}';`);
+    const retryCall = randomUUID();
+    rows(`RESET ROLE; UPDATE public.campaign_contacts SET status = 'calling', attempts = 2, current_call_id = '${retryCall}'
+            WHERE id = '${first.cc}';`);
+    const retry = { cc: first.cc, call: retryCall, to: first.to };
+    assert.equal(admit(org, retry)["result"], "admitted");
+    assert.deepEqual(snapshot(first.call), before, "the first call keeps its own version");
+    assert.deepEqual(
+      (snapshot(retryCall)["context"] as Record<string, unknown>)["objective"],
+      "Second version",
+    );
+    const rewrite = run(
+      `UPDATE public.call_logs SET campaign_context_snapshot = '{}'::jsonb WHERE id = '${first.call}';`,
+    );
+    assert.notEqual(rewrite.status, 0);
+    assert.match(rewrite.stderr, /keeps the campaign context it was admitted with/);
+    // Other columns still update normally (finalization, reconciliation).
+    rows(`UPDATE public.call_logs SET status = 'outcome_unknown' WHERE id = '${retryCall}';`);
+  });
+});
+
 describe("rollback", () => {
   test("removes the function and columns; excluded contacts become cancelled; calls survive", (t) => {
     if (!ready(t)) return;
@@ -559,7 +709,14 @@ describe("rollback", () => {
     const r = execSql!(ROLLBACK);
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(
-      rows(`SELECT count(*) FROM pg_proc WHERE proname = 'admit_campaign_outbound_call';`),
+      rows(
+        `SELECT count(*) FROM pg_proc WHERE proname IN ('admit_campaign_outbound_call', 'call_logs_context_snapshot_immutable');`,
+      ),
+      ["0"],
+    );
+    assert.deepEqual(
+      rows(`SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public'
+              AND table_name = 'call_logs' AND column_name = 'campaign_context_snapshot';`),
       ["0"],
     );
     assert.deepEqual(

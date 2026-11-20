@@ -32,6 +32,15 @@
 --        (finalization pending or failed), not only for live calls.
 --   Campaign admission also takes a share lock on the campaign row, so a pause
 --   or cancel cannot commit between the status check and the call row.
+--   7. Calling hours inside both admissions: a call is admitted only while it
+--      is 09:00-21:00 in Asia/Kolkata (within_outbound_calling_hours), read
+--      from the clock at the moment of the decision.
+--   8. call_logs.campaign_context_snapshot: written once by campaign admission
+--      and never changed (trigger) - the reviewed context version the call was
+--      admitted under (version, reviewed_at, the structured context) and the
+--      exact campaign_objective/campaign_instructions values sent to the agent.
+--      Admission refuses ('context_changed') if the dispatcher compiled another
+--      reviewed version than the one the campaign holds now.
 --
 -- Additive: nullable columns, a widened CHECK, two functions. Rollback:
 -- docs/production-rollback-20261121090000-campaign-context-engine.sql
@@ -72,14 +81,60 @@ ALTER TABLE public.campaign_contacts
     'outcome_unknown','excluded'
   ));
 
+-- ============ 4a. calling hours ============
+-- 09:00 inclusive to 21:00 exclusive, India time (no daylight saving). The
+-- optional session setting clickai.admission_now replaces the clock for tests
+-- only; admission is service-role only, and the setting lives in the caller's
+-- own session.
+CREATE OR REPLACE FUNCTION public.within_outbound_calling_hours(_at timestamptz)
+RETURNS boolean
+LANGUAGE sql STABLE SET search_path = public AS $$
+  SELECT (_at AT TIME ZONE 'Asia/Kolkata')::time >= time '09:00'
+     AND (_at AT TIME ZONE 'Asia/Kolkata')::time <  time '21:00'
+$$;
+
+CREATE OR REPLACE FUNCTION public.outbound_admission_now()
+RETURNS timestamptz
+LANGUAGE sql VOLATILE SET search_path = public AS $$
+  SELECT COALESCE(nullif(current_setting('clickai.admission_now', true), '')::timestamptz,
+                  clock_timestamp())
+$$;
+REVOKE ALL ON FUNCTION public.outbound_admission_now() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.outbound_admission_now() TO service_role;
+
+-- ============ 4b. per-call campaign context snapshot ============
+ALTER TABLE public.call_logs ADD COLUMN IF NOT EXISTS campaign_context_snapshot jsonb;
+
+CREATE OR REPLACE FUNCTION public.call_logs_context_snapshot_immutable()
+RETURNS trigger
+LANGUAGE plpgsql SET search_path = public AS $$
+BEGIN
+  IF OLD.campaign_context_snapshot IS NOT NULL
+     AND NEW.campaign_context_snapshot IS DISTINCT FROM OLD.campaign_context_snapshot THEN
+    RAISE EXCEPTION 'call % keeps the campaign context it was admitted with', OLD.id
+      USING ERRCODE = 'check_violation';
+  END IF;
+  RETURN NEW;
+END; $$;
+
+DROP TRIGGER IF EXISTS trg_call_logs_context_snapshot_immutable ON public.call_logs;
+CREATE TRIGGER trg_call_logs_context_snapshot_immutable
+  BEFORE UPDATE OF campaign_context_snapshot ON public.call_logs
+  FOR EACH ROW EXECUTE FUNCTION public.call_logs_context_snapshot_immutable();
+
 -- ============ 4. campaign admission ============
+-- The earlier signature (never applied in production) is replaced.
+DROP FUNCTION IF EXISTS public.admit_campaign_outbound_call(uuid, uuid, uuid, text, integer, integer);
 CREATE OR REPLACE FUNCTION public.admit_campaign_outbound_call(
   _campaign uuid,
   _campaign_contact uuid,
   _call uuid,
   _destination text,
   _retry_attempt integer,
-  _max_in_flight integer
+  _max_in_flight integer,
+  _context_reviewed_at timestamptz,
+  _sent_objective text,
+  _sent_instructions text
 ) RETURNS jsonb
 LANGUAGE plpgsql SET search_path = public AS $$
 DECLARE
@@ -99,7 +154,7 @@ BEGIN
   END IF;
 
   SELECT id, organization_id, status, phone_number_id, agent_config_id, budget_limit,
-         context_reviewed_at
+         context_reviewed_at, context, context_version
     INTO camp FROM public.campaigns WHERE id = _campaign;
   IF NOT FOUND THEN
     RETURN jsonb_build_object('result', 'refused', 'reason', 'campaign_not_found');
@@ -115,15 +170,25 @@ BEGIN
     RETURN jsonb_build_object('result', 'refused', 'reason', 'outbound_paused');
   END IF;
 
+  -- Calling hours, at the moment of the decision.
+  IF NOT public.within_outbound_calling_hours(public.outbound_admission_now()) THEN
+    RETURN jsonb_build_object('result', 'refused', 'reason', 'outside_calling_hours');
+  END IF;
+
   -- Re-read under a share lock: a pause or cancel that landed since is final,
   -- and one that comes later waits until this admission has committed.
-  SELECT status, context_reviewed_at INTO camp.status, camp.context_reviewed_at
+  SELECT status, context_reviewed_at, context, context_version
+    INTO camp.status, camp.context_reviewed_at, camp.context, camp.context_version
     FROM public.campaigns WHERE id = _campaign FOR SHARE;
   IF camp.status <> 'running' THEN
     RETURN jsonb_build_object('result', 'refused', 'reason', 'campaign_not_running');
   END IF;
   IF camp.context_reviewed_at IS NULL THEN
     RETURN jsonb_build_object('result', 'refused', 'reason', 'context_not_reviewed');
+  END IF;
+  -- The dispatcher compiled exactly the reviewed version the campaign holds now.
+  IF _context_reviewed_at IS DISTINCT FROM camp.context_reviewed_at THEN
+    RETURN jsonb_build_object('result', 'refused', 'reason', 'context_changed');
   END IF;
 
   -- The contact must belong to this campaign (and so this customer) and be
@@ -206,12 +271,19 @@ BEGIN
     INSERT INTO public.call_logs (
       id, organization_id, campaign_id, campaign_contact_id, contact_id, phone_number_id,
       provider, direction, caller_number, destination_number, status, started_at,
-      retry_attempt, billing_cap_minutes, billing_rate_per_minute
+      retry_attempt, billing_cap_minutes, billing_rate_per_minute, campaign_context_snapshot
     ) VALUES (
       _call, camp.organization_id, _campaign, _campaign_contact, cc.contact_id, num.id,
       'sarvam', 'outbound', num.e164, _destination, 'initiated', now(),
-      GREATEST(_retry_attempt, 0), cap_minutes, rate
-    );
+      GREATEST(_retry_attempt, 0), cap_minutes, rate,
+      jsonb_build_object(
+        'version', camp.context_version,
+        'reviewed_at', camp.context_reviewed_at,
+        'context', camp.context,
+        'sent', jsonb_build_object(
+          'campaign_objective', _sent_objective,
+          'campaign_instructions', _sent_instructions)))
+    ;
   EXCEPTION WHEN unique_violation THEN
     -- An unresolved call to this number (single or another campaign), or this
     -- contact already has a call in flight.
@@ -222,8 +294,8 @@ BEGIN
                             'cap_minutes', cap_minutes, 'rate_per_minute', rate);
 END; $$;
 
-REVOKE ALL ON FUNCTION public.admit_campaign_outbound_call(uuid, uuid, uuid, text, integer, integer) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.admit_campaign_outbound_call(uuid, uuid, uuid, text, integer, integer) TO service_role;
+REVOKE ALL ON FUNCTION public.admit_campaign_outbound_call(uuid, uuid, uuid, text, integer, integer, timestamptz, text, text) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.admit_campaign_outbound_call(uuid, uuid, uuid, text, integer, integer, timestamptz, text, text) TO service_role;
 
 -- ============ 5. single admission: reserve for open campaign calls too ============
 CREATE OR REPLACE FUNCTION public.admit_single_outbound_call(
@@ -277,6 +349,11 @@ BEGIN
       RETURN jsonb_build_object('result', 'refused', 'reason', 'idempotency_key_reused');
     END IF;
     RETURN jsonb_build_object('result', 'duplicate', 'call_id', existing.id, 'status', existing.status);
+  END IF;
+
+  -- Calling hours, at the moment of the decision.
+  IF NOT public.within_outbound_calling_hours(public.outbound_admission_now()) THEN
+    RETURN jsonb_build_object('result', 'refused', 'reason', 'outside_calling_hours');
   END IF;
 
   PERFORM 1 FROM public.phone_numbers
