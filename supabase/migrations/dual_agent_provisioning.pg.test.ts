@@ -69,6 +69,7 @@ const AGENT = randomUUID();
 const ORG_B = randomUUID();
 const AGENT_B = randomUUID();
 const CRED = randomUUID();
+const SHARED_OUT = randomUUID();
 const hash = (c: string) => c.repeat(64);
 
 function run(sql: string): RunResult {
@@ -202,6 +203,21 @@ describe("dual-agent provisioning schema", () => {
       `UPDATE public.agent_configs SET sarvam_app_id = 'Out-A' WHERE id = '${AGENT_B}';`,
       /SARVAM_INBOUND_AGENT_IS_AN_OUTBOUND_AGENT/,
     );
+    // ...nor reach it through a shared application (the update names only
+    // sarvam_application_id; the application guard copies the app id in).
+    rows(
+      `INSERT INTO public.sarvam_applications (id, name, employee_type, sarvam_app_id, sarvam_app_version)
+         VALUES ('${SHARED_OUT}', 'Mistake', 'receptionist', 'Out-A', 1);`,
+    );
+    fails(
+      `UPDATE public.agent_configs SET sarvam_application_id = '${SHARED_OUT}' WHERE id = '${AGENT_B}';`,
+      /SARVAM_INBOUND_AGENT_IS_AN_OUTBOUND_AGENT/,
+    );
+    assert.deepEqual(
+      rows(`SELECT sarvam_app_id FROM public.agent_configs WHERE id = '${AGENT_B}';`),
+      ["App-B"],
+    );
+    rows(`DELETE FROM public.sarvam_applications WHERE id = '${SHARED_OUT}';`);
     rows(
       `UPDATE public.agent_configs SET sarvam_outbound_app_id = NULL, sarvam_outbound_app_version = NULL WHERE id = '${AGENT}';`,
     );

@@ -80,8 +80,12 @@ BEGIN
 END; $$;
 
 DROP TRIGGER IF EXISTS trg_agent_configs_sarvam_role_guard ON public.agent_configs;
+-- sarvam_application_id too: mapping an agent through a shared application
+-- sets sarvam_app_id inside agent_configs_sarvam_application_guard (which
+-- fires first, by name), without naming sarvam_app_id in the UPDATE.
 CREATE TRIGGER trg_agent_configs_sarvam_role_guard
-  BEFORE INSERT OR UPDATE OF sarvam_app_id, sarvam_outbound_app_id ON public.agent_configs
+  BEFORE INSERT OR UPDATE OF sarvam_app_id, sarvam_application_id, sarvam_outbound_app_id
+  ON public.agent_configs
   FOR EACH ROW EXECUTE FUNCTION public.agent_configs_sarvam_role_guard();
 
 ALTER TABLE public.sarvam_agent_integrations

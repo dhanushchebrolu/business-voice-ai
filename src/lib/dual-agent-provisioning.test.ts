@@ -329,16 +329,16 @@ describe("customer setup steps (no internal details)", () => {
     needsAttention: false,
   };
 
-  test("progress walks through both agents and the phone line to Ready", () => {
+  test("steps follow the pipeline order: number, inbound agent, phone line, outbound agent", () => {
     const s = customerSetupSteps(base);
     assert.deepEqual(
       s.map((x) => x.label),
       [
         "Business information received",
-        "Creating your inbound AI agent",
-        "Creating your outbound AI agent",
         "Assigning your phone number",
+        "Creating your inbound AI agent",
         "Connecting your phone line",
+        "Creating your outbound AI agent",
         "Ready",
       ],
     );
@@ -365,12 +365,30 @@ describe("customer setup steps (no internal details)", () => {
       numberActive: true,
       inboundEnabled: true,
     });
-    assert.equal(s[2]!.status, "in_progress");
+    assert.equal(s[4]!.status, "in_progress", "the outbound agent is the pending step");
     assert.equal(s[5]!.status, "pending");
   });
 
+  test("while the deployment is verified, the phone line (not the outbound agent) is in progress", () => {
+    // Found in the browser harness: the outbound agent was shown as the
+    // current step while the pipeline was still connecting the phone line.
+    const verifying = customerSetupSteps({ ...base, inboundAgentReady: true, hasNumber: true });
+    assert.equal(verifying[3]!.label, "Connecting your phone line");
+    assert.equal(verifying[3]!.status, "in_progress");
+    assert.equal(verifying[4]!.status, "pending");
+    const failed = customerSetupSteps({
+      ...base,
+      inboundAgentReady: true,
+      hasNumber: true,
+      needsAttention: true,
+    });
+    assert.equal(failed[3]!.status, "attention");
+    assert.equal(failed[4]!.status, "pending");
+  });
+
   test("a step needing the ClickAI team shows attention, never an error message or id", () => {
-    const s = customerSetupSteps({ ...base, inboundAgentReady: true, needsAttention: true });
+    const s = customerSetupSteps({ ...base, hasNumber: true, needsAttention: true });
+    assert.equal(s[2]!.label, "Creating your inbound AI agent");
     assert.equal(s[2]!.status, "attention");
     assert.doesNotMatch(JSON.stringify(s), /sarvam|app_id|Error|[0-9a-f]{8}-/i);
   });

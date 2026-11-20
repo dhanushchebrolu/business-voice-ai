@@ -121,12 +121,15 @@ export interface CustomerSetupStep {
  * "pending". Outbound calling itself is switched on separately by ClickAI.
  */
 export function customerSetupSteps(i: CustomerSetupInput): CustomerSetupStep[] {
+  // The order the provisioning pipeline actually runs in (number, inbound
+  // agent, live phone line at step 10, then the outbound agent at 11-12), so
+  // the step marked in progress or needing attention is the one really pending.
   const steps: [string, boolean][] = [
     ["Business information received", i.agentExists],
-    ["Creating your inbound AI agent", i.inboundAgentReady],
-    ["Creating your outbound AI agent", i.outboundAgentReady],
     ["Assigning your phone number", i.hasNumber],
+    ["Creating your inbound AI agent", i.inboundAgentReady],
     ["Connecting your phone line", i.numberActive && i.inboundEnabled],
+    ["Creating your outbound AI agent", i.outboundAgentReady],
   ];
   const allDone = steps.every(([, done]) => done);
   steps.push(["Ready", allDone]);
