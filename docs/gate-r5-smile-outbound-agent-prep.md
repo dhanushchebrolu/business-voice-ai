@@ -359,3 +359,4 @@ Notes: a supervised test must start before 21:00 IST. The database CHECK still a
 - Extracted: `outbound_result` interested, `interest_level` high, `opted_out` no, `wrong_number` no, `call_outcome` enquiry_answered, interest Root Canal Treatment, requested 2026-11-21 08:00. 0 bookings, 0 leads (correct: only `callback_requested` creates a lead).
 - State after: 0 open outbound calls; 1 outbound call ever; …0061 outbound **still on**.
 - Observations: `call_direction` / `clickai_call_id` are absent from the stored final variables (inputs, not post-call outputs; the call is linked by id and provider call id); the admin dialog's "Agent:" label shows the inbound app (display only). Worker logs were not tailed during the call; evidence is the database and audit trail.
+- 2026-11-20 after R7-B: outbound on +917965860061 is now OFF again (user-approved). Outbound agent v2 remains confirmed.
