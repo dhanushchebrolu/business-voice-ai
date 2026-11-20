@@ -19,14 +19,14 @@ The command names the project explicitly as well as using the link: `--linked --
 
 ## 2 + 3. Exact SQL for both migrations
 
-One file, executed as one request: **[`docs/gate-r2-execute-20261119090000-20261120090000.sql`](gate-r2-execute-20261119090000-20261120090000.sql)**, SHA-256 `a2c7ea6acad53880e3529f8bad2fc64e6c4ec82be9bc09aa7e7044e166b45352`, 40,133 bytes. Contents, in order:
+One file, executed as one request: **[`docs/gate-r2-execute-20261119090000-20261120090000.sql`](gate-r2-execute-20261119090000-20261120090000.sql)**, SHA-256 `4c7bfe3a2d1c3a05d832003b895877b5e07ec461720cd5a76f1a2fa7768e336d`, 54,766 bytes (hardened after the final review, 2026-11-20). Contents, in order:
 
 1. `SET LOCAL lock_timeout = '5s'; SET LOCAL statement_timeout = '60s';`
-2. **Guard** (`DO $guard$`), aborting before any change unless: the system identifier is `7678069749886157684`; the database is `postgres`; the latest migration is `20261118120000`; neither target version is recorded; Smile Dental's agent is `Conversatio-9c6a04cd-3334` v5; 0 numbers have outbound on; 0 campaigns; no agent has two active credentials.
+2. **Guard** (`DO $guard$`, every comparison `IS DISTINCT FROM` so NULL cannot pass), aborting before any change unless: system identifier `7678069749886157684`; database `postgres`; latest migration `20261118120000`; neither target version recorded; **none of the 9 columns, 6 indexes, 5 constraints, 2 functions or the trigger exist yet**; the old credential index exists; Smile Dental is `Conversatio-9c6a04cd-3334` v5; 0061 is active, inbound on, outbound off, on `Smile-Denta-be071be0-703e`; 0 numbers with outbound on; 0 campaigns; exactly 1 active credential; Payment Enforcement explicitly `{"enabled": false}`. It then stores a fingerprint of every existing row of 13 customer-relevant tables in a transaction-local setting (no table written).
 3. **Migration 20261119090000**: the exact content of `supabase/migrations/20261119090000_outbound_call_admission.sql` (SHA-256 `f7d10f0d1076f7787731ff529b1eee17a767bf707f3937bfb88334dd85ce764e`), then its history row `('20261119090000', 'outbound_call_admission', ARRAY[<file text>])`.
 4. **Migration 20261120090000**: the exact content of `supabase/migrations/20261120090000_dual_agent_provisioning.sql` (SHA-256 `b32b117e2eb9187273311f10a79eb083768caf6e1f663df70b13d47d6d3e5053`), then its history row `('20261120090000', 'dual_agent_provisioning', ARRAY[<file text>])`.
-5. **In-transaction check** (`DO $check$`), aborting (and so undoing both migrations) unless: all 9 columns, 6 valid indexes, 5 constraints, 2 functions and the trigger exist; the old credential index is gone; the admission function is executable by `service_role` only; Smile Dental's agent is unchanged with no outbound agent, confirmation or max length; 0 numbers with outbound on; every credential is `inbound`; both history rows exist.
-6. A one-row result: applied versions, system identifier and the timeouts in force.
+5. **In-transaction check** (`DO $check$`), raising (and so undoing both migrations) unless: 9 columns, 6 valid indexes and the 5 constraints exist in `public` on their own tables; 2 functions; the trigger definition is exactly `… BEFORE INSERT OR UPDATE OF sarvam_app_id, sarvam_application_id, sarvam_outbound_app_id ON public.agent_configs …`; the old credential index is gone; the admission function is executable by `service_role` only; both history rows exist; **the 13-table fingerprint is identical** (every existing row unchanged, new columns excluded); every new column is empty on existing rows; every credential is `inbound`.
+6. A one-row result, returned only if everything passed: applied versions, system identifier, database, the object counts, the trigger definition, `old_credential_index_present false`, `admission_executable_by_anon false`, `existing_data_unchanged true`, and the timeouts in force.
 
 History rows are written the same way the Supabase CLI wrote all 70 existing ones: `statements[1]` of `20261118120000` is byte-identical to its file (MD5 `117765f6b801f5a7a398ba4ea2f63b72`, 6,507 chars).
 
@@ -51,6 +51,25 @@ Production defaults for this role are `lock_timeout = 0` and `statement_timeout 
   - a second run → `GATE_R2_UNEXPECTED_HISTORY`, nothing changed;
   - a transaction holding a lock on `call_logs` → `canceling statement due to lock timeout` after about 6 s, everything rolled back.
 - After any failure: run §7.1 to confirm nothing changed, fix the cause, and run the same file again.
+
+## 5a. Final review (2026-11-20) and rehearsal of the hardened script
+
+The first version (`a2c7ea6a…`) was reviewed statement by statement and hardened. Five issues: NULL could pass the guard (`<>`); objects created with `IF NOT EXISTS`/`OR REPLACE` were not checked absent; catalog checks were not schema-scoped; "nothing else changed" covered only a few rows; the success row did not itself show the evidence. Verified on production (read-only): an 85 KB request is still one transaction; `SET LOCAL statement_timeout` cancels a later statement; the last 13 history rows (since `20261110100000`) store the whole file as one element, the format used here.
+
+Rehearsal on PostgreSQL 17.6, production-shaped data, fresh database per case:
+
+| #   | Case                                 | Outcome                                                                                                    | State after                 |
+| --- | ------------------------------------ | ---------------------------------------------------------------------------------------------------------- | --------------------------- |
+| 1   | Production script on another cluster | `GATE_R2_WRONG_DATABASE`                                                                                   | unchanged                   |
+| 2   | Correct run                          | applied; 9 / 6 / 5 / 2, trigger incl. `sarvam_application_id`, `existing_data_unchanged true`, 5 s / 1 min | both applied                |
+| 3   | Second run                           | `GATE_R2_UNEXPECTED_HISTORY`                                                                               | unchanged                   |
+| 4   | Lock held on `call_logs`             | lock timeout after 6.5 s                                                                                   | unchanged                   |
+| 5   | Same-named index already exists      | `GATE_R2_OBJECTS_ALREADY_EXIST`                                                                            | unchanged                   |
+| 6   | Payment Enforcement enabled          | `GATE_R2_PRECONDITION: Payment Enforcement…`                                                               | unchanged                   |
+| 7   | Empty history (NULL latest)          | `GATE_R2_UNEXPECTED_HISTORY: latest is <NULL>`                                                             | unchanged                   |
+| 8   | A row changed before the check       | `GATE_R2_CHECK: existing data changed`                                                                     | both migrations rolled back |
+| 9   | Second migration removed             | `GATE_R2_CHECK: expected 9 new columns`                                                                    | first migration rolled back |
+| 10  | 65 s statement                       | statement timeout after 61 s                                                                               | unchanged                   |
 
 ## 6. Exact post-migration verification query
 
@@ -101,8 +120,8 @@ Expected: `history ["20261119090000","20261120090000"]`; `m1_columns 4`; `m2_col
      'database', current_database(), 'latest', (select max(version) from supabase_migrations.schema_migrations)) r;
    rollback;
    ```
-2. **Verify the file:** `sha256sum docs/gate-r2-execute-20261119090000-20261120090000.sql` must print `a2c7ea6acad53880e3529f8bad2fc64e6c4ec82be9bc09aa7e7044e166b45352`.
-3. **Execute once:** `npx -y supabase@2.120.0 db query --linked --project-ref eorazvlmqwunmhwviocn -f docs/gate-r2-execute-20261119090000-20261120090000.sql`. Expected output: one row `gate_r2_result` with `applied ["20261119090000","20261120090000"]`, `system_identifier 7678069749886157684`, `lock_timeout 5s`, `statement_timeout 1min`. Any error: nothing was applied; go to step 1.
+2. **Verify the file:** `sha256sum docs/gate-r2-execute-20261119090000-20261120090000.sql` must print `4c7bfe3a2d1c3a05d832003b895877b5e07ec461720cd5a76f1a2fa7768e336d`.
+3. **Execute once:** `npx -y supabase@2.120.0 db query --linked --project-ref eorazvlmqwunmhwviocn -f docs/gate-r2-execute-20261119090000-20261120090000.sql`. Expected output: one row `gate_r2_result` with `applied ["20261119090000","20261120090000"]`, `system_identifier 7678069749886157684`, `database postgres`, `new_columns 9`, `new_valid_indexes 6`, `new_constraints 5`, `new_functions 2`, the trigger definition above, `old_credential_index_present false`, `admission_executable_by_anon false`, `existing_data_unchanged true`, `lock_timeout 5s`, `statement_timeout 1min`. Any error: nothing was applied; go to step 1.
 4. **Post-check:** run §6 and compare every value.
 5. **Do not deploy** the Worker in the same step. GATE R3 (read-only) first, then the Worker under its own approval. The live Worker (`e48ff18`) keeps working with both migrations applied.
 

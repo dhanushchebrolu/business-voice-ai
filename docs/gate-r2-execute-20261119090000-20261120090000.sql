@@ -1,41 +1,52 @@
 -- GATE R2 execution script: migrations 20261119090000 and 20261120090000.
 -- Target: Supabase project eorazvlmqwunmhwviocn ("Klyro Ai"), database "postgres",
 -- PostgreSQL system identifier 7678069749886157684. Generated from the migration files
--- (SHA-256 below) by scratch build-exec.py; the embedded text is byte-identical.
+-- (SHA-256 below); the embedded text is byte-identical (executed and recorded).
 --   supabase/migrations/20261119090000_outbound_call_admission.sql  f7d10f0d1076f7787731ff529b1eee17a767bf707f3937bfb88334dd85ce764e
 --   supabase/migrations/20261120090000_dual_agent_provisioning.sql  b32b117e2eb9187273311f10a79eb083768caf6e1f663df70b13d47d6d3e5053
 --
 -- Run ONCE, as ONE request:
 --   npx -y supabase@2.120.0 db query --linked --project-ref eorazvlmqwunmhwviocn -f <this file>
--- The request runs as a single transaction (verified 2026-11-20: SET LOCAL takes
--- effect and now() is constant across statements). There is no BEGIN/COMMIT on
--- purpose: any error, including a failed guard, rolls back EVERYTHING and the
--- request returns the error. Nothing is half-applied.
+-- The request runs as ONE transaction (verified on production 2026-11-20, also
+-- for an 85 KB request; SET LOCAL lock_timeout and statement_timeout take
+-- effect for later statements). No BEGIN/COMMIT on purpose: any error,
+-- including any guard or check below, rolls back EVERYTHING.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '60s';
 
--- ===== Guard: right database, expected state; otherwise abort before any change =====
+-- ===== Guard: abort before any change unless this is the expected database in the expected state =====
+-- Comparisons use IS DISTINCT FROM so a NULL can never pass.
 DO $guard$
-DECLARE
-  sysid text := (SELECT system_identifier::text FROM pg_control_system());
 BEGIN
-  IF sysid <> '7678069749886157684' THEN
-    RAISE EXCEPTION 'GATE_R2_WRONG_DATABASE: system identifier %', sysid;
+  IF (SELECT system_identifier::text FROM pg_control_system()) IS DISTINCT FROM '7678069749886157684' THEN
+    RAISE EXCEPTION 'GATE_R2_WRONG_DATABASE: system identifier %', (SELECT system_identifier::text FROM pg_control_system());
   END IF;
-  IF current_database() <> 'postgres' THEN
+  IF current_database() IS DISTINCT FROM 'postgres' THEN
     RAISE EXCEPTION 'GATE_R2_WRONG_DATABASE: database %', current_database();
   END IF;
-  IF (SELECT max(version) FROM supabase_migrations.schema_migrations) <> '20261118120000' THEN
+  IF (SELECT max(version) FROM supabase_migrations.schema_migrations) IS DISTINCT FROM '20261118120000' THEN
     RAISE EXCEPTION 'GATE_R2_UNEXPECTED_HISTORY: latest is %', (SELECT max(version) FROM supabase_migrations.schema_migrations);
   END IF;
   IF EXISTS (SELECT 1 FROM supabase_migrations.schema_migrations WHERE version IN ('20261119090000', '20261120090000')) THEN
     RAISE EXCEPTION 'GATE_R2_ALREADY_APPLIED';
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM public.agent_configs
-                  WHERE id = 'b2972814-d9a1-432a-b5bc-820c4282c34d'
-                    AND sarvam_app_id = 'Conversatio-9c6a04cd-3334' AND sarvam_app_version = 5) THEN
+  -- Nothing the migrations create may exist yet (IF NOT EXISTS / OR REPLACE would otherwise keep or replace it silently).
+  IF (SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND ((table_name = 'call_logs' AND column_name IN ('idempotency_key', 'billing_cap_minutes', 'billing_rate_per_minute')) OR (table_name = 'agent_configs' AND column_name IN ('sarvam_outbound_max_call_seconds', 'sarvam_outbound_app_id', 'sarvam_outbound_app_version', 'sarvam_outbound_registered_at', 'sarvam_outbound_registered_by')) OR (table_name = 'sarvam_agent_integrations' AND column_name IN ('role')))) <> 0 OR (SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relnamespace = 'public'::regnamespace AND c.relname IN ('idx_call_logs_org_idempotency_key', 'idx_call_logs_single_outbound_recent', 'idx_call_logs_single_outbound_open', 'idx_call_logs_inbound_caller', 'idx_agent_configs_sarvam_outbound_app_id', 'idx_sarvam_agent_integrations_one_active_per_role')) <> 0 OR (SELECT count(*) FROM pg_constraint WHERE conname IN ('agent_configs_outbound_max_call_seconds_range', 'call_logs_idempotency_key_format', 'call_logs_billing_lock_valid', 'agent_configs_outbound_agent_complete', 'sarvam_agent_integrations_role_check')) <> 0 OR (SELECT count(*) FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname IN ('admit_single_outbound_call', 'agent_configs_sarvam_role_guard')) <> 0
+     OR EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_agent_configs_sarvam_role_guard') THEN
+    RAISE EXCEPTION 'GATE_R2_OBJECTS_ALREADY_EXIST';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname = 'idx_sarvam_agent_integrations_one_active' AND relkind = 'i') THEN
+    RAISE EXCEPTION 'GATE_R2_PRECONDITION: idx_sarvam_agent_integrations_one_active missing';
+  END IF;
+  -- Production fingerprint (2026-11-20).
+  IF NOT EXISTS (SELECT 1 FROM public.agent_configs WHERE id = 'b2972814-d9a1-432a-b5bc-820c4282c34d'
+                  AND sarvam_app_id = 'Conversatio-9c6a04cd-3334' AND sarvam_app_version = 5) THEN
     RAISE EXCEPTION 'GATE_R2_FINGERPRINT: Smile Dental agent mapping differs';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.phone_numbers WHERE right(e164, 4) = '0061' AND status = 'active'
+                  AND provider_deployment_id = 'Smile-Denta-be071be0-703e' AND inbound_enabled AND NOT outbound_enabled) THEN
+    RAISE EXCEPTION 'GATE_R2_FINGERPRINT: 0061 mapping differs';
   END IF;
   IF (SELECT count(*) FROM public.phone_numbers WHERE outbound_enabled) <> 0 THEN
     RAISE EXCEPTION 'GATE_R2_PRECONDITION: a number has outbound enabled';
@@ -43,10 +54,14 @@ BEGIN
   IF (SELECT count(*) FROM public.campaigns) <> 0 THEN
     RAISE EXCEPTION 'GATE_R2_PRECONDITION: campaigns exist';
   END IF;
-  IF EXISTS (SELECT 1 FROM public.sarvam_agent_integrations WHERE status = 'active'
-              GROUP BY agent_config_id HAVING count(*) > 1) THEN
-    RAISE EXCEPTION 'GATE_R2_PRECONDITION: an agent has two active credentials';
+  IF (SELECT count(*) FROM public.sarvam_agent_integrations WHERE status = 'active') <> 1 THEN
+    RAISE EXCEPTION 'GATE_R2_PRECONDITION: expected exactly one active credential';
   END IF;
+  IF (SELECT value -> 'enabled' FROM public.platform_settings WHERE key = 'billing.payment_required') IS DISTINCT FROM 'false'::jsonb THEN
+    RAISE EXCEPTION 'GATE_R2_PRECONDITION: Payment Enforcement is not explicitly disabled';
+  END IF;
+  -- Data fingerprint, kept in a transaction-local setting (no table is written).
+  PERFORM set_config('gate_r2.data_before', md5((SELECT 'organizations:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.organizations x) || ';' || (SELECT 'businesses:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.businesses x) || ';' || (SELECT 'agent_configs:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x) - 'sarvam_outbound_max_call_seconds' - 'sarvam_outbound_app_id' - 'sarvam_outbound_app_version' - 'sarvam_outbound_registered_at' - 'sarvam_outbound_registered_by')::text, '|' ORDER BY (to_jsonb(x) - 'sarvam_outbound_max_call_seconds' - 'sarvam_outbound_app_id' - 'sarvam_outbound_app_version' - 'sarvam_outbound_registered_at' - 'sarvam_outbound_registered_by')::text)), '-') FROM public.agent_configs x) || ';' || (SELECT 'phone_numbers:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.phone_numbers x) || ';' || (SELECT 'sarvam_agent_integrations:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x) - 'role')::text, '|' ORDER BY (to_jsonb(x) - 'role')::text)), '-') FROM public.sarvam_agent_integrations x) || ';' || (SELECT 'telephony_connections:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.telephony_connections x) || ';' || (SELECT 'sarvam_applications:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.sarvam_applications x) || ';' || (SELECT 'wallet_balances:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.wallet_balances x) || ';' || (SELECT 'wallet_transactions:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.wallet_transactions x) || ';' || (SELECT 'campaigns:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.campaigns x) || ';' || (SELECT 'campaign_contacts:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.campaign_contacts x) || ';' || (SELECT 'platform_settings:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.platform_settings x) || ';' || (SELECT 'call_logs:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x) - 'idempotency_key' - 'billing_cap_minutes' - 'billing_rate_per_minute')::text, '|' ORDER BY (to_jsonb(x) - 'idempotency_key' - 'billing_cap_minutes' - 'billing_rate_per_minute')::text)), '-') FROM public.call_logs x)), true);
 END $guard$;
 
 -- ===== Migration 20261119090000 (exact file content) =====
@@ -723,60 +738,63 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_sarvam_agent_integrations_one_active_per_r
 DROP INDEX IF EXISTS public.idx_sarvam_agent_integrations_one_active;
 $gate_m2$]);
 
--- ===== In-transaction check: anything unexpected rolls back both migrations =====
+-- ===== In-transaction check: anything unexpected raises and rolls back both migrations =====
 DO $check$
 BEGIN
-  IF (SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND (
-        (table_name = 'call_logs' AND column_name IN ('idempotency_key','billing_cap_minutes','billing_rate_per_minute'))
-        OR (table_name = 'agent_configs' AND column_name IN ('sarvam_outbound_max_call_seconds','sarvam_outbound_app_id',
-            'sarvam_outbound_app_version','sarvam_outbound_registered_at','sarvam_outbound_registered_by'))
-        OR (table_name = 'sarvam_agent_integrations' AND column_name = 'role'))) <> 9 THEN
-    RAISE EXCEPTION 'GATE_R2_CHECK: columns';
+  IF (SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND ((table_name = 'call_logs' AND column_name IN ('idempotency_key', 'billing_cap_minutes', 'billing_rate_per_minute')) OR (table_name = 'agent_configs' AND column_name IN ('sarvam_outbound_max_call_seconds', 'sarvam_outbound_app_id', 'sarvam_outbound_app_version', 'sarvam_outbound_registered_at', 'sarvam_outbound_registered_by')) OR (table_name = 'sarvam_agent_integrations' AND column_name IN ('role')))) <> 9 THEN
+    RAISE EXCEPTION 'GATE_R2_CHECK: expected 9 new columns';
   END IF;
-  IF (SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
-       WHERE i.indisvalid AND c.relname IN ('idx_call_logs_org_idempotency_key','idx_call_logs_single_outbound_recent',
-         'idx_call_logs_single_outbound_open','idx_call_logs_inbound_caller','idx_agent_configs_sarvam_outbound_app_id',
-         'idx_sarvam_agent_integrations_one_active_per_role')) <> 6 THEN
-    RAISE EXCEPTION 'GATE_R2_CHECK: indexes';
+  IF (SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relnamespace = 'public'::regnamespace AND c.relname IN ('idx_call_logs_org_idempotency_key', 'idx_call_logs_single_outbound_recent', 'idx_call_logs_single_outbound_open', 'idx_call_logs_inbound_caller', 'idx_agent_configs_sarvam_outbound_app_id', 'idx_sarvam_agent_integrations_one_active_per_role') AND i.indisvalid AND i.indisready) <> 6 THEN
+    RAISE EXCEPTION 'GATE_R2_CHECK: expected 6 new valid indexes';
   END IF;
-  IF EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'idx_sarvam_agent_integrations_one_active') THEN
+  IF EXISTS (SELECT 1 FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname = 'idx_sarvam_agent_integrations_one_active' AND relkind = 'i') THEN
     RAISE EXCEPTION 'GATE_R2_CHECK: old credential index still present';
   END IF;
-  IF (SELECT count(*) FROM pg_constraint WHERE conname IN ('agent_configs_outbound_max_call_seconds_range',
-       'call_logs_idempotency_key_format','call_logs_billing_lock_valid','agent_configs_outbound_agent_complete',
-       'sarvam_agent_integrations_role_check')) <> 5 THEN
-    RAISE EXCEPTION 'GATE_R2_CHECK: constraints';
+  IF (SELECT count(*) FROM pg_constraint WHERE (conname = 'agent_configs_outbound_max_call_seconds_range' AND conrelid = 'public.agent_configs'::regclass) OR (conname = 'call_logs_idempotency_key_format' AND conrelid = 'public.call_logs'::regclass) OR (conname = 'call_logs_billing_lock_valid' AND conrelid = 'public.call_logs'::regclass) OR (conname = 'agent_configs_outbound_agent_complete' AND conrelid = 'public.agent_configs'::regclass) OR (conname = 'sarvam_agent_integrations_role_check' AND conrelid = 'public.sarvam_agent_integrations'::regclass)) <> 5 THEN
+    RAISE EXCEPTION 'GATE_R2_CHECK: expected 5 new constraints on their tables';
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_agent_configs_sarvam_role_guard')
-     OR (SELECT count(*) FROM pg_proc WHERE proname IN ('admit_single_outbound_call','agent_configs_sarvam_role_guard')) <> 2 THEN
-    RAISE EXCEPTION 'GATE_R2_CHECK: function or trigger';
+  IF (SELECT count(*) FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname IN ('admit_single_outbound_call', 'agent_configs_sarvam_role_guard')) <> 2 THEN
+    RAISE EXCEPTION 'GATE_R2_CHECK: expected 2 new functions';
+  END IF;
+  IF (SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgrelid = 'public.agent_configs'::regclass AND tgname = 'trg_agent_configs_sarvam_role_guard') IS DISTINCT FROM 'CREATE TRIGGER trg_agent_configs_sarvam_role_guard BEFORE INSERT OR UPDATE OF sarvam_app_id, sarvam_application_id, sarvam_outbound_app_id ON public.agent_configs FOR EACH ROW EXECUTE FUNCTION agent_configs_sarvam_role_guard()' THEN
+    RAISE EXCEPTION 'GATE_R2_CHECK: role guard trigger definition: %', (SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgrelid = 'public.agent_configs'::regclass AND tgname = 'trg_agent_configs_sarvam_role_guard');
   END IF;
   IF has_function_privilege('anon', 'public.admit_single_outbound_call(uuid,uuid,text,text,text,integer,integer,integer,integer)', 'execute')
      OR has_function_privilege('authenticated', 'public.admit_single_outbound_call(uuid,uuid,text,text,text,integer,integer,integer,integer)', 'execute')
      OR NOT has_function_privilege('service_role', 'public.admit_single_outbound_call(uuid,uuid,text,text,text,integer,integer,integer,integer)', 'execute') THEN
     RAISE EXCEPTION 'GATE_R2_CHECK: admission function grants';
   END IF;
-  -- Live configuration untouched.
-  IF NOT EXISTS (SELECT 1 FROM public.agent_configs WHERE id = 'b2972814-d9a1-432a-b5bc-820c4282c34d'
-                  AND sarvam_app_id = 'Conversatio-9c6a04cd-3334' AND sarvam_app_version = 5
-                  AND sarvam_outbound_app_id IS NULL AND sarvam_outbound_ready_app_id IS NULL
-                  AND sarvam_outbound_max_call_seconds IS NULL) THEN
-    RAISE EXCEPTION 'GATE_R2_CHECK: Smile Dental agent changed';
-  END IF;
-  IF (SELECT count(*) FROM public.phone_numbers WHERE outbound_enabled) <> 0 THEN
-    RAISE EXCEPTION 'GATE_R2_CHECK: outbound enabled on a number';
-  END IF;
-  IF EXISTS (SELECT 1 FROM public.sarvam_agent_integrations WHERE role <> 'inbound') THEN
-    RAISE EXCEPTION 'GATE_R2_CHECK: credential role';
-  END IF;
-  IF (SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version IN ('20261119090000','20261120090000')) <> 2 THEN
+  IF (SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version IN ('20261119090000', '20261120090000')) <> 2 THEN
     RAISE EXCEPTION 'GATE_R2_CHECK: history';
+  END IF;
+  -- Every existing row of every customer-relevant table is unchanged (new columns excluded).
+  IF md5((SELECT 'organizations:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.organizations x) || ';' || (SELECT 'businesses:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.businesses x) || ';' || (SELECT 'agent_configs:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x) - 'sarvam_outbound_max_call_seconds' - 'sarvam_outbound_app_id' - 'sarvam_outbound_app_version' - 'sarvam_outbound_registered_at' - 'sarvam_outbound_registered_by')::text, '|' ORDER BY (to_jsonb(x) - 'sarvam_outbound_max_call_seconds' - 'sarvam_outbound_app_id' - 'sarvam_outbound_app_version' - 'sarvam_outbound_registered_at' - 'sarvam_outbound_registered_by')::text)), '-') FROM public.agent_configs x) || ';' || (SELECT 'phone_numbers:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.phone_numbers x) || ';' || (SELECT 'sarvam_agent_integrations:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x) - 'role')::text, '|' ORDER BY (to_jsonb(x) - 'role')::text)), '-') FROM public.sarvam_agent_integrations x) || ';' || (SELECT 'telephony_connections:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.telephony_connections x) || ';' || (SELECT 'sarvam_applications:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.sarvam_applications x) || ';' || (SELECT 'wallet_balances:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.wallet_balances x) || ';' || (SELECT 'wallet_transactions:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.wallet_transactions x) || ';' || (SELECT 'campaigns:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.campaigns x) || ';' || (SELECT 'campaign_contacts:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.campaign_contacts x) || ';' || (SELECT 'platform_settings:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.platform_settings x) || ';' || (SELECT 'call_logs:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x) - 'idempotency_key' - 'billing_cap_minutes' - 'billing_rate_per_minute')::text, '|' ORDER BY (to_jsonb(x) - 'idempotency_key' - 'billing_cap_minutes' - 'billing_rate_per_minute')::text)), '-') FROM public.call_logs x)) IS DISTINCT FROM current_setting('gate_r2.data_before', true) THEN
+    RAISE EXCEPTION 'GATE_R2_CHECK: existing data changed';
+  END IF;
+  -- New columns on existing rows: all empty, every credential inbound.
+  IF EXISTS (SELECT 1 FROM public.agent_configs WHERE sarvam_outbound_app_id IS NOT NULL OR sarvam_outbound_app_version IS NOT NULL
+              OR sarvam_outbound_registered_at IS NOT NULL OR sarvam_outbound_registered_by IS NOT NULL
+              OR sarvam_outbound_max_call_seconds IS NOT NULL)
+     OR EXISTS (SELECT 1 FROM public.call_logs WHERE idempotency_key IS NOT NULL OR billing_cap_minutes IS NOT NULL
+              OR billing_rate_per_minute IS NOT NULL)
+     OR EXISTS (SELECT 1 FROM public.sarvam_agent_integrations WHERE role IS DISTINCT FROM 'inbound') THEN
+    RAISE EXCEPTION 'GATE_R2_CHECK: new columns not empty / credential role';
   END IF;
 END $check$;
 
+-- Returned only if every statement above succeeded; the whole request then commits.
 SELECT json_build_object(
   'applied', (SELECT json_agg(version ORDER BY version) FROM supabase_migrations.schema_migrations WHERE version >= '20261119090000'),
   'system_identifier', (SELECT system_identifier::text FROM pg_control_system()),
+  'database', current_database(),
+  'new_columns', (SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND ((table_name = 'call_logs' AND column_name IN ('idempotency_key', 'billing_cap_minutes', 'billing_rate_per_minute')) OR (table_name = 'agent_configs' AND column_name IN ('sarvam_outbound_max_call_seconds', 'sarvam_outbound_app_id', 'sarvam_outbound_app_version', 'sarvam_outbound_registered_at', 'sarvam_outbound_registered_by')) OR (table_name = 'sarvam_agent_integrations' AND column_name IN ('role')))),
+  'new_valid_indexes', (SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relnamespace = 'public'::regnamespace AND c.relname IN ('idx_call_logs_org_idempotency_key', 'idx_call_logs_single_outbound_recent', 'idx_call_logs_single_outbound_open', 'idx_call_logs_inbound_caller', 'idx_agent_configs_sarvam_outbound_app_id', 'idx_sarvam_agent_integrations_one_active_per_role') AND i.indisvalid AND i.indisready),
+  'new_constraints', (SELECT count(*) FROM pg_constraint WHERE (conname = 'agent_configs_outbound_max_call_seconds_range' AND conrelid = 'public.agent_configs'::regclass) OR (conname = 'call_logs_idempotency_key_format' AND conrelid = 'public.call_logs'::regclass) OR (conname = 'call_logs_billing_lock_valid' AND conrelid = 'public.call_logs'::regclass) OR (conname = 'agent_configs_outbound_agent_complete' AND conrelid = 'public.agent_configs'::regclass) OR (conname = 'sarvam_agent_integrations_role_check' AND conrelid = 'public.sarvam_agent_integrations'::regclass)),
+  'new_functions', (SELECT count(*) FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname IN ('admit_single_outbound_call', 'agent_configs_sarvam_role_guard')),
+  'role_guard_trigger', (SELECT pg_get_triggerdef(oid) FROM pg_trigger WHERE tgrelid = 'public.agent_configs'::regclass AND tgname = 'trg_agent_configs_sarvam_role_guard'),
+  'old_credential_index_present', EXISTS (SELECT 1 FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relname = 'idx_sarvam_agent_integrations_one_active' AND relkind = 'i'),
+  'admission_executable_by_anon', has_function_privilege('anon', 'public.admit_single_outbound_call(uuid,uuid,text,text,text,integer,integer,integer,integer)', 'execute'),
+  'existing_data_unchanged', md5((SELECT 'organizations:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.organizations x) || ';' || (SELECT 'businesses:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.businesses x) || ';' || (SELECT 'agent_configs:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x) - 'sarvam_outbound_max_call_seconds' - 'sarvam_outbound_app_id' - 'sarvam_outbound_app_version' - 'sarvam_outbound_registered_at' - 'sarvam_outbound_registered_by')::text, '|' ORDER BY (to_jsonb(x) - 'sarvam_outbound_max_call_seconds' - 'sarvam_outbound_app_id' - 'sarvam_outbound_app_version' - 'sarvam_outbound_registered_at' - 'sarvam_outbound_registered_by')::text)), '-') FROM public.agent_configs x) || ';' || (SELECT 'phone_numbers:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.phone_numbers x) || ';' || (SELECT 'sarvam_agent_integrations:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x) - 'role')::text, '|' ORDER BY (to_jsonb(x) - 'role')::text)), '-') FROM public.sarvam_agent_integrations x) || ';' || (SELECT 'telephony_connections:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.telephony_connections x) || ';' || (SELECT 'sarvam_applications:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.sarvam_applications x) || ';' || (SELECT 'wallet_balances:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.wallet_balances x) || ';' || (SELECT 'wallet_transactions:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.wallet_transactions x) || ';' || (SELECT 'campaigns:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.campaigns x) || ';' || (SELECT 'campaign_contacts:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.campaign_contacts x) || ';' || (SELECT 'platform_settings:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x))::text, '|' ORDER BY (to_jsonb(x))::text)), '-') FROM public.platform_settings x) || ';' || (SELECT 'call_logs:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x) - 'idempotency_key' - 'billing_cap_minutes' - 'billing_rate_per_minute')::text, '|' ORDER BY (to_jsonb(x) - 'idempotency_key' - 'billing_cap_minutes' - 'billing_rate_per_minute')::text)), '-') FROM public.call_logs x)) = current_setting('gate_r2.data_before', true),
   'lock_timeout', current_setting('lock_timeout'),
   'statement_timeout', current_setting('statement_timeout')
 ) AS gate_r2_result;
