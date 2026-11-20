@@ -5,6 +5,7 @@ import { EmptyState, LoadingState, StatusPill, SectionCard } from "@/components/
 import { languageLabel } from "@/lib/voices";
 import { formatMoney } from "@/lib/pricing";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { CallContextSnapshot } from "@/components/app/CallContextSnapshot";
 import {
   callCounterpart,
   callOutcomeLabel,
@@ -166,6 +167,10 @@ export function CallsHistory({
                   </p>
                   {selected.summary}
                 </div>
+              ) : null}
+
+              {selected.direction === "outbound" ? (
+                <CallContextSnapshot callId={selected.id} scope="member" />
               ) : null}
 
               {selected.recording_url ? (

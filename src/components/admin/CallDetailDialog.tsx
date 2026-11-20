@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { StatusPill } from "@/components/app/primitives";
+import { CallContextSnapshot } from "@/components/app/CallContextSnapshot";
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -125,6 +126,12 @@ export function CallDetailDialog({
                 </Row>
               ) : null}
             </dl>
+
+            {data.direction === "outbound" && callId ? (
+              <div className="border-t border-border pt-3">
+                <CallContextSnapshot callId={callId} scope="admin" />
+              </div>
+            ) : null}
 
             <section className="space-y-2 border-t border-border pt-3">
               <p className="text-sm font-medium">Billing</p>
