@@ -469,6 +469,78 @@ describe("admit_single_outbound_call now reserves for open campaign calls", () =
   });
 });
 
+describe("audit fixes: emergency stop, in-flight window, unbilled reservations, campaign lock", () => {
+  const singleSql = (org: Org, to = phone()) =>
+    `SELECT public.admit_single_outbound_call('${org.id}', '${org.number}', '${to}', '+917900000001', 'k_${randomUUID().replace(/-/g, "")}', 3, 30, 100, 2);`;
+  const single = (org: Org) => JSON.parse(rows(singleSql(org))[0]!) as Record<string, unknown>;
+
+  test("the database stop flag refuses every new admission, single and campaign, until it is cleared", (t) => {
+    if (!ready(t)) return;
+    const org = newOrg(100_000);
+    rows(`RESET ROLE; INSERT INTO public.platform_settings (key, value) VALUES ('outbound.calling_paused', '{"enabled": true}')
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;`);
+    try {
+      assert.equal(admit(org, claimed(org))["reason"], "outbound_paused");
+      assert.equal(single(org)["reason"], "outbound_paused");
+      assert.equal(callCount(org), 0);
+    } finally {
+      rows(
+        `RESET ROLE; UPDATE public.platform_settings SET value = '{"enabled": false}' WHERE key = 'outbound.calling_paused';`,
+      );
+    }
+    assert.equal(admit(org, claimed(org))["result"], "admitted");
+    assert.equal(single(org)["result"], "admitted");
+  });
+
+  test("a call started over 15 minutes ago no longer holds an in-flight slot, but still reserves the wallet", (t) => {
+    if (!ready(t)) return;
+    const org = newOrg(2 * PER_CALL);
+    for (let i = 0; i < 3; i++) openCall(org, { started_at: "now() - interval '20 minutes'" });
+    // In-flight: not counted. Wallet: 3 x PER_CALL reserved > balance.
+    assert.equal(admit(org, claimed(org), 1)["reason"], "insufficient_balance");
+    rows(
+      `RESET ROLE; INSERT INTO public.wallet_transactions (organization_id, amount, kind, description) VALUES ('${org.id}', ${2 * PER_CALL}, 'topup', 'more');`,
+    );
+    assert.equal(
+      admit(org, claimed(org), 1)["result"],
+      "admitted",
+      "old stuck calls do not block in-flight",
+    );
+  });
+
+  test("a call that ended but is not billed yet still reserves the wallet; once billed it does not", (t) => {
+    if (!ready(t)) return;
+    const org = newOrg(PER_CALL + PER_CALL / 2);
+    // Inserted final: the finalization trigger marks it pending (not billed).
+    openCall(org, { status: "'completed'" });
+    assert.deepEqual(
+      rows(`SELECT finalization_state FROM public.call_logs WHERE organization_id = '${org.id}';`),
+      ["pending"],
+    );
+    assert.equal(admit(org, claimed(org))["reason"], "insufficient_balance");
+    assert.equal(single(org)["reason"], "insufficient_balance");
+    rows(`RESET ROLE; UPDATE public.call_logs SET billing_applied_at = now(), campaign_applied_at = now(), customer_charge = 0, finalization_state = 'done'
+            WHERE organization_id = '${org.id}';`);
+    assert.equal(admit(org, claimed(org))["result"], "admitted");
+  });
+
+  test("single-call in-flight counts open campaign calls too: one limit per customer", (t) => {
+    if (!ready(t)) return;
+    const org = newOrg(1_000_000);
+    for (let i = 0; i < 3; i++) openCall(org, { campaign_id: `'${org.campaign}'` });
+    assert.equal(single(org)["reason"], "in_flight_limit");
+  });
+
+  test("campaign admission share-locks the campaign row: a cancel waits for it to commit", (t) => {
+    if (!ready(t)) return;
+    assert.deepEqual(
+      rows(`SELECT count(*) FROM pg_proc WHERE proname = 'admit_campaign_outbound_call'
+              AND prosrc LIKE '%FROM public.campaigns WHERE id = _campaign FOR SHARE%';`),
+      ["1"],
+    );
+  });
+});
+
 describe("rollback", () => {
   test("removes the function and columns; excluded contacts become cancelled; calls survive", (t) => {
     if (!ready(t)) return;

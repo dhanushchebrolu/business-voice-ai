@@ -19,7 +19,19 @@
 --      the campaign budget, then the call row (number reservation and
 --      one-call-per-contact indexes -> destination_busy).
 --   5. admit_single_outbound_call now also counts open campaign calls when it
---      checks the wallet (it previously reserved only for single calls).
+--      checks the wallet (it previously reserved only for single calls), and
+--      its in-flight limit counts every outbound call, single or campaign.
+--   6. Both admissions:
+--      - refuse while platform_settings 'outbound.calling_paused' is
+--        {"enabled": true} (the database emergency stop: no new outbound call
+--        is admitted from the next admission on, without a deploy);
+--      - count a call as in flight only for 15 minutes after it started (no
+--        call outlives its 300 s cap; an unresolved start must not block the
+--        customer forever; its wallet and number reservations still hold);
+--      - reserve the wallet for calls that ended but are not billed yet
+--        (finalization pending or failed), not only for live calls.
+--   Campaign admission also takes a share lock on the campaign row, so a pause
+--   or cancel cannot commit between the status check and the call row.
 --
 -- Additive: nullable columns, a widened CHECK, two functions. Rollback:
 -- docs/production-rollback-20261121090000-campaign-context-engine.sql
@@ -96,9 +108,17 @@ BEGIN
   -- Serializes this customer's admissions (single and campaign) and wallet debits.
   PERFORM 1 FROM public.organizations WHERE id = camp.organization_id FOR UPDATE;
 
-  -- Re-read under the lock: a pause or cancel that landed since is final.
+  -- Database emergency stop (platform_settings 'outbound.calling_paused').
+  IF EXISTS (SELECT 1 FROM public.platform_settings
+              WHERE key = 'outbound.calling_paused'
+                AND COALESCE((value ->> 'enabled')::boolean, false)) THEN
+    RETURN jsonb_build_object('result', 'refused', 'reason', 'outbound_paused');
+  END IF;
+
+  -- Re-read under a share lock: a pause or cancel that landed since is final,
+  -- and one that comes later waits until this admission has committed.
   SELECT status, context_reviewed_at INTO camp.status, camp.context_reviewed_at
-    FROM public.campaigns WHERE id = _campaign;
+    FROM public.campaigns WHERE id = _campaign FOR SHARE;
   IF camp.status <> 'running' THEN
     RETURN jsonb_build_object('result', 'refused', 'reason', 'campaign_not_running');
   END IF;
@@ -133,7 +153,8 @@ BEGIN
   SELECT count(*) INTO in_flight FROM public.call_logs
    WHERE organization_id = camp.organization_id
      AND direction = 'outbound'
-     AND status IN ('initiated', 'ringing', 'answered', 'in_progress', 'outcome_unknown');
+     AND status IN ('initiated', 'ringing', 'answered', 'in_progress', 'outcome_unknown')
+     AND started_at > now() - interval '15 minutes';
   IF in_flight >= _max_in_flight THEN
     RETURN jsonb_build_object('result', 'refused', 'reason', 'in_flight_limit', 'in_flight', in_flight);
   END IF;
@@ -145,13 +166,14 @@ BEGIN
            0)
     INTO rate;
 
-  -- Worst case still owed by every open outbound call, single or campaign.
+  -- Worst case still owed by every outbound call not yet billed, single or campaign.
   SELECT COALESCE(sum(COALESCE(billing_cap_minutes, 1)::bigint * COALESCE(billing_rate_per_minute, rate)), 0)
     INTO open_reserved
     FROM public.call_logs
    WHERE organization_id = camp.organization_id
      AND direction = 'outbound'
-     AND status IN ('initiated', 'ringing', 'answered', 'in_progress', 'outcome_unknown');
+     AND (status IN ('initiated', 'ringing', 'answered', 'in_progress', 'outcome_unknown')
+          OR (billing_applied_at IS NULL AND finalization_state IN ('pending', 'failed')));
 
   IF rate > 0 OR open_reserved > 0 THEN
     SELECT COALESCE((SELECT b.balance FROM public.wallet_balances b
@@ -241,6 +263,13 @@ BEGIN
     RETURN jsonb_build_object('result', 'refused', 'reason', 'organization_not_found');
   END IF;
 
+  -- Database emergency stop (platform_settings 'outbound.calling_paused').
+  IF EXISTS (SELECT 1 FROM public.platform_settings
+              WHERE key = 'outbound.calling_paused'
+                AND COALESCE((value ->> 'enabled')::boolean, false)) THEN
+    RETURN jsonb_build_object('result', 'refused', 'reason', 'outbound_paused');
+  END IF;
+
   SELECT id, status, destination_number INTO existing FROM public.call_logs
    WHERE organization_id = _org AND idempotency_key = _idempotency_key;
   IF FOUND THEN
@@ -264,12 +293,19 @@ BEGIN
   END IF;
   cap_minutes := ceil(max_seconds / 60.0)::integer;
 
+  -- In flight: every outbound call of this customer, single or campaign.
+  SELECT count(*) INTO in_flight FROM public.call_logs
+   WHERE organization_id = _org
+     AND direction = 'outbound'
+     AND status IN ('initiated', 'ringing', 'answered', 'in_progress', 'outcome_unknown')
+     AND started_at > now() - interval '15 minutes';
+
+  -- Rate limits: the customer's single calls.
   SELECT
-    count(*) FILTER (WHERE status IN ('initiated', 'ringing', 'answered', 'in_progress', 'outcome_unknown')),
     count(*) FILTER (WHERE started_at > now() - interval '1 hour'),
     count(*),
     count(*) FILTER (WHERE destination_number = _destination)
-  INTO in_flight, last_hour, last_day, to_destination
+  INTO last_hour, last_day, to_destination
   FROM public.call_logs
   WHERE organization_id = _org
     AND direction = 'outbound'
@@ -297,13 +333,14 @@ BEGIN
            0)
     INTO rate;
 
-  -- Worst case still owed by every open outbound call, single or campaign.
+  -- Worst case still owed by every outbound call not yet billed, single or campaign.
   SELECT COALESCE(sum(COALESCE(billing_cap_minutes, 1)::bigint * COALESCE(billing_rate_per_minute, rate)), 0)
     INTO open_reserved
     FROM public.call_logs
    WHERE organization_id = _org
      AND direction = 'outbound'
-     AND status IN ('initiated', 'ringing', 'answered', 'in_progress', 'outcome_unknown');
+     AND (status IN ('initiated', 'ringing', 'answered', 'in_progress', 'outcome_unknown')
+          OR (billing_applied_at IS NULL AND finalization_state IN ('pending', 'failed')));
 
   IF rate > 0 OR open_reserved > 0 THEN
     SELECT COALESCE((SELECT b.balance FROM public.wallet_balances b WHERE b.organization_id = _org), 0)::int
