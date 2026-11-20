@@ -71,6 +71,16 @@ Rehearsal on PostgreSQL 17.6, production-shaped data, fresh database per case:
 | 9   | Second migration removed             | `GATE_R2_CHECK: expected 9 new columns`                                                                    | first migration rolled back |
 | 10  | 65 s statement                       | statement timeout after 61 s                                                                               | unchanged                   |
 
+## 5b. Execution-path review (2026-11-20, read-only)
+
+Script SHA-256 `4c7bfe3a2d1c3a05d832003b895877b5e07ec461720cd5a76f1a2fa7768e336d` on disk, in commit `bea754f` and at the remote branch head.
+
+- **Client (`supabase@2.120.0`):** the npm launcher runs `@supabase/cli-windows-x64@2.120.0` `supabase.exe`, a Bun build of `apps/cli` (TypeScript). `db query` (`apps/cli/src/commands/db/query/query.handler.ts` at tag v2.120.0) reads the file whole (`fs.readFileString`), then sends **one** `POST /v1/projects/{ref}/database/query` with body `{"query": <file text>}`. No splitting. The HTTP client is the plain fetch client with a debug logger (`auth/http-debug.layer.ts`): **no retry and no client timeout** on that POST. A non-201 status fails the command (exit 1).
+- **Preflight (before the file is read):** `--linked` mints a temporary login role through the Management API (`POST /v1/projects/{ref}/cli/login-role`) and verify-connects through the pooler, retrying up to 9 times (clearing network bans from the 3rd attempt). This is standard CLI behaviour on every `--linked` call (it also ran for every read-only check in this review). It never executes the script; a preflight failure means no POST is sent.
+- **Bytes received:** a read-only probe embedding the whole script as a string literal returned the same MD5 (`2fac02372cf3891358d2bef0439d516e`) and length (54,766) on the server as the local file. The API adds nothing before the query and appends only three SQL comment lines (`-- source: …`, `-- user: …`, `-- date: …`).
+- **One transaction, rollback on error:** verified on production: `now()` constant across statements (also for an 85 KB request); `SET LOCAL lock_timeout`/`statement_timeout` effective for later statements (a 1 s timeout cancelled a later `pg_sleep(3)`); an error rejects the whole request with nothing kept. The guard's fingerprint is stored with `set_config(…, true)` (transaction-local) and read by `$check$`; were they ever in different transactions, the value would be NULL and `IS DISTINCT FROM` would raise.
+- **Ambiguous outcome:** if the response is lost after the server commits, the CLI does not retry. Re-running the same file is harmless: the guard refuses (`GATE_R2_UNEXPECTED_HISTORY` / `GATE_R2_OBJECTS_ALREADY_EXIST`; rehearsal case 3). A duplicate execution racing the first would wait on the first's ACCESS EXCLUSIVE locks (5 s lock timeout) or fail on the `schema_migrations` primary key, and roll back either way. After any ambiguous result, run §7.1 / §6 (read-only) before anything else.
+
 ## 6. Exact post-migration verification query
 
 Run read-only immediately after. It is §9.2 of [`gate-r2-migration-preflight.md`](gate-r2-migration-preflight.md):
