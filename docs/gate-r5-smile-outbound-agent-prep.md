@@ -328,3 +328,23 @@ Rollback: ClickAI admin → Disconnect outbound credential (outbound only; inbou
 - Text tests (v2): busy + callback + WhatsApp → clinic phone ✔; "not a good time, driving" → clinic phone ✔; callback request while free → "cannot arrange callbacks" + clinic phone ✔; booking → availability + "call the clinic, not held" ✔; opt-out → exact end message ✔.
 - Re-registered in ClickAI 12:31:51 UTC: outbound `Smile-Denta-a17cec18-1c23` **v2**; still not confirmed for outbound.
 - Backend since 12:29 UTC: 13 events, all outbound credential (`context` 6, `call_outcome` 6, `check_availability` 1), all ok; 0 bookings, leads, call logs; 0 outbound calls ever; 0 numbers `outbound_enabled`; 0 campaigns; 0061 unchanged; Payment Enforcement off.
+
+## 11. GATE R7-A preflight (read-only, 2026-11-20 18:05 IST)
+
+All 11 checks PASS; nothing was enabled, confirmed, deployed or called.
+
+| #   | Check              | Result | Evidence                                                                                                                                                                                                                          |
+| --- | ------------------ | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Worker             | PASS   | klyro `4832430f` at 100% = `8a6e5fb`; 0 code files changed since                                                                                                                                                                  |
+| 2   | Sarvam agent       | PASS   | `Smile-Denta-a17cec18-1c23` v2 committed (prompt `15e353bce74ca716`); v3 empty draft; not deployed                                                                                                                                |
+| 3   | Registration       | PASS   | `sarvam_outbound_app_id` = that id, version 2; ready/max NULL (unconfirmed)                                                                                                                                                       |
+| 4   | Tool auth          | PASS   | v2: all four ClickAI tools Bearer `01a1f8e1…` (outbound); none `01a1cbfa…`                                                                                                                                                        |
+| 5   | Credential         | PASS   | 1 inbound + 1 outbound, both active, both on agent config `b2972814…`                                                                                                                                                             |
+| 6   | Caller number      | PASS   | only usable one: …0061 (Smile Dental, Sarvam, connection registered and same org, agent = Smile); …0870 is Vobiz (no Sarvam connection) and cannot place Sarvam calls; 0 numbers `outbound_enabled`                               |
+| 7   | 300 s / billing    | PASS   | Sarvam v2 `max_interaction_time_seconds` 300; ClickAI confirmation accepts ≤ 300 (deployed); admission reserves ceil(300/60) = 5 min × ₹4.00 = ₹20.00; wallet ₹536.00; finalization bills min(started, 5) min                     |
+| 8   | Eligibility        | PASS   | hours 09–21 IST (no override); +91 only (no override); test allowlist = 1 +91 number; that number: Smile contact, past inbound caller and booking (relationship ✔), not opted out, 0 outbound calls in 24 h, not a ClickAI number |
+| 9   | Switches           | PASS   | `OUTBOUND_CALLING_DISABLED` not set (kill switch available, not engaged); outbound blocked by data (0 numbers enabled, agent unconfirmed); `CAMPAIGN_DISPATCH_ENABLED` not set, last dispatch `skipped: disabled`; 0 campaigns    |
+| 10  | Concurrency/wallet | PASS   | 0 open outbound calls, 0 outbound ever, 0 campaign contacts; limits 3 in flight / 30 h / 100 d / 2 per destination per day                                                                                                        |
+| 11  | Inbound            | PASS   | `Conversatio-9c6a04cd-3334` v5; …0061 → `Smile-Denta-be071be0-703e`, verified v5, inbound on                                                                                                                                      |
+
+Notes: a supervised test must start before 21:00 IST. The database CHECK still allows up to 3600 s if written directly; the only write path (admin confirmation) enforces ≤ 300.
