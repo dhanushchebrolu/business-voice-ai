@@ -275,6 +275,8 @@ export interface CheckAvailabilityInput {
   dateIso: string;
   durationMinutes: number;
   bufferMinutes?: number;
+  /** Defaults to the current time; tests pin it so "no past slots" stays deterministic. */
+  now?: Date;
 }
 
 export async function check_calendar_availability(
@@ -353,6 +355,7 @@ export async function check_calendar_availability(
       override,
       durationMinutes: input.durationMinutes,
       bufferMinutes: input.bufferMinutes,
+      now: input.now,
       googleBusyPeriods,
       existingBookings: (existingBookingsRes.data ?? []).map((b) => ({
         start: b.start_at,

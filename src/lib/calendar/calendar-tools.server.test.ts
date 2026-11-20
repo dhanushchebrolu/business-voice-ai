@@ -13,6 +13,9 @@ import {
 import { encryptCredential } from "../google-calendar/google-calendar-crypto.server.ts";
 import { _resetWarnedKeysForTests } from "./business-hours-validation.ts";
 
+/** The tests below check 2026-11-20; a fixed clock before it keeps every slot in the future. */
+const BEFORE_TEST_DAY = new Date("2026-11-19T00:00:00Z");
+
 /**
  * These tests target the tenant/permission gating every tool must apply
  * before touching a calendar connection or a booking (spec section 39:
@@ -229,6 +232,7 @@ describe("tenant/connection gating — after permission passes", () => {
       organizationId: "org-1",
       businessId: "biz-1",
       dateIso: "2026-11-20",
+      now: BEFORE_TEST_DAY,
       durationMinutes: 30,
     });
     assert.equal(result.success, true);
@@ -287,6 +291,7 @@ describe("tenant/connection gating — after permission passes", () => {
       organizationId: "org-1",
       businessId: "biz-1",
       dateIso: "2026-11-20",
+      now: BEFORE_TEST_DAY,
       durationMinutes: 30,
     });
     assert.equal(result.success, true);
@@ -349,6 +354,7 @@ describe("tenant/connection gating — after permission passes", () => {
       organizationId: "org-1",
       businessId: "biz-1",
       dateIso: "2026-11-20",
+      now: BEFORE_TEST_DAY,
       durationMinutes: 30,
     });
     assert.equal(result.success, true);
@@ -397,6 +403,7 @@ describe("tenant/connection gating — after permission passes", () => {
           organizationId: "org-1",
           businessId: "biz-1",
           dateIso: "2026-11-20",
+          now: BEFORE_TEST_DAY,
           durationMinutes: 30,
         }),
       (err: unknown) => {
@@ -579,6 +586,7 @@ describe("check_calendar_availability — daily overrides are actually fetched a
         organizationId: "org-1",
         businessId: "biz-1",
         dateIso: "2026-11-20",
+        now: BEFORE_TEST_DAY,
         durationMinutes: 30,
       });
       assert.equal(result.success, true);
