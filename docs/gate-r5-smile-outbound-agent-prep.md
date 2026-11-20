@@ -321,3 +321,10 @@ Remaining (user, then Claude): generate the outbound credential in ClickAI; crea
 - Not tested live (covered by deployed code + tests, would need a production write or the raw token): direct 403 `forbidden_for_outbound_agent` on booking/callback with the outbound token; database refusal of the outbound agent as an inbound agent.
 
 Rollback: ClickAI admin → Disconnect outbound credential (outbound only; inbound unaffected) → unregister / re-register as needed; Sarvam: delete secret `CLICKAI_OUTBOUND_API_KEY` once no tool uses it; the agent stays undeployed. Before any Worker rollback past `71f671d4`, disconnect the outbound credential first.
+
+### 10.2 R6 fix: v2 (2026-11-20, user-approved)
+
+- Prompt edit (draft → **committed v2**, prompt `15e353bce74ca716`): Conversation step 1 now ends a busy / not-a-good-time call (even with a callback or reminder request) with "No problem. You can reach the clinic on {{business_phone}} whenever it suits you. Thank you."; step 5 adds "Never end the call after such a request without having said {{business_phone}}." Nothing else changed (300 s, voicemail, voice, languages, tools, auth).
+- Text tests (v2): busy + callback + WhatsApp → clinic phone ✔; "not a good time, driving" → clinic phone ✔; callback request while free → "cannot arrange callbacks" + clinic phone ✔; booking → availability + "call the clinic, not held" ✔; opt-out → exact end message ✔.
+- Re-registered in ClickAI 12:31:51 UTC: outbound `Smile-Denta-a17cec18-1c23` **v2**; still not confirmed for outbound.
+- Backend since 12:29 UTC: 13 events, all outbound credential (`context` 6, `call_outcome` 6, `check_availability` 1), all ok; 0 bookings, leads, call logs; 0 outbound calls ever; 0 numbers `outbound_enabled`; 0 campaigns; 0061 unchanged; Payment Enforcement off.
