@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
+import { MAX_RETRY_AFTER_MINUTES, MIN_RETRY_AFTER_MINUTES } from "@/lib/campaign-outcome";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select,
@@ -73,6 +74,14 @@ function NewCampaignPage() {
     }
     if (!description.trim()) {
       toast.error("Describe why you are calling these people.");
+      return;
+    }
+    if (
+      !Number.isInteger(retryAfterMinutes) ||
+      retryAfterMinutes < MIN_RETRY_AFTER_MINUTES ||
+      retryAfterMinutes > MAX_RETRY_AFTER_MINUTES
+    ) {
+      toast.error("Retries must wait between 15 minutes and 7 days.");
       return;
     }
     const budget = budgetRupees.trim() ? Math.round(Number(budgetRupees) * 100) : null;
@@ -278,7 +287,8 @@ function NewCampaignPage() {
             <Label>Retry after (minutes)</Label>
             <Input
               type="number"
-              min={15}
+              min={MIN_RETRY_AFTER_MINUTES}
+              max={MAX_RETRY_AFTER_MINUTES}
               value={retryAfterMinutes}
               onChange={(e) => setRetryAfterMinutes(Number(e.target.value) || 15)}
             />

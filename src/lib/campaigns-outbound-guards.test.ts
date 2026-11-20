@@ -39,6 +39,17 @@ describe("campaign launch and cohort upload obey the outbound safety switches", 
   });
 });
 
+describe("campaign launch refuses unsafe retry settings (GATE C4 H1)", () => {
+  test("checked after the campaign is read and before it is set running", () => {
+    const read = launch.indexOf('.from("campaigns")');
+    const check = launch.indexOf("const retryProblem = retrySettingsProblem(campaign);");
+    const refuse = launch.indexOf("if (retryProblem) throw new Error(retryProblem);");
+    const running = launch.indexOf('status: "running"');
+    assert.ok(check > -1 && refuse > check, "retry settings checked and refused");
+    assert.ok(read < check && refuse < running);
+  });
+});
+
 describe("single calls: the calling hours are re-checked between admission and the dial", () => {
   test("a call admitted at 20:59 that would dial after 21:00 is recorded as never started", () => {
     const single = readFileSync(

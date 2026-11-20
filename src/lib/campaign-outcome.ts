@@ -23,6 +23,39 @@ export type CampaignContactStatus =
   | "wrong_number"
   | "cancelled";
 
+/**
+ * Only an unanswered attempt is ever retried, and never sooner than 15 minutes
+ * (nor later than 7 days). The same limits are database constraints on
+ * campaigns (20261122090000) and are checked at launch; applied here too so a
+ * row written before them can never call someone who answered.
+ */
+export const RETRYABLE_CALL_STATUSES: readonly CallTerminalStatus[] = [
+  "no_answer",
+  "busy",
+  "failed",
+];
+export const MIN_RETRY_AFTER_MINUTES = 15;
+export const MAX_RETRY_AFTER_MINUTES = 7 * 24 * 60;
+
+/** A reason the campaign's retry settings are outside the limits, or null. */
+export function retrySettingsProblem(settings: {
+  retry_statuses: string[] | null;
+  retry_after_minutes: number | null;
+}): string | null {
+  const statuses = settings.retry_statuses ?? [];
+  if (statuses.some((s) => !(RETRYABLE_CALL_STATUSES as readonly string[]).includes(s)))
+    return "Only no-answer, busy or failed calls can be retried.";
+  const minutes = settings.retry_after_minutes;
+  if (
+    minutes === null ||
+    !Number.isInteger(minutes) ||
+    minutes < MIN_RETRY_AFTER_MINUTES ||
+    minutes > MAX_RETRY_AFTER_MINUTES
+  )
+    return `Retries must wait between ${MIN_RETRY_AFTER_MINUTES} minutes and 7 days.`;
+  return null;
+}
+
 export interface CampaignRetryPolicy {
   maxAttempts: number;
   retryAfterMinutes: number;
@@ -74,9 +107,18 @@ export function decideCampaignContactOutcome(
   if (agentVariables?.["outbound_result"] === "voicemail")
     return { status: terminalStatus, nextAttemptAt: null };
 
-  const isRetryable = policy.retryStatuses.includes(terminalStatus);
+  const isRetryable =
+    RETRYABLE_CALL_STATUSES.includes(terminalStatus) &&
+    policy.retryStatuses.includes(terminalStatus);
   if (isRetryable && attempts < policy.maxAttempts) {
-    const next = new Date(now.getTime() + policy.retryAfterMinutes * 60_000);
+    const waitMinutes = Math.min(
+      Math.max(
+        Number.isFinite(policy.retryAfterMinutes) ? policy.retryAfterMinutes : 0,
+        MIN_RETRY_AFTER_MINUTES,
+      ),
+      MAX_RETRY_AFTER_MINUTES,
+    );
+    const next = new Date(now.getTime() + waitMinutes * 60_000);
     return { status: "retry_scheduled", nextAttemptAt: next.toISOString() };
   }
 

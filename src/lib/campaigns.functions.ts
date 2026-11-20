@@ -64,6 +64,10 @@ export const launchCampaign = createServerFn({ method: "POST" })
       throw new Error(`Campaign is already ${campaign.status}.`);
 
     if (!campaign.agent_config_id) throw new Error("Choose an AI voice agent before launching.");
+    // Retries only for unanswered calls, at least 15 minutes apart (also a database constraint).
+    const { retrySettingsProblem } = await import("@/lib/campaign-outcome");
+    const retryProblem = retrySettingsProblem(campaign);
+    if (retryProblem) throw new Error(retryProblem);
     // Every call says only what the customer reviewed; the dispatcher refuses otherwise too.
     if (!campaign.context_reviewed_at)
       throw new Error("Review and save what the AI should say on these calls before launching.");

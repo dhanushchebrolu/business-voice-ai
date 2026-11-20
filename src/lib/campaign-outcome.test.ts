@@ -1,6 +1,10 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { decideCampaignContactOutcome, type CampaignRetryPolicy } from "./campaign-outcome.ts";
+import {
+  decideCampaignContactOutcome,
+  retrySettingsProblem,
+  type CampaignRetryPolicy,
+} from "./campaign-outcome.ts";
 
 const policy: CampaignRetryPolicy = {
   maxAttempts: 3,
@@ -99,5 +103,63 @@ describe("voicemail is never retried", () => {
         .status,
       "retry_scheduled",
     );
+  });
+});
+
+describe("retry limits (GATE C4 H1): someone who answered is never called again", () => {
+  const now = new Date("2026-09-12T10:00:00Z");
+  const unsafe: CampaignRetryPolicy = {
+    maxAttempts: 10,
+    retryAfterMinutes: 0,
+    retryStatuses: ["completed", "cancelled", "no_answer", "busy", "failed"],
+  };
+
+  test("a completed or cancelled call is final even when the campaign lists it for retry", () => {
+    for (const status of ["completed", "cancelled"] as const)
+      assert.deepEqual(decideCampaignContactOutcome(status, 1, unsafe, null, now), {
+        status,
+        nextAttemptAt: null,
+      });
+  });
+
+  test("a retry never comes sooner than 15 minutes, whatever the campaign says", () => {
+    for (const retryAfterMinutes of [0, -60, 5, Number.NaN]) {
+      const d = decideCampaignContactOutcome(
+        "no_answer",
+        1,
+        { ...unsafe, retryAfterMinutes },
+        null,
+        now,
+      );
+      assert.equal(d.status, "retry_scheduled");
+      assert.equal(d.nextAttemptAt, new Date("2026-09-12T10:15:00Z").toISOString());
+    }
+  });
+
+  test("nor later than 7 days", () => {
+    const d = decideCampaignContactOutcome(
+      "busy",
+      1,
+      { ...policy, retryAfterMinutes: 999_999 },
+      null,
+      now,
+    );
+    assert.equal(d.nextAttemptAt, new Date("2026-09-19T10:00:00Z").toISOString());
+  });
+
+  test("launch refuses settings outside the limits", () => {
+    const ok = { retry_statuses: ["no_answer", "busy", "failed"], retry_after_minutes: 120 };
+    assert.equal(retrySettingsProblem(ok), null);
+    assert.equal(retrySettingsProblem({ retry_statuses: [], retry_after_minutes: 15 }), null);
+    assert.equal(retrySettingsProblem({ ...ok, retry_after_minutes: 10080 }), null);
+    assert.match(
+      retrySettingsProblem({ ...ok, retry_statuses: ["no_answer", "completed"] }) ?? "",
+      /Only no-answer, busy or failed/,
+    );
+    for (const retry_after_minutes of [0, 14, 10081, 1.5, null])
+      assert.match(
+        retrySettingsProblem({ ...ok, retry_after_minutes }) ?? "",
+        /between 15 minutes and 7 days/,
+      );
   });
 });
