@@ -15,6 +15,7 @@ import {
 import { UNIVERSAL_CAPABILITIES } from "./universal-agent-config.ts";
 import { customGreetingFor, renderGreeting } from "./agent-greeting.ts";
 import {
+  availabilityReplyTemplate,
   bookingReplyTemplate,
   buildSarvamAgentPrompt,
   sarvamPromptGuardrails,
@@ -1292,7 +1293,7 @@ export interface SarvamToolSpec {
   responseTemplate?: string;
 }
 
-/** Adds the shared booking reply template to the book_appointment spec (sarvam-agent-prompt.ts). */
+/** Adds the shared reply templates to the check_availability and book_appointment specs (sarvam-agent-prompt.ts). */
 function withReplyTemplates(
   specs: SarvamToolSpec[],
   role: AgentRole,
@@ -1301,7 +1302,9 @@ function withReplyTemplates(
   return specs.map((t) =>
     t.name === "book_appointment"
       ? { ...t, responseTemplate: bookingReplyTemplate({ role, tools }) }
-      : t,
+      : t.name === "check_availability"
+        ? { ...t, responseTemplate: availabilityReplyTemplate({ role, tools }) }
+        : t,
   );
 }
 

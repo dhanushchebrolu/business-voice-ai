@@ -2,6 +2,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
+  availabilityReplyTemplate,
   bookingReplyTemplate,
   buildSarvamAgentPrompt,
   sarvamPromptGuardrails,
@@ -289,10 +290,14 @@ describe("booking reply template (generated for both channels)", () => {
     "utf8",
   );
 
-  test("both booking tools carry it; no other tool does", () => {
+  test("only check_availability and book_appointment carry reply templates", () => {
     for (const tpl of [inboundTpl, outboundTpl])
       for (const t of tpl.tools)
-        assert.equal(Boolean(t.responseTemplate), t.name === "book_appointment", t.name);
+        assert.equal(
+          Boolean(t.responseTemplate),
+          t.name === "book_appointment" || t.name === "check_availability",
+          t.name,
+        );
   });
 
   test("it produces exactly the reply words the prompt reacts to, confirmed only on success", () => {
@@ -350,5 +355,61 @@ describe("booking reply template (generated for both channels)", () => {
     assert.doesNotMatch(r, /callback/i);
     for (const t of [IN_REPLY, OUT_REPLY, r])
       assert.doesNotMatch(t, /clinic|dental|smile|patient/i);
+  });
+});
+
+describe("availability reply template (generated for both channels)", () => {
+  const reply = (tpl: ReturnType<typeof sarvamToolConfiguration>) =>
+    tpl.tools.find((t) => t.name === "check_availability")!.responseTemplate!;
+  const IN_AV = reply(inboundTpl);
+  const OUT_AV = reply(outboundTpl);
+
+  test("with booking it tells the agent how to book the chosen time; it never says booked", () => {
+    for (const r of [IN_AV, OUT_AV]) {
+      assert.match(
+        r,
+        /Offer only these exact times\. To book, send the chosen time exactly as shown \(HH:mm\)\./,
+      );
+      assert.doesNotMatch(r, /books appointments directly|never say a time is booked/);
+      assert.match(r, /IS FREE\./);
+      assert.match(r, /IS NOT FREE\./);
+      assert.match(r, /There are no open slots on that date/);
+    }
+  });
+
+  test("without booking it says the call cannot book (the old outbound wording is gone)", () => {
+    const r = availabilityReplyTemplate({
+      role: "outbound",
+      tools: OUTBOUND_AGENT_TOOLS.filter((t) => t !== "book_appointment"),
+    });
+    assert.match(r, /This call cannot book; never say a time is booked or held\./);
+    assert.doesNotMatch(r, /To book, send/);
+  });
+
+  test("the channels differ only in the failure branch; outbound never offers a callback", () => {
+    const common = (r: string) =>
+      r.replace(/\{% else %\}Availability could not be checked[\s\S]*$/, "");
+    assert.equal(common(IN_AV), common(OUT_AV));
+    assert.match(IN_AV, /request_callback/);
+    assert.doesNotMatch(OUT_AV, /callback/i);
+    assert.match(OUT_AV, /give the business phone number so they can ask the business/);
+    assert.doesNotMatch(
+      availabilityReplyTemplate({ role: "inbound", tools: ["check_availability"] }),
+      /callback/i,
+    );
+  });
+
+  test("it reads the fields the availability endpoint returns and shares the service branches", () => {
+    const server = readFileSync(new URL("./sarvam-agent-api.server.ts", import.meta.url), "utf8");
+    for (const field of ["requested_time", "duration_minutes", "timezone", "start_local"])
+      assert.ok(server.includes(field), `backend returns ${field}`);
+    const services = (r: string) =>
+      r.slice(
+        r.indexOf('code == "SERVICE_NOT_OFFERED"'),
+        r.indexOf("{% else %}", r.indexOf('code == "SERVICE_REQUIRED"')),
+      );
+    const booking = bookingReplyTemplate({ role: "outbound", tools: [...OUTBOUND_AGENT_TOOLS] });
+    assert.equal(services(OUT_AV).split("{% elif")[0], services(booking).split("{% elif")[0]);
+    for (const r of [IN_AV, OUT_AV]) assert.doesNotMatch(r, /clinic|dental|smile|patient|caller/i);
   });
 });

@@ -154,8 +154,8 @@ describe("central templates", () => {
     assert.equal(a.fingerprint, buildOutboundAgentConfig(snapshot({}), VOICE).fingerprint);
     assert.match(
       a.fingerprint,
-      /^o5-[0-9a-f]{8}$/,
-      "outbound template version 5 (shared prompt and booking reply template)",
+      /^o6-[0-9a-f]{8}$/,
+      "outbound template version 6 (shared prompt and reply templates)",
     );
     assert.match(buildUniversalAgentConfig(snapshot({}), VOICE).fingerprint, /^u1-[0-9a-f]{8}$/);
   });
@@ -544,7 +544,7 @@ describe("outbound template (v2 call settings, v3 booking): post-call variables 
 
   test("call settings: 300 s hard maximum, voicemail detection with a fixed message, no transfer", () => {
     const c = buildOutboundAgentConfig(snapshot({}), VOICE);
-    assert.equal(c.templateVersion, 5);
+    assert.equal(c.templateVersion, 6);
     assert.deepEqual(c.callHandling, {
       maxCallSeconds: 300,
       voicemailDetection: true,

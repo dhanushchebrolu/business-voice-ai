@@ -69,8 +69,7 @@ export function OutboundAgentPanel(p: OutboundAgentPanelProps) {
   const gate = outboundRegistrationGate(p.gate, appId);
   const templateJson = p.template ? JSON.stringify(p.template, null, 2) : "";
   const systemPrompt = p.template?.systemPrompt ?? "";
-  const bookingReply =
-    p.template?.tools.find((t) => t.name === "book_appointment")?.responseTemplate ?? "";
+  const replyTemplates = (p.template?.tools ?? []).filter((t) => t.responseTemplate);
 
   return (
     <SectionCard
@@ -153,8 +152,8 @@ export function OutboundAgentPanel(p: OutboundAgentPanelProps) {
               the same for every customer; the business's details reach it as variables.
             </li>
             <li>
-              On the book_appointment tool, paste the booking reply template below as its reply
-              (send fields from the API response to the agent), unchanged.
+              On check_availability and book_appointment, paste each reply template below as the
+              tool's reply (send fields from the API response to the agent), unchanged.
             </li>
             <li>
               {p.config?.voiceLanguage
@@ -205,29 +204,27 @@ export function OutboundAgentPanel(p: OutboundAgentPanelProps) {
                   </pre>
                 </>
               ) : null}
-              {bookingReply ? (
-                <>
+              {replyTemplates.map((t) => (
+                <div key={t.name}>
                   <div className="flex items-center gap-2 pt-2">
-                    <span className="text-xs text-muted-foreground">
-                      book_appointment reply template
-                    </span>
+                    <span className="text-xs text-muted-foreground">{t.name} reply template</span>
                     <Button
                       size="sm"
                       variant="outline"
                       className="h-7 text-xs"
-                      onClick={() => copyText(bookingReply, "Booking reply template")}
+                      onClick={() => copyText(t.responseTemplate ?? "", `${t.name} reply template`)}
                     >
                       Copy reply template
                     </Button>
                   </div>
                   <pre
                     className="max-h-64 overflow-auto whitespace-pre-wrap rounded bg-muted p-2 text-xs"
-                    data-testid="outbound-booking-reply-template"
+                    data-testid={`outbound-reply-template-${t.name}`}
                   >
-                    {bookingReply}
+                    {t.responseTemplate}
                   </pre>
-                </>
-              ) : null}
+                </div>
+              ))}
             </div>
           ) : (
             <p className="mt-1 text-xs text-destructive">

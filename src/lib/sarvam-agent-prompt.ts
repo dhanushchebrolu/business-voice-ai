@@ -50,6 +50,49 @@ export const BOOKING_REPLY = {
   pending: 'PENDING, NOT CONFIRMED (bookingOutcome "pending")',
 } as const;
 
+const SERVICE_OPTIONS =
+  "{% for s in result.error.options %}{{ s }}{% if not loop.last %}, {% endif %}{% endfor %}";
+const errorCode = (c: string) =>
+  `{% elif result and result.error and result.error.code == "${c}" %}`;
+/** The service branches both reply templates share (codes from the agent API's service matching). */
+const SERVICE_BRANCHES = [
+  `${errorCode("SERVICE_NOT_OFFERED")}SERVICE NOT OFFERED: "{{ result.error.requested }}" is not a service of this business. Do not check times or book it. Say politely that it is not offered and name the services that are: ${SERVICE_OPTIONS}. Never pick a different service for them.`,
+  `${errorCode("SERVICE_AMBIGUOUS")}SERVICE UNCLEAR: "{{ result.error.requested }}" matches more than one service. Ask which one they want: ${SERVICE_OPTIONS}.`,
+  `${errorCode("SERVICE_REQUIRED")}SERVICE NEEDED: ask which service they want: ${SERVICE_OPTIONS}.`,
+];
+
+/**
+ * The Sarvam reply template (Jinja) for the check_availability tool: turns
+ * ClickAI's reply ({ ok, duration_minutes, timezone, service, requested_time,
+ * result: { success, data: { slots: [{ start_local }] }, error } }) into the
+ * free times the agent may offer. Modelled on the inbound v5 template
+ * (docs/sarvam-prompt-baseline-2026-11-21.md). It differs only by what the
+ * agent can do: with book_appointment it says how to book the chosen time,
+ * without it that the time cannot be booked or held on this call; when the
+ * check fails, inbound offers a callback if it has request_callback,
+ * otherwise the business phone number.
+ */
+export function availabilityReplyTemplate(o: {
+  role: PromptRole;
+  tools: readonly string[];
+}): string {
+  const book = o.tools.includes("book_appointment");
+  const callback = o.role === "inbound" && o.tools.includes("request_callback");
+  const next = book
+    ? "To book, send the chosen time exactly as shown (HH:mm)."
+    : "This call cannot book; never say a time is booked or held.";
+  const failed = callback
+    ? "Say so, and offer to have the team call them back (request_callback)."
+    : "Say so, and give the business phone number so they can ask the business.";
+  return [
+    "{% if ok and result.success %}",
+    "{% if requested_time %}{% if requested_time.available %}{{ requested_time.time }} IS FREE. {% else %}{{ requested_time.time }} IS NOT FREE.{% if requested_time.alternatives %} Nearest open times: {% for s in requested_time.alternatives %}{{ s }}{% if not loop.last %}, {% endif %}{% endfor %}.{% endif %} Tell them that time is not free and offer the nearest times. {% endif %}{% endif %}",
+    `{% if result.data.slots %}All open {{ duration_minutes }}-minute start times on that date{% if service %} for {{ service.name }}{% endif %} (local time, {{ timezone }}): {% for s in result.data.slots %}{{ s.start_local }}{% if not loop.last %}, {% endif %}{% endfor %}. Offer only these exact times. ${next}{% else %}There are no open slots on that date. Do not offer any time on that date; ask whether another date suits them.{% endif %}`,
+    ...SERVICE_BRANCHES,
+    `{% else %}Availability could not be checked right now. Do not offer or guess any time. ${failed}{% endif %}`,
+  ].join("");
+}
+
 /**
  * The Sarvam reply template (Jinja) for the book_appointment tool: turns
  * ClickAI's JSON reply ({ ok, service, result: { success, bookingOutcome,
@@ -62,9 +105,7 @@ export const BOOKING_REPLY = {
  */
 export function bookingReplyTemplate(o: { role: PromptRole; tools: readonly string[] }): string {
   const callback = o.role === "inbound" && o.tools.includes("request_callback");
-  const list =
-    "{% for s in result.error.options %}{{ s }}{% if not loop.last %}, {% endif %}{% endfor %}";
-  const code = (c: string) => `{% elif result and result.error and result.error.code == "${c}" %}`;
+  const code = errorCode;
   const fallback = callback
     ? "Say the appointment could not be booked. Do not say it is booked, saved or that anyone will call. Offer to have the team call them back; only if they agree, use request_callback."
     : "Say clearly that it is NOT booked. Do not say it is booked, saved or that anyone will call. Offer another free time, or give the business phone number.";
@@ -74,9 +115,7 @@ export function bookingReplyTemplate(o: { role: PromptRole; tools: readonly stri
     "{% elif ok and result.success %}PENDING, NOT CONFIRMED: the booking is not confirmed yet. Say it is not confirmed yet; do not say it is booked.",
     `${code("SLOT_NO_LONGER_AVAILABLE")}NOT BOOKED: that time was just taken. Do not say it is booked. Call check_availability again for that date and offer only times it returns.`,
     `${code("SLOT_OUTSIDE_SCHEDULE")}NOT BOOKED: that time is outside the schedule. Offer only times check_availability returns.`,
-    `${code("SERVICE_NOT_OFFERED")}SERVICE NOT OFFERED: "{{ result.error.requested }}" is not a service of this business. Do not check times or book it. Say politely that it is not offered and name the services that are: ${list}. Never pick a different service for them.`,
-    `${code("SERVICE_AMBIGUOUS")}SERVICE UNCLEAR: "{{ result.error.requested }}" matches more than one service. Ask which one they want: ${list}.`,
-    `${code("SERVICE_REQUIRED")}SERVICE NEEDED: ask which service they want: ${list}.`,
+    ...SERVICE_BRANCHES,
     `${code("CUSTOMER_NAME_REQUIRED")}NOT BOOKED YET: their name is needed. Ask for their name, then book again.`,
     `${code("TEST_CALL_NOT_SAVED")}NOT BOOKED (test call): {{ result.error.message }}. Say this was a test and nothing was booked.`,
     ...(o.role === "outbound"
