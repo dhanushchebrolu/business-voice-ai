@@ -341,8 +341,8 @@ export async function suppressSingleCallOptOut(
  * explicitly asked to be contacted later: outbound_result is exactly "callback_requested"
  * (a value the agent picks from a fixed list after the call), the call completed, and the
  * person neither opted out nor said it was the wrong number (detectSpecialOutcome).
- * Booking interest alone is never enough: on an outbound call the agent sends people to
- * the clinic to book, which is not a callback request.
+ * Booking interest alone is never enough: the agent books during the call itself (or
+ * gives the clinic phone), which is not a callback request.
  *
  * The phone is ClickAI's own dialled number (call_logs.destination_number), never the
  * agent's tool-reported caller id. The id is deterministic per call, so a retried

@@ -5,8 +5,10 @@
  *             gets the tools the customer's capabilities switch on
  *             (universal-agent-config.ts), including booking and callbacks.
  *   outbound  is dialled by ClickAI through instant outbound only. It may read
- *             business data, check availability and record the call's outcome
- *             (which carries opt-outs). It may never create anything.
+ *             business data, check availability, book a free slot for the
+ *             person ClickAI dialled, and record the call's outcome (which
+ *             carries opt-outs). It never arranges callbacks, sends messages or
+ *             transfers the call.
  *
  * The outbound restriction is enforced in three places, so no single
  * misconfiguration opens it:
@@ -14,8 +16,11 @@
  *      operator creates in Sarvam);
  *   2. ClickAI's agent API refuses every other endpoint for an
  *      outbound-role credential (roleAllowsAgentApi), whatever the agent sends;
- *   3. booking and callbacks are also refused for any request that carries an
- *      outbound ClickAI call id (sarvam-agent-api.server.ts).
+ *   3. a booking on an outbound call is made only for a call ClickAI itself
+ *      placed and that is still open, and only for the number ClickAI dialled
+ *      (never the provider's unverified caller id); callbacks are refused for
+ *      any request carrying an outbound ClickAI call id
+ *      (sarvam-agent-api.server.ts).
  *
  * Pure, no imports: safe for the browser, the Worker and tests.
  */
@@ -32,12 +37,12 @@ export const OUTBOUND_AGENT_TOOLS = [
   "clickai_business_context",
   "get_business_info",
   "check_availability",
+  "book_appointment",
   "record_call_outcome",
 ] as const;
 
-/** Never on an outbound agent: they create bookings, callbacks, messages or hand the call over. */
+/** Never on an outbound agent: they create callbacks, messages or hand the call over. */
 export const OUTBOUND_FORBIDDEN_TOOLS = [
-  "book_appointment",
   "request_callback",
   "send_reminder",
   "call_transfer",
@@ -55,6 +60,7 @@ export function roleAllowsAgentApi(role: AgentRole, tool: string | undefined): b
     tool === undefined ||
     tool === "get_business_info" ||
     tool === "check_availability" ||
+    tool === "book_appointment" ||
     tool === "record_call_outcome"
   );
 }

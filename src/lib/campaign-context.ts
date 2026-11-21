@@ -212,7 +212,7 @@ export function platformCapabilities(): { allowed: string[]; forbidden: string[]
     get_business_info: "Answer questions from the business's verified information",
     check_availability: "Check whether an appointment time is free",
     record_call_outcome: "Record the result of the call",
-    book_appointment: "Book, hold or change appointments",
+    book_appointment: "Book a free appointment time for the person called",
     request_callback: "Schedule callbacks",
     send_reminder: "Send reminders, SMS, WhatsApp or e-mail",
     call_transfer: "Transfer the call",

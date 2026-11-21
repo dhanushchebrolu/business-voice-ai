@@ -191,8 +191,8 @@ function NewCampaignPage() {
             />
             <p className="text-xs text-muted-foreground">
               Next you'll review the structured version ClickAI prepares from this before any call
-              is made. The AI can share information and check availability; it cannot book, schedule
-              callbacks or send messages.
+              is made. The AI can share information, check availability and book a free time for the
+              person it calls; it cannot schedule callbacks or send messages.
             </p>
           </div>
           <div className="space-y-1.5">

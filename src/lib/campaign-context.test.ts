@@ -171,16 +171,17 @@ describe("campaign context: drafting", () => {
     assert.match(String(user["description"]), /Don't pressure people/);
   });
 
-  test("capabilities come from the outbound role: booking, callbacks, messages and transfer are forbidden", () => {
+  test("capabilities come from the outbound role: booking allowed; callbacks, messages and transfer forbidden", () => {
     const caps = platformCapabilities();
     assert.ok(caps.allowed.some((c) => /appointment time is free/i.test(c)));
-    for (const f of ["Book", "callbacks", "SMS", "Transfer"])
+    assert.ok(caps.allowed.some((c) => /book a free appointment time/i.test(c)));
+    for (const f of ["callbacks", "SMS", "Transfer"])
       assert.ok(
         caps.forbidden.some((c) => c.includes(f)),
         f,
       );
     assert.equal(
-      caps.allowed.some((c) => /book|callback|send|transfer/i.test(c)),
+      caps.allowed.some((c) => /callback|send|transfer/i.test(c)),
       false,
     );
   });

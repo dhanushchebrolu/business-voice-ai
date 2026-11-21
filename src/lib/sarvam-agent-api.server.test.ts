@@ -1304,6 +1304,7 @@ describe("outbound calls: inbound-only tools refuse, identified by ClickAI's own
       provider: "sarvam",
       direction: "outbound",
       status: "initiated",
+      started_at: NOW.toISOString(),
       destination_number: DIALLED,
       ...over,
     });
@@ -1337,19 +1338,141 @@ describe("outbound calls: inbound-only tools refuse, identified by ClickAI's own
       d,
     );
 
-  test("an outbound call never books, whatever the agent sent, and the refusal is audited", async () => {
+  test("an open outbound call books for the dialled number, never the caller id the agent sent", async () => {
     outboundRow();
     for (const sent of ["", "user-identifier-xyz", "+919000000001"]) {
       const { inputs, d } = booking();
       const res = await book({ customer_phone: sent, clickai_call_id: OUT_ID }, d);
-      const body = (await res.json()) as { result: { success: boolean; error: { code: string } } };
-      assert.equal(body.result.success, false);
-      assert.equal(body.result.error.code, "OUTBOUND_BOOKING_NOT_ALLOWED", `agent sent "${sent}"`);
-      assert.equal(inputs.length, 0, "no calendar call at all");
+      const body = (await res.json()) as {
+        result: { success: boolean; bookingOutcome?: string };
+      };
+      assert.equal(body.result.success, true, `agent sent "${sent}"`);
+      assert.equal(body.result.bookingOutcome, "confirmed");
+      assert.equal(inputs.length, 1, "one booking request");
+      assert.equal(inputs[0]!["name"], "book_appointment");
+      assert.equal(inputs[0]!["customerPhone"], DIALLED, `agent sent "${sent}"`);
+      assert.equal(inputs[0]!["customerName"], "Ravi");
     }
-    const event = db.tables["sarvam_agent_events"]!.find((e) => e["kind"] === "book_appointment")!;
-    assert.equal(event["status"], "rejected");
+    const event = db.tables["sarvam_agent_events"]!.filter(
+      (e) => e["kind"] === "book_appointment",
+    ).at(-1)!;
+    assert.equal(event["status"], "ok");
     assert.equal((event["detail"] as { outbound_call?: boolean }).outbound_call, true);
+  });
+
+  test("an ended call, or one older than 15 minutes, cannot book; nothing is written", async () => {
+    for (const over of [
+      { status: "completed" },
+      { status: "failed" },
+      { status: "outcome_unknown" },
+      { started_at: new Date(NOW.getTime() - 16 * 60_000).toISOString() },
+    ]) {
+      db.tables["call_logs"] = [];
+      outboundRow(over);
+      const { inputs, d } = booking();
+      const res = await book({ clickai_call_id: OUT_ID }, d);
+      const body = (await res.json()) as { result: { success: boolean; error: { code: string } } };
+      assert.equal(body.result.success, false, JSON.stringify(over));
+      assert.equal(body.result.error.code, "OUTBOUND_CALL_NOT_OPEN");
+      assert.equal(inputs.length, 0, "no calendar call");
+    }
+  });
+
+  test("without the person's name nothing is booked and the agent is told to ask for it", async () => {
+    outboundRow();
+    const { inputs, d } = booking();
+    const res = await book({ clickai_call_id: OUT_ID, customer_name: "" }, d);
+    const body = (await res.json()) as {
+      result: { success: boolean; error: { code: string; message: string } };
+    };
+    assert.equal(body.result.success, false);
+    assert.equal(body.result.error.code, "CUSTOMER_NAME_REQUIRED");
+    assert.match(body.result.error.message, /ask for the person's name/);
+    assert.equal(inputs.length, 0);
+  });
+
+  test("a slot taken since the lookup, or a backend failure, is reported as not booked", async () => {
+    outboundRow();
+    for (const failure of [
+      { success: false, error: { code: "SLOT_UNAVAILABLE", message: "That time was just taken." } },
+      { success: false, error: { code: "BOOKING_FAILED", message: "Database unavailable." } },
+      { success: false, error: { code: "BOOKING_NOT_ACTIVE", message: "Cancelled." } },
+    ]) {
+      const d: AgentApiDeps = {
+        ...deps(),
+        executeTool: async () => ({ content: JSON.stringify(failure), isError: true }),
+      };
+      const res = await book({ clickai_call_id: OUT_ID }, d);
+      const body = (await res.json()) as {
+        ok: boolean;
+        result: { success: boolean; bookingOutcome?: string; error: { code: string } };
+      };
+      assert.equal(body.ok, false, failure.error.code);
+      assert.equal(body.result.success, false);
+      assert.equal(body.result.bookingOutcome, undefined, "never a confirmation");
+      assert.equal(body.result.error.code, failure.error.code);
+      const event = db.tables["sarvam_agent_events"]!.filter(
+        (e) => e["kind"] === "book_appointment",
+      ).at(-1)!;
+      assert.equal((event["detail"] as { outcome: string }).outcome, "not_booked");
+    }
+  });
+
+  test("a calendar sync failure is passed on as saved-not-confirmed, never as confirmed", async () => {
+    outboundRow();
+    const d: AgentApiDeps = {
+      ...deps(),
+      executeTool: async () => ({
+        content: JSON.stringify({
+          success: true,
+          bookingOutcome: "saved_calendar_sync_failed",
+          data: { id: "b-1" },
+        }),
+      }),
+    };
+    const res = await book({ clickai_call_id: OUT_ID }, d);
+    const body = (await res.json()) as { result: { bookingOutcome: string } };
+    assert.equal(body.result.bookingOutcome, "saved_calendar_sync_failed");
+    assert.doesNotMatch(JSON.stringify(body), /"confirmed"/);
+  });
+
+  test("the same booking sent twice in one call uses one idempotency key (no second booking)", async () => {
+    outboundRow();
+    const contexts: { callId?: string | undefined }[] = [];
+    const d: AgentApiDeps = {
+      ...deps(),
+      executeTool: async (ctx) => {
+        contexts.push(ctx);
+        return { content: JSON.stringify({ success: true, bookingOutcome: "confirmed" }) };
+      },
+    };
+    await book({ clickai_call_id: OUT_ID }, d);
+    await book({ clickai_call_id: OUT_ID }, d);
+    assert.equal(contexts.length, 2);
+    // ai-tools book_appointment keys the booking on ctx.callId + the slot, so
+    // create_calendar_event returns the first booking for the second request.
+    assert.equal(contexts[0]!.callId, "sarvam-20261119/out-1");
+    assert.equal(contexts[1]!.callId, contexts[0]!.callId);
+  });
+
+  test("a dialled test-caller number is checked like a booking but never saved", async () => {
+    outboundRow();
+    db.tables["sarvam_agent_integrations"]!.find((r) => r["organization_id"] === ORG_SMILE)![
+      "test_caller_numbers"
+    ] = [DIALLED];
+    const calls: string[] = [];
+    const d: AgentApiDeps = {
+      ...deps(),
+      executeTool: async (_c, name) => {
+        calls.push(name);
+        return { content: JSON.stringify({ success: true, data: { slots: [] } }) };
+      },
+    };
+    const res = await book({ customer_phone: "+919000000001", clickai_call_id: OUT_ID }, d);
+    const body = (await res.json()) as { result: { success: boolean; error: { code: string } } };
+    assert.equal(body.result.success, false);
+    assert.equal(body.result.error.code, "TEST_CALL_NOT_SAVED");
+    assert.deepEqual(calls, ["check_calendar_availability"], "no booking written");
   });
 
   test("another customer's call id, an inbound row or a malformed id changes nothing", async () => {
@@ -1436,24 +1559,62 @@ describe("dual agents: the outbound agent's credential is limited by role", () =
           "OUTBOUND_AGENT_TOOL_FORBIDDEN",
     );
 
-  test("booking and callbacks are refused for the outbound credential, whatever the body says", async () => {
+  test("callbacks are refused for the outbound credential, whatever the body says", async () => {
     const token = await outboundCredential(ORG_SMILE);
-    for (const [tool, body] of [
-      ["book_appointment", { date: "2026-11-12", time: "10:00", customer_name: "A" }],
-      ["request_callback", { customer_name: "A", reason: "book", call_direction: "inbound" }],
-    ] as const) {
-      const r = await call(`tools/${tool}`, token, body);
-      assert.equal(r.status, 403, tool);
-      assert.equal(r.body["error"], "forbidden_for_outbound_agent");
-      assert.doesNotMatch(JSON.stringify(r.body), /CONFIRMED|RECORDED/);
+    const r = await call("tools/request_callback", token, {
+      customer_name: "A",
+      reason: "book",
+      call_direction: "inbound",
+    });
+    assert.equal(r.status, 403);
+    assert.equal(r.body["error"], "forbidden_for_outbound_agent");
+    assert.doesNotMatch(JSON.stringify(r.body), /RECORDED/);
+    assert.equal(toolCalls.length, 0, "no callback tool ever ran");
+    assert.equal(rejectedEvents().length, 1, "the refusal is audited");
+    assert.equal(rejectedEvents()[0]!["organization_id"], ORG_SMILE);
+  });
+
+  test("the outbound credential books only on an open call ClickAI placed, for the dialled number", async () => {
+    const token = await outboundCredential(ORG_SMILE);
+    const CALL = "8f14e45f-ceea-467e-a4a9-2d2d2d2d2d2d";
+    const slot = {
+      interaction_id: "20261111/out-book",
+      date: "2026-11-12",
+      time: "10:00",
+      customer_name: "A",
+      customer_phone: "+919000000001",
+    };
+    // No ClickAI call id (or another customer's call): refused, nothing written.
+    for (const id of ["", CALL]) {
+      const r = await call("tools/book_appointment", token, { ...slot, clickai_call_id: id });
+      const result = r.body["result"] as { success: boolean; error: { code: string } };
+      assert.equal(result.success, false, id);
+      assert.equal(result.error.code, "OUTBOUND_CALL_NOT_VERIFIED", id);
     }
-    assert.equal(toolCalls.length, 0, "no booking or callback tool ever ran");
-    assert.equal(rejectedEvents().length, 2, "each refusal is audited");
+    (db.tables["call_logs"] ??= []).push({
+      id: CALL,
+      organization_id: ORG_ABC,
+      provider: "sarvam",
+      direction: "outbound",
+      status: "initiated",
+      started_at: NOW.toISOString(),
+      destination_number: "+919811100000",
+    });
+    const other = await call("tools/book_appointment", token, { ...slot, clickai_call_id: CALL });
     assert.equal(
-      rejectedEvents().every((e) => e["organization_id"] === ORG_SMILE),
-      true,
-      "audited under the credential's own customer",
+      (other.body["result"] as { error: { code: string } }).error.code,
+      "OUTBOUND_CALL_NOT_VERIFIED",
+      "another customer's call id",
     );
+    assert.equal(toolCalls.length, 0, "nothing booked so far");
+    // The customer's own open call: booked for the number ClickAI dialled.
+    db.tables["call_logs"]!.at(-1)!["organization_id"] = ORG_SMILE;
+    const ok = await call("tools/book_appointment", token, { ...slot, clickai_call_id: CALL });
+    assert.equal(ok.status, 200);
+    assert.equal(toolCalls.length, 1);
+    assert.equal(toolCalls[0]!.name, "book_appointment");
+    assert.equal(toolCalls[0]!.ctx.organizationId, ORG_SMILE);
+    assert.equal(toolCalls[0]!.input["customerPhone"], "+919811100000");
   });
 
   test("the outbound credential may read business data, check availability and record the outcome", async () => {
@@ -1503,11 +1664,26 @@ describe("dual agents: the outbound agent's credential is limited by role", () =
   test("the outbound template carries only the allowed tools and the outbound call variables", () => {
     const cfg = sarvamToolConfiguration("https://clickai.in", "outbound");
     assert.deepEqual(cfg.tools.map((t) => t.name).sort(), [
+      "book_appointment",
       "check_availability",
       "clickai_business_context",
       "get_business_info",
       "record_call_outcome",
     ]);
+    // Booking sends ClickAI's own call id, so the server books for the dialled number.
+    const bookTool = cfg.tools.find((t) => t.name === "book_appointment")!;
+    assert.equal(bookTool.body["clickai_call_id"], "@clickai_call_id");
+    // The agent is told the whole flow and never to claim a booking without confirmation.
+    for (const step of [
+      /check_availability/,
+      /only times it returned/,
+      /ask for their name/,
+      /book_appointment/,
+      /bookingOutcome "confirmed"/,
+      /NOT booked/,
+      /Never say it is booked before that reply/,
+    ])
+      assert.match(cfg.promptGuard, step);
     const names = cfg.inputVariables.map((v) => v.name);
     for (const v of [
       "call_direction",
@@ -1517,7 +1693,7 @@ describe("dual agents: the outbound agent's credential is limited by role", () =
     ])
       assert.ok(names.includes(v), v);
     assert.ok(cfg.outputVariables.some((v) => v.name === "opted_out"));
-    assert.doesNotMatch(JSON.stringify(cfg), /book_appointment|request_callback|send_reminder/);
+    assert.doesNotMatch(JSON.stringify(cfg.tools), /request_callback|send_reminder|call_transfer/);
     // The inbound template is unchanged by the role parameter.
     assert.deepEqual(
       sarvamToolConfiguration("https://clickai.in"),

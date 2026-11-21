@@ -38,19 +38,24 @@ import type { AgentSnapshot } from "./agent-instructions.ts";
  */
 
 describe("agent roles", () => {
-  test("the outbound credential reaches only reads and the call outcome", () => {
+  test("the outbound credential reaches reads, booking and the call outcome; nothing else", () => {
     assert.equal(roleAllowsAgentApi("outbound", undefined), true, "on-start context");
-    for (const t of ["get_business_info", "check_availability", "record_call_outcome"])
+    for (const t of [
+      "get_business_info",
+      "check_availability",
+      "book_appointment",
+      "record_call_outcome",
+    ])
       assert.equal(roleAllowsAgentApi("outbound", t), true, t);
-    for (const t of ["book_appointment", "request_callback", "send_reminder", "call_transfer", "x"])
+    for (const t of ["request_callback", "send_reminder", "call_transfer", "x"])
       assert.equal(roleAllowsAgentApi("outbound", t), false, t);
     for (const t of [undefined, ...AGENT_TOOLS])
       assert.equal(roleAllowsAgentApi("inbound", t), true, String(t));
   });
 
-  test("every ClickAI write endpoint is forbidden for outbound; the template and the gate agree", () => {
+  test("only the callback endpoint is forbidden for outbound; the template and the gate agree", () => {
     const writes = AGENT_TOOLS.filter((t) => !roleAllowsAgentApi("outbound", t));
-    assert.deepEqual([...writes].sort(), ["book_appointment", "request_callback"]);
+    assert.deepEqual([...writes].sort(), ["request_callback"]);
     for (const t of OUTBOUND_FORBIDDEN_TOOLS)
       assert.ok(!(OUTBOUND_AGENT_TOOLS as readonly string[]).includes(t), t);
     for (const t of OUTBOUND_AGENT_TOOLS)
@@ -111,7 +116,7 @@ describe("central templates", () => {
     transfer_to_human: true,
   };
 
-  test("the outbound template never gets a write tool, whatever the customer enables", () => {
+  test("the outbound template gets booking but no callback, message or transfer tool, whatever the customer enables", () => {
     for (const caps of [{}, everything]) {
       const c = buildOutboundAgentConfig(snapshot(caps), VOICE);
       assert.deepEqual(c.tools.enable, [...OUTBOUND_AGENT_TOOLS]);
@@ -143,7 +148,7 @@ describe("central templates", () => {
   test("fingerprints: stable, role-specific, and the inbound one is unchanged by dual agents", () => {
     const a = buildOutboundAgentConfig(snapshot({}), VOICE);
     assert.equal(a.fingerprint, buildOutboundAgentConfig(snapshot({}), VOICE).fingerprint);
-    assert.match(a.fingerprint, /^o2-[0-9a-f]{8}$/, "outbound template version 2");
+    assert.match(a.fingerprint, /^o3-[0-9a-f]{8}$/, "outbound template version 3 (booking)");
     assert.match(buildUniversalAgentConfig(snapshot({}), VOICE).fingerprint, /^u1-[0-9a-f]{8}$/);
   });
 });
@@ -447,7 +452,7 @@ describe("wiring (source checks)", () => {
   });
 });
 
-describe("outbound template v2: post-call variables and call settings", () => {
+describe("outbound template (v2 call settings, v3 booking): post-call variables and call settings", () => {
   const outbound = sarvamToolConfiguration("https://clickai.in", "outbound");
   const outputs = new Map(outbound.outputVariables.map((v) => [v.name, v]));
 
@@ -484,7 +489,7 @@ describe("outbound template v2: post-call variables and call settings", () => {
 
   test("call settings: 300 s hard maximum, voicemail detection with a fixed message, no transfer", () => {
     const c = buildOutboundAgentConfig(snapshot({}), VOICE);
-    assert.equal(c.templateVersion, 2);
+    assert.equal(c.templateVersion, 3);
     assert.deepEqual(c.callHandling, {
       maxCallSeconds: 300,
       voicemailDetection: true,

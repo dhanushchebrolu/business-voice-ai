@@ -543,9 +543,9 @@ async function readCallEvents(
  * customer's outbound calls. The agent sends `clickai_call_id` (the outbound
  * agent variable ClickAI sets; empty on inbound calls). On an outbound call the
  * agent's own caller id comes from Sarvam's user_identifier, which is not
- * verified for instant outbound. When this is known, the inbound-only tools
- * refuse: an outbound call never books (the agent sends the person to the
- * clinic) and never records a mid-call callback (finalization saves one from
+ * verified for instant outbound. When this is known, a booking is made for this
+ * dialled number only (outboundCallForTool), and request_callback refuses: no
+ * mid-call callback on an outbound call (finalization saves one from
  * outbound_result, on this dialled number, so it is never saved twice). Same
  * organization only; anything else (no id, not a UUID, another customer's
  * call, an inbound call) is null and the tool behaves exactly as before.
@@ -555,18 +555,44 @@ export async function dialledNumberForTool(
   auth: AuthenticatedIntegration,
   body: Record<string, unknown>,
 ): Promise<string | null> {
+  return (await outboundCallForTool(deps, auth, body, new Date()))?.phone ?? null;
+}
+
+/** Statuses of an outbound call that is still going on (Sarvam's result webhook not yet in). */
+const OPEN_OUTBOUND_STATUSES = ["initiated", "ringing", "answered", "in_progress"];
+/** No outbound call outlives its 300 s cap; a booking for an older call id is refused. */
+const OUTBOUND_BOOKING_WINDOW_MS = 15 * 60 * 1000;
+
+/**
+ * The customer's own Sarvam outbound call named by the tool body's
+ * clickai_call_id: the number ClickAI dialled (canonical E.164) and whether the
+ * call is still open (not ended, started within the last 15 minutes).
+ */
+export async function outboundCallForTool(
+  deps: AgentApiDeps,
+  auth: AuthenticatedIntegration,
+  body: Record<string, unknown>,
+  now: Date,
+): Promise<{ phone: string | null; open: boolean } | null> {
   const callId = str(body, "clickai_call_id", 64);
   if (!callId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(callId))
     return null;
   const { data, error } = await deps.supabaseAdmin
     .from("call_logs")
-    .select("organization_id, provider, direction, destination_number")
+    .select("organization_id, provider, direction, destination_number, status, started_at")
     .eq("id", callId)
     .eq("organization_id", auth.organizationId)
     .maybeSingle();
   if (error) throw error;
   if (!data || data.provider !== "sarvam" || data.direction !== "outbound") return null;
-  return normalizeCustomerPhone(data.destination_number ?? "", null);
+  const started = Date.parse(data.started_at ?? "");
+  return {
+    phone: normalizeCustomerPhone(data.destination_number ?? "", null),
+    open:
+      OPEN_OUTBOUND_STATUSES.includes(data.status ?? "") &&
+      Number.isFinite(started) &&
+      now.getTime() - started < OUTBOUND_BOOKING_WINDOW_MS,
+  };
 }
 
 /** "yes" / "true" (any case) from Sarvam's opted_out agent variable. */
@@ -881,7 +907,7 @@ export async function handleSarvamAgentRequest(
         ok: false,
         error: "forbidden_for_outbound_agent",
         guidance:
-          "This call cannot book appointments, arrange callbacks or send messages. Give the clinic phone number from the business facts instead.",
+          "This call cannot arrange callbacks or send messages. Give the clinic phone number from the business facts instead.",
       },
       403,
     );
@@ -1036,27 +1062,40 @@ export async function handleSarvamAgentRequest(
       const time = str(body, "time", 5);
       if (!time || !/^\d{2}:\d{2}$/.test(time))
         return json({ ok: false, error: "time must be HH:mm" }, 400);
-      if (await dialledNumberForTool(deps, auth, body)) {
+      // On a call ClickAI placed, the booking is for the number ClickAI dialled,
+      // taken from its own call row; the provider's caller id (customer_phone,
+      // unverified on instant outbound) is never used. An outbound-role
+      // credential books only on such a call while it is still open.
+      const outboundCall = await outboundCallForTool(deps, auth, body, now);
+      const refuse = async (code: string, message: string) => {
         await audit(deps, auth, "book_appointment", "rejected", interactionId, {
           date,
           time,
           outbound_call: true,
-          error_code: "OUTBOUND_BOOKING_NOT_ALLOWED",
+          error_code: code,
         });
         return json({
           ok: true,
           outbound_call: true,
-          result: {
-            success: false,
-            error: {
-              code: "OUTBOUND_BOOKING_NOT_ALLOWED",
-              message:
-                "Appointments are not booked on calls the clinic places. Ask the person to call the clinic to book.",
-            },
-          },
+          result: { success: false, error: { code, message } },
         });
-      }
-      const caller = str(body, "customer_phone", 200) ?? "";
+      };
+      if (outboundCall && (!outboundCall.open || !outboundCall.phone))
+        return refuse(
+          "OUTBOUND_CALL_NOT_OPEN",
+          "Not booked: this call can no longer book. Tell the person it is not booked and give them the clinic phone number.",
+        );
+      if (!outboundCall && auth.role === "outbound")
+        return refuse(
+          "OUTBOUND_CALL_NOT_VERIFIED",
+          "Not booked: ClickAI could not identify this call. Tell the person it is not booked and give them the clinic phone number.",
+        );
+      if (outboundCall && !str(body, "customer_name", 200))
+        return refuse(
+          "CUSTOMER_NAME_REQUIRED",
+          "Not booked yet: ask for the person's name, then book again.",
+        );
+      const caller = outboundCall?.phone ?? str(body, "customer_phone", 200) ?? "";
       const phone = normalizeCustomerPhone(caller, null);
       const start = zonedWallTimeToUtc(date, time, business.timezone);
       const end = new Date(start.getTime() + duration * 60_000);
@@ -1116,6 +1155,7 @@ export async function handleSarvamAgentRequest(
         outcome: booked.success ? (booked.bookingOutcome ?? "unknown") : "not_booked",
         booking_id: booked.success ? (booked.data?.id ?? null) : null,
         error_code: booked.error?.code ?? null,
+        ...(outboundCall ? { outbound_call: true } : {}),
       });
       return json({ ok: !out.isError, service, result: booked });
     }
@@ -1312,7 +1352,7 @@ export function sarvamToolConfiguration(
           "Answer in order and stop at the first yes: asked not to be called or contacted again → opted_out; wrong number or not the person meant → wrong_person; answering machine, beep or recorded greeting → voicemail; no real conversation → no_conversation; explicitly asked to be contacted later → callback_requested; clearly declined → not_interested; otherwise interested.",
       },
     ],
-    promptGuard: `This agent only makes outbound calls for the business. Business facts come only from the ClickAI variables or the get_business_info tool. It may check availability, but it never books, holds a time, arranges a callback or sends a message: for any of those it gives the business phone number (business_phone). If the person asks not to be called again, it apologises and ends the call at once.`,
+    promptGuard: `This agent only makes outbound calls for the business. Business facts come only from the ClickAI variables or the get_business_info tool. To book: call check_availability for the date and service, offer only times it returned, let the person choose one, ask for their name if you do not have it, then call book_appointment with that date, time, service and name. Say the appointment is booked only when the reply has success true and bookingOutcome "confirmed"; for "saved_calendar_sync_failed" say it is saved and the clinic will confirm it; for anything else say clearly it is NOT booked, and offer another free time or the business phone number (business_phone). Never say it is booked before that reply. It never holds a time, arranges a callback or sends a message: for those it gives business_phone. If the person asks not to be called again, it apologises and ends the call at once.`,
     allowlistIps: inbound.allowlistIps,
   };
 }

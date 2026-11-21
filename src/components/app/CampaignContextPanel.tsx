@@ -354,8 +354,8 @@ export function CampaignInsights({
             ))}
           </div>
           <p className="text-xs text-muted-foreground">
-            Bookings are not counted here: this assistant cannot book. People who want an
-            appointment were asked to call you.
+            Bookings are not counted here. Appointments booked on these calls appear in your
+            bookings.
           </p>
         </div>
       ) : null}

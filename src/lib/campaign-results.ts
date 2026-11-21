@@ -3,8 +3,8 @@
  *
  * Results are derived from what ClickAI already stores per contact (its status
  * and the outbound variables retained at finalization), so reporting never
- * claims more than happened: the outbound agent cannot book, so a booking is
- * never counted as a campaign conversion.
+ * claims more than happened: a booking made during a campaign call is not
+ * counted here as a campaign conversion.
  */
 
 export type ExclusionReason =

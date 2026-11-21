@@ -276,7 +276,7 @@ export interface CampaignStats {
   spent: number;
   reserved: number;
   budgetLimit: number | null;
-  /** The outbound agent cannot book; bookings are never reported as campaign conversions. */
+  /** Bookings made on campaign calls are not reported here as campaign conversions. */
   bookingCapable: false;
 }
 
