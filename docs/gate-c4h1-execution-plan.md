@@ -1,7 +1,12 @@
 # GATE C4-H1 — production migration 20261122090000 (campaign retry limits)
 
-Status: **prepared, not executed.** Nothing here has been run against
-production. Applying it needs explicit approval from the owner in chat.
+Status: **executed 2026-11-21 (owner-approved).** Applied with
+`docs/gate-c4h1-execute-20261122090000.sql` (SHA-256 `26f7284a…c09c`): result
+row with `"constraints": 2` and `"existing_data_unchanged": true`; verification
+`all_pass`; GATE C1 verification still `all_pass`. Worker unchanged
+(`5f0a4c37`, commit `3400c98`). Until Worker `a2b7943` is deployed, these
+constraints are the only protection against unsafe retry settings: do not roll
+back before that deploy.
 
 Fixes GATE C4 audit finding H1 in the database: a campaign may retry only an
 unanswered attempt (`no_answer`, `busy`, `failed`), at least 15 minutes and at
