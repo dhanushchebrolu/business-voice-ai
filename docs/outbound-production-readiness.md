@@ -163,6 +163,7 @@ instant-outbound API takes no idempotency key: an ambiguous start is held in
 | 2026-11-21 06:47:36 | `e7472488-514c-4ad6-8920-0fbecabea732` | `8abac61` | 44876687069 green (voice agent not triggered) | `da71e765-5052-4976-967d-b1db7f8830f2` | Verified                 |
 | 2026-11-21 07:27:52 | `ac20dc95-5efa-47b3-b1cc-e4012f7808bc` | `1464e38` | 44879686871 green                             | `e7472488-514c-4ad6-8920-0fbecabea732` | Verified (fix seen live) |
 | 2026-11-21 08:30:40 | `7ba8937d-1325-4205-bf85-c96550d07393` | `a8bb13b` | 44883771803 green                             | `ac20dc95-5efa-47b3-b1cc-e4012f7808bc` | Verified                 |
+| 2026-11-21 11:12:09 | `f8737bfb-3afb-4393-a098-ea45e6b6a5bf` | `b828823` | 44897430318 green                             | `7ba8937d-1325-4205-bf85-c96550d07393` | Verified                 |
 
 Procedure for each: clean worktree at the exact commit, `bun install
 --frozen-lockfile`, `npm run build` with the live Worker's own
@@ -181,6 +182,8 @@ new outbound call.
 Rollback (code only; no migration involved):
 
 ```powershell
+# Shared prompt core only (keeps B1, D1, R1, H3):
+npx wrangler versions deploy 7ba8937d-1325-4205-bf85-c96550d07393@100% --name klyro --yes
 # B1 only (keeps D1, R1 and H3):
 npx wrangler versions deploy ac20dc95-5efa-47b3-b1cc-e4012f7808bc@100% --name klyro --yes
 # D1 only (keeps R1 and H3):
@@ -344,3 +347,12 @@ context).
 Rollback: redeploy the previous Worker (`ac20dc95`); the outbound role then
 gets 403 on booking again, whatever Sarvam sends. Remove the tool from the
 Sarvam outbound app (or keep v2 mapped) to stop the agent attempting it.
+
+## 11. Shared Sarvam prompt core (2026-11-21)
+
+Commit `b828823`, deployed as `f8737bfb`. Both Sarvam agents' prompts are
+composed from one core (`src/lib/sarvam-agent-prompt.ts`); outbound
+`book_appointment` follows the customer's booking capability; outbound
+template v4. Nothing in Sarvam was changed. Baseline:
+`docs/sarvam-prompt-baseline-2026-11-21.md` (inbound part provisional: taken
+from the v6 draft; live v5 still to be captured).
