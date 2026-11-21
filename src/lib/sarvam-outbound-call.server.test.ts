@@ -34,6 +34,9 @@ type OpType = "select" | "update" | "insert";
 /** 11:00 India time: inside the calling window, whenever the suite runs. */
 const DAYTIME = new Date("2026-11-19T05:30:00Z");
 
+/** The platform_settings 'outbound.calling_paused' row the fake returns; tests replace it. */
+let emergencyStop: () => unknown = () => null;
+
 /**
  * Lookups that are not part of a test's script: the prior-relationship check
  * (by default the number called the business before, so it qualifies) and the
@@ -46,6 +49,8 @@ function defaultResult(
   relationship: boolean,
 ): QueryResult | undefined {
   if (type !== "select") return undefined;
+  // The database emergency stop: no row (not stopped) unless a test sets one.
+  if (table === "platform_settings") return { data: emergencyStop(), error: null };
   const has = (col: string, value?: unknown) =>
     filters.some(([c, v]) => c === col && (value === undefined || v === value));
   if (table === "call_logs" && has("direction", "inbound"))
@@ -457,6 +462,70 @@ const dial = (client: never, status: number) =>
       toE164: "+912222222222",
     }),
   );
+
+describe("sendSarvamInstantOutboundCall — the database emergency stop (GATE C4 H3)", () => {
+  const scripted = () =>
+    makeFakeSupabase({
+      phone_numbers: { select: [{ data: PHONE_NUMBER_ROW, error: null }] },
+      telephony_connections: { select: [{ data: CONNECTION_ROW, error: null }] },
+      agent_configs: { select: [{ data: AGENT_CONFIG_ROW, error: null }] },
+      call_logs: {
+        select: [{ data: null, error: null }],
+        insert: [{ data: { id: "call_1" }, error: null }],
+        update: [{ data: [{ id: "call_1" }], error: null }],
+      },
+    });
+
+  test("set after admission, before the dial: no provider request, the call is closed as never started", async () => {
+    const { client, calls, rpcs } = scripted();
+    emergencyStop = () => ({ value: { enabled: true } });
+    try {
+      const { result, requestBody } = await withSarvamEnvAndFetch(
+        { status: 200, body: { attempt_id: "att_1" } },
+        () =>
+          sendSarvamInstantOutboundCall(client, {
+            now: DAYTIME,
+            phoneNumberId: "num_1",
+            toE164: "+912222222222",
+          }).catch((err: Error) => err.message),
+      );
+      assert.match(String(result), /emergency stop/);
+      assert.equal(requestBody, undefined, "nothing was sent to Sarvam");
+      const update = calls.find((c) => c.table === "call_logs" && c.type === "update")!;
+      assert.deepEqual(update.filters, [
+        ["id", "call_1"],
+        ["status", "initiated"],
+      ]);
+      const payload = update.payload as Record<string, unknown>;
+      assert.equal(payload["status"], "failed");
+      assert.equal(payload["resolution_source"], "start_failure", "never started: no charge");
+      // Finalized (a zero charge), so the call is not left open.
+      assert.ok(rpcs.length > 0);
+    } finally {
+      emergencyStop = () => null;
+    }
+  });
+
+  test("inactive ({enabled: false}): the call is dialled as usual", async () => {
+    const { client } = scripted();
+    emergencyStop = () => ({ value: { enabled: false } });
+    try {
+      const { result, requestBody } = await withSarvamEnvAndFetch(
+        { status: 200, body: { attempt_id: "att_1" } },
+        () =>
+          sendSarvamInstantOutboundCall(client, {
+            now: DAYTIME,
+            phoneNumberId: "num_1",
+            toE164: "+912222222222",
+          }),
+      );
+      assert.equal(result.outcome, "started");
+      assert.ok(requestBody);
+    } finally {
+      emergencyStop = () => null;
+    }
+  });
+});
 
 describe("sendSarvamInstantOutboundCall — does not fake success", () => {
   test("a definite rejection (400) marks the row failed, only while still initiated, and rethrows", async () => {

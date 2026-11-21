@@ -30,6 +30,8 @@ import {
   OUTBOUND_DISABLED_MESSAGE,
   OUTBOUND_TEST_ALLOWLIST_MESSAGE,
   outboundCallingDisabled,
+  OUTBOUND_EMERGENCY_STOP_MESSAGE,
+  outboundEmergencyStopActive,
   staticEligibilityBlocker,
 } from "../outbound-eligibility.server.ts";
 import { isNumberSuppressed, OPT_OUT_NUMBER_MESSAGE } from "../contact-suppression.server.ts";
@@ -301,6 +303,8 @@ export async function startOutboundAgentCall(
   // the global kill switch, India-only calling hours, do-not-call, and no cold calls.
   const ineligible = staticEligibilityBlocker(input.toE164, deps.session.now());
   if (ineligible) return fail("not_eligible", ineligible);
+  if (await outboundEmergencyStopActive(deps.session.db))
+    return fail("disabled", OUTBOUND_EMERGENCY_STOP_MESSAGE);
   if (await isNumberSuppressed(deps.session.db, orgId, input.toE164))
     return fail("opted_out", OPT_OUT_NUMBER_MESSAGE);
   if (!(await hasPriorRelationship(deps.session.db, orgId, input.toE164)))

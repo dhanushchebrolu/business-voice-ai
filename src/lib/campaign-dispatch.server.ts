@@ -2,6 +2,7 @@ import {
   isDestinationCountryAllowed,
   isOutboundDestinationAllowlisted,
   outboundCallingDisabled,
+  outboundEmergencyStopActive,
   withinCallingHours,
 } from "./outbound-eligibility.server.ts";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -17,6 +18,7 @@ import { decideCampaignContactOutcome, type CallTerminalStatus } from "./campaig
 import {
   persistStartResult,
   recordCampaignStartFailure,
+  recordSarvamStartFailure,
   releaseCampaignClaim,
 } from "./sarvam-outbound-call.server.ts";
 import { finalizeTerminalCallSafely } from "./telephony/call-finalization.server.ts";
@@ -169,6 +171,11 @@ export async function dispatchDueCampaigns(
   // The platform calling hours (09:00-21:00 India time) bound every campaign's
   // own schedule, exactly as they bound single calls.
   if (!withinCallingHours(new Date(deps.now()))) return summary;
+  // The database emergency stop: nothing is read, claimed or dialled.
+  if (await outboundEmergencyStopActive(supabaseAdmin)) {
+    console.warn("campaign_dispatch:emergency_stop");
+    return summary;
+  }
 
   // Only ever dispatches instant_outbound_fallback campaigns (spec "THIRD"):
   // a sarvam_campaign-mode campaign already had its full contact list
@@ -190,6 +197,8 @@ export async function dispatchDueCampaigns(
       summary.contactsSkipped += dialed.skipped;
       if (dialed.dialed > 0) summary.campaignsDialed++;
       if (dialed.completed) summary.campaignsCompleted++;
+      // The emergency stop landed mid-run: no other campaign is tried either.
+      if (dialed.emergencyStop) break;
     } catch (err) {
       summary.errors.push({ campaignId: campaign.id, message: (err as Error).message });
       console.error("campaign_dispatch:campaign_failed", campaign.id, (err as Error).message);
@@ -214,7 +223,7 @@ async function dispatchOneCampaign(
   },
   deps: DispatchDeps,
   deadline: number,
-): Promise<{ dialed: number; skipped: number; completed: boolean }> {
+): Promise<{ dialed: number; skipped: number; completed: boolean; emergencyStop?: boolean }> {
   const { supabaseAdmin } = deps;
 
   if (!isWithinCallingWindow((campaign.schedule as CampaignSchedule) ?? {})) {
@@ -304,6 +313,7 @@ async function dispatchOneCampaign(
 
   let dialed = 0;
   let skipped = 0;
+  let emergencyStop = false;
 
   // Read fresh for every contact, so a pause or cancel stops the batch at the next claim.
   const stillRunning = async () => {
@@ -518,6 +528,7 @@ async function dispatchOneCampaign(
         continue;
       }
       console.info("campaign_dispatch:admission_refused", campaign.id, admission.reason);
+      if (admission.reason === "outbound_paused") emergencyStop = true;
       // The budget is spent: pause, so the customer decides (raise it or stop).
       if (admission.reason === "budget_exhausted") {
         await supabaseAdmin
@@ -562,6 +573,34 @@ async function dispatchOneCampaign(
       ...outboundVars,
     };
 
+    // The database emergency stop, read once more immediately before the
+    // provider request (a stop set after admission lands here). Nothing is
+    // sent: the call is recorded as never started (failed, start_failure:
+    // no charge, outside the budget), the contact gets its claim back exactly
+    // as it was (status and attempt count; no retry is scheduled), and only
+    // then is the call finalized, so its "failed" outcome never reaches the
+    // contact (finalization matches current_call_id, which is now cleared).
+    if (await outboundEmergencyStopActive(supabaseAdmin)) {
+      console.warn("campaign_dispatch:emergency_stop_before_dial", campaign.id, call.id);
+      const recorded = await recordSarvamStartFailure(
+        supabaseAdmin,
+        call.id,
+        new Error("emergency_stop: stopped before dialling"),
+      );
+      if (recorded === "failed") {
+        await releaseCampaignClaim(supabaseAdmin, {
+          campaignId: campaign.id,
+          campaignContactId: cc.id,
+          previousStatus: cc.status,
+          previousAttempts: cc.attempts,
+        });
+        await deps.finalize(call.id);
+      }
+      skipped++;
+      emergencyStop = true;
+      break;
+    }
+
     try {
       const result = await adapter.createInstantOutbound({
         appId: target.appId,
@@ -603,7 +642,7 @@ async function dispatchOneCampaign(
   }
 
   const completed = await maybeCompleteCampaign(campaign.id, supabaseAdmin);
-  return { dialed, skipped, completed };
+  return { dialed, skipped, completed, emergencyStop };
 }
 
 /**

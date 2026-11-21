@@ -167,6 +167,7 @@ function fakeDb(seed: Record<string, Row[]> = {}) {
     call_logs: [],
     webhook_events: [],
     phone_numbers: [],
+    platform_settings: [],
     ...seed,
   };
   const unique: Record<string, string[]> = {
@@ -1370,6 +1371,61 @@ describe("M4: toll-fraud controls", () => {
     assert.equal(code(await startOutboundAgentCall(limited.deps, OUT)), "rate_limited");
     for (const x of [suspended, locked, nonVobiz, poor, limited])
       assert.equal(x.dispatched.length, 0);
+  });
+});
+
+describe("AI (LiveKit) outbound obeys the database emergency stop (GATE C4 H3)", () => {
+  const stop = (o: ReturnType<typeof outboundDeps>, enabled: unknown) => {
+    o.db.tables["platform_settings"] = [{ key: "outbound.calling_paused", value: { enabled } }];
+  };
+
+  test("active: a new request is refused before any row or dispatch", async () => {
+    const o = outboundDeps();
+    stop(o, true);
+    const r = await startOutboundAgentCall(o.deps, OUT);
+    assert.equal(code(r), "disabled");
+    assert.match(String((r as { message?: string }).message), /emergency stop/);
+    assert.equal(o.calls().length, 0);
+    assert.equal(o.dispatched.length, 0);
+  });
+
+  test("set after dispatch, before the agent dials: the claim is refused and the row closed as never dialled", async () => {
+    const o = outboundDeps();
+    const id = await placeOutbound(o);
+    stop(o, true);
+    assert.deepEqual(
+      await claimOutboundCall(o.deps.session, {
+        callId: id,
+        roomName: outboundRoomName(id),
+        jobId: "AJ_1",
+      }),
+      { ok: false, reason: "outbound_paused" },
+    );
+    const row = o.calls()[0]!;
+    assert.equal(row["status"], "failed", "never ringing: the agent must not dial");
+    assert.equal(row["failure_reason"], "emergency_stop_at_dial");
+    // Lifting the stop does not revive it: the row is closed for good.
+    stop(o, false);
+    assert.deepEqual(
+      await claimOutboundCall(o.deps.session, {
+        callId: id,
+        roomName: outboundRoomName(id),
+        jobId: "AJ_1",
+      }),
+      { ok: false, reason: "call_ended" },
+    );
+  });
+
+  test("inactive ({enabled: false}): request and claim proceed as usual", async () => {
+    const o = outboundDeps();
+    stop(o, false);
+    const id = await placeOutbound(o);
+    const c = await claimOutboundCall(o.deps.session, {
+      callId: id,
+      roomName: outboundRoomName(id),
+      jobId: "AJ_1",
+    });
+    assert.equal(c.ok, true);
   });
 });
 

@@ -25,6 +25,7 @@ import { bookingNeedsPayment, paymentAmountMinorUnits } from "../payments/paymen
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { normalizeInboundNumber } from "./phone.ts";
+import { outboundEmergencyStopActive } from "../outbound-eligibility.server.ts";
 import {
   DEFAULT_MAX_CALL_SECONDS,
   MAX_CALL_SECONDS_CEILING,
@@ -1412,7 +1413,13 @@ export type ClaimOutboundResult =
   | {
       ok: false;
       reason:
-        "not_found" | "wrong_room" | "already_claimed" | "expired" | "call_ended" | "not_entitled";
+        | "not_found"
+        | "wrong_room"
+        | "already_claimed"
+        | "expired"
+        | "call_ended"
+        | "not_entitled"
+        | "outbound_paused";
     };
 
 /**
@@ -1466,6 +1473,20 @@ export async function claimOutboundCall(
       .eq("id", call.id)
       .eq("status", "initiated");
     return { ok: false, reason: "not_entitled" };
+  }
+  // The database emergency stop (fails closed), at the last step before the
+  // agent dials: the row is closed as never dialled (no answer, so no charge).
+  if (await outboundEmergencyStopActive(deps.db)) {
+    await deps.db
+      .from("call_logs")
+      .update({
+        status: "failed",
+        failure_reason: "emergency_stop_at_dial",
+        ended_at: new Date(nowMs).toISOString(),
+      })
+      .eq("id", call.id)
+      .eq("status", "initiated");
+    return { ok: false, reason: "outbound_paused" };
   }
   const { data: won } = await deps.db
     .from("call_logs")

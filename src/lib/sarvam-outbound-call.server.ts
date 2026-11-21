@@ -18,7 +18,8 @@ import {
   isOutboundDestinationAllowlisted,
   OUTBOUND_TEST_ALLOWLIST_MESSAGE,
   NO_RELATIONSHIP_MESSAGE,
-  OUTBOUND_DISABLED_MESSAGE,
+  OUTBOUND_EMERGENCY_STOP_MESSAGE,
+  outboundEmergencyStopActive,
   staticEligibilityBlocker,
   withinCallingHours,
 } from "./outbound-eligibility.server.ts";
@@ -92,7 +93,7 @@ export function admissionRefusalMessage(reason: unknown): string {
     case "max_call_length_not_set":
       return MAX_CALL_LENGTH_NOT_SET_MESSAGE;
     case "outbound_paused":
-      return OUTBOUND_DISABLED_MESSAGE;
+      return OUTBOUND_EMERGENCY_STOP_MESSAGE;
     case "outside_calling_hours":
       return CALLING_HOURS_MESSAGE;
     default:
@@ -476,6 +477,16 @@ export async function sendSarvamInstantOutboundCall(
   if (!withinCallingHours(params.now ?? new Date())) {
     await recordSarvamStartFailure(supabaseAdmin, call.id, new Error(CALLING_HOURS_MESSAGE));
     throw new Error(CALLING_HOURS_MESSAGE);
+  }
+  // The database emergency stop, read again immediately before the provider
+  // request (a stop set after admission lands here): never started, no charge.
+  if (await outboundEmergencyStopActive(supabaseAdmin)) {
+    if (
+      (await recordSarvamStartFailure(supabaseAdmin, call.id, new Error("emergency_stop"))) ===
+      "failed"
+    )
+      await finalizeTerminalCallSafely(supabaseAdmin, call.id);
+    throw new Error(OUTBOUND_EMERGENCY_STOP_MESSAGE);
   }
 
   try {

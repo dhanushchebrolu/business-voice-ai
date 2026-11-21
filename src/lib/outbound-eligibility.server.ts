@@ -12,6 +12,10 @@ import { normalizeCustomerPhone } from "./phone-number.ts";
  *
  *   kill switch      OUTBOUND_CALLING_DISABLED=true stops every new outbound
  *                    call (single and campaign); calls in progress are untouched
+ *   emergency stop   platform_settings 'outbound.calling_paused' (database, no
+ *                    deploy): outboundEmergencyStopActive, checked again right
+ *                    before every provider request; it cannot end a call the
+ *                    provider has already accepted
  *   destination      only countries in OUTBOUND_ALLOWED_COUNTRY_CODES (default 91)
  *   calling hours    09:00–21:00 India time by default (OUTBOUND_CALLING_HOURS,
  *                    "HH-HH" in whole hours, can only narrow it), the window
@@ -59,6 +63,42 @@ export function callingWindow(): { startHour: number; endHour: number } {
 /** The global kill switch. Only an explicit "true" stops calls, so a typo never blocks them silently. */
 export function outboundCallingDisabled(): boolean {
   return process.env["OUTBOUND_CALLING_DISABLED"]?.trim().toLowerCase() === "true";
+}
+
+export const OUTBOUND_EMERGENCY_STOP_MESSAGE =
+  "Outbound calling is stopped on ClickAI (emergency stop). No new calls are placed and no campaign can start or resume until it is lifted. Calls already in progress are not affected.";
+
+/** False-y spellings PostgreSQL's text-to-boolean cast accepts (admission reads `(value ->> 'enabled')::boolean`). */
+const PG_FALSE = new Set(["false", "f", "no", "n", "off", "0"]);
+
+/**
+ * The database emergency stop (platform_settings 'outbound.calling_paused'
+ * {"enabled": true}), read fresh on every call. The admission functions check
+ * it too; this read covers the steps outside them: launch, resume, the
+ * dispatcher's entry and the moment right before each provider request.
+ * Fails closed: a failed read, or any value admission would not read as
+ * false, counts as stopped. No row means not stopped, as in admission.
+ */
+export async function outboundEmergencyStopActive(db: Admin): Promise<boolean> {
+  try {
+    const { data, error } = await db
+      .from("platform_settings")
+      .select("value")
+      .eq("key", "outbound.calling_paused")
+      .maybeSingle();
+    if (error) return true;
+    if (!data) return false;
+    const value = data.value;
+    const enabled =
+      value && typeof value === "object" && !Array.isArray(value)
+        ? (value as Record<string, unknown>)["enabled"]
+        : undefined;
+    if (enabled === undefined || enabled === null || enabled === false || enabled === 0)
+      return false;
+    return !(typeof enabled === "string" && PG_FALSE.has(enabled.trim().toLowerCase()));
+  } catch {
+    return true;
+  }
 }
 
 export const OUTBOUND_TEST_ALLOWLIST_MESSAGE =

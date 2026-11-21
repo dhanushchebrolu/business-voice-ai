@@ -994,3 +994,191 @@ describe("campaign dispatch — M5: the 21:00 India-time cutoff around admission
     }
   });
 });
+
+describe("campaign dispatch — the database emergency stop (GATE C4 H3)", () => {
+  const STOP = "outbound.calling_paused";
+  const setStop = (t: ReturnType<typeof setup>, enabled: unknown) => {
+    const rows = (t.db.tables["platform_settings"] ??= []);
+    const row = rows.find((r) => r["key"] === STOP);
+    if (row) row["value"] = { enabled };
+    else rows.push({ key: STOP, value: { enabled } });
+  };
+  /**
+   * Finalization as apply_call_campaign_outcome applies it: the call's outcome
+   * (here: a retry) reaches the contact only while the contact still points at
+   * that exact call. Records what the contact looked like when it ran.
+   */
+  const guardedFinalize = (t: ReturnType<typeof setup>) => {
+    const seen: { callId: string; contactCallId: unknown }[] = [];
+    t.deps.finalize = async (callId) => {
+      const call = t.table("call_logs").find((c) => c["id"] === callId)!;
+      const cc = t.table("campaign_contacts").find((c) => c["id"] === call["campaign_contact_id"])!;
+      seen.push({ callId, contactCallId: cc["current_call_id"] });
+      if (
+        cc["current_call_id"] === callId &&
+        ["calling", "outcome_unknown"].includes(String(cc["status"]))
+      )
+        Object.assign(cc, { status: "retry_scheduled", next_attempt_at: "2026-11-17T11:00:00Z" });
+    };
+    return seen;
+  };
+  /** Pulls the stop right after the first admission writes its call row. */
+  const stopAfterFirstAdmission = (t: ReturnType<typeof setup>) => {
+    const admit = t.deps.admitCampaignCall;
+    let armed = true;
+    t.deps.admitCampaignCall = async (req) => {
+      const r = await admit(req);
+      if (armed) setStop(t, true);
+      armed = false;
+      return r;
+    };
+  };
+
+  test("active before the run: nothing is claimed, admitted, written or dialled", async () => {
+    const t = setup(3);
+    setStop(t, true);
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 0);
+    assert.equal(t.admission.requests.length, 0);
+    assert.equal(t.table("call_logs").length, 0);
+    for (const cc of t.table("campaign_contacts")) {
+      assert.equal(cc["status"], "pending");
+      assert.equal(cc["attempts"], 0);
+    }
+  });
+
+  test("inactive ({enabled: false}) or no row: the normal path dials", async () => {
+    const off = setup(2);
+    setStop(off, false);
+    await dispatchDueCampaigns({ deps: off.deps });
+    assert.equal(off.dialed.length, 2);
+    const none = setup(2);
+    await dispatchDueCampaigns({ deps: none.deps });
+    assert.equal(none.dialed.length, 2);
+  });
+
+  test("a failed read of the stop counts as stopped (fails closed)", async () => {
+    const t = setup(1);
+    const client = t.deps.supabaseAdmin as unknown as { from: (table: string) => unknown };
+    const from = client.from.bind(client);
+    client.from = (table: string) =>
+      table === "platform_settings"
+        ? {
+            select: () => ({
+              eq: () => ({
+                maybeSingle: async () => ({ data: null, error: { message: "timeout" } }),
+              }),
+            }),
+          }
+        : from(table);
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 0);
+    assert.equal(t.table("call_logs").length, 0);
+  });
+
+  test("set after admission, before the dial: no provider request, no charge, no retry, contact not stuck", async () => {
+    const t = setup(3);
+    const finalized = guardedFinalize(t);
+    stopAfterFirstAdmission(t);
+    await dispatchDueCampaigns({ deps: t.deps });
+
+    assert.equal(t.dialed.length, 0, "no provider request");
+    assert.equal(t.table("call_logs").length, 1, "the batch stops at the first contact");
+    const call = t.table("call_logs")[0]!;
+    assert.equal(call["status"], "failed");
+    assert.equal(call["resolution_source"], "start_failure", "never started: no charge, no budget");
+    assert.match(String(call["failure_reason"]), /emergency_stop/);
+    assert.ok(call["ended_at"]);
+
+    const cc = t.table("campaign_contacts").find((c) => c["id"] === call["campaign_contact_id"])!;
+    assert.equal(cc["status"], "pending", "back exactly as it was, not calling");
+    assert.equal(cc["attempts"], 0, "the attempt is not consumed");
+    assert.equal(cc["current_call_id"], null);
+    assert.equal(cc["next_attempt_at"], null, "no retry scheduled");
+
+    // Finalized once, after the contact was given back: its "failed" outcome
+    // cannot reach the contact.
+    assert.deepEqual(finalized, [{ callId: call["id"], contactCallId: null }]);
+    assert.equal(t.table("campaign_contacts").filter((c) => c["status"] === "calling").length, 0);
+  });
+
+  test("the stop also ends the run for every other campaign", async () => {
+    const t = setup(1);
+    t.table("campaigns").push({ ...t.table("campaigns")[0]!, id: "camp_2" });
+    t.table("contacts").push({
+      id: "contact_x",
+      organization_id: ORG,
+      phone: "+919876543299",
+      opted_out: false,
+    });
+    t.table("campaign_contacts").push({
+      id: "cc_x",
+      campaign_id: "camp_2",
+      organization_id: ORG,
+      contact_id: "contact_x",
+      status: "pending",
+      attempts: 0,
+      next_attempt_at: null,
+      variables: {},
+      created_at: "2026-11-17T10:00:09Z",
+    });
+    stopAfterFirstAdmission(t);
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 0);
+    assert.equal(t.admission.requests.length, 1, "camp_2 is never admitted");
+    assert.equal(
+      t.table("campaign_contacts").find((c) => c["id"] === "cc_x")!["status"],
+      "pending",
+    );
+  });
+
+  test("while it stays on, later runs dial nothing; once lifted, the contact is dialled exactly once", async () => {
+    const t = setup(1);
+    stopAfterFirstAdmission(t);
+    await dispatchDueCampaigns({ deps: t.deps });
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 0);
+    assert.equal(t.admission.requests.length, 1, "nothing admitted while stopped");
+
+    setStop(t, false);
+    await dispatchDueCampaigns({ deps: t.deps });
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 1, "one call, no duplicate");
+    const cc = t.table("campaign_contacts")[0]!;
+    assert.equal(cc["attempts"], 1, "only the call that was placed counts");
+    assert.equal(cc["status"], "calling");
+  });
+
+  test("admission refusing with outbound_paused gives the contact back and ends the run", async () => {
+    const t = setup(3);
+    t.admission.refuse = "outbound_paused";
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 0);
+    assert.equal(t.admission.requests.length, 1);
+    for (const cc of t.table("campaign_contacts")) {
+      assert.equal(cc["status"], "pending");
+      assert.equal(cc["attempts"], 0);
+      assert.equal(cc["current_call_id"] ?? null, null);
+    }
+  });
+
+  test("the stop is the last database read before the provider request", async () => {
+    const t = setup(1);
+    const order: string[] = [];
+    const client = t.deps.supabaseAdmin as unknown as { from: (table: string) => unknown };
+    const from = client.from.bind(client);
+    client.from = (table: string) => {
+      order.push(table);
+      return from(table);
+    };
+    const dial = t.deps.adapter!.createInstantOutbound;
+    t.deps.adapter = {
+      createInstantOutbound: async (input) => {
+        order.push("DIAL");
+        return dial(input);
+      },
+    };
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(order[order.indexOf("DIAL") - 1], "platform_settings");
+  });
+});

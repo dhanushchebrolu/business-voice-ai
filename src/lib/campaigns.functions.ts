@@ -49,10 +49,17 @@ export const launchCampaign = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     const orgId = await campaignOrgId(context, data.campaignId, true);
     // The global outbound kill switch: no campaign starts or resumes while it is on.
-    const { outboundCallingDisabled, OUTBOUND_DISABLED_MESSAGE } =
-      await import("@/lib/outbound-eligibility.server");
+    const {
+      outboundCallingDisabled,
+      outboundEmergencyStopActive,
+      OUTBOUND_DISABLED_MESSAGE,
+      OUTBOUND_EMERGENCY_STOP_MESSAGE,
+    } = await import("@/lib/outbound-eligibility.server");
     if (outboundCallingDisabled()) throw new Error(OUTBOUND_DISABLED_MESSAGE);
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    // The database emergency stop (fails closed): no campaign starts or resumes.
+    if (await outboundEmergencyStopActive(supabaseAdmin))
+      throw new Error(OUTBOUND_EMERGENCY_STOP_MESSAGE);
 
     const { data: campaign } = await supabaseAdmin
       .from("campaigns")
@@ -197,7 +204,7 @@ function simpleTransition(
 export const pauseCampaign = simpleTransition(["running"], "paused", "paused_at", false);
 
 /** Resume: identical readiness bar as launch is deliberately NOT re-run here — spec §38 only requires pause->edit->resume for fields that need it; resuming without editing should not re-block on transient billing dips the dispatcher itself already re-checks per call. */
-/** Resuming re-runs every launch check (kill switch, number, agent, context, wallet, contacts). */
+/** Resuming re-runs every launch check (kill switch, emergency stop, number, agent, context, wallet, contacts). */
 export const resumeCampaign = launchCampaign;
 
 export const cancelCampaign = createServerFn({ method: "POST" })
