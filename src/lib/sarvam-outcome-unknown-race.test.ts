@@ -11,6 +11,15 @@ import { checkClientReferenceMatch } from "./telephony/webhook-correlation.serve
 import { decideCampaignContactOutcome, type CallTerminalStatus } from "./campaign-outcome.ts";
 import { TelephonyAdapterError, type NormalizedCallEvent } from "./telephony/adapter.ts";
 
+// The pilot allowlist fails closed: list every number these tests dial.
+process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"] = [
+  "+910987654321",
+  "+911111111111",
+  "+912222222222",
+  "+913333333333",
+  "+919876543210",
+].join(",");
+
 /**
  * Race-order and billing-once coverage for outcome_unknown.
  *

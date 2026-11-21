@@ -25,8 +25,10 @@
 import { classifyDispatchError } from "./livekit-api.ts";
 import {
   hasPriorRelationship,
+  isOutboundDestinationAllowlisted,
   NO_RELATIONSHIP_MESSAGE,
   OUTBOUND_DISABLED_MESSAGE,
+  OUTBOUND_TEST_ALLOWLIST_MESSAGE,
   outboundCallingDisabled,
   staticEligibilityBlocker,
 } from "../outbound-eligibility.server.ts";
@@ -221,6 +223,10 @@ export async function startOutboundAgentCall(
       "invalid_request",
       "A phone number, a valid E.164 destination and a request id are required.",
     );
+  // The pilot allowlist every outbound path shares (fails closed when unset),
+  // before any read, so a replayed request id cannot re-dispatch around it.
+  if (!isOutboundDestinationAllowlisted(input.toE164))
+    return fail("destination_not_allowed", OUTBOUND_TEST_ALLOWLIST_MESSAGE);
 
   const { data: number } = await deps.session.db
     .from("phone_numbers")

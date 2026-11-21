@@ -1,10 +1,14 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { dirname, join, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { memorySupabase } from "./payments/memory-supabase.test-helper.ts";
 import {
   callingWindow,
   hasPriorRelationship,
   isDestinationCountryAllowed,
+  isOutboundDestinationAllowlisted,
   outboundCallingDisabled,
   staticEligibilityBlocker,
   withinCallingHours,
@@ -130,5 +134,144 @@ describe("prior relationship", () => {
       bookings: [{ organization_id: "org_b", customer_phone: PERSON }],
     });
     assert.equal(await hasPriorRelationship(client, "org_a", PERSON), false);
+  });
+});
+
+describe("pilot allowlist (SARVAM_OUTBOUND_TEST_ALLOWLIST) fails closed (GATE C4 H2)", () => {
+  const KEY = "SARVAM_OUTBOUND_TEST_ALLOWLIST";
+  function withAllowlist(value: string | undefined, fn: () => void) {
+    const prior = process.env[KEY];
+    if (value === undefined) delete process.env[KEY];
+    else process.env[KEY] = value;
+    try {
+      fn();
+    } finally {
+      if (prior === undefined) delete process.env[KEY];
+      else process.env[KEY] = prior;
+    }
+  }
+  const allowed = (to: string) => isOutboundDestinationAllowlisted(to);
+
+  test("missing: nothing is allowed", () =>
+    withAllowlist(undefined, () => assert.equal(allowed("+919876543210"), false)));
+
+  test("empty: nothing is allowed", () =>
+    withAllowlist("", () => assert.equal(allowed("+919876543210"), false)));
+
+  test("whitespace or separators only: nothing is allowed", () => {
+    for (const value of ["   ", "\t\n", " , ,, "])
+      withAllowlist(value, () =>
+        assert.equal(allowed("+919876543210"), false, JSON.stringify(value)),
+      );
+  });
+
+  test("malformed entries are ignored and never widen the list", () => {
+    withAllowlist("not-a-number, *, +, 98765, all, +919876543210", () => {
+      assert.equal(allowed("+919876543210"), true);
+      assert.equal(allowed("+919876543211"), false);
+      assert.equal(allowed("+912222222222"), false);
+    });
+    withAllowlist("*", () => assert.equal(allowed("+919876543210"), false));
+    withAllowlist("garbage", () => assert.equal(allowed("+919876543210"), false));
+  });
+
+  test("a listed number is allowed; any other is not", () =>
+    withAllowlist("+919876543210", () => {
+      assert.equal(allowed("+919876543210"), true);
+      assert.equal(allowed("+918888888888"), false);
+    }));
+
+  test("both sides are normalized to E.164 before comparing", () => {
+    withAllowlist("0091 98765 43210, +91-88888-88888", () => {
+      assert.equal(allowed("+919876543210"), true);
+      assert.equal(allowed("+91 98765-43210"), true);
+      assert.equal(allowed("+918888888888"), true);
+    });
+    withAllowlist("+919876543210", () => assert.equal(allowed("0091 98765 43210"), true));
+  });
+
+  test("no partial, prefix or suffix matching", () =>
+    withAllowlist("+919876543210", () => {
+      for (const to of [
+        "+9198765432", // a prefix of the entry
+        "+19876543210", // the same digits under another country code
+        "+9198765432100", // the entry with more digits
+        "+449876543210", // the same subscriber digits elsewhere
+        "",
+        "not-a-number",
+      ])
+        assert.equal(allowed(to), false, to);
+    }));
+});
+
+describe("every outbound path checks the pilot allowlist; no bypass (GATE C4 H2)", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const read = (p: string) => readFileSync(join(here, p), "utf8").replace(/\r\n/g, "\n");
+  const single = read("sarvam-outbound-call.server.ts");
+  const campaign = read("campaign-dispatch.server.ts");
+  const livekit = read("voice-agent/outbound.server.ts");
+
+  /** In `src`, `check` (the allowlist refusal) comes before `later` (a write, admission or dial). */
+  const before = (src: string, check: string, later: string) => {
+    const c = src.indexOf(check);
+    const l = src.indexOf(later);
+    assert.ok(c > -1, `missing: ${check}`);
+    assert.ok(l > -1, `missing: ${later}`);
+    assert.ok(c < l, `${check} must come before ${later}`);
+  };
+
+  test("single and admin test calls: refused before the database, admission or Sarvam", () => {
+    const fn = single.slice(single.indexOf("export async function sendSarvamInstantOutboundCall"));
+    const check =
+      "if (!isOutboundDestinationAllowlisted(toE164)) throw new Error(OUTBOUND_TEST_ALLOWLIST_MESSAGE);";
+    before(fn, check, '.from("phone_numbers")');
+    before(fn, check, 'rpc("admit_single_outbound_call"');
+    before(fn, check, "adapter.createInstantOutbound(");
+  });
+
+  test("campaign dispatcher: refused before the claim, admission and Sarvam", () => {
+    const check = "if (!isOutboundDestinationAllowlisted(destination)) {";
+    before(campaign, check, '.update({ status: "calling", attempts, current_call_id: callId })');
+    before(campaign, check, ".admitCampaignCall({");
+    before(campaign, check, "adapter.createInstantOutbound(");
+  });
+
+  test("LiveKit agent call: refused before any read, so a replayed request cannot re-dispatch", () => {
+    const fn = livekit.slice(livekit.indexOf("export async function startOutboundAgentCall"));
+    const check = "if (!isOutboundDestinationAllowlisted(input.toE164))";
+    before(fn, check, '.from("phone_numbers")');
+    before(fn, check, '.from("call_logs")');
+    before(fn, check, "dispatchOnce(deps, callId)");
+    before(fn, check, "prepareOutboundSipCall(");
+  });
+
+  test("admission and the Sarvam dial are only called from these checked paths", () => {
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const name of readdirSync(dir)) {
+        const p = join(dir, name);
+        if (statSync(p).isDirectory()) walk(p);
+        else if (/\.(ts|tsx)$/.test(name) && !/\.test\.tsx?$/.test(name)) files.push(p);
+      }
+    };
+    walk(join(here, ".."));
+    const users = (pattern: RegExp) =>
+      files
+        .filter((f) => pattern.test(readFileSync(f, "utf8")))
+        .map((f) =>
+          f
+            .split(sep)
+            .join("/")
+            .replace(/^.*\/src\//, "src/"),
+        )
+        .sort();
+    assert.deepEqual(users(/rpc\("admit_(single|campaign)_outbound_call"/), [
+      "src/lib/campaign-dispatch.server.ts",
+      "src/lib/sarvam-outbound-call.server.ts",
+    ]);
+    assert.deepEqual(users(/\.createInstantOutbound\(/), [
+      "src/lib/campaign-dispatch.server.ts",
+      "src/lib/sarvam-outbound-call.server.ts",
+    ]);
   });
 });

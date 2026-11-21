@@ -87,7 +87,7 @@ What is **not** resolved (needs legal counsel and the provider; nothing here is 
 3. **DPDP Act 2023.** Phone numbers and call transcripts are personal data. A notice/consent or legitimate-use basis for each customer's contacts, and retention rules, are not defined product-wide (call variables already expire; see `call-variable-retention`).
 4. **What Sarvam (as the number's provider) does on its side** for registration, scrubbing and caller ID.
 
-Until these are answered, `SARVAM_OUTBOUND_TEST_ALLOWLIST` must stay set, so only approved test numbers can be called.
+Until these are answered, `SARVAM_OUTBOUND_TEST_ALLOWLIST` must stay set, so only approved test numbers can be called. It fails closed: missing, empty or whitespace-only allows **no** outbound call on any path (Sarvam single, admin test, campaign, LiveKit), invalid entries are ignored, and a number must equal an entry exactly in E.164.
 
 ## 4. Limits and concurrency
 
@@ -213,13 +213,13 @@ Verification after the change (text playground, no calls): the generated brief (
 
 ## 10. Configuration
 
-| Setting                          | Default           | Effect                                                      |
-| -------------------------------- | ----------------- | ----------------------------------------------------------- |
-| `OUTBOUND_CALLING_DISABLED`      | unset             | `true` stops all new outbound calls                         |
-| `OUTBOUND_ALLOWED_COUNTRY_CODES` | `91`              | comma list of country codes                                 |
-| `OUTBOUND_CALLING_HOURS`         | `9-21`            | narrower whole-hour window, India time                      |
-| `SARVAM_OUTBOUND_TEST_ALLOWLIST` | set in production | only these numbers can be called; keep until §3 is resolved |
-| `CAMPAIGN_DISPATCH_ENABLED`      | unset             | campaigns stay off                                          |
+| Setting                          | Default           | Effect                                                                       |
+| -------------------------------- | ----------------- | ---------------------------------------------------------------------------- |
+| `OUTBOUND_CALLING_DISABLED`      | unset             | `true` stops all new outbound calls                                          |
+| `OUTBOUND_ALLOWED_COUNTRY_CODES` | `91`              | comma list of country codes                                                  |
+| `OUTBOUND_CALLING_HOURS`         | `9-21`            | narrower whole-hour window, India time                                       |
+| `SARVAM_OUTBOUND_TEST_ALLOWLIST` | set in production | only these numbers can be called; missing or empty blocks all outbound calls |
+| `CAMPAIGN_DISPATCH_ENABLED`      | unset             | campaigns stay off                                                           |
 
 ## 11. Rollout and rollback
 

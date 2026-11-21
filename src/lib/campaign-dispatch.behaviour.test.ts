@@ -18,6 +18,12 @@ import { memorySupabase } from "./payments/memory-supabase.test-helper.ts";
 type Row = Record<string, unknown>;
 const ORG = "org_a";
 const CAMPAIGN = "camp_1";
+// The pilot allowlist fails closed: list exactly the numbers these tests dial.
+process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"] = [
+  ...Array.from({ length: 30 }, (_, i) => `+9198765432${String(i).padStart(2, "0")}`),
+  "+919876543299",
+].join(",");
+
 const UNRESOLVED = ["initiated", "outcome_unknown"];
 const TERMINAL = ["completed", "failed", "busy", "no_answer", "cancelled"];
 
@@ -284,6 +290,40 @@ describe("campaign dispatch — the global outbound kill switch", () => {
     // Switched back on: the same campaign dials.
     await dispatchDueCampaigns({ deps: t.deps });
     assert.equal(t.dialed.length, 3);
+  });
+});
+
+describe("campaign dispatch — the pilot allowlist fails closed (GATE C4 H2)", () => {
+  test("missing, empty, or without these numbers: nothing claimed, admitted, written or dialled", async () => {
+    const prior = process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"];
+    try {
+      for (const value of [undefined, "", " , ", "+919999999999"]) {
+        if (value === undefined) delete process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"];
+        else process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"] = value;
+        const t = setup(2);
+        await dispatchDueCampaigns({ deps: t.deps });
+        assert.equal(t.dialed.length, 0, String(value));
+        assert.equal(t.admission.requests.length, 0, String(value));
+        assert.equal(t.table("call_logs").length, 0, String(value));
+        assert.ok(t.table("campaign_contacts").every((c) => c["status"] === "pending"));
+      }
+    } finally {
+      if (prior === undefined) delete process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"];
+      else process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"] = prior;
+    }
+  });
+
+  test("only the listed number is dialled", async () => {
+    const prior = process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"];
+    process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"] = "+919876543201";
+    try {
+      const t = setup(3);
+      await dispatchDueCampaigns({ deps: t.deps });
+      assert.deepEqual(t.dialed, ["+919876543201"]);
+    } finally {
+      if (prior === undefined) delete process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"];
+      else process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"] = prior;
+    }
   });
 });
 

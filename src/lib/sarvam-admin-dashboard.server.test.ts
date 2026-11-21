@@ -369,7 +369,9 @@ async function withSarvam<T>(
     TELEPHONY_WEBHOOK_BASE_URL: "https://clickai.test",
     SARVAM_WEBHOOK_SECRET: "secret",
   });
-  delete process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"];
+  // The pilot allowlist fails closed: list exactly the numbers these tests dial.
+  process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"] =
+    "+919876543210,+918000000001,+918000000002,+918000000003,+918000000004,+918000000005";
   const requests: unknown[] = [];
   const realFetch = globalThis.fetch;
   globalThis.fetch = (async (_u: unknown, init?: RequestInit) => {

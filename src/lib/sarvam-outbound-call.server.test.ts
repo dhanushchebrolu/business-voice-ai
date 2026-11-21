@@ -7,10 +7,13 @@ import {
   SINGLE_CALL_LIMITS,
   TOO_MANY_IN_FLIGHT_MESSAGE,
   UNRESOLVED_CALL_MESSAGE,
-  isSarvamOutboundDestinationAllowed,
   persistStartResult,
   sendSarvamInstantOutboundCall,
 } from "./sarvam-outbound-call.server.ts";
+
+// The pilot allowlist fails closed: list exactly the numbers these tests dial.
+const DIALLED = "+912222222222,+919876543210,+919999999999,+918888888888";
+process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"] = DIALLED;
 
 /**
  * Behavioral coverage for sendSarvamInstantOutboundCall — the logic
@@ -642,25 +645,29 @@ describe("supervised-test allowlist (SARVAM_OUTBOUND_TEST_ALLOWLIST)", () => {
     }
   }
 
-  test("unset: no restriction", async () => {
-    await withAllowlist(undefined, () =>
-      assert.equal(isSarvamOutboundDestinationAllowed("+912222222222"), true),
-    );
-  });
-
-  test("set: only the listed numbers, compared in canonical form", async () => {
-    await withAllowlist("0091 99999 99999, +91-88888-88888", () => {
-      assert.equal(isSarvamOutboundDestinationAllowed("+919999999999"), true);
-      assert.equal(isSarvamOutboundDestinationAllowed("+918888888888"), true);
-      assert.equal(isSarvamOutboundDestinationAllowed("+912222222222"), false);
+  // The allowlist's own rules are tested in outbound-eligibility.server.test.ts.
+  for (const [label, value] of [
+    ["missing", undefined],
+    ["empty", ""],
+  ] as const)
+    test(`${label}: the single-call path refuses before any database access or Sarvam request`, async () => {
+      const { client, calls, rpcs } = makeFakeSupabase({});
+      await withAllowlist(value, async () => {
+        const { requestBody } = await withSarvamEnvAndFetch({ status: 200, body: {} }, async () => {
+          await assert.rejects(
+            sendSarvamInstantOutboundCall(client, {
+              now: DAYTIME,
+              phoneNumberId: "num_1",
+              toE164: "+912222222222",
+            }),
+            /limited to approved test numbers/,
+          );
+        });
+        assert.equal(requestBody, undefined);
+      });
+      assert.deepEqual(calls, []);
+      assert.deepEqual(rpcs, []);
     });
-  });
-
-  test("set but with no valid number: nothing is allowed (fails closed)", async () => {
-    await withAllowlist("not-a-number", () =>
-      assert.equal(isSarvamOutboundDestinationAllowed("+912222222222"), false),
-    );
-  });
 
   test("a number outside the list is refused before any database access or Sarvam request", async () => {
     const { client, calls, rpcs } = makeFakeSupabase({});

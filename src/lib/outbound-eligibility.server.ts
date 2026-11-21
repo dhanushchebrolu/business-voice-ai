@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
+import { normalizeCustomerPhone } from "./phone-number.ts";
 
 /**
  * Pre-dial eligibility for every outbound call, enforced inside
@@ -58,6 +59,27 @@ export function callingWindow(): { startHour: number; endHour: number } {
 /** The global kill switch. Only an explicit "true" stops calls, so a typo never blocks them silently. */
 export function outboundCallingDisabled(): boolean {
   return process.env["OUTBOUND_CALLING_DISABLED"]?.trim().toLowerCase() === "true";
+}
+
+export const OUTBOUND_TEST_ALLOWLIST_MESSAGE =
+  "Outbound calling is limited to approved test numbers right now.";
+
+/**
+ * Pilot allowlist (SARVAM_OUTBOUND_TEST_ALLOWLIST: comma-separated numbers).
+ * Every outbound path checks it before anything is written or dialled: Sarvam
+ * single and admin test calls (sendSarvamInstantOutboundCall), the campaign
+ * dispatcher, and the LiveKit agent call. Fails closed: missing, empty or
+ * whitespace-only allows nothing, an entry that is not a valid number is
+ * ignored (never widens the list), and a destination must equal an entry
+ * exactly once both are normalized to E.164 (no prefix/suffix matching).
+ */
+export function isOutboundDestinationAllowlisted(destination: string): boolean {
+  const to = normalizeCustomerPhone(destination, null);
+  if (!to) return false;
+  return (process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"] ?? "")
+    .split(",")
+    .map((entry) => normalizeCustomerPhone(entry.trim(), null))
+    .some((entry) => entry === to);
 }
 
 function allowedCountryCodes(): string[] {

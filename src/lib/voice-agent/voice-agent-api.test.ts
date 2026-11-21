@@ -111,6 +111,28 @@ import {
   type TranscriptTurn,
 } from "./sessions.server.ts";
 
+// The pilot allowlist fails closed: list every number these tests dial (the
+// destination-policy tests still refuse their numbers through checkDestination).
+process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"] = [
+  "+14155550100",
+  "+442079460958",
+  "+910000000000",
+  "+91123456789",
+  "+911800123456",
+  "+91190012345",
+  "+914023456789",
+  "+918000000001",
+  "+918000000002",
+  "+918000000099",
+  "+918040001234",
+  "+919198765432",
+  "+919876500000",
+  "+9198765432",
+  "+919876543210",
+  "+9198765432101",
+  "+919999999999",
+].join(",");
+
 /* ------------------------------------------------------------------ */
 /* A small in-memory stand-in for the Supabase client: only what the   */
 /* voice-agent code uses. Semantics that matter for correctness:       */
@@ -1030,6 +1052,31 @@ describe("AI (LiveKit) outbound applies the central pre-dial rules", () => {
     } finally {
       if (prior === undefined) delete process.env["OUTBOUND_CALLING_DISABLED"];
       else process.env["OUTBOUND_CALLING_DISABLED"] = prior;
+    }
+  });
+
+  test("pilot allowlist missing, empty or without this number: refused before any row or dispatch, replays included", async () => {
+    const prior = process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"];
+    try {
+      for (const value of [undefined, "", "   ", "+919999999999"]) {
+        if (value === undefined) delete process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"];
+        else process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"] = value;
+        const o = outboundDeps();
+        assert.equal(code(await startOutboundAgentCall(o.deps, OUT)), "destination_not_allowed");
+        assert.equal(o.calls().length, 0, String(value));
+        assert.equal(o.dispatched.length, 0, String(value));
+      }
+      // A request id first used while the number was allowed cannot re-dispatch once it is not.
+      process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"] = OUT_TO;
+      const o = outboundDeps();
+      await placeOutbound(o);
+      const dispatches = o.dispatched.length;
+      process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"] = "";
+      assert.equal(code(await startOutboundAgentCall(o.deps, OUT)), "destination_not_allowed");
+      assert.equal(o.dispatched.length, dispatches);
+    } finally {
+      if (prior === undefined) delete process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"];
+      else process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"] = prior;
     }
   });
 });

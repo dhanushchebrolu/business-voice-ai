@@ -15,6 +15,8 @@ import { isNumberSuppressed, OPT_OUT_NUMBER_MESSAGE } from "./contact-suppressio
 import {
   CALLING_HOURS_MESSAGE,
   hasPriorRelationship,
+  isOutboundDestinationAllowlisted,
+  OUTBOUND_TEST_ALLOWLIST_MESSAGE,
   NO_RELATIONSHIP_MESSAGE,
   OUTBOUND_DISABLED_MESSAGE,
   staticEligibilityBlocker,
@@ -112,27 +114,6 @@ export const INVALID_DESTINATION_MESSAGE =
 
 export const UNRESOLVED_CALL_MESSAGE =
   "An earlier call to this number hasn't finished or has an unconfirmed outcome. Wait for it, or resolve it in call history, before calling again.";
-
-export const OUTBOUND_TEST_ALLOWLIST_MESSAGE =
-  "Sarvam outbound calling is limited to approved test numbers right now.";
-
-/**
- * Supervised-test guard. When SARVAM_OUTBOUND_TEST_ALLOWLIST is set (comma-
- * separated numbers, canonicalized like every outbound number), every Sarvam
- * outbound path — single calls, the admin test call and the campaign
- * dispatcher — refuses any other destination before anything is written or
- * dialled. Unset means no restriction. Set but with no valid number means
- * nothing is allowed (fails closed). Remove it at production rollout.
- */
-export function isSarvamOutboundDestinationAllowed(toE164: string): boolean {
-  const raw = process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"];
-  if (!raw || !raw.trim()) return true;
-  const allowed = raw
-    .split(",")
-    .map((n) => normalizeCustomerPhone(n.trim(), null))
-    .filter((n): n is string => n !== null);
-  return allowed.includes(toE164);
-}
 
 /**
  * Records a failed Sarvam start-call request on its call_logs row, only while
@@ -361,7 +342,7 @@ export async function sendSarvamInstantOutboundCall(
   // Kill switch, destination country, calling hours (outbound-eligibility.server.ts).
   const blocked = staticEligibilityBlocker(toE164, params.now ?? new Date());
   if (blocked) throw new Error(blocked);
-  if (!isSarvamOutboundDestinationAllowed(toE164)) throw new Error(OUTBOUND_TEST_ALLOWLIST_MESSAGE);
+  if (!isOutboundDestinationAllowlisted(toE164)) throw new Error(OUTBOUND_TEST_ALLOWLIST_MESSAGE);
 
   const { data: phoneNumber } = await supabaseAdmin
     .from("phone_numbers")

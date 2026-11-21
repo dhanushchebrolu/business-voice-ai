@@ -1,5 +1,6 @@
 import {
   isDestinationCountryAllowed,
+  isOutboundDestinationAllowlisted,
   outboundCallingDisabled,
   withinCallingHours,
 } from "./outbound-eligibility.server.ts";
@@ -14,7 +15,6 @@ import { isWithinCallingWindow, type CampaignSchedule } from "./campaign-schedul
 import { normalizeCustomerPhone } from "./phone-number.ts";
 import { decideCampaignContactOutcome, type CallTerminalStatus } from "./campaign-outcome.ts";
 import {
-  isSarvamOutboundDestinationAllowed,
   persistStartResult,
   recordCampaignStartFailure,
   releaseCampaignClaim,
@@ -382,7 +382,7 @@ async function dispatchOneCampaign(
 
     // Supervised-test allowlist (SARVAM_OUTBOUND_TEST_ALLOWLIST): any other
     // number is left exactly as it is — not claimed, nothing written or dialled.
-    if (!isSarvamOutboundDestinationAllowed(destination)) {
+    if (!isOutboundDestinationAllowlisted(destination)) {
       console.error("campaign_dispatch:destination_not_allowlisted", campaign.id, cc.id);
       skipped++;
       continue;
