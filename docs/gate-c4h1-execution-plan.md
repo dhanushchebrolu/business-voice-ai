@@ -8,6 +8,12 @@ row with `"constraints": 2` and `"existing_data_unchanged": true`; verification
 constraints are the only protection against unsafe retry settings: do not roll
 back before that deploy.
 
+Worker `a2b7943` deployed 2026-11-21 05:03:16 UTC as klyro
+`8cae8981-3a19-48da-88c6-4caa319e5f7b` (rollback `5f0a4c37`), same 28
+bindings; the application now enforces the same limits, so rolling this
+migration back no longer re-opens H1. Both verifications `all_pass` after the
+deploy; dispatch still `skipped: disabled`.
+
 Fixes GATE C4 audit finding H1 in the database: a campaign may retry only an
 unanswered attempt (`no_answer`, `busy`, `failed`), at least 15 minutes and at
 most 7 days apart. The application already enforces the same limits from
