@@ -31,13 +31,13 @@ npx -y supabase@2.120.0 db query --linked --project-ref eorazvlmqwunmhwviocn -f 
 
 ## 2. Findings
 
-| ID  | Severity | Finding                                                                                                                                                                                                                                                                                                                                         | Status                            |
-| --- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- |
-| H3  | High     | The database emergency stop was read only inside the admission functions. A stop set after admission still let that call reach Sarvam; launch/resume ignored it; the LiveKit path never read it.                                                                                                                                                | Fixed `0cd054a`, deployed         |
-| R1  | High     | A pause, cancel, kill switch or the end of calling hours landing between admission and the dial finalized the never-started call while the contact still pointed at it, so its `failed` outcome reached a contact that was never dialled: an attempt was used and the contact became terminal `failed` (lost from the campaign) or got a retry. | Fixed `8abac61`                   |
-| L1  | Low      | Sarvam can mark an instant-outbound attempt for its own retry (`next_action_status = retry`). ClickAI sends no retry setting and cannot confirm whether Sarvam redials an instant call. Reconciliation treats it as pending and never redials itself.                                                                                           | Documented limitation             |
-| D1  | Low      | Admin Calls "Needs review" (and an organization filter) with no results showed "No calls yet / Calls will appear here as numbers go live", which misreads as "no calls ever" during a supervised call.                                                                                                                                          | Fixed (this commit), not deployed |
-| L2  | Low      | `releaseOrphanedCampaignClaims` returns an orphaned claim (no call row after 15 min) to `pending` even when its campaign was cancelled meanwhile. Nothing dials a cancelled campaign, so it is cosmetic.                                                                                                                                        | Documented, not changed           |
+| ID  | Severity | Finding                                                                                                                                                                                                                                                                                                                                         | Status                               |
+| --- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| H3  | High     | The database emergency stop was read only inside the admission functions. A stop set after admission still let that call reach Sarvam; launch/resume ignored it; the LiveKit path never read it.                                                                                                                                                | Fixed `0cd054a`, deployed            |
+| R1  | High     | A pause, cancel, kill switch or the end of calling hours landing between admission and the dial finalized the never-started call while the contact still pointed at it, so its `failed` outcome reached a contact that was never dialled: an attempt was used and the contact became terminal `failed` (lost from the campaign) or got a retry. | Fixed `8abac61`                      |
+| L1  | Low      | Sarvam can mark an instant-outbound attempt for its own retry (`next_action_status = retry`). ClickAI sends no retry setting and cannot confirm whether Sarvam redials an instant call. Reconciliation treats it as pending and never redials itself.                                                                                           | Documented limitation                |
+| D1  | Low      | Admin Calls "Needs review" (and an organization filter) with no results showed "No calls yet / Calls will appear here as numbers go live", which misreads as "no calls ever" during a supervised call.                                                                                                                                          | Fixed `1464e38`, deployed `ac20dc95` |
+| L2  | Low      | `releaseOrphanedCampaignClaims` returns an orphaned claim (no call row after 15 min) to `pending` even when its campaign was cancelled meanwhile. Nothing dials a cancelled campaign, so it is cosmetic.                                                                                                                                        | Documented, not changed              |
 
 No other critical or high issue was reproducible.
 
@@ -157,10 +157,11 @@ instant-outbound API takes no idempotency key: an ambiguous start is held in
 
 ## 4. Deployments
 
-| When (UTC)          | Worker version                         | Commit    | CI (Test / Voice agent)                       | Rollback to                            | Result   |
-| ------------------- | -------------------------------------- | --------- | --------------------------------------------- | -------------------------------------- | -------- |
-| 2026-11-21 06:27:23 | `da71e765-5052-4976-967d-b1db7f8830f2` | `0cd054a` | 44874631072 / 44874631141 green               | `4d3a8a24-4ad2-4ade-8ecb-c1d6a6c8d630` | Verified |
-| 2026-11-21 06:47:36 | `e7472488-514c-4ad6-8920-0fbecabea732` | `8abac61` | 44876687069 green (voice agent not triggered) | `da71e765-5052-4976-967d-b1db7f8830f2` | Verified |
+| When (UTC)          | Worker version                         | Commit    | CI (Test / Voice agent)                       | Rollback to                            | Result                   |
+| ------------------- | -------------------------------------- | --------- | --------------------------------------------- | -------------------------------------- | ------------------------ |
+| 2026-11-21 06:27:23 | `da71e765-5052-4976-967d-b1db7f8830f2` | `0cd054a` | 44874631072 / 44874631141 green               | `4d3a8a24-4ad2-4ade-8ecb-c1d6a6c8d630` | Verified                 |
+| 2026-11-21 06:47:36 | `e7472488-514c-4ad6-8920-0fbecabea732` | `8abac61` | 44876687069 green (voice agent not triggered) | `da71e765-5052-4976-967d-b1db7f8830f2` | Verified                 |
+| 2026-11-21 07:27:52 | `ac20dc95-5efa-47b3-b1cc-e4012f7808bc` | `1464e38` | 44879686871 green                             | `e7472488-514c-4ad6-8920-0fbecabea732` | Verified (fix seen live) |
 
 Procedure for each: clean worktree at the exact commit, `bun install
 --frozen-lockfile`, `npm run build` with the live Worker's own
@@ -179,6 +180,8 @@ new outbound call.
 Rollback (code only; no migration involved):
 
 ```powershell
+# D1 only (keeps R1 and H3):
+npx wrangler versions deploy e7472488-514c-4ad6-8920-0fbecabea732@100% --name klyro --yes
 # R1 only (keeps H3):
 npx wrangler versions deploy da71e765-5052-4976-967d-b1db7f8830f2@100% --name klyro --yes
 # R1 and H3 (back to H2):
