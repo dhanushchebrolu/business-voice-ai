@@ -48,9 +48,11 @@ Read only. Expect:
 - `open_outbound_calls` — calls that were already live (see §5);
 - `outcome_unknown_calls` — calls needing an operator decision (see §6).
 
-In the app: a single call request shows "Outbound calling is paused on
-ClickAI right now"; the dispatcher logs `campaign_dispatch:admission_refused
-<campaign> outbound_paused`. Layer 2: `npx wrangler secret list --name klyro`
+In the app: a single call request or campaign launch/resume shows "Outbound
+calling is stopped on ClickAI (emergency stop)…"; the dispatcher logs
+`campaign_dispatch:emergency_stop` (nothing claimed),
+`campaign_dispatch:emergency_stop_before_dial` (admitted, not sent) or
+`campaign_dispatch:admission_refused <campaign> outbound_paused`. Layer 2: `npx wrangler secret list --name klyro`
 lists `OUTBOUND_CALLING_DISABLED` (names only).
 
 ## 4. Remove safely
@@ -89,12 +91,20 @@ deactivate file.
   agent).
 - Its webhook still arrives and finalizes it normally: billing, and the
   campaign contact's outcome.
-- A campaign call that was admitted but not yet dialled when the stop
-  landed is recorded as never started (no charge, no budget) and is not
-  dialled — this check uses layer 2 and the calling hours; the database stop
-  takes effect at the next admission.
-- Refused campaign contacts are released back to their previous status; the
-  campaign stays `running` and simply admits nothing while the stop is on.
+- A call that was admitted but not yet sent to the provider when the stop
+  landed is not sent. Since Worker `da71e765` (commit `0cd054a`, GATE C4 H3)
+  the database stop is read again as the last step before every provider
+  request: campaign calls, single Sarvam calls, and the LiveKit agent's claim
+  before it dials. The call is recorded as never started (`failed`,
+  `start_failure`: no charge, no budget). A stop set in the last milliseconds
+  before the request leaves cannot be caught.
+- Refused campaign contacts are given back exactly as they were (status and
+  attempt count; no retry scheduled; `cancelled` if their campaign was
+  cancelled); the campaign stays `running` and dispatches nothing while the
+  stop is on. The dispatcher also checks the stop before claiming anything.
+- Campaign launch and resume are refused while the stop is on ("Outbound
+  calling is stopped on ClickAI (emergency stop)…"); so is a single call
+  request. A failed read of the setting counts as stopped.
 - `open_outbound_calls` in the status file falls to 0 as those calls end
   and their webhooks arrive (the longest is the maximum call length). A call still `initiated` with no Sarvam attempt id after
   30 minutes is moved to `outcome_unknown` automatically.
