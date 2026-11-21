@@ -116,10 +116,14 @@ describe("central templates", () => {
     transfer_to_human: true,
   };
 
-  test("the outbound template gets booking but no callback, message or transfer tool, whatever the customer enables", () => {
+  test("the outbound template books only with the booking capability, and never gets a callback, message or transfer tool", () => {
     for (const caps of [{}, everything]) {
       const c = buildOutboundAgentConfig(snapshot(caps), VOICE);
-      assert.deepEqual(c.tools.enable, [...OUTBOUND_AGENT_TOOLS]);
+      // Booking only with the customer's booking capability; the rest always.
+      assert.deepEqual(
+        c.tools.enable,
+        OUTBOUND_AGENT_TOOLS.filter((t) => t !== "book_appointment" || caps === everything),
+      );
       for (const t of OUTBOUND_FORBIDDEN_TOOLS)
         assert.ok(!(c.tools.enable as string[]).includes(t), t);
       assert.equal(c.role, "outbound");
@@ -148,8 +152,59 @@ describe("central templates", () => {
   test("fingerprints: stable, role-specific, and the inbound one is unchanged by dual agents", () => {
     const a = buildOutboundAgentConfig(snapshot({}), VOICE);
     assert.equal(a.fingerprint, buildOutboundAgentConfig(snapshot({}), VOICE).fingerprint);
-    assert.match(a.fingerprint, /^o3-[0-9a-f]{8}$/, "outbound template version 3 (booking)");
+    assert.match(
+      a.fingerprint,
+      /^o4-[0-9a-f]{8}$/,
+      "outbound template version 4 (generated booking prompt)",
+    );
     assert.match(buildUniversalAgentConfig(snapshot({}), VOICE).fingerprint, /^u1-[0-9a-f]{8}$/);
+  });
+
+  test("tenant isolation: the prompt follows capabilities and category, never a customer's own data", () => {
+    const salon = (caps: Record<string, boolean>) =>
+      buildOutboundAgentConfig(
+        {
+          ...snapshot(caps, "Sunrise Salon"),
+          business: { ...snapshot({}).business, name: "Sunrise Salon", business_type: "salon" },
+        },
+        VOICE,
+      );
+    const dental = buildOutboundAgentConfig(snapshot({ calendar_book: true }), VOICE);
+    const salonBooking = salon({ calendar_book: true });
+    // Same capabilities and category -> the same prompt for any customer.
+    assert.equal(
+      buildOutboundAgentConfig(snapshot({ calendar_book: true }, "Other Dental"), VOICE)
+        .systemPrompt,
+      dental.systemPrompt,
+    );
+    assert.equal(salonBooking.systemPrompt, salon({ calendar_book: true }).systemPrompt);
+    assert.deepEqual(dental.tools, salonBooking.tools);
+    assert.deepEqual(dental.callVariables, salonBooking.callVariables);
+    // Customer data never enters the prompt; it stays in the customer's own settings.
+    for (const cfg of [dental, salonBooking])
+      for (const own of ["Smile Dental", "Sunrise Salon", "+919800000000", "Cleaning", "Aria"])
+        assert.ok(!cfg.systemPrompt.includes(own), own);
+    assert.match(salonBooking.callHandling.voicemailMessage, /Sunrise Salon/);
+    assert.doesNotMatch(salonBooking.callHandling.voicemailMessage, /Smile Dental/);
+    assert.notEqual(dental.fingerprint, salonBooking.fingerprint);
+  });
+
+  test("outbound booking follows the customer's own booking capability", () => {
+    const withBooking = buildOutboundAgentConfig(snapshot({ calendar_book: true }), VOICE);
+    const without = buildOutboundAgentConfig(snapshot({}), VOICE);
+    assert.ok(withBooking.tools.enable.includes("book_appointment"));
+    assert.ok(!without.tools.enable.includes("book_appointment"));
+    assert.ok(without.tools.enable.includes("check_availability"), "availability stays");
+    assert.match(withBooking.systemPrompt, /tool:book_appointment/);
+    assert.doesNotMatch(without.systemPrompt, /book_appointment/);
+    assert.match(without.systemPrompt, /This call cannot book/);
+    // Same rule as the inbound agent's capability mapping.
+    for (const caps of [{}, { calendar_book: true }, { book_appointment: true }])
+      assert.equal(
+        buildOutboundAgentConfig(snapshot(caps), VOICE).tools.enable.includes("book_appointment"),
+        buildUniversalAgentConfig(snapshot(caps), VOICE).tools.enable.includes("book_appointment"),
+        JSON.stringify(caps),
+      );
   });
 });
 
@@ -489,7 +544,7 @@ describe("outbound template (v2 call settings, v3 booking): post-call variables 
 
   test("call settings: 300 s hard maximum, voicemail detection with a fixed message, no transfer", () => {
     const c = buildOutboundAgentConfig(snapshot({}), VOICE);
-    assert.equal(c.templateVersion, 3);
+    assert.equal(c.templateVersion, 4);
     assert.deepEqual(c.callHandling, {
       maxCallSeconds: 300,
       voicemailDetection: true,

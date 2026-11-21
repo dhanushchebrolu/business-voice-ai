@@ -14,6 +14,7 @@ import {
 } from "./sarvam-inbound-admission.server.ts";
 import { UNIVERSAL_CAPABILITIES } from "./universal-agent-config.ts";
 import { customGreetingFor, renderGreeting } from "./agent-greeting.ts";
+import { buildSarvamAgentPrompt, sarvamPromptGuardrails } from "./sarvam-agent-prompt.ts";
 import {
   isAgentRole,
   OUTBOUND_AGENT_TOOLS,
@@ -894,8 +895,9 @@ export async function handleSarvamAgentRequest(
       });
   }
 
-  // Role gate: an outbound agent's credential can never book, request a
-  // callback or reach any other write tool, whatever the agent sends. Checked
+  // Role gate: an outbound agent's credential can never request a callback or
+  // reach any write tool except booking (bound to its own open call, below),
+  // whatever the agent sends. Checked
   // before admission and before the body is read, so nothing else runs.
   if (!roleAllowsAgentApi(auth.role, tool)) {
     await audit(deps, auth, tool ?? "context", "rejected", undefined, {
@@ -907,7 +909,7 @@ export async function handleSarvamAgentRequest(
         ok: false,
         error: "forbidden_for_outbound_agent",
         guidance:
-          "This call cannot arrange callbacks or send messages. Give the clinic phone number from the business facts instead.",
+          "This call cannot arrange callbacks or send messages. Give the business phone number from the business facts instead.",
       },
       403,
     );
@@ -1083,12 +1085,12 @@ export async function handleSarvamAgentRequest(
       if (outboundCall && (!outboundCall.open || !outboundCall.phone))
         return refuse(
           "OUTBOUND_CALL_NOT_OPEN",
-          "Not booked: this call can no longer book. Tell the person it is not booked and give them the clinic phone number.",
+          "Not booked: this call can no longer book. Tell the person it is not booked and give them the business phone number.",
         );
       if (!outboundCall && auth.role === "outbound")
         return refuse(
           "OUTBOUND_CALL_NOT_VERIFIED",
-          "Not booked: ClickAI could not identify this call. Tell the person it is not booked and give them the clinic phone number.",
+          "Not booked: ClickAI could not identify this call. Tell the person it is not booked and give them the business phone number.",
         );
       if (outboundCall && !str(body, "customer_name", 200))
         return refuse(
@@ -1180,7 +1182,7 @@ export async function handleSarvamAgentRequest(
           error: {
             code: "OUTBOUND_USE_CALL_RESULT",
             message:
-              "On calls the clinic places, set outbound_result to callback_requested; the callback is saved when the call ends.",
+              "On calls the business places, set outbound_result to callback_requested; the callback is saved when the call ends.",
           },
         });
       }
@@ -1297,25 +1299,49 @@ export interface SarvamToolConfiguration {
   inputVariables: { name: string; defaultValue: string }[];
   outputVariables: { name: string; type: string; extractionPrompt: string }[];
   promptGuard: string;
+  /** The agent's complete system prompt, composed from the shared core (sarvam-agent-prompt.ts). */
+  systemPrompt: string;
   allowlistIps: string[];
+}
+
+/** What the generated prompt depends on: the customer's tools and business category. */
+export interface SarvamTemplateOptions {
+  /** ClickAI tools this customer's agent has (from its capabilities). Defaults to the role's full set. */
+  tools?: readonly string[];
+  /** Dental or medical business: emergency and medical-advice guidance. */
+  healthcare?: boolean;
 }
 
 /**
  * The configuration for one of the customer's two agents. The outbound agent
- * gets only OUTBOUND_AGENT_TOOLS (agent-roles.ts), the variables ClickAI sets
- * on every outbound call, and an opt-out output; ClickAI's API refuses
- * anything else from its credential anyway.
+ * gets only OUTBOUND_AGENT_TOOLS (agent-roles.ts) that the customer's
+ * capabilities allow, the variables ClickAI sets on every outbound call and an
+ * opt-out output; ClickAI's API refuses anything else from its credential
+ * anyway. Both get a system prompt from the same shared core.
  */
 export function sarvamToolConfiguration(
   baseUrl: string,
   role: AgentRole = "inbound",
+  options: SarvamTemplateOptions = {},
 ): SarvamToolConfiguration {
   const inbound = inboundToolConfiguration(baseUrl);
-  if (role === "inbound") return { role, ...inbound };
-  const allowed = new Set<string>(OUTBOUND_AGENT_TOOLS);
+  const healthcare = options.healthcare ?? false;
+  if (role === "inbound") {
+    const tools = options.tools ?? inbound.tools.map((t) => t.name);
+    return {
+      role,
+      ...inbound,
+      systemPrompt: buildSarvamAgentPrompt({ role, tools, healthcare }),
+    };
+  }
+  const allowed = new Set<string>(
+    OUTBOUND_AGENT_TOOLS.filter((t) => !options.tools || options.tools.includes(t)),
+  );
+  const tools = inbound.tools.filter((t) => allowed.has(t.name));
+  const promptOptions = { role, tools: tools.map((t) => t.name), healthcare } as const;
   return {
     role,
-    tools: inbound.tools.filter((t) => allowed.has(t.name)),
+    tools,
     inputVariables: [
       ...inbound.inputVariables,
       { name: "call_direction", defaultValue: "outbound" },
@@ -1337,7 +1363,7 @@ export function sarvamToolConfiguration(
         name: "wrong_number",
         type: "Enum: yes, no",
         extractionPrompt:
-          "yes only if the person said it is the wrong number or that they are not the person the clinic meant to reach; otherwise no.",
+          "yes only if the person said it is the wrong number or that they are not the person the business meant to reach; otherwise no.",
       },
       {
         name: "interest_level",
@@ -1352,12 +1378,15 @@ export function sarvamToolConfiguration(
           "Answer in order and stop at the first yes: asked not to be called or contacted again → opted_out; wrong number or not the person meant → wrong_person; answering machine, beep or recorded greeting → voicemail; no real conversation → no_conversation; explicitly asked to be contacted later → callback_requested; clearly declined → not_interested; otherwise interested.",
       },
     ],
-    promptGuard: `This agent only makes outbound calls for the business. Business facts come only from the ClickAI variables or the get_business_info tool. To book: call check_availability for the date and service, offer only times it returned, let the person choose one, ask for their name if you do not have it, then call book_appointment with that date, time, service and name. Say the appointment is booked only when the reply has success true and bookingOutcome "confirmed"; for "saved_calendar_sync_failed" say it is saved and the clinic will confirm it; for anything else say clearly it is NOT booked, and offer another free time or the business phone number (business_phone). Never say it is booked before that reply. It never holds a time, arranges a callback or sends a message: for those it gives business_phone. If the person asks not to be called again, it apologises and ends the call at once.`,
+    promptGuard: sarvamPromptGuardrails(promptOptions),
+    systemPrompt: buildSarvamAgentPrompt(promptOptions),
     allowlistIps: inbound.allowlistIps,
   };
 }
 
-function inboundToolConfiguration(baseUrl: string): Omit<SarvamToolConfiguration, "role"> {
+function inboundToolConfiguration(
+  baseUrl: string,
+): Omit<SarvamToolConfiguration, "role" | "systemPrompt"> {
   const auth = "Bearer token: the Sarvam secret holding this customer's ClickAI integration token";
   const base = `${baseUrl.replace(/\/+$/, "")}/api/public/sarvam/agent`;
   const contextVars = [

@@ -1673,17 +1673,17 @@ describe("dual agents: the outbound agent's credential is limited by role", () =
     // Booking sends ClickAI's own call id, so the server books for the dialled number.
     const bookTool = cfg.tools.find((t) => t.name === "book_appointment")!;
     assert.equal(bookTool.body["clickai_call_id"], "@clickai_call_id");
-    // The agent is told the whole flow and never to claim a booking without confirmation.
+    // The agent's generated prompt carries the whole flow and never claims a booking
+    // without confirmation (full coverage in sarvam-agent-prompt.test.ts).
     for (const step of [
       /check_availability/,
-      /only times it returned/,
+      /times the tool returned/,
       /ask for their name/,
       /book_appointment/,
       /bookingOutcome "confirmed"/,
       /NOT booked/,
-      /Never say it is booked before that reply/,
     ])
-      assert.match(cfg.promptGuard, step);
+      assert.match(cfg.systemPrompt ?? "", step);
     const names = cfg.inputVariables.map((v) => v.name);
     for (const v of [
       "call_direction",

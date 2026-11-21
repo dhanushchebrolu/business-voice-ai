@@ -6,6 +6,7 @@ import {
   OUTBOUND_FORBIDDEN_TOOLS,
   OUTBOUND_MAX_CALL_SECONDS_CAP,
 } from "./agent-roles.ts";
+import { buildSarvamAgentPrompt, HEALTHCARE_BUSINESS_TYPES } from "./sarvam-agent-prompt.ts";
 
 /**
  * The customer-specific configuration of ClickAI's ONE universal Sarvam
@@ -303,13 +304,17 @@ export function capabilityAllowsTool(
 /* ------------------------------------------------------------------ */
 
 /** Bump when the outbound template's tool set, variables or prompt contract change. */
-export const OUTBOUND_AGENT_TEMPLATE_VERSION = 3;
+export const OUTBOUND_AGENT_TEMPLATE_VERSION = 4;
 
 /**
  * The customer's OUTBOUND agent: the same business data (read live by the
  * on-start hook) and the same voice and languages as the inbound agent, but a
- * fixed tool set that does not depend on capabilities. Booking, callbacks,
- * reminders and transfer are never on it, whatever the customer enables.
+ * fixed tool allow-list (OUTBOUND_AGENT_TOOLS): book_appointment only when the
+ * customer's own booking capability is on (the inbound capability mapping),
+ * and a system prompt from the same shared core as the inbound agent
+ * (sarvam-agent-prompt.ts). It books only for the number ClickAI dialled;
+ * callbacks, reminders and transfer are never on it, whatever the customer
+ * enables.
  */
 export interface OutboundAgentConfig {
   role: "outbound";
@@ -318,6 +323,8 @@ export interface OutboundAgentConfig {
   tools: { enable: string[]; forbidden: string[] };
   /** Agent variables ClickAI sets on every outbound call; the agent must declare them. */
   callVariables: string[];
+  /** The agent's complete system prompt (Sarvam syntax), composed from the shared core. */
+  systemPrompt: string;
   /**
    * Sarvam call settings for the agent. maxCallSeconds is the hard maximum (Sarvam
    * ends the call there; ClickAI confirms nothing longer). Voicemail detection is
@@ -346,17 +353,25 @@ export function buildOutboundAgentConfig(
     voiceLanguage === undefined
       ? { config: null, problem: null }
       : voiceLanguageConfig(voiceLanguage);
+  // Booking follows the customer's own capability, exactly as on the inbound agent.
+  const canBook = buildUniversalAgentConfig(s).tools.enable.includes("book_appointment");
+  const enable = OUTBOUND_AGENT_TOOLS.filter((t) => t !== "book_appointment" || canBook);
   const core = {
     role: "outbound" as const,
     templateVersion: OUTBOUND_AGENT_TEMPLATE_VERSION,
     businessType: s.business.business_type,
-    tools: { enable: [...OUTBOUND_AGENT_TOOLS], forbidden: [...OUTBOUND_FORBIDDEN_TOOLS] },
+    tools: { enable, forbidden: [...OUTBOUND_FORBIDDEN_TOOLS] },
     callVariables: [
       "call_direction",
       "clickai_call_id",
       "campaign_objective",
       "campaign_instructions",
     ],
+    systemPrompt: buildSarvamAgentPrompt({
+      role: "outbound",
+      tools: enable,
+      healthcare: HEALTHCARE_BUSINESS_TYPES.includes(s.business.business_type),
+    }),
     callHandling: {
       maxCallSeconds: OUTBOUND_MAX_CALL_SECONDS_CAP,
       voicemailDetection: true as const,

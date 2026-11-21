@@ -314,7 +314,7 @@ export function outboundChecklist(o: OutboundChecklistInput): ChecklistItem[] {
       label: "Outbound credential issued",
       status: live ? "done" : "todo",
       detail: live
-        ? "An active outbound credential exists. ClickAI refuses booking, callbacks and every other write tool for it."
+        ? "An active outbound credential exists. ClickAI lets it book only for the number it dialled on an open call, and refuses callbacks and every other write tool."
         : "Issue the outbound credential, then store it as the Sarvam secret on the outbound agent (never the inbound agent's secret).",
     },
     {

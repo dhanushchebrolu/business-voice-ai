@@ -68,11 +68,12 @@ export function OutboundAgentPanel(p: OutboundAgentPanelProps) {
   );
   const gate = outboundRegistrationGate(p.gate, appId);
   const templateJson = p.template ? JSON.stringify(p.template, null, 2) : "";
+  const systemPrompt = p.template?.systemPrompt ?? "";
 
   return (
     <SectionCard
       title="Outbound agent"
-      description="A second, separate Sarvam agent that ClickAI dials for outbound calls. It can read business data, check availability and record the call's outcome; it can never book, arrange callbacks, send reminders or transfer calls. ClickAI refuses those for its credential even if the agent is misconfigured."
+      description="A second, separate Sarvam agent that ClickAI dials for outbound calls. It can read business data, check availability, book a free time for the person ClickAI called, and record the call's outcome; it can never arrange callbacks, send reminders or transfer calls. ClickAI refuses those for its credential, and books only for the number it dialled, even if the agent is misconfigured."
     >
       <div className="space-y-4 text-sm" data-testid="outbound-agent-panel">
         <div>
@@ -146,6 +147,10 @@ export function OutboundAgentPanel(p: OutboundAgentPanelProps) {
             </li>
             <li>Use the outbound credential above as the Bearer token of every ClickAI tool.</li>
             <li>
+              Paste the generated system prompt below as the agent's instructions, unchanged. It is
+              the same for every customer; the business's details reach it as variables.
+            </li>
+            <li>
               {p.config?.voiceLanguage
                 ? `Same voice and languages as the inbound agent (voice ${p.config.voiceLanguage.voice.name}, starting in ${p.config.voiceLanguage.defaultLanguage}).`
                 : "Save this customer's voice & languages first."}{" "}
@@ -173,6 +178,27 @@ export function OutboundAgentPanel(p: OutboundAgentPanelProps) {
               >
                 {templateJson}
               </pre>
+              {systemPrompt ? (
+                <>
+                  <div className="flex items-center gap-2 pt-2">
+                    <span className="text-xs text-muted-foreground">Outbound system prompt</span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs"
+                      onClick={() => copyText(systemPrompt, "Outbound system prompt")}
+                    >
+                      Copy system prompt
+                    </Button>
+                  </div>
+                  <pre
+                    className="max-h-64 overflow-auto whitespace-pre-wrap rounded bg-muted p-2 text-xs"
+                    data-testid="outbound-system-prompt"
+                  >
+                    {systemPrompt}
+                  </pre>
+                </>
+              ) : null}
             </div>
           ) : (
             <p className="mt-1 text-xs text-destructive">

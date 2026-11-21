@@ -206,10 +206,19 @@ async function loadDetail(orgId: string) {
   // credential is referenced by name, its value is shown once at issue time).
   const base = process.env["TELEPHONY_WEBHOOK_BASE_URL"]?.replace(/\/+$/, "");
   const { sarvamToolConfiguration } = await import("@/lib/sarvam-agent-api.server");
+  const { HEALTHCARE_BUSINESS_TYPES } = await import("@/lib/sarvam-agent-prompt");
+  // The prompts follow this customer's own tools and business category.
+  const healthcare = HEALTHCARE_BUSINESS_TYPES.includes(business?.business_type ?? "");
   const templates = base
     ? {
-        inbound: sarvamToolConfiguration(base, "inbound"),
-        outbound: sarvamToolConfiguration(base, "outbound"),
+        inbound: sarvamToolConfiguration(base, "inbound", {
+          healthcare,
+          ...(config ? { tools: config.tools.enable } : {}),
+        }),
+        outbound: sarvamToolConfiguration(base, "outbound", {
+          healthcare,
+          ...(outboundConfig ? { tools: outboundConfig.tools.enable } : {}),
+        }),
       }
     : null;
 
