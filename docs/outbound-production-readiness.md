@@ -164,6 +164,7 @@ instant-outbound API takes no idempotency key: an ambiguous start is held in
 | 2026-11-21 07:27:52 | `ac20dc95-5efa-47b3-b1cc-e4012f7808bc` | `1464e38` | 44879686871 green                             | `e7472488-514c-4ad6-8920-0fbecabea732` | Verified (fix seen live) |
 | 2026-11-21 08:30:40 | `7ba8937d-1325-4205-bf85-c96550d07393` | `a8bb13b` | 44883771803 green                             | `ac20dc95-5efa-47b3-b1cc-e4012f7808bc` | Verified                 |
 | 2026-11-21 11:12:09 | `f8737bfb-3afb-4393-a098-ea45e6b6a5bf` | `b828823` | 44897430318 green                             | `7ba8937d-1325-4205-bf85-c96550d07393` | Verified                 |
+| 2026-11-21 11:58:37 | `85bf47fe-2ba4-4ef8-a124-e7d58d687f6b` | `b5311c8` | 44901049838 green                             | `f8737bfb-3afb-4393-a098-ea45e6b6a5bf` | Verified                 |
 
 Procedure for each: clean worktree at the exact commit, `bun install
 --frozen-lockfile`, `npm run build` with the live Worker's own
@@ -182,6 +183,8 @@ new outbound call.
 Rollback (code only; no migration involved):
 
 ```powershell
+# Booking reply template only (keeps the shared prompt core):
+npx wrangler versions deploy f8737bfb-3afb-4393-a098-ea45e6b6a5bf@100% --name klyro --yes
 # Shared prompt core only (keeps B1, D1, R1, H3):
 npx wrangler versions deploy 7ba8937d-1325-4205-bf85-c96550d07393@100% --name klyro --yes
 # B1 only (keeps D1, R1 and H3):
@@ -356,3 +359,10 @@ composed from one core (`src/lib/sarvam-agent-prompt.ts`); outbound
 template v4. Nothing in Sarvam was changed. Baseline:
 `docs/sarvam-prompt-baseline-2026-11-21.md` (inbound part provisional: taken
 from the v6 draft; live v5 still to be captured).
+
+Commit `b5311c8`, deployed as `85bf47fe`: ClickAI generates the shared
+`book_appointment` reply template for both agents (inbound last branch offers
+a callback only with request_callback; outbound never). Provisioning for
+Smile Dental: outbound template fingerprint `o5-810226e2`, prompt sha256
+prefix `0d6956345b6e1c49`, reply template sha256 prefix `31850d0f9d2e065f`.
+Sarvam not yet changed.
