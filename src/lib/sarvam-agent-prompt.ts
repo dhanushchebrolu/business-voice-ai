@@ -40,15 +40,54 @@ export interface SarvamPromptOptions {
 export const HEALTHCARE_BUSINESS_TYPES: readonly string[] = ["dental_clinic", "medical_clinic"];
 
 /**
- * How the booking tool's reply reads. Inbound agents may carry a Sarvam reply
- * template that starts the reply with these words; without one the agent sees
- * ClickAI's JSON (success, bookingOutcome). The prompt accepts both.
+ * How the booking tool's reply reads. The generated reply template
+ * (bookingReplyTemplate) starts the reply with these words; an agent without
+ * it sees ClickAI's JSON (success, bookingOutcome). The prompt accepts both.
  */
 export const BOOKING_REPLY = {
   confirmed: 'CONFIRMED (success true and bookingOutcome "confirmed")',
   saved: 'SAVED, NOT CONFIRMED (bookingOutcome "saved_calendar_sync_failed")',
   pending: 'PENDING, NOT CONFIRMED (bookingOutcome "pending")',
 } as const;
+
+/**
+ * The Sarvam reply template (Jinja) for the book_appointment tool: turns
+ * ClickAI's JSON reply ({ ok, service, result: { success, bookingOutcome,
+ * error: { code, message, requested, options } } }) into the words the prompt
+ * reacts to. One template for both channels, modelled on the inbound v5
+ * template (docs/sarvam-prompt-baseline-2026-11-21.md); only the last branch
+ * differs: inbound offers a callback when the agent has request_callback,
+ * outbound never does. Every refusal code ClickAI's booking endpoint returns
+ * has its own branch, so nothing is ever read as booked.
+ */
+export function bookingReplyTemplate(o: { role: PromptRole; tools: readonly string[] }): string {
+  const callback = o.role === "inbound" && o.tools.includes("request_callback");
+  const list =
+    "{% for s in result.error.options %}{{ s }}{% if not loop.last %}, {% endif %}{% endfor %}";
+  const code = (c: string) => `{% elif result and result.error and result.error.code == "${c}" %}`;
+  const fallback = callback
+    ? "Say the appointment could not be booked. Do not say it is booked, saved or that anyone will call. Offer to have the team call them back; only if they agree, use request_callback."
+    : "Say clearly that it is NOT booked. Do not say it is booked, saved or that anyone will call. Offer another free time, or give the business phone number.";
+  return [
+    '{% if ok and result.success and result.bookingOutcome == "confirmed" %}CONFIRMED: ClickAI has booked {% if service %}{{ service.name }} {% endif %}for the date and time you sent. Tell them it is booked, with the day, date and time.',
+    '{% elif ok and result.success and result.bookingOutcome == "saved_calendar_sync_failed" %}SAVED, NOT CONFIRMED: ClickAI saved the request but the appointment is not confirmed. Say exactly that: the business has the request and will confirm it. Do not say it is booked.',
+    "{% elif ok and result.success %}PENDING, NOT CONFIRMED: the booking is not confirmed yet. Say it is not confirmed yet; do not say it is booked.",
+    `${code("SLOT_NO_LONGER_AVAILABLE")}NOT BOOKED: that time was just taken. Do not say it is booked. Call check_availability again for that date and offer only times it returns.`,
+    `${code("SLOT_OUTSIDE_SCHEDULE")}NOT BOOKED: that time is outside the schedule. Offer only times check_availability returns.`,
+    `${code("SERVICE_NOT_OFFERED")}SERVICE NOT OFFERED: "{{ result.error.requested }}" is not a service of this business. Do not check times or book it. Say politely that it is not offered and name the services that are: ${list}. Never pick a different service for them.`,
+    `${code("SERVICE_AMBIGUOUS")}SERVICE UNCLEAR: "{{ result.error.requested }}" matches more than one service. Ask which one they want: ${list}.`,
+    `${code("SERVICE_REQUIRED")}SERVICE NEEDED: ask which service they want: ${list}.`,
+    `${code("CUSTOMER_NAME_REQUIRED")}NOT BOOKED YET: their name is needed. Ask for their name, then book again.`,
+    `${code("TEST_CALL_NOT_SAVED")}NOT BOOKED (test call): {{ result.error.message }}. Say this was a test and nothing was booked.`,
+    ...(o.role === "outbound"
+      ? [
+          `${code("OUTBOUND_CALL_NOT_OPEN")}NOT BOOKED: this call can no longer book. Say it is not booked and give the business phone number.`,
+          `${code("OUTBOUND_CALL_NOT_VERIFIED")}NOT BOOKED: this call could not be verified. Say it is not booked and give the business phone number.`,
+        ]
+      : []),
+    `{% else %}NOT BOOKED{% if result and result.error and result.error.message %} ({{ result.error.message }}){% endif %}. Nothing was booked and nothing was saved. ${fallback}{% endif %}`,
+  ].join("");
+}
 
 function persona(role: PromptRole): string {
   return role === "inbound"

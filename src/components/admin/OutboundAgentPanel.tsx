@@ -69,6 +69,8 @@ export function OutboundAgentPanel(p: OutboundAgentPanelProps) {
   const gate = outboundRegistrationGate(p.gate, appId);
   const templateJson = p.template ? JSON.stringify(p.template, null, 2) : "";
   const systemPrompt = p.template?.systemPrompt ?? "";
+  const bookingReply =
+    p.template?.tools.find((t) => t.name === "book_appointment")?.responseTemplate ?? "";
 
   return (
     <SectionCard
@@ -151,6 +153,10 @@ export function OutboundAgentPanel(p: OutboundAgentPanelProps) {
               the same for every customer; the business's details reach it as variables.
             </li>
             <li>
+              On the book_appointment tool, paste the booking reply template below as its reply
+              (send fields from the API response to the agent), unchanged.
+            </li>
+            <li>
               {p.config?.voiceLanguage
                 ? `Same voice and languages as the inbound agent (voice ${p.config.voiceLanguage.voice.name}, starting in ${p.config.voiceLanguage.defaultLanguage}).`
                 : "Save this customer's voice & languages first."}{" "}
@@ -196,6 +202,29 @@ export function OutboundAgentPanel(p: OutboundAgentPanelProps) {
                     data-testid="outbound-system-prompt"
                   >
                     {systemPrompt}
+                  </pre>
+                </>
+              ) : null}
+              {bookingReply ? (
+                <>
+                  <div className="flex items-center gap-2 pt-2">
+                    <span className="text-xs text-muted-foreground">
+                      book_appointment reply template
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs"
+                      onClick={() => copyText(bookingReply, "Booking reply template")}
+                    >
+                      Copy reply template
+                    </Button>
+                  </div>
+                  <pre
+                    className="max-h-64 overflow-auto whitespace-pre-wrap rounded bg-muted p-2 text-xs"
+                    data-testid="outbound-booking-reply-template"
+                  >
+                    {bookingReply}
                   </pre>
                 </>
               ) : null}

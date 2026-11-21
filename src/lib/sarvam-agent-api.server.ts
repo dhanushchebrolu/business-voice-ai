@@ -14,7 +14,11 @@ import {
 } from "./sarvam-inbound-admission.server.ts";
 import { UNIVERSAL_CAPABILITIES } from "./universal-agent-config.ts";
 import { customGreetingFor, renderGreeting } from "./agent-greeting.ts";
-import { buildSarvamAgentPrompt, sarvamPromptGuardrails } from "./sarvam-agent-prompt.ts";
+import {
+  bookingReplyTemplate,
+  buildSarvamAgentPrompt,
+  sarvamPromptGuardrails,
+} from "./sarvam-agent-prompt.ts";
 import {
   isAgentRole,
   OUTBOUND_AGENT_TOOLS,
@@ -1284,6 +1288,21 @@ export interface SarvamToolSpec {
   body: Record<string, string>;
   saveIntoVariables?: string[];
   purpose: string;
+  /** Sarvam reply template (Jinja) applied to the tool's response, when the tool has one. */
+  responseTemplate?: string;
+}
+
+/** Adds the shared booking reply template to the book_appointment spec (sarvam-agent-prompt.ts). */
+function withReplyTemplates(
+  specs: SarvamToolSpec[],
+  role: AgentRole,
+  tools: readonly string[],
+): SarvamToolSpec[] {
+  return specs.map((t) =>
+    t.name === "book_appointment"
+      ? { ...t, responseTemplate: bookingReplyTemplate({ role, tools }) }
+      : t,
+  );
 }
 
 /**
@@ -1331,17 +1350,18 @@ export function sarvamToolConfiguration(
     return {
       role,
       ...inbound,
+      tools: withReplyTemplates(inbound.tools, role, tools),
       systemPrompt: buildSarvamAgentPrompt({ role, tools, healthcare }),
     };
   }
   const allowed = new Set<string>(
     OUTBOUND_AGENT_TOOLS.filter((t) => !options.tools || options.tools.includes(t)),
   );
-  const tools = inbound.tools.filter((t) => allowed.has(t.name));
-  const promptOptions = { role, tools: tools.map((t) => t.name), healthcare } as const;
+  const specs = inbound.tools.filter((t) => allowed.has(t.name));
+  const promptOptions = { role, tools: specs.map((t) => t.name), healthcare } as const;
   return {
     role,
-    tools,
+    tools: withReplyTemplates(specs, role, promptOptions.tools),
     inputVariables: [
       ...inbound.inputVariables,
       { name: "call_direction", defaultValue: "outbound" },

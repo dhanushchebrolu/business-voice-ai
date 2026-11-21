@@ -304,7 +304,7 @@ export function capabilityAllowsTool(
 /* ------------------------------------------------------------------ */
 
 /** Bump when the outbound template's tool set, variables or prompt contract change. */
-export const OUTBOUND_AGENT_TEMPLATE_VERSION = 4;
+export const OUTBOUND_AGENT_TEMPLATE_VERSION = 5;
 
 /**
  * The customer's OUTBOUND agent: the same business data (read live by the

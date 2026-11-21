@@ -1,7 +1,11 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { buildSarvamAgentPrompt, sarvamPromptGuardrails } from "./sarvam-agent-prompt.ts";
+import {
+  bookingReplyTemplate,
+  buildSarvamAgentPrompt,
+  sarvamPromptGuardrails,
+} from "./sarvam-agent-prompt.ts";
 import { sarvamToolConfiguration } from "./sarvam-agent-api.server.ts";
 import { OUTBOUND_AGENT_TOOLS, roleAllowsAgentApi } from "./agent-roles.ts";
 
@@ -271,5 +275,80 @@ describe("generated book_appointment tool matches the deployed backend (a8bb13b)
       );
     }
     assert.equal(tool.body["clickai_call_id"], "@clickai_call_id");
+  });
+});
+
+describe("booking reply template (generated for both channels)", () => {
+  const reply = (tpl: ReturnType<typeof sarvamToolConfiguration>) =>
+    tpl.tools.find((t) => t.name === "book_appointment")!.responseTemplate!;
+  const IN_REPLY = reply(inboundTpl);
+  const OUT_REPLY = reply(outboundTpl);
+  const server = readFileSync(new URL("./sarvam-agent-api.server.ts", import.meta.url), "utf8");
+  const calendar = readFileSync(
+    new URL("./calendar/booking-service.server.ts", import.meta.url),
+    "utf8",
+  );
+
+  test("both booking tools carry it; no other tool does", () => {
+    for (const tpl of [inboundTpl, outboundTpl])
+      for (const t of tpl.tools)
+        assert.equal(Boolean(t.responseTemplate), t.name === "book_appointment", t.name);
+  });
+
+  test("it produces exactly the reply words the prompt reacts to, confirmed only on success", () => {
+    for (const r of [IN_REPLY, OUT_REPLY]) {
+      assert.match(
+        r,
+        /^\{% if ok and result\.success and result\.bookingOutcome == "confirmed" %\}CONFIRMED:/,
+      );
+      assert.match(r, /bookingOutcome == "saved_calendar_sync_failed" %\}SAVED, NOT CONFIRMED:/);
+      assert.match(r, /\{% elif ok and result\.success %\}PENDING, NOT CONFIRMED:/);
+      assert.equal((r.match(/CONFIRMED: ClickAI has booked/g) ?? []).length, 1);
+      assert.match(r, /\{% else %\}NOT BOOKED/);
+      assert.ok(r.endsWith("{% endif %}"));
+    }
+  });
+
+  test("every refusal code the booking endpoint returns has its own branch", () => {
+    for (const c of [
+      "SLOT_NO_LONGER_AVAILABLE",
+      "SLOT_OUTSIDE_SCHEDULE",
+      "SERVICE_NOT_OFFERED",
+      "SERVICE_AMBIGUOUS",
+      "SERVICE_REQUIRED",
+      "CUSTOMER_NAME_REQUIRED",
+      "TEST_CALL_NOT_SAVED",
+    ]) {
+      assert.ok(server.includes(`"${c}"`) || calendar.includes(`"${c}"`), `backend returns ${c}`);
+      for (const r of [IN_REPLY, OUT_REPLY]) assert.match(r, new RegExp(`code == "${c}"`), c);
+    }
+    for (const c of ["OUTBOUND_CALL_NOT_OPEN", "OUTBOUND_CALL_NOT_VERIFIED"]) {
+      assert.ok(server.includes(`"${c}"`), c);
+      assert.match(OUT_REPLY, new RegExp(`code == "${c}"`), c);
+    }
+  });
+
+  test("the channels differ only in the final branch and the outbound-only codes", () => {
+    const common = (r: string) =>
+      r
+        .replace(
+          /\{% elif result and result\.error and result\.error\.code == "OUTBOUND_CALL_[A-Z_]+" %\}[^{]*/g,
+          "",
+        )
+        .replace(/\{% else %\}[\s\S]*$/, "");
+    assert.equal(common(IN_REPLY), common(OUT_REPLY));
+    assert.match(IN_REPLY, /\{% else %\}[\s\S]*request_callback/);
+    assert.doesNotMatch(OUT_REPLY, /callback/i);
+    assert.match(
+      OUT_REPLY,
+      /\{% else %\}[\s\S]*Offer another free time, or give the business phone number/,
+    );
+  });
+
+  test("without a callback tool, inbound never offers one; no tenant wording", () => {
+    const r = bookingReplyTemplate({ role: "inbound", tools: ["book_appointment"] });
+    assert.doesNotMatch(r, /callback/i);
+    for (const t of [IN_REPLY, OUT_REPLY, r])
+      assert.doesNotMatch(t, /clinic|dental|smile|patient/i);
   });
 });
