@@ -139,8 +139,21 @@ function AdminCalls() {
         {rows.length === 0 ? (
           <EmptyState
             icon={PhoneCall}
-            title="No calls yet"
-            description="Calls will appear here as numbers go live."
+            {...(needsReview
+              ? {
+                  title: "No calls need review",
+                  description:
+                    "No Sarvam outbound call is unresolved, waiting to be finalized, or in conflict.",
+                }
+              : orgId.trim()
+                ? {
+                    title: "No calls for this organization",
+                    description: "Clear the filter to see every customer's calls.",
+                  }
+                : {
+                    title: "No calls yet",
+                    description: "Calls will appear here as numbers go live.",
+                  })}
           />
         ) : (
           <div className="overflow-x-auto">

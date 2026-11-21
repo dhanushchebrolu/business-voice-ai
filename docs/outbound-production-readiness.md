@@ -14,29 +14,30 @@ npx -y supabase@2.120.0 db query --linked --project-ref eorazvlmqwunmhwviocn -f 
 
 ## 1. Master checklist
 
-| #   | Item                                        | State                                                   |
-| --- | ------------------------------------------- | ------------------------------------------------------- |
-| 1   | H1 retry limits (DB + app)                  | Live: migration 20261122090000, Worker since `8cae8981` |
-| 2   | H2 fail-closed allowlist                    | Live since `4d3a8a24`                                   |
-| 3   | H3 emergency stop at launch/resume/pre-dial | **Deployed** `da71e765` (commit `0cd054a`)              |
-| 4   | R1 undialled contact failed after a stop    | **Deployed** `e7472488` (commit `8abac61`)              |
-| 5   | Contact lifecycle and recovery sweeps       | Audited (§3.2)                                          |
-| 6   | Duplicate call / idempotency                | Audited (§3.3)                                          |
-| 7   | Provider lifecycle and webhooks             | Audited (§3.4), provider behaviour partly unverifiable  |
-| 8   | Wallet, billing, budget                     | Audited (§3.5)                                          |
-| 9   | Tenant isolation and privacy                | Audited (§3.6), production RLS checked                  |
-| 10  | Authenticated dashboard walkthrough         | **Blocked** (§6)                                        |
-| 11  | Configuration and operations                | Checked read-only (§5)                                  |
-| 12  | Supervised first call                       | Not started (needs owner approval, §8)                  |
+| #   | Item                                        | State                                                           |
+| --- | ------------------------------------------- | --------------------------------------------------------------- |
+| 1   | H1 retry limits (DB + app)                  | Live: migration 20261122090000, Worker since `8cae8981`         |
+| 2   | H2 fail-closed allowlist                    | Live since `4d3a8a24`                                           |
+| 3   | H3 emergency stop at launch/resume/pre-dial | **Deployed** `da71e765` (commit `0cd054a`)                      |
+| 4   | R1 undialled contact failed after a stop    | **Deployed** `e7472488` (commit `8abac61`)                      |
+| 5   | Contact lifecycle and recovery sweeps       | Audited (§3.2)                                                  |
+| 6   | Duplicate call / idempotency                | Audited (§3.3)                                                  |
+| 7   | Provider lifecycle and webhooks             | Audited (§3.4), provider behaviour partly unverifiable          |
+| 8   | Wallet, billing, budget                     | Audited (§3.5)                                                  |
+| 9   | Tenant isolation and privacy                | Audited (§3.6), production RLS checked                          |
+| 10  | Authenticated dashboard walkthrough         | Admin pages verified; customer pages need a customer login (§6) |
+| 11  | Configuration and operations                | Checked read-only (§5)                                          |
+| 12  | Supervised first call                       | Not started (needs owner approval, §8)                          |
 
 ## 2. Findings
 
-| ID  | Severity | Finding                                                                                                                                                                                                                                                                                                                                         | Status                    |
-| --- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
-| H3  | High     | The database emergency stop was read only inside the admission functions. A stop set after admission still let that call reach Sarvam; launch/resume ignored it; the LiveKit path never read it.                                                                                                                                                | Fixed `0cd054a`, deployed |
-| R1  | High     | A pause, cancel, kill switch or the end of calling hours landing between admission and the dial finalized the never-started call while the contact still pointed at it, so its `failed` outcome reached a contact that was never dialled: an attempt was used and the contact became terminal `failed` (lost from the campaign) or got a retry. | Fixed `8abac61`           |
-| L1  | Low      | Sarvam can mark an instant-outbound attempt for its own retry (`next_action_status = retry`). ClickAI sends no retry setting and cannot confirm whether Sarvam redials an instant call. Reconciliation treats it as pending and never redials itself.                                                                                           | Documented limitation     |
-| L2  | Low      | `releaseOrphanedCampaignClaims` returns an orphaned claim (no call row after 15 min) to `pending` even when its campaign was cancelled meanwhile. Nothing dials a cancelled campaign, so it is cosmetic.                                                                                                                                        | Documented, not changed   |
+| ID  | Severity | Finding                                                                                                                                                                                                                                                                                                                                         | Status                            |
+| --- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- |
+| H3  | High     | The database emergency stop was read only inside the admission functions. A stop set after admission still let that call reach Sarvam; launch/resume ignored it; the LiveKit path never read it.                                                                                                                                                | Fixed `0cd054a`, deployed         |
+| R1  | High     | A pause, cancel, kill switch or the end of calling hours landing between admission and the dial finalized the never-started call while the contact still pointed at it, so its `failed` outcome reached a contact that was never dialled: an attempt was used and the contact became terminal `failed` (lost from the campaign) or got a retry. | Fixed `8abac61`                   |
+| L1  | Low      | Sarvam can mark an instant-outbound attempt for its own retry (`next_action_status = retry`). ClickAI sends no retry setting and cannot confirm whether Sarvam redials an instant call. Reconciliation treats it as pending and never redials itself.                                                                                           | Documented limitation             |
+| D1  | Low      | Admin Calls "Needs review" (and an organization filter) with no results showed "No calls yet / Calls will appear here as numbers go live", which misreads as "no calls ever" during a supervised call.                                                                                                                                          | Fixed (this commit), not deployed |
+| L2  | Low      | `releaseOrphanedCampaignClaims` returns an orphaned claim (no call row after 15 min) to `pending` even when its campaign was cancelled meanwhile. Nothing dials a cancelled campaign, so it is cosmetic.                                                                                                                                        | Documented, not changed           |
 
 No other critical or high issue was reproducible.
 
@@ -213,13 +214,35 @@ rejected), `outcome_unknown` (needs a decision), `finalization_state` and
 
 ## 6. Not verified, and why
 
-- **Authenticated dashboard walkthrough** (campaign draft, CSV import,
-  launch refusal, pause/resume/cancel, history, snapshot viewer): the built-in
-  browser has no signed-in session and production passwords are not entered
-  by Claude; most flows also need production writes (campaigns, contacts),
-  which are outside this program. Covered instead by server-function and
-  route tests. To verify: the owner signs in and walks the flows on a draft
-  campaign that is never launched.
+- **Authenticated dashboard (2026-11-21, owner signed in, admin account).**
+  Verified read-only in the browser:
+  - Admin overview loads; Payment enforcement shows Disabled.
+  - Admin **Calls** loads all 208 calls with financials; no console errors;
+    every request 200. **Needs review** returns 0 calls. Its empty state
+    said "No calls yet", fixed in `src/routes/admin.calls.tsx` (D1 below).
+  - **Call details** of the supervised call: completed, 79 s, provider id
+    and interaction id, cost ₹7 / charge ₹8, wallet debit −₹8, finalization
+    done in 1 attempt, webhook processed, transcript, "Not a campaign call".
+    Answered shows "—" (Sarvam's result webhook carries no answer time).
+    The detail's Refresh is a database read; "Load recording from Sarvam"
+    calls Sarvam and was not clicked.
+  - Admin **Jobs**: scheduler on, nothing dead-lettered, every kind
+    succeeding.
+  - Isolation: the admin account has no customer workspace, and `/app/*`
+    sends it to the public site; no customer data is shown to a non-member.
+
+  Not verified in the browser:
+  - **Admin Place Call form** (customer page `SarvamOutboundPanel`):
+    opening Smile Dental's admin customer page automatically calls Sarvam
+    (`getSarvamDeployments` → `getDeployment`, enabled whenever a number has
+    a deployment). That is a provider request, so the page was not opened.
+    Validation is covered by tests; the owner can open the page.
+  - **Customer Place Call dialog, campaign dashboard, customer tenant
+    isolation**: need a customer (Smile Dental member) sign-in. The dialog's
+    Call button stays disabled while outbound is off, so it cannot submit.
+  - Campaign draft, CSV import, launch refusal, pause/resume/cancel: need
+    production writes; covered by server-function and route tests.
+
 - **Provider behaviour**: Sarvam's own redial of an instant call (L1), the
   exact webhook sequence for busy/no-answer, and whether Sarvam ends the call
   at the agent's maximum length can only be seen on a real call.
