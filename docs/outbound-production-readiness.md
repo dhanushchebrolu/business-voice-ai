@@ -165,6 +165,7 @@ instant-outbound API takes no idempotency key: an ambiguous start is held in
 | 2026-11-21 08:30:40 | `7ba8937d-1325-4205-bf85-c96550d07393` | `a8bb13b` | 44883771803 green                             | `ac20dc95-5efa-47b3-b1cc-e4012f7808bc` | Verified                 |
 | 2026-11-21 11:12:09 | `f8737bfb-3afb-4393-a098-ea45e6b6a5bf` | `b828823` | 44897430318 green                             | `7ba8937d-1325-4205-bf85-c96550d07393` | Verified                 |
 | 2026-11-21 11:58:37 | `85bf47fe-2ba4-4ef8-a124-e7d58d687f6b` | `b5311c8` | 44901049838 green                             | `f8737bfb-3afb-4393-a098-ea45e6b6a5bf` | Verified                 |
+| 2026-11-21 12:31:09 | `d5512be9-5d5a-4bfa-bf31-89d5a1181574` | `30a56c5` | 44903657296 green                             | `85bf47fe-2ba4-4ef8-a124-e7d58d687f6b` | Verified                 |
 
 Procedure for each: clean worktree at the exact commit, `bun install
 --frozen-lockfile`, `npm run build` with the live Worker's own
@@ -366,3 +367,29 @@ a callback only with request_callback; outbound never). Provisioning for
 Smile Dental: outbound template fingerprint `o5-810226e2`, prompt sha256
 prefix `0d6956345b6e1c49`, reply template sha256 prefix `31850d0f9d2e065f`.
 Sarvam not yet changed.
+
+## 12. Sarvam outbound app v3 published (2026-11-21)
+
+Commit `30a56c5` (deployed `d5512be9`) generates the shared
+`check_availability` reply template; Provisioning fingerprint `o6-f2dcbcf3`.
+Applied to Sarvam app `Smile-Denta-a17cec18-1c23` (console, owner signed in):
+
+- Check Availability: reply template replaced with the generated one
+  ("To book, send the chosen time exactly as shown"); the stale description
+  sentence "It never books or holds a time." removed.
+- `book_appointment` added: POST `/tools/book_appointment`, Bearer
+  `CLICKAI_OUTBOUND_API_KEY`, fields interaction_id (Interaction ID),
+  date / time / service_name / customer_name (agent, generated descriptions),
+  customer_phone (User identifier), clickai_call_id (agent variable),
+  require_service (fixed `true`), generated reply template.
+- Instructions replaced with the generated prompt (8 sections, 30 variables
+  - 7 tool references as chips).
+- Text-chat test (no call): availability offered from the tool; name and
+  explicit confirmation asked; booking request refused by ClickAI
+  (`OUTBOUND_CALL_NOT_VERIFIED`, chat is not a ClickAI call); agent said
+  "not booked". No booking written.
+- Committed as **v3** (note "ClickAI outbound template v6 (o6-f2dcbcf3)…").
+
+ClickAI still dials **v2** (`sarvam_outbound_app_version` and ready version
+2): registering and confirming v3 is a separate approval. Inbound agent
+unchanged (v5). Rollback: keep ClickAI on v2 (no change needed).
