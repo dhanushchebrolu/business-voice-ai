@@ -868,6 +868,39 @@ describe("campaign dispatch — stops that land after admission", () => {
     assert.equal(t.table("call_logs").length, 1, "the batch stops");
   });
 
+  test("a stop after admission never marks the undialled contact failed or uses up its attempt", async () => {
+    // Finalization as apply_call_campaign_outcome applies it: only while the
+    // contact still points at this exact call.
+    const cases: [string, (t: ReturnType<typeof setup>) => void, string][] = [
+      ["pause", (t) => setCampaignStatus(t, "paused"), "pending"],
+      ["cancel", (t) => setCampaignStatus(t, "cancelled"), "cancelled"],
+      ["calling hours end", (t) => t.advance(12 * 3600_000), "pending"],
+    ];
+    for (const [name, stop, expected] of cases) {
+      const t = setup(1);
+      t.table("campaigns")[0]!["retry_statuses"] = ["failed"];
+      t.deps.finalize = async (callId) => {
+        const cc = t.table("campaign_contacts")[0]!;
+        if (cc["current_call_id"] === callId)
+          Object.assign(cc, { status: "retry_scheduled", next_attempt_at: "2026-11-17T11:00:00Z" });
+      };
+      const admit = t.deps.admitCampaignCall;
+      t.deps.admitCampaignCall = async (req) => {
+        const r = await admit(req);
+        stop(t);
+        return r;
+      };
+      await dispatchDueCampaigns({ deps: t.deps });
+      assert.equal(t.dialed.length, 0, name);
+      assert.equal(t.table("call_logs")[0]!["resolution_source"], "start_failure", name);
+      const cc = t.table("campaign_contacts")[0]!;
+      assert.equal(cc["status"], expected, name);
+      assert.equal(cc["attempts"], 0, `${name}: no attempt used`);
+      assert.equal(cc["next_attempt_at"], null, `${name}: no retry scheduled`);
+      assert.equal(cc["current_call_id"], null, name);
+    }
+  });
+
   test("the kill switch turned on mid-run stops the next contact", async () => {
     const t = setup(3);
     const prior = process.env["OUTBOUND_CALLING_DISABLED"];

@@ -584,6 +584,9 @@ describe("billing a single call never exceeds what admission reserved", () => {
       [1, 1],
       [60, 1],
       [61, 2],
+      [30, 1],
+      [79, 2], // the supervised 2026-11-20 call: 79 s billed as 2 minutes
+      [120, 2],
       [299, 5],
       [300, 5],
     ] as const)

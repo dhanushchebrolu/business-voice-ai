@@ -552,15 +552,25 @@ async function dispatchOneCampaign(
         console.error("campaign_dispatch:status_check_failed", campaign.id, err.message);
         return false;
       }));
+    // Stopped after admission, before anything is sent: the call is recorded as
+    // never started (failed, start_failure: no charge, outside the budget), the
+    // contact gets its claim back exactly as it was (status and attempt count,
+    // or cancelled with its campaign; no retry is scheduled), and only then is
+    // the call finalized, so its "failed" outcome never reaches the contact
+    // (finalization matches current_call_id, which is now cleared).
+    const stopBeforeDial = async (reason: string) => {
+      const recorded = await recordSarvamStartFailure(supabaseAdmin, call.id, new Error(reason));
+      if (recorded !== "failed") return;
+      await releaseCampaignClaim(supabaseAdmin, {
+        campaignId: campaign.id,
+        campaignContactId: cc.id,
+        previousStatus: cc.status,
+        previousAttempts: cc.attempts,
+      });
+      await deps.finalize(call.id);
+    };
     if (!stillOn) {
-      await recordCampaignStartFailure(
-        supabaseAdmin,
-        { callId: call.id, campaignContactId: cc.id },
-        new Error("Stopped before dialling"),
-        async () => {
-          await deps.finalize(call.id);
-        },
-      );
+      await stopBeforeDial("Stopped before dialling");
       skipped++;
       break;
     }
@@ -574,28 +584,10 @@ async function dispatchOneCampaign(
     };
 
     // The database emergency stop, read once more immediately before the
-    // provider request (a stop set after admission lands here). Nothing is
-    // sent: the call is recorded as never started (failed, start_failure:
-    // no charge, outside the budget), the contact gets its claim back exactly
-    // as it was (status and attempt count; no retry is scheduled), and only
-    // then is the call finalized, so its "failed" outcome never reaches the
-    // contact (finalization matches current_call_id, which is now cleared).
+    // provider request (a stop set after admission lands here).
     if (await outboundEmergencyStopActive(supabaseAdmin)) {
       console.warn("campaign_dispatch:emergency_stop_before_dial", campaign.id, call.id);
-      const recorded = await recordSarvamStartFailure(
-        supabaseAdmin,
-        call.id,
-        new Error("emergency_stop: stopped before dialling"),
-      );
-      if (recorded === "failed") {
-        await releaseCampaignClaim(supabaseAdmin, {
-          campaignId: campaign.id,
-          campaignContactId: cc.id,
-          previousStatus: cc.status,
-          previousAttempts: cc.attempts,
-        });
-        await deps.finalize(call.id);
-      }
+      await stopBeforeDial("emergency_stop: stopped before dialling");
       skipped++;
       emergencyStop = true;
       break;
