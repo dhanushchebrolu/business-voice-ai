@@ -698,32 +698,41 @@ export async function maybeCompleteCampaign(
 ): Promise<boolean> {
   const supabaseAdmin =
     client ?? (await import("@/integrations/supabase/client.server")).supabaseAdmin;
-  const { count } = await supabaseAdmin
+  // A failed read is "not finished": an unread count must never complete a
+  // campaign that still has contacts to dial.
+  const { count, error: openError } = await supabaseAdmin
     .from("campaign_contacts")
     .select("id", { count: "exact", head: true })
     .eq("campaign_id", campaignId)
     // outcome_unknown is unresolved, not finished: it keeps the campaign open.
     .in("status", ["pending", "retry_scheduled", "queued", "calling", "outcome_unknown"]);
-  if (count && count > 0) return false;
+  if (openError || count === null || count > 0) return false;
 
-  const { data: campaign } = await supabaseAdmin
+  const { data: campaign, error: campaignError } = await supabaseAdmin
     .from("campaigns")
     .select("id, status")
     .eq("id", campaignId)
     .maybeSingle();
-  if (!campaign || campaign.status !== "running") return false;
+  if (campaignError || !campaign || campaign.status !== "running") return false;
 
-  const { count: totalCount } = await supabaseAdmin
+  const { count: totalCount, error: totalError } = await supabaseAdmin
     .from("campaign_contacts")
     .select("id", { count: "exact", head: true })
     .eq("campaign_id", campaignId);
-  if (!totalCount || totalCount === 0) return false; // nothing was ever enrolled — not "completed"
+  if (totalError || !totalCount) return false; // nothing was ever enrolled — not "completed"
 
-  await supabaseAdmin
+  // Only a campaign still running: a pause or cancel that landed since the read above wins.
+  const { data: done, error: updateError } = await supabaseAdmin
     .from("campaigns")
     .update({ status: "completed", completed_at: new Date().toISOString() })
-    .eq("id", campaignId);
-  return true;
+    .eq("id", campaignId)
+    .eq("status", "running")
+    .select("id");
+  if (updateError) {
+    console.error("campaign_dispatch:complete_failed", campaignId, updateError.message);
+    return false;
+  }
+  return (done?.length ?? 0) > 0;
 }
 
 /** admit_campaign_outbound_call through the service client. */

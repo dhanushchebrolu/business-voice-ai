@@ -25,7 +25,61 @@ const OUT = arg("--out", join(root, "docs"));
 
 // One entry per migration. `absent`/`present` are SQL booleans for its objects;
 // `newColumns` are left out of the data fingerprint (adding a column changes to_jsonb).
-// shortcut: only 20261123-20261124 are described; add the next entry when its gate is prepared.
+// Every outbound reliability migration (20261123-20261128) is described.
+
+// A function by signature: invoker (not SECURITY DEFINER), owned by postgres, empty
+// search_path, executable by service_role only. `source` adds a prosrc condition.
+const fn = (sig, source = "") => {
+  const p = `to_regprocedure('public.${sig}')`;
+  return `(SELECT NOT prosecdef AND pg_get_userbyid(proowner) = 'postgres' AND proconfig = ARRAY['search_path=""']${source ? ` AND ${source}` : ""}
+            FROM pg_proc WHERE oid = ${p})
+     AND has_function_privilege('service_role', ${p}, 'EXECUTE')
+     AND NOT has_function_privilege('anon', ${p}, 'EXECUTE')
+     AND NOT has_function_privilege('authenticated', ${p}, 'EXECUTE')`;
+};
+const cols = (table, names) =>
+  `(SELECT string_agg(column_name || ':' || data_type || ':' || is_nullable || ':' || coalesce(column_default, '-'), ',' ORDER BY column_name)
+        FROM information_schema.columns WHERE table_schema = 'public' AND table_name = '${table}'
+         AND column_name IN (${names.map((n) => `'${n}'`).join(", ")}))`;
+const noCols = (table, names) =>
+  `NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = '${table}'
+                  AND column_name IN (${names.map((n) => `'${n}'`).join(", ")}))`;
+const conDef = (table, name) =>
+  `(SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'public.${table}'::regclass AND conname = '${name}' AND convalidated)`;
+const idxDef = (name) =>
+  `(SELECT indexdef FROM pg_indexes WHERE schemaname = 'public' AND indexname = '${name}')`;
+const srcHas = (sig, text) =>
+  `position('${text}' in (SELECT prosrc FROM pg_proc WHERE oid = to_regprocedure('public.${sig}'))) > 0`;
+const CLAIM_SIG = "claim_webhook_event(text, text, text, jsonb, integer, integer)";
+const FENCED_SIG = "apply_call_event_fenced(text, text, uuid, uuid, jsonb)";
+const BILLING_SIG = "apply_call_billing(uuid, uuid, integer, integer, text, integer, text)";
+const VERIFY_SIG = "verify_call_duration(uuid, integer)";
+const CLAIM_COLS = ["claim_token", "claimed_at", "attempts"];
+
+// The one foreign key from `tbl` to `parent`: named `name`, on `cols` -> `pcols`, ON DELETE
+// CASCADE, validated. Exactly one key per pair keeps PostgREST embeds unambiguous (PGRST201).
+const fk = (tbl, name, cols, parent, pcols) => {
+  const names = (side, rel) =>
+    `ARRAY(SELECT a.attname::text FROM unnest(k.${side}) WITH ORDINALITY u(n, o) JOIN pg_attribute a ON a.attrelid = k.${rel} AND a.attnum = u.n ORDER BY u.o)`;
+  const list = (xs) => `ARRAY[${xs.map((x) => `'${x}'`).join(", ")}]`;
+  return `(SELECT count(*) FROM pg_constraint k WHERE k.conrelid = 'public.${tbl}'::regclass AND k.contype = 'f' AND k.confrelid = 'public.${parent}'::regclass) = 1
+     AND EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conrelid = 'public.${tbl}'::regclass AND k.conname = '${name}' AND k.contype = 'f'
+           AND k.confrelid = 'public.${parent}'::regclass AND k.confdeltype = 'c' AND k.convalidated
+           AND ${names("conkey", "conrelid")} = ${list(cols)} AND ${names("confkey", "confrelid")} = ${list(pcols)})`;
+};
+const TENANT_FKS = (composite) =>
+  [
+    ["campaign_contacts", "campaign_contacts_campaign_id_fkey", "campaign_id", "campaigns"],
+    ["campaign_contacts", "campaign_contacts_contact_id_fkey", "contact_id", "contacts"],
+    ["campaign_uploads", "campaign_uploads_campaign_id_fkey", "campaign_id", "campaigns"],
+  ]
+    .map(([t, n, c, p]) =>
+      composite
+        ? fk(t, n, [c, "organization_id"], p, ["id", "organization_id"])
+        : fk(t, n, [c], p, ["id"]),
+    )
+    .join("\n     AND ");
+
 const GATES = {
   20261123090000: {
     name: "campaign_creation_idempotency",
@@ -65,6 +119,72 @@ const GATES = {
         "idempotency_key",
       ],
     },
+  },
+  20261125090000: {
+    name: "campaign_tenant_integrity",
+    previous: "20261124090000",
+    rollback: "docs/production-rollback-20261125090000-campaign-tenant-integrity.sql",
+    absent: `${TENANT_FKS(false)}
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname IN ('campaigns_id_organization_id_key', 'contacts_id_organization_id_key',
+           'campaign_contacts_campaign_same_org_fkey', 'campaign_contacts_contact_same_org_fkey', 'campaign_uploads_campaign_same_org_fkey'))`,
+    present: `${TENANT_FKS(true)}
+     AND (SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'public.campaigns'::regclass AND conname = 'campaigns_id_organization_id_key') = 'UNIQUE (id, organization_id)'
+     AND (SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'public.contacts'::regclass AND conname = 'contacts_id_organization_id_key') = 'UNIQUE (id, organization_id)'`,
+    newColumns: {},
+  },
+  20261126090000: {
+    name: "webhook_event_claim_lease",
+    previous: "20261125090000",
+    rollback: "docs/production-rollback-20261126090000-webhook-event-claim-lease.sql",
+    absent: `${noCols("webhook_events", CLAIM_COLS)}
+     AND to_regprocedure('public.${CLAIM_SIG}') IS NULL
+     AND to_regprocedure('public.${FENCED_SIG}') IS NULL`,
+    present: `${cols("webhook_events", CLAIM_COLS)}
+         = 'attempts:integer:NO:0,claim_token:uuid:YES:-,claimed_at:timestamp with time zone:YES:-'
+     AND ${fn(CLAIM_SIG)}
+     AND ${fn(FENCED_SIG, `NOT ${srcHas(FENCED_SIG, "billing_hold")}`)}`,
+    newColumns: { webhook_events: CLAIM_COLS },
+  },
+  20261127090000: {
+    name: "wallet_ledger_integrity",
+    previous: "20261126090000",
+    rollback: "docs/production-rollback-20261127090000-wallet-ledger-integrity.sql",
+    absent: `${noCols("wallet_transactions", ["idempotency_key"])}
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.wallet_transactions'::regclass
+                       AND conname IN ('wallet_tx_idempotency_key_format', 'wallet_tx_call_usage_has_reference'))
+     AND to_regclass('public.idx_wallet_tx_idempotency_key') IS NULL
+     AND ${idxDef("idx_wallet_tx_call_usage_ref")} = 'CREATE UNIQUE INDEX idx_wallet_tx_call_usage_ref ON public.wallet_transactions USING btree (organization_id, reference) WHERE (kind = ''call_usage''::text)'`,
+    present: `${cols("wallet_transactions", ["idempotency_key"])} = 'idempotency_key:text:YES:-'
+     AND ${conDef("wallet_transactions", "wallet_tx_idempotency_key_format")}
+         = 'CHECK (((idempotency_key IS NULL) OR (idempotency_key ~ ''^[A-Za-z0-9_-]{16,100}$''::text)))'
+     AND ${conDef("wallet_transactions", "wallet_tx_call_usage_has_reference")}
+         = 'CHECK (((kind <> ''call_usage''::text) OR (reference IS NOT NULL)))'
+     AND ${idxDef("idx_wallet_tx_idempotency_key")}
+         = 'CREATE UNIQUE INDEX idx_wallet_tx_idempotency_key ON public.wallet_transactions USING btree (idempotency_key) WHERE (idempotency_key IS NOT NULL)'
+     AND ${idxDef("idx_wallet_tx_call_usage_ref")} = 'CREATE UNIQUE INDEX idx_wallet_tx_call_usage_ref ON public.wallet_transactions USING btree (organization_id, reference) WHERE (kind = ''call_usage''::text)'`,
+    newColumns: { wallet_transactions: ["idempotency_key"] },
+  },
+  20261128090000: {
+    name: "call_billing_hold",
+    previous: "20261127090000",
+    rollback: "docs/production-rollback-20261128090000-call-billing-hold.sql",
+    // Before (and after rollback): neither function mentions billing_hold, verify_call_duration is absent.
+    absent: `${noCols("call_logs", ["billing_hold"])}
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.call_logs'::regclass AND conname = 'call_logs_billing_hold_check')
+     AND to_regclass('public.idx_call_logs_billing_hold') IS NULL
+     AND to_regprocedure('public.${VERIFY_SIG}') IS NULL
+     AND ${fn(BILLING_SIG, `NOT ${srcHas(BILLING_SIG, "billing_hold")}`)}
+     AND ${fn(FENCED_SIG, `NOT ${srcHas(FENCED_SIG, "billing_hold")}`)}`,
+    present: `${cols("call_logs", ["billing_hold"])} = 'billing_hold:text:YES:-'
+     AND ${conDef("call_logs", "call_logs_billing_hold_check")}
+         = 'CHECK (((billing_hold IS NULL) OR (billing_hold = ''duration_unknown''::text)))'
+     AND ${idxDef("idx_call_logs_billing_hold")}
+         = 'CREATE INDEX idx_call_logs_billing_hold ON public.call_logs USING btree (started_at) WHERE (billing_hold IS NOT NULL)'
+     AND has_column_privilege('authenticated', 'public.call_logs', 'billing_hold', 'SELECT')
+     AND ${fn(VERIFY_SIG)}
+     AND ${fn(BILLING_SIG, srcHas(BILLING_SIG, "BILLING_ON_HOLD"))}
+     AND ${fn(FENCED_SIG, srcHas(FENCED_SIG, "billing_hold"))}`,
+    newColumns: { call_logs: ["billing_hold"] },
   },
 };
 
