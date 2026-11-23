@@ -179,14 +179,25 @@ describe("wallet ledger integrity on real PostgreSQL", () => {
   test("8 concurrent charges for one call (raw inserts and debit_wallet_for_call): one ledger row", async (t) => {
     if (!ready(t)) return;
     const call = randomUUID();
+    // A raw insert holds the call's unique-index entry and then waits for the organization
+    // row (foreign-key check) that debit_wallet_for_call holds while it waits for that
+    // entry: PostgreSQL aborts one of them with "deadlock detected" (40P01), which leaves
+    // nothing behind and is retried, as any client would. Production writes call charges
+    // only through debit_wallet_for_call, so it never mixes the two paths.
+    const retryDeadlock = async (sql: string): Promise<RunResult> => {
+      for (let attempt = 1; ; attempt++) {
+        const r = await runAsync(sql);
+        if (attempt === 3 || !/deadlock detected/.test(r.stderr)) return r;
+      }
+    };
     const rs = await Promise.all([
       ...Array.from({ length: 4 }, () =>
-        runAsync(
+        retryDeadlock(
           `INSERT INTO public.wallet_transactions (organization_id, amount, kind, description, reference) VALUES ('${ORG}', -1200, 'call_usage', 'x', '${call}');`,
         ),
       ),
       ...Array.from({ length: 4 }, () =>
-        runAsync(
+        retryDeadlock(
           `SELECT already_applied FROM public.debit_wallet_for_call('${ORG}', '${call}', 1200, 'x');`,
         ),
       ),
