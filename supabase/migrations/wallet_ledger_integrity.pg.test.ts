@@ -183,11 +183,13 @@ describe("wallet ledger integrity on real PostgreSQL", () => {
     // row (foreign-key check) that debit_wallet_for_call holds while it waits for that
     // entry: PostgreSQL aborts one of them with "deadlock detected" (40P01), which leaves
     // nothing behind and is retried, as any client would. Production writes call charges
-    // only through debit_wallet_for_call, so it never mixes the two paths.
+    // only through debit_wallet_for_call, so it never mixes the two paths. Only SQLSTATE
+    // 40P01 is retried; a jittered pause keeps the retries from colliding all over again.
     const retryDeadlock = async (sql: string): Promise<RunResult> => {
       for (let attempt = 1; ; attempt++) {
-        const r = await runAsync(sql);
-        if (attempt === 3 || !/deadlock detected/.test(r.stderr)) return r;
+        const r = await runAsync(`\\set VERBOSITY verbose\n${sql}`);
+        if (attempt === 10 || !/ERROR:\s+40P01:/.test(r.stderr)) return r;
+        await new Promise((done) => setTimeout(done, 20 + Math.random() * 80 * attempt));
       }
     };
     const rs = await Promise.all([
