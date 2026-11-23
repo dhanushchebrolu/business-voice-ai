@@ -58,7 +58,9 @@ CREATE OR REPLACE FUNCTION public.import_campaign_contacts(
 RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public
+-- Empty: every table is schema-qualified and built-ins resolve to pg_catalog only, so no
+-- function created in public can shadow one and run with this function's privileges.
+SET search_path = ''
 AS $$
 DECLARE
   existing public.campaign_uploads%ROWTYPE;
@@ -84,7 +86,7 @@ BEGIN
 
   -- Same import again (retry, lost response, double click): the first result, unchanged.
   IF _idempotency_key IS NOT NULL THEN
-    PERFORM pg_advisory_xact_lock(hashtextextended(_org::text || ':' || _idempotency_key, 0));
+    PERFORM pg_advisory_xact_lock(hashtextextended(_org::text || ':' || _idempotency_key, 0::bigint));
     SELECT * INTO existing FROM public.campaign_uploads
       WHERE organization_id = _org AND idempotency_key = _idempotency_key;
     IF FOUND THEN
@@ -112,7 +114,9 @@ BEGIN
       USING ERRCODE = 'check_violation';
   END IF;
 
-  FOR r IN SELECT * FROM jsonb_array_elements(_rows) LOOP
+  -- Phone order: concurrent imports lock shared contacts in the same order, so they
+  -- queue instead of deadlocking.
+  FOR r IN SELECT value FROM jsonb_array_elements(_rows) ORDER BY value->>'phone' LOOP
     incoming_name := nullif(btrim(coalesce(r->>'name', '')), '');
     SELECT coalesce(jsonb_object_agg(key, value), '{}'::jsonb) INTO clean_fields
       FROM jsonb_each(coalesce(r->'fields', '{}'::jsonb))
