@@ -37,7 +37,13 @@ describe("CI PostgreSQL setup", () => {
 
   test("the database tests still run and still fail CI on any skip or todo", () => {
     const pg = step("PostgreSQL regression tests must not silently skip or todo in CI");
-    assert.match(pg, /supabase\/migrations\/outbound_call_admission\.pg\.test\.ts/);
+    // Every PostgreSQL file by glob, never a hand-kept list that new migrations fall out of.
+    assert.match(pg, /--test --test-reporter=tap supabase\/migrations\/\*\.pg\.test\.ts/);
+    // Only the PostgREST-binary skips are tolerated; any other skip still fails.
+    assert.match(
+      pg,
+      /skipped=\$\(grep -E '# SKIP' pg-test-output\.log \| grep -vc 'POSTGREST_BIN' \|\| true\)/,
+    );
     assert.match(pg, /if \[ "\$\{skipped:-0\}" -gt 0 \]; then[\s\S]*?exit 1/);
     assert.match(pg, /if \[ "\$\{todo:-0\}" -gt 0 \]; then[\s\S]*?exit 1/);
     // Setup comes before the tests that need it.

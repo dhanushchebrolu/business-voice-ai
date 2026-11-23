@@ -12,6 +12,10 @@ import {
   sendSarvamInstantOutboundCall,
 } from "@/lib/sarvam-outbound-call.server";
 import { loadCallDetail, placeSarvamCallForOrganization } from "@/lib/sarvam-admin-calls.server";
+import {
+  START_FAILURE_DECISIONS,
+  type StartFailureDecision,
+} from "@/lib/start-failure-review.server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/integrations/supabase/types";
 
@@ -1285,6 +1289,106 @@ export const retrySarvamCallFinalization = createServerFn({ method: "POST" })
     });
     if (result.state === "skipped")
       throw new Error("Another finalization of this call is in progress. Try again in 2 minutes.");
+    return result;
+  });
+
+/**
+ * Operator review of a start failure a late provider report contradicted
+ * (start-failure-review.server.ts): confirm the call happened, confirm it did
+ * not (optionally releasing a campaign contact to its retry policy), or leave
+ * it unresolved. Never bills or dials. Platform admins only, always audited.
+ */
+export const reviewSarvamStartFailure = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator(
+    (input: { callId: string; decision: string; allowRetry?: boolean; reason: string }) => {
+      if (!input?.callId) throw new Error("callId is required");
+      if (!(START_FAILURE_DECISIONS as readonly string[]).includes(input.decision))
+        throw new Error("Choose what happened to this call.");
+      if (!input.reason?.trim()) throw new Error("A reason is required");
+      return {
+        callId: input.callId,
+        decision: input.decision as StartFailureDecision,
+        allowRetry: input.allowRetry === true,
+        reason: input.reason.trim(),
+      };
+    },
+  )
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { reviewContradictedStartFailure } = await import("@/lib/start-failure-review.server");
+    const result = await reviewContradictedStartFailure(supabaseAdmin, {
+      ...data,
+      reviewedBy: admin.userId,
+    });
+    // A repeat of a decision already made changes nothing and is not audited again.
+    if (!result.duplicate)
+      await writeAudit(admin, {
+        action: "SARVAM_START_FAILURE_REVIEWED",
+        entityType: "call_log",
+        entityId: data.callId,
+        organizationId: result.organizationId,
+        newValue: {
+          decision: data.decision,
+          allowRetry: data.allowRetry,
+          contactStatus: result.contact,
+        },
+        reason: data.reason,
+      });
+    return {
+      decision: result.applied?.decision ?? "unresolved",
+      duplicate: result.duplicate,
+      contactStatus: result.contact,
+    };
+  });
+
+/**
+ * Operator verification of a connected Sarvam outbound call whose duration
+ * was unknown (billing hold, F3): the operator enters the duration they
+ * verified in Sarvam, and the call is billed once, capped at its admission
+ * reservation (call-finalization.server.ts verifyCallDuration). Platform
+ * admins only, always audited. Nothing is billed without a verified duration.
+ */
+export const verifySarvamCallDuration = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { callId: string; durationSeconds: number; reason: string }) => {
+    if (!input?.callId) throw new Error("callId is required");
+    if (
+      !Number.isInteger(input.durationSeconds) ||
+      input.durationSeconds < 1 ||
+      input.durationSeconds > 86400
+    )
+      throw new Error("Enter the verified duration in whole seconds (at least 1).");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { data: call } = await supabaseAdmin
+      .from("call_logs")
+      .select("id, organization_id, provider, direction, billing_hold")
+      .eq("id", data.callId)
+      .maybeSingle();
+    if (!call || call.provider !== "sarvam" || call.direction !== "outbound")
+      throw new Error("Sarvam outbound call not found.");
+    if (!call.billing_hold) throw new Error("This call's billing is not on hold.");
+
+    const { verifyCallDuration } = await import("@/lib/telephony/call-finalization.server");
+    const result = await verifyCallDuration(supabaseAdmin, call.id, data.durationSeconds);
+    if (result.result === "not_on_hold")
+      throw new Error("This call's duration was already verified. Reload to see it.");
+
+    await writeAudit(admin, {
+      action: "SARVAM_CALL_DURATION_VERIFIED",
+      entityType: "call_log",
+      entityId: call.id,
+      organizationId: call.organization_id,
+      oldValue: { billingHold: call.billing_hold },
+      newValue: { durationSeconds: data.durationSeconds, finalization: result.finalization },
+      reason: data.reason,
+    });
     return result;
   });
 

@@ -1,6 +1,8 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { csvToTable, validateContactRows } from "./contacts-import";
+import { CAMPAIGN_IDEMPOTENCY_KEY_PATTERN } from "./campaign-create-key";
+import { IMPORT_TOO_LARGE_MESSAGE, MAX_IMPORT_ROWS } from "./campaign-wizard";
 
 /**
  * Enrolling contacts into a campaign (spec §11/§12/§26). The client may
@@ -11,9 +13,10 @@ import { csvToTable, validateContactRows } from "./contacts-import";
  * to the customer always match what was actually written to the database.
  *
  * Pipeline (spec §26): validate -> parse -> map -> validate phone -> dedupe
- * -> upsert into `contacts` (Klyro's own CRM, independent of any campaign)
- * -> create `campaign_contacts` rows for this campaign, skipping any contact
- * already opted out. No row is ever sent to Sarvam here — enrollment only
+ * -> one database transaction (import_campaign_contacts): upsert into
+ * `contacts` (a blank name never replaces a saved one), create
+ * `campaign_contacts` rows, skipping any contact already opted out, and write
+ * the history row with exactly what was added. No row is ever sent to Sarvam here — enrollment only
  * ever writes Klyro's own tables; dispatching to Sarvam is
  * campaign-dispatch.server.ts's job, one call at a time, only once the
  * campaign is launched.
@@ -26,16 +29,11 @@ interface ImportCsvInput {
   phoneColumn: string;
   /** {csvColumn: agentVariableName} */
   mapping: Record<string, string>;
+  /** One per import attempt (kept across retries): the same key returns the first result. */
+  idempotencyKey?: string;
 }
 
-export interface ImportCsvResult {
-  totalRows: number;
-  enrolled: number;
-  alreadyInCampaign: number;
-  optedOut: number;
-  invalid: number;
-  duplicatesInFile: number;
-}
+export type { ImportResult as ImportCsvResult } from "./campaign-enrollment.server";
 
 type CallerContext = { supabase: unknown; userId: string };
 
@@ -73,47 +71,40 @@ export const importCampaignContactsCsv = createServerFn({ method: "POST" })
     if (!input?.campaignId) throw new Error("campaignId is required");
     if (!input.csvText) throw new Error("csvText is required");
     if (!input.phoneColumn) throw new Error("phoneColumn is required");
+    if (
+      input.idempotencyKey !== undefined &&
+      !CAMPAIGN_IDEMPOTENCY_KEY_PATTERN.test(input.idempotencyKey)
+    )
+      throw new Error("This import has an invalid request id.");
     return input;
   })
-  .handler(async ({ data, context }): Promise<ImportCsvResult> => {
+  .handler(async ({ data, context }) => {
     const orgId = await campaignOrgId(context, data.campaignId);
     await requireOwnCampaign(orgId, data.campaignId);
 
+    // The whole file is parsed and validated before anything is written.
     const table = csvToTable(data.csvText);
+    // One import is one database transaction under the Data API's 8 s statement timeout;
+    // local load tests ran 5,000 rows in 1.6-3.5 s and timed out (rolled back) at 20,000.
+    if (table.rows.length > MAX_IMPORT_ROWS) throw new Error(IMPORT_TOO_LARGE_MESSAGE);
     if (!table.headers.includes(data.phoneColumn)) {
       throw new Error(`Column "${data.phoneColumn}" was not found in the uploaded file.`);
     }
     const summary = validateContactRows(table, data.phoneColumn);
 
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-
-    const { enrollContactRows } = await import("@/lib/campaign-enrollment.server");
-    const { enrolled, alreadyInCampaign, optedOut } = await enrollContactRows(supabaseAdmin, {
+    const { buildImportRows, importContactsAtomically } =
+      await import("@/lib/campaign-enrollment.server");
+    // One transaction: contacts, memberships and the history row, or nothing.
+    return importContactsAtomically(supabaseAdmin, {
       organizationId: orgId,
       campaignId: data.campaignId,
-      rows: summary.valid,
-      mapping: data.mapping,
-    });
-
-    await supabaseAdmin.from("campaign_uploads").insert({
-      campaign_id: data.campaignId,
-      organization_id: orgId,
+      userId: context.userId,
+      idempotencyKey: data.idempotencyKey ?? null,
       filename: data.filename,
-      total_rows: summary.totalRows,
-      valid_rows: summary.valid.length,
-      invalid_rows: summary.invalid.length,
-      duplicate_rows: summary.duplicates.length,
-      created_by: context.userId,
+      summary,
+      rows: buildImportRows(summary.valid, data.mapping),
     });
-
-    return {
-      totalRows: summary.totalRows,
-      enrolled,
-      alreadyInCampaign,
-      optedOut,
-      invalid: summary.invalid.length,
-      duplicatesInFile: summary.duplicates.length,
-    };
   });
 
 interface EnrollExistingInput {

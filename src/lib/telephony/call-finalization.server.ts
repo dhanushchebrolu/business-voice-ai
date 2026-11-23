@@ -39,6 +39,16 @@ import {
 
 export const FINALIZATION_LEASE_SECONDS = 120;
 
+/**
+ * call_logs.billing_hold for a connected call whose duration is missing or
+ * invalid (F3). It is never billed as 0 and no duration is invented: billing
+ * waits, the wallet reservation stays, and the call is listed in Needs review
+ * until verifyCallDuration records a duration from Sarvam or an operator.
+ */
+export const BILLING_HOLD_DURATION_UNKNOWN = "duration_unknown";
+export const BILLING_HOLD_MESSAGE =
+  "Billing on hold: the call connected but Sarvam reported no usable duration. It is billed once the duration is verified (from Sarvam's records or by an operator).";
+
 export type FinalizationResult =
   | { state: "done" }
   | { state: "failed"; error: string }
@@ -76,6 +86,9 @@ interface FinalizingCall {
   /** Locked at admission (admit_single_outbound_call); null on older calls and campaign calls. */
   billing_cap_minutes?: number | null;
   billing_rate_per_minute?: number | null;
+  billing_hold?: string | null;
+  resolution_source?: string | null;
+  resolution_conflict?: boolean | null;
 }
 
 // Supabase errors are plain objects with a `message`, not Error instances.
@@ -107,14 +120,16 @@ export async function finalizeTerminalCall(
   const { data, error: readError } = await supabaseAdmin
     .from("call_logs")
     .select(
-      "id, organization_id, status, duration_seconds, campaign_id, campaign_contact_id, contact_id, business_id, destination_number, final_agent_variables, billing_applied_at, campaign_applied_at, billing_cap_minutes, billing_rate_per_minute",
+      "id, organization_id, status, duration_seconds, campaign_id, campaign_contact_id, contact_id, business_id, destination_number, final_agent_variables, billing_applied_at, campaign_applied_at, billing_cap_minutes, billing_rate_per_minute, billing_hold, resolution_source, resolution_conflict",
     )
     .eq("id", callId)
     .single();
   const call = data as FinalizingCall | null;
   if (readError || !call) errors.push(`read: ${readError?.message ?? "call not found"}`);
 
-  if (call && !call.billing_applied_at) {
+  // A held call is not billed (and not done): it stays failed with this reason, in Needs review.
+  if (call && !call.billing_applied_at && call.billing_hold) errors.push(BILLING_HOLD_MESSAGE);
+  else if (call && !call.billing_applied_at) {
     try {
       await applyBilling(rpc, call, token, deps);
     } catch (err) {
@@ -146,6 +161,31 @@ export async function finalizeTerminalCall(
     console.error("call_finalization:fail_record_failed", callId, failed.error.message);
   console.error("call_finalization:failed", callId, message);
   return { state: "failed", error: message };
+}
+
+/**
+ * Records a verified duration for a call on billing hold and bills it, once.
+ * The hold is released by one conditional update (verify_call_duration), so
+ * concurrent verifiers (the reconciler and an operator) cannot both apply a
+ * duration; billing then runs through normal finalization, capped at the
+ * admission reservation and charged once per call. `not_on_hold`: already
+ * verified, billed, or never held — nothing changed.
+ */
+export async function verifyCallDuration(
+  supabaseAdmin: Client,
+  callId: string,
+  durationSeconds: number,
+  deps: FinalizationDeps = {},
+): Promise<{ result: "verified" | "not_on_hold"; finalization: FinalizationResult["state"] }> {
+  const seconds = Math.ceil(durationSeconds);
+  if (!Number.isFinite(seconds) || seconds < 1)
+    throw new Error("A verified duration must be at least 1 second.");
+  const rpc = supabaseAdmin.rpc.bind(supabaseAdmin) as unknown as Rpc;
+  const { data, error } = await rpc("verify_call_duration", { _call: callId, _seconds: seconds });
+  if (error) throw error;
+  const result = data === "verified" ? "verified" : "not_on_hold";
+  const finalized = await finalizeTerminalCallSafely(supabaseAdmin, callId, deps);
+  return { result, finalization: finalized.state };
 }
 
 /**
@@ -255,6 +295,10 @@ async function applyCampaign(supabaseAdmin: Client, rpc: Rpc, call: FinalizingCa
       },
       vars,
     );
+    // A start rejection the provider later contradicted (F2) is ambiguous: never retried
+    // automatically; the contact is held for review whichever of the two lands first.
+    if (call.resolution_source === "start_failure" && call.resolution_conflict)
+      decision = { status: "outcome_unknown", nextAttemptAt: null };
   }
 
   // A single (non-campaign) call: an opt-out goes on the do-not-call list, and a follow-up

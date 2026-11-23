@@ -8,6 +8,7 @@ import { recordCampaignStartFailure } from "./sarvam-outbound-call.server.ts";
 import { resolveUnknownSarvamCall } from "./sarvam-call-resolution.server.ts";
 import { checkCallTransition, TERMINAL_CALL_STATUSES } from "./telephony-guard.server.ts";
 import { checkClientReferenceMatch } from "./telephony/webhook-correlation.server.ts";
+import { claimWebhookEvent, completeWebhookEvent } from "./telephony/webhook-claim.server.ts";
 import { decideCampaignContactOutcome, type CallTerminalStatus } from "./campaign-outcome.ts";
 import { TelephonyAdapterError, type NormalizedCallEvent } from "./telephony/adapter.ts";
 
@@ -54,6 +55,47 @@ class MemoryDb {
    * outbound_call_admission.pg.test.ts). Other functions (finalization) are no-ops.
    */
   rpc = async (fn: string, args: Record<string, unknown>) => {
+    // claim_webhook_event (migration 20261126090000): insert-as-claimed, or take over an
+    // unfinished event whose claim expired or recorded an error. Its locking is tested
+    // against PostgreSQL in webhook_event_claim_lease.pg.test.ts.
+    if (fn === "claim_webhook_event") {
+      const rows = this.tables["webhook_events"]!;
+      const row = rows.find(
+        (r) => r["provider"] === args["_provider"] && r["event_id"] === args["_event_id"],
+      );
+      const token = randomUUID();
+      const max = args["_max_attempts"] as number | null;
+      if (!row) {
+        rows.push({
+          id: randomUUID(),
+          provider: args["_provider"],
+          event_id: args["_event_id"],
+          claim_token: token,
+          claimed_at: Date.now(),
+          attempts: 1,
+          processed_at: null,
+          error: null,
+        });
+        return { data: { result: "claimed", token, attempt: 1, reclaimed: false }, error: null };
+      }
+      const leaseMs = (args["_lease_seconds"] as number) * 1000;
+      const expired = ((row["claimed_at"] as number | undefined) ?? 0) < Date.now() - leaseMs;
+      const attempts = (row["attempts"] as number | undefined) ?? 0;
+      if (row["processed_at"] != null) return { data: { result: "processed" }, error: null };
+      if ((row["error"] != null || expired) && (max === null || attempts < max)) {
+        Object.assign(row, {
+          claim_token: token,
+          claimed_at: Date.now(),
+          attempts: attempts + 1,
+          error: null,
+        });
+        const data = { result: "claimed", token, attempt: attempts + 1, reclaimed: true };
+        return { data, error: null };
+      }
+      if (max !== null && attempts >= max)
+        return { data: { result: "exhausted", attempts, error: row["error"] }, error: null };
+      return { data: { result: "in_progress", attempts }, error: null };
+    }
     if (fn !== "admit_single_outbound_call") return { data: null, error: null };
     const { data, error } = (await this.from("call_logs")
       .insert({
@@ -271,13 +313,19 @@ async function applyEvent(
   }
 }
 
-/** Model of handleTelephonyWebhook: dedupe on webhook_events, then process. */
+/** Model of handleTelephonyWebhook: claim the event (the real helper), process, complete. */
 async function deliverWebhook(env: ReturnType<typeof setup>, event: NormalizedCallEvent) {
-  const { error } = await env.db
-    .from("webhook_events")
-    .insert({ provider: "sarvam", event_id: event.eventId! });
-  if (error) return "duplicate";
+  const claimed = await claimWebhookEvent(env.db as never, {
+    provider: "sarvam",
+    eventId: event.eventId!,
+    eventType: event.status,
+    payload: {},
+    maxAttempts: 10,
+  });
+  if (claimed.result === "processed") return "duplicate";
+  if (claimed.result !== "claimed") return claimed.result; // in_progress -> 503, exhausted
   await applyEvent(env, event);
+  await completeWebhookEvent(env.db as never, claimed.claim);
   return "processed";
 }
 
@@ -514,7 +562,7 @@ describe("operator resolution", () => {
     assert.equal(env.charges.length, 1);
   });
 
-  test("if processing throws, the operator's dedupe row is released for a retry", async () => {
+  test("if processing throws, the operator's event is marked failed and stays claimable for a retry", async () => {
     const env = setup();
     await startFailure(env, timeout());
     await assert.rejects(
@@ -525,7 +573,9 @@ describe("operator resolution", () => {
       ),
       /boom/,
     );
-    assert.equal(env.db.tables["webhook_events"]!.length, 0);
+    const [row] = env.db.tables["webhook_events"]!;
+    assert.equal(row!["processed_at"], null, "never marked done");
+    assert.match(String(row!["error"]), /boom/, "a recorded error makes it claimable at once");
   });
 });
 
@@ -723,7 +773,10 @@ describe("tenant safety of operator resolution", () => {
         finalize: async () => ({ state: "done" as const }),
       },
     );
-    assert.deepEqual(seen, [{ onlyCallId: CALL_ID }]);
+    assert.deepEqual(
+      seen.map((o) => o.onlyCallId),
+      [CALL_ID],
+    );
   });
 
   test("a pinned event that would land on a different call changes nothing", async () => {
@@ -762,13 +815,49 @@ describe("shared rules and wiring", () => {
   const shared = read("telephony/telephony-event-processing.server.ts");
 
   test("the shared processor never overwrites a final status and stops before billing when it can't write", () => {
-    const update = shared.slice(shared.indexOf(".update(patch as never)"));
+    const update = shared.slice(shared.indexOf("let applied: boolean;"));
     assert.ok(
       update.includes('.not("status", "in", `(${TERMINAL_CALL_STATUSES.join(",")})`)'),
       "update is conditional on the call not being final",
     );
-    const guard = update.indexOf("if (!updated || updated.length === 0) {");
+    // Under a webhook claim the same guard runs in SQL (apply_call_event_fenced: 'already_final').
+    assert.match(
+      update,
+      /if \(claim\) \{\s*applied = \(await applyCallEventFenced\(supabaseAdmin, claim, call\.id, patch\)\) === "applied";/,
+    );
+    const guard = update.indexOf("if (!applied) {");
     assert.ok(guard > -1 && guard < update.indexOf("finalizeCallBilling("));
+  });
+
+  test("a provider report after a start failure (or an operator decision) is kept and flagged, never applied or billed", () => {
+    assert.match(shared, /const LATE_REPORT_SOURCES = new Set\(\["operator", "start_failure"\]\);/);
+    const late = shared.slice(shared.indexOf("async function afterFinalCallEvent("));
+    assert.match(
+      late,
+      /if \(row && LATE_REPORT_SOURCES\.has\(row\.resolution_source \?\? ""\)\) \{/,
+    );
+    assert.match(late, /late_provider_report: \{/);
+    assert.match(late, /resolution_conflict: row\.status !== event\.status,/);
+    assert.doesNotMatch(
+      late,
+      /status: event\.status,\s*\}\)\s*\.eq\("id", call\.id\)/,
+      "no status write",
+    );
+  });
+
+  test("F3: a connected Sarvam outbound result without a positive duration is written with a billing hold", () => {
+    assert.match(
+      shared,
+      /if \(\s*isSarvamOutbound\(call\) &&\s*event\.status === "completed" &&\s*!\(\(event\.durationSeconds \?\? 0\) > 0\)\s*\)\s*patch\["billing_hold"\] = BILLING_HOLD_DURATION_UNKNOWN;/,
+    );
+  });
+
+  test("F2: a contradicted start failure holds its campaign contact only while a retry is scheduled for that call", () => {
+    const late = shared.slice(shared.indexOf("async function afterFinalCallEvent("));
+    assert.match(
+      late,
+      /\.update\(\{ status: "outcome_unknown", next_attempt_at: null \}\)\s*\.eq\("id", row\.campaign_contact_id\)\s*\.eq\("current_call_id", call\.id\)\s*\.eq\("status", "retry_scheduled"\);/,
+    );
   });
 
   test("the shared processor honours onlyCallId on both paths and never inserts for a targeted event", () => {
@@ -839,9 +928,9 @@ describe("operator dedupe row, webhook duplicate, then operator failure", () => 
       }
       const before = env.db.call(CALL_ID)["status"];
 
-      // 1. The operator has inserted the att_1 dedupe row; 2. the real webhook
-      // for att_1 arrives and is discarded as a duplicate; 3. the operator's
-      // processing then fails.
+      // 1. The operator holds the att_1 claim; 2. the real webhook for att_1
+      // arrives and is told to come back later (503, in_progress); 3. the
+      // operator's processing then fails.
       let webhookResult: string | undefined;
       await assert.rejects(
         resolveUnknownSarvamCall(env.db as never, input, {
@@ -858,11 +947,12 @@ describe("operator dedupe row, webhook duplicate, then operator failure", () => 
         }),
         /processing failed/,
       );
-      assert.equal(webhookResult, "duplicate");
+      assert.equal(webhookResult, "in_progress");
 
-      // Recoverable: unchanged, nothing billed, dedupe row released.
+      // Recoverable: unchanged, nothing billed, the event marked failed (claimable at once).
       assert.equal(env.db.call(CALL_ID)["status"], before);
-      assert.equal(env.db.tables["webhook_events"]!.length, 0);
+      assert.equal(env.db.tables["webhook_events"]![0]!["processed_at"], null);
+      assert.match(String(env.db.tables["webhook_events"]![0]!["error"]), /processing failed/);
       assert.equal(env.charges.length, 0);
 
       // A second resolution succeeds and bills once.

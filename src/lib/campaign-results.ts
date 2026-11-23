@@ -13,7 +13,7 @@ export type ExclusionReason =
 export const EXCLUSION_LABEL: Record<ExclusionReason, string> = {
   opted_out: "Asked not to be called (do-not-call)",
   invalid_number: "Not a valid phone number",
-  country_not_allowed: "Outside the countries ClickAI may call (+91 only)",
+  country_not_allowed: "Not a callable number (regular +91 numbers only; no toll-free or premium)",
   duplicate_number: "Same number as another contact in this campaign",
 };
 

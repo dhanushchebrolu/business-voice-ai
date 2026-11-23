@@ -71,3 +71,40 @@ describe("single calls: the calling hours are re-checked between admission and t
     assert.match(single, /case "outside_calling_hours":\s*return CALLING_HOURS_MESSAGE;/);
   });
 });
+
+describe("a campaign without a caller number can't be launched", () => {
+  test("launch refuses a campaign with no caller number before anything is set running", () => {
+    const check = launch.indexOf(
+      'if (!campaign.phone_number_id) throw new Error("Choose a caller number before launching.");',
+    );
+    assert.ok(check > -1);
+    assert.ok(check < launch.indexOf('status: "running"'));
+  });
+
+  test("launch also refuses instructions saved only as a draft (not confirmed)", () => {
+    const check = launch.indexOf("if (!campaign.context_reviewed_at)");
+    assert.ok(check > -1 && check < launch.indexOf('status: "running"'));
+  });
+});
+
+describe("campaign launch is unavailable while campaign dispatch is switched off", () => {
+  test("launch (and resume, the same function) refuses before the campaign is read or set running", () => {
+    const gate = launch.indexOf(
+      "if (!campaignDispatchEnabled()) throw new Error(CAMPAIGN_LAUNCH_UNAVAILABLE_MESSAGE);",
+    );
+    const read = launch.indexOf('.from("campaigns")');
+    const running = launch.indexOf('status: "running"');
+    assert.ok(gate > -1, "dispatch switch checked at launch");
+    assert.ok(gate < read && read < running);
+    assert.match(src, /export const resumeCampaign = launchCampaign;/);
+  });
+
+  test("the switch is the dispatcher's own (CAMPAIGN_DISPATCH_ENABLED), not a second flag", async () => {
+    assert.match(launch, /await import\("@\/lib\/jobs\/handlers\.server"\)/);
+    const handlers = readFileSync(new URL("./jobs/handlers.server.ts", import.meta.url), "utf8");
+    assert.match(
+      handlers,
+      /return process\.env\["CAMPAIGN_DISPATCH_ENABLED"\]\?\.trim\(\)\.toLowerCase\(\) === "true";/,
+    );
+  });
+});

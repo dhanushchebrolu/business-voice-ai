@@ -73,6 +73,7 @@ describe("reconcileSarvamCall", () => {
   const run = async (rows: Record<string, unknown>, found: SarvamAttemptSummary | null) => {
     const resolved: unknown[] = [];
     const searched: unknown[] = [];
+    const verified: unknown[] = [];
     const result = await reconcileSarvamCall(fakeAdmin(rows), "call-1", {
       findAttempt: async (appId, attemptId, since, until) => {
         searched.push({ appId, attemptId, since: since.toISOString(), until: until.toISOString() });
@@ -81,9 +82,12 @@ describe("reconcileSarvamCall", () => {
       resolve: async (input) => {
         resolved.push(input);
       },
+      verifyDuration: async (callId, seconds) => {
+        verified.push({ callId, seconds });
+      },
       now: () => new Date("2026-11-11T12:00:00Z"),
     });
-    return { result, resolved, searched };
+    return { result, resolved, searched, verified };
   };
 
   test("a final Sarvam outcome resolves the call through the shared path", async () => {
@@ -137,6 +141,45 @@ describe("reconcileSarvamCall", () => {
     );
     assert.deepEqual(result, { state: "already_final", status: "completed" });
     assert.equal(searched.length, 0);
+  });
+
+  test("F3: a connected attempt without a usable duration resolves completed with NO duration (held), never 0", async () => {
+    for (const durationSeconds of [0, 0.3, -3, Number.NaN]) {
+      assert.deepEqual(outcomeFromAttempt(attempt({ durationSeconds })), {
+        outcome: "completed",
+        durationSeconds: undefined,
+      });
+      const { result, resolved } = await run(defaultRows, attempt({ durationSeconds }));
+      assert.equal(result.state, "resolved");
+      assert.equal((resolved[0] as { durationSeconds?: number }).durationSeconds, undefined);
+    }
+  });
+
+  test("F3: a held call gets Sarvam's positive duration for its exact attempt, once, through verification", async () => {
+    const held = {
+      ...defaultRows,
+      call_logs: { ...CALL, status: "completed", billing_hold: "duration_unknown" },
+    };
+    const { result, verified, resolved } = await run(held, attempt({ durationSeconds: 95.2 }));
+    assert.deepEqual(result, { state: "duration_verified", durationSeconds: 95 });
+    assert.deepEqual(verified, [{ callId: "call-1", seconds: 95 }]);
+    assert.equal(resolved.length, 0, "the outcome is not resolved again");
+  });
+
+  test("F3: a held call whose Sarvam record still has no duration (or did not connect) stays held", async () => {
+    const held = {
+      ...defaultRows,
+      call_logs: { ...CALL, status: "completed", billing_hold: "duration_unknown" },
+    };
+    for (const found of [
+      attempt({ durationSeconds: 0 }),
+      attempt({ connectivityStatus: "failed" }),
+      null,
+    ]) {
+      const { result, verified } = await run(held, found);
+      assert.equal(result.state, "pending");
+      assert.equal(verified.length, 0);
+    }
   });
 });
 

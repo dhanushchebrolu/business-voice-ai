@@ -6,7 +6,7 @@
  */
 
 type Row = Record<string, unknown>;
-type Unique = { table: string; key: (r: Row) => string | null };
+type Unique = { table: string; key: (r: Row) => string | null; name?: string };
 type Filter = (r: Row) => boolean;
 
 export interface MemoryDb {
@@ -67,7 +67,16 @@ export function memorySupabase(opts: {
           if (u.table !== table) continue;
           const k = u.key(row);
           if (k !== null && rows().some((r) => u.key(r) === k))
-            return { data: null, error: { code: "23505", message: "duplicate key" } };
+            return {
+              data: null,
+              error: {
+                code: "23505",
+                // Postgres names the violated constraint; named uniques do the same here.
+                message: u.name
+                  ? `duplicate key value violates unique constraint "${u.name}"`
+                  : "duplicate key",
+              },
+            };
         }
         rows().push(row);
         result = [row];

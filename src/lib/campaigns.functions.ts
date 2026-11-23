@@ -3,11 +3,10 @@ import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { checkTelephonyAccess, walletCanAffordOutbound } from "@/lib/telephony-guard.server";
 
 /**
- * Campaign lifecycle transitions (spec §24/§36/§37/§38). Creating/editing a
- * *draft* campaign's own config columns happens through direct
- * Supabase/RLS writes from the client (same pattern as agent_configs,
- * businesses, services) — the `campaigns` migration's column-level grants
- * already restrict that to config fields, never `status`. Every actual
+ * Campaign lifecycle transitions (spec §24/§36/§37/§38). Creating or editing a
+ * campaign's configuration goes through saveCampaignConfiguration below
+ * (organization, agent and caller number checked server-side); it never sets
+ * `status`. Every actual
  * status transition goes through one of the functions below instead, so the
  * full authorization/readiness/billing chain from spec §24 step "When
  * clicked" always re-runs server-side, exactly like handoverClient's
@@ -36,6 +35,57 @@ async function campaignOrgId(
   );
 }
 
+interface SaveCampaignConfigurationInput {
+  /** New campaign: the workspace to create it in. Edit: omit, the campaign's own is used. */
+  organizationId?: string;
+  campaignId?: string;
+  wizard: unknown;
+  /** true: the call instructions are confirmed (reviewed); false: kept as an unreviewed draft. */
+  confirm: boolean;
+  /** Create only: the creation session's key, so a repeat returns the first campaign. */
+  idempotencyKey?: string;
+  /** Edit only: the campaign version the editor loaded (optimistic concurrency). */
+  expectedUpdatedAt?: string;
+}
+
+/**
+ * Creates or edits a campaign's configuration (campaign-config.server.ts).
+ * The organization is the campaign's own (edit) or one the caller is an owner
+ * or admin of (create) — never trusted from the request alone. Places no call.
+ */
+export const saveCampaignConfiguration = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: SaveCampaignConfigurationInput) => {
+    if (!input?.campaignId && !input?.organizationId)
+      throw new Error("organizationId or campaignId is required");
+    if (typeof input.confirm !== "boolean") throw new Error("confirm is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { requireRole } = await import("@/lib/outbound-authorization.server");
+    const orgId = data.campaignId
+      ? await campaignOrgId(context, data.campaignId, true)
+      : await requireRole(
+          { supabase: context.supabase as typeof supabaseAdmin, supabaseAdmin },
+          context.userId,
+          data.organizationId!,
+          true,
+          "Workspace not found.",
+        );
+    const { saveCampaignConfigurationFor } = await import("@/lib/campaign-config.server");
+    return saveCampaignConfigurationFor(supabaseAdmin, orgId, context.userId, {
+      campaignId: data.campaignId,
+      wizard: data.wizard,
+      confirm: data.confirm,
+      idempotencyKey: data.idempotencyKey,
+      expectedUpdatedAt: data.expectedUpdatedAt,
+    });
+  });
+
+export const CAMPAIGN_LAUNCH_UNAVAILABLE_MESSAGE =
+  "Launching campaigns is not available yet. Your campaign is saved; no calls are placed.";
+
 interface LaunchCampaignInput {
   campaignId: string;
 }
@@ -60,6 +110,10 @@ export const launchCampaign = createServerFn({ method: "POST" })
     // The database emergency stop (fails closed): no campaign starts or resumes.
     if (await outboundEmergencyStopActive(supabaseAdmin))
       throw new Error(OUTBOUND_EMERGENCY_STOP_MESSAGE);
+    // No campaign starts or resumes while campaign dispatch is switched off:
+    // launching is not part of the campaign-creation MVP.
+    const { campaignDispatchEnabled } = await import("@/lib/jobs/handlers.server");
+    if (!campaignDispatchEnabled()) throw new Error(CAMPAIGN_LAUNCH_UNAVAILABLE_MESSAGE);
 
     const { data: campaign } = await supabaseAdmin
       .from("campaigns")

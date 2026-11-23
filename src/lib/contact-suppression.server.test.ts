@@ -8,7 +8,6 @@ import {
   suppressContact,
 } from "./contact-suppression.server.ts";
 import { applyOutcomeToCampaignContact } from "./campaign-dispatch.server.ts";
-import { enrollContactRows } from "./campaign-enrollment.server.ts";
 import { partitionDoNotCall } from "./campaign-cohort.ts";
 import { csvToTable, validateContactRows } from "./contacts-import.ts";
 import { readdirSync, readFileSync } from "node:fs";
@@ -222,26 +221,9 @@ describe("campaign opt-out marks the verified contact", () => {
 });
 
 describe("future campaigns and imports exclude opted-out contacts", () => {
-  test("a CSV upload into a new campaign skips the opted-out contact and does not clear it", async () => {
-    const s = setup();
-    s.row("contacts", "c_a")["opted_out"] = true;
-    const result = await enrollContactRows(s.db.client, {
-      organizationId: ORG_A,
-      campaignId: "camp_new",
-      rows: [
-        { phone: PHONE, fields: { name: "Asha" } },
-        { phone: "+919876500002", fields: { name: "Ravi" } },
-      ],
-      mapping: {},
-    });
-    assert.deepEqual(result, { enrolled: 1, alreadyInCampaign: 0, optedOut: 1 });
-    assert.equal(s.row("contacts", "c_a")["opted_out"], true);
-    assert.ok(
-      !s
-        .t("campaign_contacts")
-        .some((r) => r["campaign_id"] === "camp_new" && r["contact_id"] === "c_a"),
-    );
-  });
+  // A CSV upload skipping an opted-out contact (and never clearing it) now happens inside
+  // the import_campaign_contacts database function; it is proven against real PostgreSQL
+  // in supabase/migrations/campaign_contact_import_atomic.pg.test.ts.
 
   test("a Sarvam cohort launch never uploads an opted-out or missing contact", () => {
     const { dialable, excluded } = partitionDoNotCall([
@@ -330,21 +312,12 @@ describe("an opted-out number stays suppressed", () => {
     });
   };
 
-  test("re-importing the number in another format keeps it suppressed and unenrolled", async () => {
-    const s = setup();
-    optOut(s);
+  test("re-importing the number in another format normalizes to the stored number", () => {
+    // ... so the import matches the existing (suppressed) contact; that it then stays
+    // suppressed and unenrolled is proven in campaign_contact_import_atomic.pg.test.ts.
     const table = csvToTable("phone,name\n+91 98765 00001,Asha\n");
     const summary = validateContactRows(table, "phone");
     assert.equal(summary.valid[0]!.phone, PHONE, "normalized to the stored number");
-    const result = await enrollContactRows(s.db.client, {
-      organizationId: ORG_A,
-      campaignId: "camp_new",
-      rows: summary.valid,
-      mapping: {},
-    });
-    assert.deepEqual(result, { enrolled: 0, alreadyInCampaign: 0, optedOut: 1 });
-    assert.equal(s.row("contacts", "c_a")["opted_out"], true);
-    assert.equal(s.t("contacts").filter((c) => c["phone"] === PHONE).length, 2, "no new row");
   });
 
   test("manually re-adding the number in the same workspace is rejected", async () => {
@@ -393,7 +366,8 @@ describe("an opted-out number stays suppressed", () => {
     assert.equal(s.audit.length, 1);
   });
 
-  test("concurrent opt-outs, a re-import and a member's mark leave one suppressed contact", async () => {
+  // (The re-import part of this race now runs in PostgreSQL: campaign_contact_import_atomic.pg.test.ts.)
+  test("concurrent opt-outs and a member's mark leave one suppressed contact", async () => {
     const s = setup();
     await Promise.all([
       suppressContact(s.db.client, {
@@ -406,12 +380,6 @@ describe("an opted-out number stays suppressed", () => {
         contactId: "c_a",
         actorRole: "staff",
         optedOut: true,
-      }),
-      enrollContactRows(s.db.client, {
-        organizationId: ORG_A,
-        campaignId: "camp_new",
-        rows: [{ phone: PHONE, fields: { name: "Asha" } }],
-        mapping: {},
       }),
       suppressContact(s.db.client, {
         organizationId: ORG_A,

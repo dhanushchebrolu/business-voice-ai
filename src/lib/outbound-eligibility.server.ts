@@ -32,7 +32,8 @@ type Admin = SupabaseClient<Database>;
 
 export const OUTBOUND_DISABLED_MESSAGE =
   "Outbound calling is paused on ClickAI right now. Calls already in progress are not affected.";
-export const DESTINATION_COUNTRY_MESSAGE = "Calls can only be placed to Indian (+91) numbers.";
+export const DESTINATION_COUNTRY_MESSAGE =
+  "Calls can only be placed to regular Indian (+91) numbers, not toll-free, shared-cost or premium service numbers.";
 export const CALLING_HOURS_MESSAGE =
   "Calls can only be placed between 9:00 AM and 9:00 PM India time.";
 export const NO_RELATIONSHIP_MESSAGE =
@@ -130,9 +131,19 @@ function allowedCountryCodes(): string[] {
   return codes;
 }
 
-/** A canonical E.164 number whose country code is allowed. Set but empty allows nothing. */
+// An Indian subscriber number ClickAI may dial: 10 digits starting 2-9 (mobiles 6-9,
+// geographic 2-8). Numbers starting 1 are service codes (1800 toll-free, 1860
+// shared-cost, 1900 premium) and are never dialled: the same rule as the voice
+// agent's (voice-agent/phone.ts).
+const DIALLABLE_INDIAN_NSN = /^[2-9]\d{9}$/;
+
+/**
+ * A canonical E.164 number whose country code is allowed (set but empty
+ * allows nothing) and, for India, a regular subscriber number.
+ */
 export function isDestinationCountryAllowed(e164: string): boolean {
-  return allowedCountryCodes().some((code) => e164.startsWith(`+${code}`));
+  if (!allowedCountryCodes().some((code) => e164.startsWith(`+${code}`))) return false;
+  return !e164.startsWith("+91") || DIALLABLE_INDIAN_NSN.test(e164.slice(3));
 }
 
 /** Whether `now` is inside the calling window, in India time (DST-free, so the hour is exact). */

@@ -549,6 +549,7 @@ export type Database = {
           gross_profit: number | null;
           id: string;
           billing_cap_minutes: number | null;
+          billing_hold: string | null;
           billing_rate_per_minute: number | null;
           idempotency_key: string | null;
           language: string | null;
@@ -600,6 +601,7 @@ export type Database = {
           failure_reason?: string | null;
           id?: string;
           billing_cap_minutes?: number | null;
+          billing_hold?: string | null;
           billing_rate_per_minute?: number | null;
           idempotency_key?: string | null;
           language?: string | null;
@@ -651,6 +653,7 @@ export type Database = {
           failure_reason?: string | null;
           id?: string;
           billing_cap_minutes?: number | null;
+          billing_hold?: string | null;
           billing_rate_per_minute?: number | null;
           idempotency_key?: string | null;
           language?: string | null;
@@ -737,6 +740,7 @@ export type Database = {
           context_reviewed_at: string | null;
           context_reviewed_by: string | null;
           context_version: number | null;
+          idempotency_key: string | null;
           description: string | null;
           cancelled_at: string | null;
           completed_at: string | null;
@@ -772,6 +776,7 @@ export type Database = {
           context_reviewed_at?: string | null;
           context_reviewed_by?: string | null;
           context_version?: number | null;
+          idempotency_key?: string | null;
           description?: string | null;
           cancelled_at?: string | null;
           completed_at?: string | null;
@@ -807,6 +812,7 @@ export type Database = {
           context_reviewed_at?: string | null;
           context_reviewed_by?: string | null;
           context_version?: number | null;
+          idempotency_key?: string | null;
           description?: string | null;
           cancelled_at?: string | null;
           completed_at?: string | null;
@@ -912,17 +918,17 @@ export type Database = {
         Relationships: [
           {
             foreignKeyName: "campaign_contacts_campaign_id_fkey";
-            columns: ["campaign_id"];
+            columns: ["campaign_id", "organization_id"];
             isOneToOne: false;
             referencedRelation: "campaigns";
-            referencedColumns: ["id"];
+            referencedColumns: ["id", "organization_id"];
           },
           {
             foreignKeyName: "campaign_contacts_contact_id_fkey";
-            columns: ["contact_id"];
+            columns: ["contact_id", "organization_id"];
             isOneToOne: false;
             referencedRelation: "contacts";
-            referencedColumns: ["id"];
+            referencedColumns: ["id", "organization_id"];
           },
           {
             foreignKeyName: "campaign_contacts_call_id_fkey";
@@ -939,6 +945,10 @@ export type Database = {
           created_at: string;
           created_by: string | null;
           duplicate_rows: number;
+          enrolled_rows: number | null;
+          already_in_campaign_rows: number | null;
+          opted_out_rows: number | null;
+          idempotency_key: string | null;
           filename: string | null;
           id: string;
           invalid_rows: number;
@@ -951,6 +961,10 @@ export type Database = {
           created_at?: string;
           created_by?: string | null;
           duplicate_rows?: number;
+          enrolled_rows?: number | null;
+          already_in_campaign_rows?: number | null;
+          opted_out_rows?: number | null;
+          idempotency_key?: string | null;
           filename?: string | null;
           id?: string;
           invalid_rows?: number;
@@ -963,6 +977,10 @@ export type Database = {
           created_at?: string;
           created_by?: string | null;
           duplicate_rows?: number;
+          enrolled_rows?: number | null;
+          already_in_campaign_rows?: number | null;
+          opted_out_rows?: number | null;
+          idempotency_key?: string | null;
           filename?: string | null;
           id?: string;
           invalid_rows?: number;
@@ -973,10 +991,10 @@ export type Database = {
         Relationships: [
           {
             foreignKeyName: "campaign_uploads_campaign_id_fkey";
-            columns: ["campaign_id"];
+            columns: ["campaign_id", "organization_id"];
             isOneToOne: false;
             referencedRelation: "campaigns";
-            referencedColumns: ["id"];
+            referencedColumns: ["id", "organization_id"];
           },
         ];
       };
@@ -2855,6 +2873,7 @@ export type Database = {
           currency: string;
           description: string | null;
           id: string;
+          idempotency_key: string | null;
           kind: string;
           organization_id: string;
           reference: string | null;
@@ -2866,6 +2885,7 @@ export type Database = {
           currency?: string;
           description?: string | null;
           id?: string;
+          idempotency_key?: string | null;
           kind: string;
           organization_id: string;
           reference?: string | null;
@@ -2877,6 +2897,7 @@ export type Database = {
           currency?: string;
           description?: string | null;
           id?: string;
+          idempotency_key?: string | null;
           kind?: string;
           organization_id?: string;
           reference?: string | null;
@@ -2893,6 +2914,9 @@ export type Database = {
       };
       webhook_events: {
         Row: {
+          attempts: number;
+          claim_token: string | null;
+          claimed_at: string | null;
           created_at: string;
           error: string | null;
           event_id: string;
@@ -2903,6 +2927,9 @@ export type Database = {
           provider: string;
         };
         Insert: {
+          attempts?: number;
+          claim_token?: string | null;
+          claimed_at?: string | null;
           created_at?: string;
           error?: string | null;
           event_id: string;
@@ -2913,6 +2940,9 @@ export type Database = {
           provider: string;
         };
         Update: {
+          attempts?: number;
+          claim_token?: string | null;
+          claimed_at?: string | null;
           created_at?: string;
           error?: string | null;
           event_id?: string;

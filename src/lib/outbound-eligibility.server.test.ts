@@ -66,6 +66,15 @@ describe("destination country", () => {
         ),
       );
   });
+
+  test("Indian service numbers are never dialled: toll-free, shared-cost, premium (start with 1)", () => {
+    withEnv({ OUTBOUND_ALLOWED_COUNTRY_CODES: undefined }, () => {
+      for (const n of ["+911800123456", "+911860123456", "+911900123456", "+911234567890"])
+        assert.equal(isDestinationCountryAllowed(n), false, n);
+      for (const n of ["+919876543210", "+916123456789", "+912223456789", "+918012345678"])
+        assert.equal(isDestinationCountryAllowed(n), true, n);
+    });
+  });
 });
 
 describe("calling hours (India time)", () => {

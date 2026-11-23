@@ -3,6 +3,12 @@ import type { Database } from "@/integrations/supabase/types";
 import type { NormalizedCallEvent } from "./telephony/adapter.ts";
 import { isResolvableSarvamCall } from "./sarvam-call-review.ts";
 import type { FinalizationResult } from "./telephony/call-finalization.server.ts";
+import {
+  claimWebhookEvent,
+  completeWebhookEvent,
+  failWebhookEvent,
+  type WebhookClaim,
+} from "./telephony/webhook-claim.server.ts";
 
 /**
  * Operator resolution for a Sarvam outbound call whose outcome Klyro could
@@ -38,6 +44,11 @@ export interface ResolveUnknownCallInput {
   confirmedCheckedInSarvam?: boolean | undefined;
   /** The admin who decided (call_logs.resolved_by). */
   resolvedBy?: string | undefined;
+  /**
+   * The reconciler's cap on automatic tries of this attempt's event
+   * (WEBHOOK_MAX_ATTEMPTS). Unset for an operator, who is never capped.
+   */
+  maxAttempts?: number | undefined;
 }
 
 export interface ResolvableCall {
@@ -55,7 +66,10 @@ export interface ResolutionDeps {
    * telephony-event-processing.server.ts's processTelephonyEvent("sarvam", …)
    * — the same service the public webhook route uses. Injectable for tests.
    */
-  processEvent?: (event: NormalizedCallEvent, options: { onlyCallId: string }) => Promise<void>;
+  processEvent?: (
+    event: NormalizedCallEvent,
+    options: { onlyCallId: string; claim: WebhookClaim },
+  ) => Promise<void>;
   /**
    * Finalizes a call once it is final (billing + campaign outcome, exactly
    * once). Defaults to call-finalization.server.ts's finalizeTerminalCallSafely.
@@ -143,35 +157,42 @@ export async function resolveUnknownSarvamCall(
       throw new Error("That attempt ID belongs to a different call.");
   }
 
-  // Same dedupe key a real webhook for this attempt would use.
-  const { error: dedupeError } = await supabaseAdmin.from("webhook_events").insert({
+  // Same event key a real webhook for this attempt would use, claimed the same
+  // way: an unfinished claim (a webhook processor that crashed, or recorded an
+  // error) is taken over here instead of blocking the resolution forever.
+  const claimed = await claimWebhookEvent(supabaseAdmin, {
     provider: "sarvam",
-    event_id: eventKey,
-    event_type: outcome,
-    payload: { source: "operator_resolution", call_id: call.id, outcome } as never,
+    eventId: eventKey,
+    eventType: outcome,
+    payload: { source: "operator_resolution", call_id: call.id, outcome },
+    maxAttempts: input.maxAttempts ?? null,
   });
-  if (dedupeError) {
-    if ((dedupeError as { code?: string }).code === "23505")
-      throw new Error("Sarvam's result for this attempt was already recorded.");
-    throw dedupeError;
-  }
+  if (claimed.result === "processed")
+    throw new Error("Sarvam's result for this attempt was already recorded.");
+  if (claimed.result === "in_progress")
+    throw new Error(
+      "Sarvam's result for this attempt is being recorded right now. Check again in a few minutes.",
+    );
+  if (claimed.result === "exhausted")
+    throw new Error(
+      `Automatic recording of this attempt's result stopped after ${claimed.attempts} tries; an operator must resolve it.`,
+    );
+  const claim = claimed.claim;
 
-  // If the call's status was never written, drop our dedupe row so neither a
-  // retry nor the real webhook for this attempt is blocked by it. Once the
-  // status is written the decision stands and the row is kept: billing and
-  // the campaign outcome are finalization's job (retried from Needs review).
-  const releaseDedupeIfUnapplied = async () => {
+  // If the call's status was never written, the event is marked failed (never
+  // deleted, so its attempt count survives) and stays immediately claimable by
+  // a retry or the real webhook. Once the status is written the decision
+  // stands and the event is completed, so a later webhook is a duplicate:
+  // billing and the campaign outcome are finalization's job (Needs review).
+  const releaseClaim = async (message: string) => {
     const { data: now } = await supabaseAdmin
       .from("call_logs")
       .select("status")
       .eq("id", call.id)
       .maybeSingle();
     if (now && isResolvableSarvamCall({ ...call, status: now.status }))
-      await supabaseAdmin
-        .from("webhook_events")
-        .delete()
-        .eq("provider", "sarvam")
-        .eq("event_id", eventKey);
+      await failWebhookEvent(supabaseAdmin, claim, message);
+    else await completeWebhookEvent(supabaseAdmin, claim);
   };
 
   const event: NormalizedCallEvent = {
@@ -189,9 +210,11 @@ export async function resolveUnknownSarvamCall(
     raw: { source: "operator_resolution", attempt_id: attemptId ?? null },
   };
   try {
-    await processEvent(event, { onlyCallId: call.id });
+    await processEvent(event, { onlyCallId: call.id, claim });
   } catch (err) {
-    await releaseDedupeIfUnapplied();
+    // Claim lost to a takeover: the new holder owns the event; touch nothing.
+    if ((err as Error)?.name !== "WebhookClaimLostError")
+      await releaseClaim((err as Error)?.message ?? String(err));
     throw err;
   }
 
@@ -201,16 +224,11 @@ export async function resolveUnknownSarvamCall(
     .eq("id", call.id)
     .maybeSingle();
   if (!after || after.status !== outcome) {
-    await releaseDedupeIfUnapplied();
-    throw new Error(
-      `The call was not updated (now: ${after?.status ?? "missing"}). A webhook may have resolved it first.`,
-    );
+    const message = `The call was not updated (now: ${after?.status ?? "missing"}). A webhook may have resolved it first.`;
+    await releaseClaim(message);
+    throw new Error(message);
   }
-  await supabaseAdmin
-    .from("webhook_events")
-    .update({ processed_at: new Date().toISOString() })
-    .eq("provider", "sarvam")
-    .eq("event_id", eventKey);
+  await completeWebhookEvent(supabaseAdmin, claim);
   if (input.resolvedBy && after.resolution_source === "operator") {
     await supabaseAdmin
       .from("call_logs")

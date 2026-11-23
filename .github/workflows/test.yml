@@ -100,26 +100,13 @@ jobs:
         # real failure instead of fixing it.
         run: |
           set -eo pipefail
-          node --experimental-strip-types --test \
-            supabase/migrations/business_hours_interval_validation.pg.test.ts \
-            supabase/migrations/business_hours_interval_validation.harness-selftest.pg.test.ts \
-            supabase/migrations/booking_concurrency.pg.test.ts \
-            supabase/migrations/voice_agent_transcript_segments.pg.test.ts \
-            supabase/migrations/outbound_call_outcome_unknown.pg.test.ts \
-            supabase/migrations/sarvam_outbound_call_finalization.pg.test.ts \
-            supabase/migrations/wallet_service_role_balance.pg.test.ts \
-            supabase/migrations/ai_employee_types_and_sarvam_applications.pg.test.ts \
-            supabase/migrations/wallet_balance_ledger_cache.pg.test.ts \
-            supabase/migrations/job_queue.pg.test.ts \
-            supabase/migrations/job_crash_recovery.pg.test.ts \
-            supabase/migrations/sarvam_agent_integrations.pg.test.ts \
-            supabase/migrations/agent_outbound_ready.pg.test.ts \
-            supabase/migrations/contact_opt_out_guard.pg.test.ts \
-            supabase/migrations/provider_metadata_cleanup.pg.test.ts \
-            supabase/migrations/outbound_call_admission.pg.test.ts \
-            supabase/migrations/dual_agent_provisioning.pg.test.ts \
+          # Every real-PostgreSQL file, by glob: a hand-kept list had silently
+          # left 18 of 35 files (all migrations since 2026-11-20) unguarded.
+          node --experimental-strip-types --test --test-reporter=tap supabase/migrations/*.pg.test.ts \
             2>&1 | tee pg-test-output.log
-          skipped=$(grep -oP '(?<=^# skipped )\d+' pg-test-output.log | tail -1)
+          # Every skip fails CI except the real-PostgREST checks of the WhatsApp
+          # files, which need a PostgREST binary (POSTGREST_BIN) this job does not install.
+          skipped=$(grep -E '# SKIP' pg-test-output.log | grep -vc 'POSTGREST_BIN' || true)
           todo=$(grep -oP '(?<=^# todo )\d+' pg-test-output.log | tail -1)
           if [ "${skipped:-0}" -gt 0 ]; then
             echo "::error::${skipped} PostgreSQL regression test(s) were skipped in CI. PostgreSQL is installed in this job, so a skip here means CI is misconfigured, not that the environment genuinely lacks PostgreSQL — failing rather than passing silently with no real database coverage."

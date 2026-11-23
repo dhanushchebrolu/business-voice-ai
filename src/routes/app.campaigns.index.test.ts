@@ -12,11 +12,11 @@ import { dirname, join } from "node:path";
  */
 
 const src = readFileSync(
-  join(dirname(fileURLToPath(import.meta.url)), "app.campaigns.tsx"),
+  join(dirname(fileURLToPath(import.meta.url)), "app.campaigns.index.tsx"),
   "utf8",
 );
 
-describe("app.campaigns.tsx — a failed fetch is a real, retryable error, never a silent empty state", () => {
+describe("app.campaigns.index.tsx — a failed fetch is a real, retryable error, never a silent empty state", () => {
   test("destructures isError/error/refetch from the campaigns query", () => {
     assert.match(src, /isLoading,\s*isError,\s*error,\s*refetch\s*\} = useQuery\(campaignsQuery/);
   });

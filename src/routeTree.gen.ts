@@ -70,6 +70,7 @@ import { Route as AdminCustomersIndexRouteImport } from './routes/admin.customer
 import { Route as AdminCustomersOrgIdRouteImport } from './routes/admin.customers.$orgId'
 import { Route as AdminProvisioningIndexRouteImport } from './routes/admin.provisioning.index'
 import { Route as AdminProvisioningOrgIdRouteImport } from './routes/admin.provisioning.$orgId'
+import { Route as AppCampaignsIndexRouteImport } from './routes/app.campaigns.index'
 import { Route as AppCampaignsCampaignIdRouteImport } from './routes/app.campaigns.$campaignId'
 import { Route as AppCampaignsNewRouteImport } from './routes/app.campaigns.new'
 import { Route as ApiInternalVoiceAgentOutboundClaimRouteImport } from './routes/api/internal/voice-agent/outbound-claim'
@@ -92,6 +93,7 @@ import { Route as ApiPublicWebhooksRazorpayPaymentsRouteImport } from './routes/
 import { Route as ApiPublicWebhooksTelephonyRouteImport } from './routes/api/public/webhooks/telephony'
 import { Route as ApiPublicWebhooksVobizAnswerRouteImport } from './routes/api/public/webhooks/vobiz-answer'
 import { Route as ApiPublicWebhooksWhatsappRouteImport } from './routes/api/public/webhooks/whatsapp'
+import { Route as AppCampaignsCampaignIdEditRouteImport } from './routes/app.campaigns.$campaignId_.edit'
 import { Route as ApiPublicIntegrationsGoogleCalendarCallbackRouteImport } from './routes/api/public/integrations/google-calendar/callback'
 import { Route as ApiPublicIntegrationsInstagramCallbackRouteImport } from './routes/api/public/integrations/instagram/callback'
 import { Route as ApiPublicIntegrationsRazorpayCallbackRouteImport } from './routes/api/public/integrations/razorpay/callback'
@@ -405,6 +407,11 @@ const AdminProvisioningOrgIdRoute = AdminProvisioningOrgIdRouteImport.update({
   path: '/provisioning/$orgId',
   getParentRoute: () => AdminRoute,
 } as any)
+const AppCampaignsIndexRoute = AppCampaignsIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => AppCampaignsRoute,
+} as any)
 const AppCampaignsCampaignIdRoute = AppCampaignsCampaignIdRouteImport.update({
   id: '/$campaignId',
   path: '/$campaignId',
@@ -535,6 +542,12 @@ const ApiPublicWebhooksWhatsappRoute =
     path: '/api/public/webhooks/whatsapp',
     getParentRoute: () => rootRouteImport,
   } as any)
+const AppCampaignsCampaignIdEditRoute =
+  AppCampaignsCampaignIdEditRouteImport.update({
+    id: '/$campaignId_/edit',
+    path: '/$campaignId/edit',
+    getParentRoute: () => AppCampaignsRoute,
+  } as any)
 const ApiPublicIntegrationsGoogleCalendarCallbackRoute =
   ApiPublicIntegrationsGoogleCalendarCallbackRouteImport.update({
     id: '/api/public/integrations/google-calendar/callback',
@@ -636,6 +649,7 @@ export interface FileRoutesByFullPath {
   '/app/campaigns/new': typeof AppCampaignsNewRoute
   '/admin/customers/': typeof AdminCustomersIndexRoute
   '/admin/provisioning/': typeof AdminProvisioningIndexRoute
+  '/app/campaigns/': typeof AppCampaignsIndexRoute
   '/api/internal/voice-agent/outbound-claim': typeof ApiInternalVoiceAgentOutboundClaimRoute
   '/api/internal/voice-agent/session': typeof ApiInternalVoiceAgentSessionRoute
   '/api/internal/voice-agent/session-end': typeof ApiInternalVoiceAgentSessionEndRoute
@@ -656,6 +670,7 @@ export interface FileRoutesByFullPath {
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
   '/api/public/webhooks/vobiz-answer': typeof ApiPublicWebhooksVobizAnswerRoute
   '/api/public/webhooks/whatsapp': typeof ApiPublicWebhooksWhatsappRoute
+  '/app/campaigns/$campaignId/edit': typeof AppCampaignsCampaignIdEditRoute
   '/api/public/integrations/google-calendar/callback': typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
   '/api/public/integrations/instagram/callback': typeof ApiPublicIntegrationsInstagramCallbackRoute
   '/api/public/integrations/razorpay/callback': typeof ApiPublicIntegrationsRazorpayCallbackRoute
@@ -703,7 +718,6 @@ export interface FileRoutesByTo {
   '/app/bookings': typeof AppBookingsRoute
   '/app/business': typeof AppBusinessRoute
   '/app/calls': typeof AppCallsRoute
-  '/app/campaigns': typeof AppCampaignsRouteWithChildren
   '/app/contacts': typeof AppContactsRoute
   '/app/integrations': typeof AppIntegrationsRoute
   '/app/knowledge': typeof AppKnowledgeRoute
@@ -723,6 +737,7 @@ export interface FileRoutesByTo {
   '/app/campaigns/new': typeof AppCampaignsNewRoute
   '/admin/customers': typeof AdminCustomersIndexRoute
   '/admin/provisioning': typeof AdminProvisioningIndexRoute
+  '/app/campaigns': typeof AppCampaignsIndexRoute
   '/api/internal/voice-agent/outbound-claim': typeof ApiInternalVoiceAgentOutboundClaimRoute
   '/api/internal/voice-agent/session': typeof ApiInternalVoiceAgentSessionRoute
   '/api/internal/voice-agent/session-end': typeof ApiInternalVoiceAgentSessionEndRoute
@@ -743,6 +758,7 @@ export interface FileRoutesByTo {
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
   '/api/public/webhooks/vobiz-answer': typeof ApiPublicWebhooksVobizAnswerRoute
   '/api/public/webhooks/whatsapp': typeof ApiPublicWebhooksWhatsappRoute
+  '/app/campaigns/$campaignId/edit': typeof AppCampaignsCampaignIdEditRoute
   '/api/public/integrations/google-calendar/callback': typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
   '/api/public/integrations/instagram/callback': typeof ApiPublicIntegrationsInstagramCallbackRoute
   '/api/public/integrations/razorpay/callback': typeof ApiPublicIntegrationsRazorpayCallbackRoute
@@ -815,6 +831,7 @@ export interface FileRoutesById {
   '/app/campaigns/new': typeof AppCampaignsNewRoute
   '/admin/customers/': typeof AdminCustomersIndexRoute
   '/admin/provisioning/': typeof AdminProvisioningIndexRoute
+  '/app/campaigns/': typeof AppCampaignsIndexRoute
   '/api/internal/voice-agent/outbound-claim': typeof ApiInternalVoiceAgentOutboundClaimRoute
   '/api/internal/voice-agent/session': typeof ApiInternalVoiceAgentSessionRoute
   '/api/internal/voice-agent/session-end': typeof ApiInternalVoiceAgentSessionEndRoute
@@ -835,6 +852,7 @@ export interface FileRoutesById {
   '/api/public/webhooks/telephony': typeof ApiPublicWebhooksTelephonyRoute
   '/api/public/webhooks/vobiz-answer': typeof ApiPublicWebhooksVobizAnswerRoute
   '/api/public/webhooks/whatsapp': typeof ApiPublicWebhooksWhatsappRoute
+  '/app/campaigns/$campaignId_/edit': typeof AppCampaignsCampaignIdEditRoute
   '/api/public/integrations/google-calendar/callback': typeof ApiPublicIntegrationsGoogleCalendarCallbackRoute
   '/api/public/integrations/instagram/callback': typeof ApiPublicIntegrationsInstagramCallbackRoute
   '/api/public/integrations/razorpay/callback': typeof ApiPublicIntegrationsRazorpayCallbackRoute
@@ -908,6 +926,7 @@ export interface FileRouteTypes {
     | '/app/campaigns/new'
     | '/admin/customers/'
     | '/admin/provisioning/'
+    | '/app/campaigns/'
     | '/api/internal/voice-agent/outbound-claim'
     | '/api/internal/voice-agent/session'
     | '/api/internal/voice-agent/session-end'
@@ -928,6 +947,7 @@ export interface FileRouteTypes {
     | '/api/public/webhooks/telephony'
     | '/api/public/webhooks/vobiz-answer'
     | '/api/public/webhooks/whatsapp'
+    | '/app/campaigns/$campaignId/edit'
     | '/api/public/integrations/google-calendar/callback'
     | '/api/public/integrations/instagram/callback'
     | '/api/public/integrations/razorpay/callback'
@@ -975,7 +995,6 @@ export interface FileRouteTypes {
     | '/app/bookings'
     | '/app/business'
     | '/app/calls'
-    | '/app/campaigns'
     | '/app/contacts'
     | '/app/integrations'
     | '/app/knowledge'
@@ -995,6 +1014,7 @@ export interface FileRouteTypes {
     | '/app/campaigns/new'
     | '/admin/customers'
     | '/admin/provisioning'
+    | '/app/campaigns'
     | '/api/internal/voice-agent/outbound-claim'
     | '/api/internal/voice-agent/session'
     | '/api/internal/voice-agent/session-end'
@@ -1015,6 +1035,7 @@ export interface FileRouteTypes {
     | '/api/public/webhooks/telephony'
     | '/api/public/webhooks/vobiz-answer'
     | '/api/public/webhooks/whatsapp'
+    | '/app/campaigns/$campaignId/edit'
     | '/api/public/integrations/google-calendar/callback'
     | '/api/public/integrations/instagram/callback'
     | '/api/public/integrations/razorpay/callback'
@@ -1086,6 +1107,7 @@ export interface FileRouteTypes {
     | '/app/campaigns/new'
     | '/admin/customers/'
     | '/admin/provisioning/'
+    | '/app/campaigns/'
     | '/api/internal/voice-agent/outbound-claim'
     | '/api/internal/voice-agent/session'
     | '/api/internal/voice-agent/session-end'
@@ -1106,6 +1128,7 @@ export interface FileRouteTypes {
     | '/api/public/webhooks/telephony'
     | '/api/public/webhooks/vobiz-answer'
     | '/api/public/webhooks/whatsapp'
+    | '/app/campaigns/$campaignId_/edit'
     | '/api/public/integrations/google-calendar/callback'
     | '/api/public/integrations/instagram/callback'
     | '/api/public/integrations/razorpay/callback'
@@ -1594,6 +1617,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AdminProvisioningOrgIdRouteImport
       parentRoute: typeof AdminRoute
     }
+    '/app/campaigns/': {
+      id: '/app/campaigns/'
+      path: '/'
+      fullPath: '/app/campaigns/'
+      preLoaderRoute: typeof AppCampaignsIndexRouteImport
+      parentRoute: typeof AppCampaignsRoute
+    }
     '/app/campaigns/$campaignId': {
       id: '/app/campaigns/$campaignId'
       path: '/$campaignId'
@@ -1748,6 +1778,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicWebhooksWhatsappRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/app/campaigns/$campaignId_/edit': {
+      id: '/app/campaigns/$campaignId_/edit'
+      path: '/$campaignId/edit'
+      fullPath: '/app/campaigns/$campaignId/edit'
+      preLoaderRoute: typeof AppCampaignsCampaignIdEditRouteImport
+      parentRoute: typeof AppCampaignsRoute
+    }
     '/api/public/integrations/google-calendar/callback': {
       id: '/api/public/integrations/google-calendar/callback'
       path: '/api/public/integrations/google-calendar/callback'
@@ -1867,11 +1904,15 @@ const AdminRouteWithChildren = AdminRoute._addFileChildren(AdminRouteChildren)
 interface AppCampaignsRouteChildren {
   AppCampaignsCampaignIdRoute: typeof AppCampaignsCampaignIdRoute
   AppCampaignsNewRoute: typeof AppCampaignsNewRoute
+  AppCampaignsIndexRoute: typeof AppCampaignsIndexRoute
+  AppCampaignsCampaignIdEditRoute: typeof AppCampaignsCampaignIdEditRoute
 }
 
 const AppCampaignsRouteChildren: AppCampaignsRouteChildren = {
   AppCampaignsCampaignIdRoute: AppCampaignsCampaignIdRoute,
   AppCampaignsNewRoute: AppCampaignsNewRoute,
+  AppCampaignsIndexRoute: AppCampaignsIndexRoute,
+  AppCampaignsCampaignIdEditRoute: AppCampaignsCampaignIdEditRoute,
 }
 
 const AppCampaignsRouteWithChildren = AppCampaignsRoute._addFileChildren(

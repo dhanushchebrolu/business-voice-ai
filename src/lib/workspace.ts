@@ -34,6 +34,7 @@ export type CustomerCallRow = Pick<
   | "summary"
   | "lead_score"
   | "customer_charge"
+  | "billing_hold"
   | "currency"
   | "started_at"
   | "answered_at"
@@ -211,7 +212,7 @@ export const callsQuery = (organizationId: string | undefined) =>
       const { data, error } = await supabase
         .from("call_logs")
         .select(
-          "id, organization_id, business_id, phone_number_id, provider, provider_call_id, direction, caller_number, caller_name, destination_number, status, outcome, language, duration_seconds, agent_version, recording_url, transcript, summary, lead_score, customer_charge, currency, started_at, answered_at, ended_at, failure_reason, created_at, updated_at",
+          "id, organization_id, business_id, phone_number_id, provider, provider_call_id, direction, caller_number, caller_name, destination_number, status, outcome, language, duration_seconds, agent_version, recording_url, transcript, summary, lead_score, customer_charge, billing_hold, currency, started_at, answered_at, ended_at, failure_reason, created_at, updated_at",
         )
         .eq("organization_id", organizationId!)
         .order("started_at", { ascending: false })
@@ -274,6 +275,29 @@ export const usageQuery = (organizationId: string | undefined) =>
 export type ContactRow = Database["public"]["Tables"]["contacts"]["Row"];
 export type CampaignRow = Database["public"]["Tables"]["campaigns"]["Row"];
 export type CampaignContactRow = Database["public"]["Tables"]["campaign_contacts"]["Row"];
+export type CampaignListRow = CampaignRow & {
+  agent_configs: { agent_name: string | null } | null;
+  campaign_contacts: { count: number }[];
+};
+
+/** Contact uploads for one campaign (import history), newest first. */
+export const campaignUploadsQuery = (campaignId: string | undefined) =>
+  queryOptions({
+    queryKey: ["campaign-uploads", campaignId],
+    enabled: Boolean(campaignId),
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("campaign_uploads")
+        .select(
+          "id, filename, total_rows, valid_rows, invalid_rows, duplicate_rows, enrolled_rows, already_in_campaign_rows, opted_out_rows, created_at",
+        )
+        .eq("campaign_id", campaignId!)
+        .order("created_at", { ascending: false })
+        .limit(50);
+      if (error) throw error;
+      return data;
+    },
+  });
 
 export const contactsQuery = (organizationId: string | undefined) =>
   queryOptions({
@@ -295,14 +319,14 @@ export const campaignsQuery = (organizationId: string | undefined) =>
   queryOptions({
     queryKey: ["campaigns", organizationId],
     enabled: Boolean(organizationId),
-    queryFn: async (): Promise<CampaignRow[]> => {
+    queryFn: async (): Promise<CampaignListRow[]> => {
       const { data, error } = await supabase
         .from("campaigns")
-        .select("*")
+        .select("*, agent_configs(agent_name), campaign_contacts(count)")
         .eq("organization_id", organizationId!)
         .order("created_at", { ascending: false });
       if (error) throw error;
-      return data;
+      return data as unknown as CampaignListRow[];
     },
   });
 

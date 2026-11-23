@@ -56,20 +56,62 @@ describe("app.campaigns.$campaignId.tsx — non-idempotent campaign actions can'
     assert.match(code, /\} finally \{\s*\n\s*setActionPending\(false\);/);
   });
 
-  test("the launch/pause/cancel buttons are disabled while an action is in flight", () => {
+  test("the pause/cancel buttons are disabled while an action is in flight", () => {
     const actionsIdx = code.indexOf("actions={");
     const sectionEndIdx = code.indexOf('<SectionCard title="Progress"');
     const block = code.slice(actionsIdx, sectionEndIdx);
     const disabledCount = (block.match(/disabled=\{actionPending\}/g) ?? []).length;
-    assert.ok(
-      disabledCount >= 3,
-      `expected launch/pause/cancel all disabled, found ${disabledCount}`,
+    assert.ok(disabledCount >= 2, `expected pause/cancel disabled, found ${disabledCount}`);
+  });
+});
+
+describe("app.campaigns.$campaignId.tsx — launching is not available in the campaign MVP", () => {
+  test("the Launch/Resume button is always disabled and has no click handler", () => {
+    const idx = code.indexOf('{["draft", "scheduled", "paused"].includes(campaign.status)');
+    const block = code.slice(idx, code.indexOf("</Button>", idx));
+    assert.match(block, /\n\s*disabled\n/);
+    assert.doesNotMatch(block, /onClick=/);
+  });
+
+  test("the page cannot launch or resume a campaign at all", () => {
+    assert.doesNotMatch(code, /launchCampaign\s*\(/);
+    assert.doesNotMatch(code, /resumeCampaign/);
+    assert.doesNotMatch(code, /import \{[^}]*launchCampaign/);
+  });
+
+  test("the configuration, import history and activity sections render only saved data", () => {
+    assert.match(code, /function CampaignConfiguration\(/);
+    assert.match(code, /function ImportHistory\(/);
+    assert.match(code, /useQuery\(campaignUploadsQuery\(campaignId\)\)/);
+    assert.match(code, /function CampaignActivity\(/);
+    assert.match(code, /\.filter\(\(\[, at\]\) => Boolean\(at\)\)/);
+  });
+
+  test("a CSV upload shows valid/invalid/duplicate counts before importing, and needs a valid row", () => {
+    assert.match(code, /validateContactRows\(csvToTable\(csvText\), phoneColumn\)/);
+    assert.match(
+      code,
+      /disabled=\{importing \|\| !phoneColumn \|\| !uploadPreview\?\.valid\.length \|\| tooLarge\}/,
     );
   });
 
-  test("doLaunch still calls launchCampaign for both 'Launch' and 'Resume' (unchanged dispatch — launchCampaign re-runs the full readiness bar, deliberately not resumeCampaign, for a UI-driven resume)", () => {
-    const idx = code.indexOf('{["draft", "scheduled", "paused"].includes(campaign.status)');
-    const block = code.slice(idx, idx + 300);
-    assert.match(block, /onClick=\{doLaunch\}/);
+  test("a file over the row cap shows the cap message and cannot be imported", () => {
+    assert.match(code, /const tooLarge = \(uploadPreview\?\.totalRows \?\? 0\) > MAX_IMPORT_ROWS;/);
+    assert.match(code, /IMPORT_TOO_LARGE_MESSAGE/);
+  });
+});
+
+describe("app.campaigns.$campaignId.tsx — editing the configuration", () => {
+  test("Edit configuration links to the edit page, only for statuses that can be edited", () => {
+    assert.match(
+      code,
+      /\{configEditBlockedReason\(campaign\.status\) \? null : \(\s*\n\s*<Link to="\/app\/campaigns\/\$campaignId\/edit"/,
+    );
+    assert.match(code, /Edit configuration/);
+  });
+
+  test("the Configuration card explains why a campaign can't be edited, and a missing caller number", () => {
+    assert.match(code, /const blocked = configEditBlockedReason\(campaign\.status\);/);
+    assert.match(code, /No caller number yet\. Edit the configuration to choose one/);
   });
 });

@@ -253,14 +253,13 @@ describe("duplicate deliveries and mismatched organizations", () => {
   });
 
   test("route dedupes on webhook_events before any processing, and replays are no-ops", () => {
-    const dedupe = route.indexOf('from("webhook_events").insert(');
+    const dedupe = route.indexOf("await claimWebhookEvent(supabaseAdmin,");
     const process = route.indexOf("await processTelephonyEvent(");
     assert.ok(dedupe > -1 && dedupe < process);
-    // A replay is a no-op unless the earlier attempt failed and was never processed.
-    assert.match(route, /code !== "23505"/);
+    // A replay of a processed event is a no-op; only the claim holder processes.
     assert.match(
       route,
-      /\.is\("processed_at", null\)[\s\S]*?if \(!claimed\?\.length\) return new Response\("ok \(duplicate\)"\)/,
+      /if \(claimed\.result === "processed"\) return new Response\("ok \(duplicate\)"\);/,
     );
     assert.match(route, /if \(!transition\.changed\) \{\s*\/\/ idempotent replay/);
   });

@@ -53,9 +53,37 @@ describe("normalizePhoneNumber — E.164 only, national numbers only with a know
       assert.equal(normalizeCustomerPhone("+919876543210", country), "+919876543210");
     });
   }
+  // How an Indian number is written never changes the result (campaign hardening): the
+  // bare, 0-prefixed, 91-prefixed and +91 forms of one national number all give the same
+  // E.164, or are all rejected. Before, "5876543210" and "915876543210" were rejected while
+  // "+915876543210" was accepted, so one person could become two contacts or slip past a
+  // do-not-call match. (Which numbers may be CALLED is outbound-eligibility's stricter rule.)
+  for (const nsn of ["9876543210", "5876543210", "2223456789", "1800123456", "4012345678"]) {
+    test(`India: every way of writing ${nsn} gives the same number`, () => {
+      const forms = [
+        nsn,
+        `0${nsn}`,
+        `91${nsn}`,
+        `+91${nsn}`,
+        `0091${nsn}`,
+        `+91 ${nsn.slice(0, 5)} ${nsn.slice(5)}`,
+      ];
+      for (const raw of forms) assert.equal(normalizeCustomerPhone(raw, "IN"), `+91${nsn}`, raw);
+    });
+  }
+  test("India: forms that do not hold exactly one 10-digit national number are rejected in every form", () => {
+    for (const raw of [
+      "0987654321",
+      // ("00…" is the international dialling prefix by design: it is read as +…)
+      "910987654321",
+      "+910987654321",
+      "91987654321",
+      "098765432",
+    ])
+      assert.equal(normalizeCustomerPhone(raw, "IN"), null, raw);
+  });
   for (const raw of [
     "12345678", // too short for India
-    "5876543210", // 10 digits but not an Indian mobile prefix
     "7900",
     "+9198765", // +91 with too few digits
     "+910987654321", // +91 national part starting with 0

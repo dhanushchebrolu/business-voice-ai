@@ -36,9 +36,12 @@ export function isIndiaCountry(countryCode: string | null | undefined): boolean 
   return normalized === "IN" || normalized === "IND" || normalized === "INDIA";
 }
 
-const INDIAN_MOBILE = /^[6-9]\d{9}$/;
-// An Indian number dialled with its trunk prefix: 0 + area code/mobile.
-const INDIAN_TRUNK_PREFIXED = /^0[1-9]\d{9}$/;
+// India's national significant number: 10 digits, never starting 0. The same
+// rule for every way of writing it (+91…, 0091…, 91…, 0…, bare), so how a
+// number is written never changes whether it is accepted or what it becomes.
+// (Whether ClickAI may CALL it is a separate, stricter check:
+// isDestinationCountryAllowed in outbound-eligibility.server.ts.)
+const INDIAN_NSN = /^[1-9]\d{9}$/;
 
 /**
  * Normalizes a customer-supplied phone number to E.164 using the
@@ -46,9 +49,9 @@ const INDIAN_TRUNK_PREFIXED = /^0[1-9]\d{9}$/;
  *
  * - "+…" / "00…": international form — validated as E.164 (and, for +91,
  *   exactly 10 national digits not starting with 0).
- * - Otherwise, only when the country is India: a 10-digit mobile
- *   (6–9 first digit), a 0-prefixed 11-digit number, or a 12-digit number
- *   starting 91 followed by a 10-digit mobile.
+ * - Otherwise, only when the country is India: the 10-digit national number,
+ *   0 + that number (11 digits), or 91 + that number (12 digits), with the
+ *   same national-number rule as +91 (10 digits, first digit 1–9).
  * - Anything else is rejected with a reason — never guessed.
  */
 export function normalizePhoneNumber(
@@ -66,16 +69,21 @@ export function normalizePhoneNumber(
   if (compact.startsWith("+") || compact.startsWith("00")) {
     const candidate = `+${compact.replace(/^(\+|00)/, "")}`;
     if (!E164_PATTERN.test(candidate)) return { ok: false, reason: "invalid" };
-    if (candidate.startsWith("+91") && !/^\+91[1-9]\d{9}$/.test(candidate)) {
+    if (candidate.startsWith("+91") && !INDIAN_NSN.test(candidate.slice(3))) {
       return { ok: false, reason: "invalid" };
     }
     return { ok: true, e164: candidate };
   }
 
   if (!isIndiaCountry(countryCode)) return { ok: false, reason: "country_code_required" };
-  if (INDIAN_MOBILE.test(compact)) return { ok: true, e164: `+91${compact}` };
-  if (INDIAN_TRUNK_PREFIXED.test(compact)) return { ok: true, e164: `+91${compact.slice(1)}` };
-  if (/^91[6-9]\d{9}$/.test(compact)) return { ok: true, e164: `+${compact}` };
+  // 10 digits: the national number itself.
+  if (compact.length === 10 && INDIAN_NSN.test(compact)) return { ok: true, e164: `+91${compact}` };
+  // 11 digits: trunk prefix 0 + national number.
+  if (compact.length === 11 && compact.startsWith("0") && INDIAN_NSN.test(compact.slice(1)))
+    return { ok: true, e164: `+91${compact.slice(1)}` };
+  // 12 digits: country code 91 without "+" + national number.
+  if (compact.length === 12 && compact.startsWith("91") && INDIAN_NSN.test(compact.slice(2)))
+    return { ok: true, e164: `+${compact}` };
   return { ok: false, reason: "invalid" };
 }
 

@@ -168,6 +168,15 @@ export async function loadCallDetail(supabaseAdmin: SupabaseClient<Database>, ca
         .maybeSingle()
     : { data: null };
 
+  const { data: contactRow } = call.campaign_contact_id
+    ? await supabaseAdmin
+        .from("campaign_contacts")
+        .select("status, attempts, current_call_id")
+        .eq("id", call.campaign_contact_id)
+        .eq("organization_id", call.organization_id)
+        .maybeSingle()
+    : { data: null };
+
   const transcript = Array.isArray(call.transcript)
     ? call.transcript.flatMap((t) =>
         t && typeof t === "object" && !Array.isArray(t) && typeof t["text"] === "string"
@@ -218,6 +227,43 @@ export async function loadCallDetail(supabaseAdmin: SupabaseClient<Database>, ca
     billingAppliedAt: call.billing_applied_at,
     resolutionSource: call.resolution_source,
     resolutionConflict: call.resolution_conflict,
+    /** F3: set while a connected call's duration is unverified; nothing is billed meanwhile. */
+    billingHold: call.billing_hold,
+    /** F2: the campaign contact this call was for, as it is now (null for a single call). */
+    campaignContact: contactRow
+      ? {
+          status: contactRow.status,
+          attempts: contactRow.attempts,
+          onThisCall: contactRow.current_call_id === call.id,
+        }
+      : null,
+    /** F2: an operator's review of a contradicted start failure, once made. */
+    operatorReview:
+      call.provider_metadata &&
+      typeof call.provider_metadata === "object" &&
+      !Array.isArray(call.provider_metadata) &&
+      call.provider_metadata["operator_review"] &&
+      typeof call.provider_metadata["operator_review"] === "object"
+        ? (call.provider_metadata["operator_review"] as {
+            decision?: string;
+            allowRetry?: boolean;
+            reason?: string;
+            reviewedAt?: string;
+          })
+        : null,
+    /** A provider result that arrived after the outcome was recorded (start failure / operator). */
+    lateProviderReport:
+      call.provider_metadata &&
+      typeof call.provider_metadata === "object" &&
+      !Array.isArray(call.provider_metadata) &&
+      call.provider_metadata["late_provider_report"] &&
+      typeof call.provider_metadata["late_provider_report"] === "object"
+        ? (call.provider_metadata["late_provider_report"] as {
+            status?: string;
+            durationSeconds?: number | null;
+            receivedAt?: string;
+          })
+        : null,
     webhookEvents: events ?? [],
   };
 }

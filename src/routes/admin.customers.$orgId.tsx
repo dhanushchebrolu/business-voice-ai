@@ -1,7 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { ArrowLeft, Lock, Unlock, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import { getCustomerDetail, setFeatureLock, adjustWallet } from "@/lib/admin.functions";
@@ -10,6 +10,7 @@ import { retryProvisioning } from "@/lib/telephony-admin.functions";
 import { testSarvamInboundDeployment, testSarvamOutboundCall } from "@/lib/sarvam-admin.functions";
 import { getProfitAnalytics } from "@/lib/admin-finance.functions";
 import { describeQueryError } from "@/lib/query-error";
+import { newRequestKey } from "@/lib/request-key";
 import {
   PageHeader,
   SectionCard,
@@ -115,6 +116,8 @@ function CustomerDetail() {
   } | null>(null);
   const [walletOpen, setWalletOpen] = useState(false);
   const [walletAmount, setWalletAmount] = useState("");
+  // One request id per adjustment (amount + reason), reused on retry, so it posts once.
+  const walletAttempt = useRef<{ key: string; params: string } | null>(null);
   const [retryOpen, setRetryOpen] = useState(false);
   const [inboundTestOpen, setInboundTestOpen] = useState(false);
   const [outboundTestOpen, setOutboundTestOpen] = useState(false);
@@ -1086,10 +1089,25 @@ function CustomerDetail() {
         onConfirm={async (reason) => {
           const rupees = Number(walletAmount);
           if (!Number.isFinite(rupees) || rupees === 0) throw new Error("Enter a non-zero amount");
-          await saveWallet({
-            data: { orgId, amount: Math.round(rupees * 100), kind: "manual_adjustment", reason },
+          const amount = Math.round(rupees * 100);
+          const params = JSON.stringify([orgId, amount, reason]);
+          if (walletAttempt.current?.params !== params)
+            walletAttempt.current = { key: newRequestKey(), params };
+          const result = await saveWallet({
+            data: {
+              orgId,
+              amount,
+              kind: "manual_adjustment",
+              reason,
+              idempotencyKey: walletAttempt.current.key,
+            },
           });
-          toast.success("Wallet updated");
+          walletAttempt.current = null;
+          if (result.duplicate)
+            toast.info("Already posted", {
+              description: "This adjustment was already in the ledger; nothing was added again.",
+            });
+          else toast.success("Wallet updated");
           setWalletAmount("");
           await invalidate();
         }}

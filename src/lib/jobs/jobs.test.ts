@@ -239,6 +239,7 @@ describe("handlers", () => {
       select: () => query,
       eq: () => query,
       in: () => query,
+      or: () => query,
       not: () => query,
       lt: () => query,
       gt: () => query,
@@ -260,23 +261,50 @@ describe("handlers", () => {
       lt: () => noClaims,
       limit: async () => ({ data: [], error: null }),
     };
+    // staleWebhookClaims: one event past its lease, none at the attempt cap.
+    const events = (count: number) => {
+      const q: Record<string, unknown> = {};
+      Object.assign(q, {
+        select: () => q,
+        eq: () => q,
+        is: () => q,
+        or: async () => ({ count, error: null }),
+        gte: async () => ({ count: 0, error: null }),
+      });
+      return q;
+    };
     const handlers = buildJobHandlers({
       supabaseAdmin: {
         from: (table: string) =>
           table === "campaign_contacts"
             ? noClaims
-            : {
-                ...query,
-                update: (patch: Record<string, unknown>) => (updates.push(patch), update),
-              },
+            : table === "webhook_events"
+              ? events(1)
+              : {
+                  ...query,
+                  update: (patch: Record<string, unknown>) => (updates.push(patch), update),
+                },
       } as never,
       store,
       now: () => new Date("2026-11-11T10:20:00Z"),
     });
     const first = await handlers["sweep.sarvam_reconcile"]!({} as Job);
     const again = await handlers["sweep.sarvam_reconcile"]!({} as Job);
-    assert.deepEqual(first, { candidates: 2, enqueued: 2, unconfirmed: 1, releasedClaims: 0 });
-    assert.deepEqual(again, { candidates: 2, enqueued: 0, unconfirmed: 1, releasedClaims: 0 });
+    const webhookClaims = { stale: 1, exhausted: 0 };
+    assert.deepEqual(first, {
+      candidates: 2,
+      enqueued: 2,
+      unconfirmed: 1,
+      releasedClaims: 0,
+      webhookClaims,
+    });
+    assert.deepEqual(again, {
+      candidates: 2,
+      enqueued: 0,
+      unconfirmed: 1,
+      releasedClaims: 0,
+      webhookClaims,
+    });
     assert.equal(updates[0]!["status"], "outcome_unknown");
     const job = [...store.jobs.values()].find((j) => j.idempotency_key.includes("c1"))!;
     assert.equal(job.idempotency_key, "sarvam.reconcile_call:c1:2026-11-11T10");
@@ -327,6 +355,7 @@ describe("crash after the effect, before the acknowledgement", () => {
           appVersion: 2,
           attemptedAt: null,
         }),
+        verifyDuration: async () => undefined,
         resolve: async () => {
           resolutions++;
           call.status = "completed"; // the effect commits

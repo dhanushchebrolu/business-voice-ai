@@ -5,6 +5,8 @@ import {
   billableTerms,
   finalizeTerminalCall,
   finalizeTerminalCallSafely,
+  verifyCallDuration,
+  BILLING_HOLD_MESSAGE,
 } from "./call-finalization.server.ts";
 import { callLeadId } from "../sarvam-agent-api.server.ts";
 
@@ -337,8 +339,9 @@ describe("Phase 1 scope: Sarvam outbound only (source checks)", () => {
     const resolution = read("../sarvam-call-resolution.server.ts");
     assert.match(
       resolution,
-      /if \(now && isResolvableSarvamCall\(\{ \.\.\.call, status: now\.status \}\)\)\s*await supabaseAdmin\s*\.from\("webhook_events"\)\s*\.delete\(\)/,
+      /if \(now && isResolvableSarvamCall\(\{ \.\.\.call, status: now\.status \}\)\)\s*await failWebhookEvent\(supabaseAdmin, claim, message\);\s*else await completeWebhookEvent\(supabaseAdmin, claim\);/,
     );
+    assert.doesNotMatch(resolution, /from\("webhook_events"\)\s*\.delete\(\)/, "never deleted");
   });
 });
 
@@ -648,5 +651,67 @@ describe("billing a single call never exceeds what admission reserved", () => {
     assert.equal(billing["_minutes"], 5);
     assert.equal(billing["_amount"], 2000, "5 x the locked 400, not the current 500");
     assert.equal(billing["_provider_cost"], 11 * 200, "what the provider charges ClickAI");
+  });
+});
+
+describe("F3: a connected call with an unknown duration is held, never billed as 0", () => {
+  test("held: no billing request, the campaign step still runs, finalization fails with the reason", async () => {
+    const f = fakeClient({
+      call: { ...CALL, duration_seconds: 0, billing_hold: "duration_unknown" },
+    });
+    const r = await finalizeTerminalCall(f.client, "call_1", { getRate });
+    assert.equal(r.state, "failed");
+    assert.ok(r.state === "failed" && r.error.includes(BILLING_HOLD_MESSAGE));
+    assert.deepEqual(f.names(), [
+      "claim_call_finalization",
+      "apply_call_campaign_outcome",
+      "fail_call_finalization",
+    ]);
+  });
+
+  test("verifyCallDuration releases the hold through the database function, then finalizes", async () => {
+    const f = fakeClient({ replies: { verify_call_duration: { data: "verified" } } });
+    const r = await verifyCallDuration(f.client, "call_1", 95.2, { getRate });
+    assert.deepEqual(r, { result: "verified", finalization: "done" });
+    assert.deepEqual(f.rpcs[0], {
+      fn: "verify_call_duration",
+      args: { _call: "call_1", _seconds: 96 },
+    });
+  });
+
+  test("zero, negative or non-numeric durations are refused before anything is written", async () => {
+    for (const s of [0, -5, Number.NaN]) {
+      const f = fakeClient({});
+      await assert.rejects(verifyCallDuration(f.client, "call_1", s, { getRate }), /at least 1/);
+      assert.equal(f.rpcs.length, 0);
+    }
+  });
+});
+
+describe("F2: a start rejection the provider contradicted is never retried automatically", () => {
+  const startFailure = (conflict: boolean) =>
+    fakeClient({
+      call: {
+        ...CALL,
+        status: "failed",
+        resolution_source: "start_failure",
+        resolution_conflict: conflict,
+      },
+      campaign: { ...CAMPAIGN, retry_statuses: ["failed"] },
+    });
+  const contactStep = (f: ReturnType<typeof fakeClient>) =>
+    f.rpcs.find((r) => r.fn === "apply_call_campaign_outcome")!.args;
+
+  test("contradicted: the contact is held in outcome_unknown, no retry time", async () => {
+    const f = startFailure(true);
+    await finalizeTerminalCall(f.client, "call_1", { getRate });
+    assert.equal(contactStep(f)["_contact_status"], "outcome_unknown");
+    assert.equal(contactStep(f)["_next_attempt_at"], null);
+  });
+
+  test("not contradicted: the campaign's normal retry policy applies", async () => {
+    const f = startFailure(false);
+    await finalizeTerminalCall(f.client, "call_1", { getRate });
+    assert.equal(contactStep(f)["_contact_status"], "retry_scheduled");
   });
 });

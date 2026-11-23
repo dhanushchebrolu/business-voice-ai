@@ -1,17 +1,31 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
+import {
+  configEditBlockedReason,
+  describeImportResult,
+  describeUploadRow,
+  IMPORT_TOO_LARGE_MESSAGE,
+  MAX_IMPORT_ROWS,
+} from "@/lib/campaign-wizard";
+import { newCampaignCreateKey } from "@/lib/campaign-create-key";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Upload, Users2 } from "lucide-react";
-import { campaignQuery, campaignContactsQuery } from "@/lib/workspace";
-import { csvToTable } from "@/lib/contacts-import";
-import { importCampaignContactsCsv } from "@/lib/campaign-contacts.functions";
+import { Pencil, Upload, Users2 } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
 import {
-  launchCampaign,
-  pauseCampaign,
-  resumeCampaign,
-  cancelCampaign,
-} from "@/lib/campaigns.functions";
+  campaignQuery,
+  campaignContactsQuery,
+  campaignUploadsQuery,
+  type CampaignRow,
+} from "@/lib/workspace";
+import { csvToTable, validateContactRows } from "@/lib/contacts-import";
+import {
+  CampaignSetupPill,
+  CampaignStatusPill,
+  formatDateTime,
+} from "@/components/app/CampaignStatus";
+import { importCampaignContactsCsv } from "@/lib/campaign-contacts.functions";
+import { pauseCampaign, cancelCampaign } from "@/lib/campaigns.functions";
 import {
   PageHeader,
   SectionCard,
@@ -44,17 +58,6 @@ export const Route = createFileRoute("/app/campaigns/$campaignId")({
   head: () => ({ meta: [{ title: "Campaign — ClickAI" }, { name: "robots", content: "noindex" }] }),
   component: CampaignDetailPage,
 });
-
-const STATUS_TONE: Record<string, "live" | "ready" | "idle" | "error"> = {
-  draft: "idle",
-  scheduled: "ready",
-  queued: "ready",
-  running: "live",
-  paused: "idle",
-  completed: "ready",
-  failed: "error",
-  cancelled: "error",
-};
 
 const CONTACT_STATUS_TONE: Record<string, "live" | "ready" | "idle" | "error"> = {
   pending: "idle",
@@ -97,6 +100,7 @@ function CampaignDetailPage() {
   const [phoneColumn, setPhoneColumn] = useState("");
   const [mapping, setMapping] = useState<Record<string, string>>({});
   const [importing, setImporting] = useState(false);
+  const [importKey, setImportKey] = useState(() => newCampaignCreateKey());
   const [actionPending, setActionPending] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -106,6 +110,13 @@ function CampaignDetailPage() {
     return byStatus;
   }, [contacts]);
   const total = contacts?.length ?? 0;
+  // The same validation the server re-runs on import, shown before anything is written.
+  const uploadPreview = useMemo(
+    () => (csvText && phoneColumn ? validateContactRows(csvToTable(csvText), phoneColumn) : null),
+    [csvText, phoneColumn],
+  );
+  // Same cap the server enforces (one import = one transaction under an 8 s timeout).
+  const tooLarge = (uploadPreview?.totalRows ?? 0) > MAX_IMPORT_ROWS;
 
   async function invalidate() {
     await Promise.all([
@@ -113,6 +124,8 @@ function CampaignDetailPage() {
       qc.invalidateQueries({ queryKey: ["campaign-contacts", campaignId] }),
       qc.invalidateQueries({ queryKey: ["campaign-eligibility", campaignId] }),
       qc.invalidateQueries({ queryKey: ["campaign-stats", campaignId] }),
+      qc.invalidateQueries({ queryKey: ["campaign-uploads", campaignId] }),
+      qc.invalidateQueries({ queryKey: ["campaigns"] }),
     ]);
   }
 
@@ -125,19 +138,27 @@ function CampaignDetailPage() {
     const guess = table.headers.find((h) => /phone/i.test(h)) ?? table.headers[0] ?? "";
     setPhoneColumn(guess);
     setMapping({});
+    // One import attempt per chosen file: retries (double click, timeout, lost response)
+    // send the same key and get the first result back instead of a second import.
+    setImportKey(newCampaignCreateKey());
     setUploadOpen(true);
   }
 
   async function doImport() {
-    if (!file || !phoneColumn) return;
+    if (!file || !phoneColumn || importing) return;
     setImporting(true);
     try {
       const result = await importCampaignContactsCsv({
-        data: { campaignId, filename: file.name, csvText, phoneColumn, mapping },
+        data: {
+          campaignId,
+          filename: file.name,
+          csvText,
+          phoneColumn,
+          mapping,
+          idempotencyKey: importKey,
+        },
       });
-      toast.success(
-        `Imported ${result.enrolled} contacts. ${result.optedOut} opted out (skipped), ${result.alreadyInCampaign} already in this campaign, ${result.invalid} invalid, ${result.duplicatesInFile} duplicate rows.`,
-      );
+      toast.success(describeImportResult(result));
       setUploadOpen(false);
       await invalidate();
     } catch (err) {
@@ -163,15 +184,8 @@ function CampaignDetailPage() {
       setActionPending(false);
     }
   }
-  const doLaunch = () =>
-    runAction(
-      () => launchCampaign({ data: { campaignId } }),
-      "Campaign launched — calls will begin within the scheduled window.",
-    );
   const doPause = () =>
     runAction(() => pauseCampaign({ data: { campaignId } }), "Campaign paused.");
-  const doResume = () =>
-    runAction(() => resumeCampaign({ data: { campaignId } }), "Campaign resumed.");
   const doCancel = () => {
     if (
       !confirm(
@@ -199,12 +213,29 @@ function CampaignDetailPage() {
         title={campaign.name}
         description={campaign.objective ?? "No objective set."}
         actions={
-          <div className="flex items-center gap-2">
-            <StatusPill tone={STATUS_TONE[campaign.status] ?? "idle"} dot={false}>
-              {campaign.status}
-            </StatusPill>
+          // Wraps onto further rows on narrow screens instead of running off the page.
+          <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+            <CampaignStatusPill status={campaign.status} />
+            {campaign.status === "draft" ? (
+              <CampaignSetupPill reviewedAt={campaign.context_reviewed_at} />
+            ) : null}
+            {configEditBlockedReason(campaign.status) ? null : (
+              <Link to="/app/campaigns/$campaignId/edit" params={{ campaignId }}>
+                <Button size="sm" variant="secondary">
+                  <Pencil className="mr-1.5 size-3.5" /> Edit configuration
+                </Button>
+              </Link>
+            )}
             {["draft", "scheduled", "paused"].includes(campaign.status) ? (
-              <Button size="sm" onClick={doLaunch} disabled={actionPending}>
+              // Launching is not available in this version: the button stays
+              // disabled and launchCampaign also refuses while campaign
+              // dispatch is switched off (CAMPAIGN_DISPATCH_ENABLED).
+              <Button
+                size="sm"
+                disabled
+                title="Launching campaigns is not available yet. Saving never places a call."
+                aria-describedby="launch-unavailable"
+              >
                 {campaign.status === "paused" ? "Resume" : "Launch campaign"}
               </Button>
             ) : null}
@@ -221,6 +252,13 @@ function CampaignDetailPage() {
           </div>
         }
       />
+
+      <p id="launch-unavailable" className="text-xs text-muted-foreground">
+        Launching campaigns is not available yet, so no calls are placed. You can set up, edit and
+        add contacts now.
+      </p>
+
+      <CampaignConfiguration campaign={campaign} />
 
       <CampaignContextPanel campaign={campaign} onSaved={invalidate} />
 
@@ -293,6 +331,11 @@ function CampaignDetailPage() {
         )}
       </SectionCard>
 
+      <div className="grid gap-6 lg:grid-cols-2">
+        <ImportHistory campaignId={campaignId} />
+        <CampaignActivity campaign={campaign} />
+      </div>
+
       <input
         ref={fileInputRef}
         type="file"
@@ -342,13 +385,192 @@ function CampaignDetailPage() {
                 ))}
             </div>
           </div>
+          {uploadPreview ? (
+            <p className="text-sm" aria-live="polite">
+              {uploadPreview.totalRows} rows: {uploadPreview.valid.length} valid,{" "}
+              {uploadPreview.invalid.length} invalid (not added), {uploadPreview.duplicates.length}{" "}
+              duplicate (added once). Opted-out contacts are skipped.
+            </p>
+          ) : null}
+          {tooLarge ? (
+            <p className="text-sm text-destructive" role="alert">
+              {IMPORT_TOO_LARGE_MESSAGE}
+            </p>
+          ) : null}
           <DialogFooter>
-            <Button onClick={doImport} disabled={importing || !phoneColumn}>
+            <Button
+              onClick={doImport}
+              disabled={importing || !phoneColumn || !uploadPreview?.valid.length || tooLarge}
+            >
               {importing ? "Importing…" : "Import contacts"}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/** What this campaign is set to do, read from the saved row only. */
+function CampaignConfiguration({ campaign }: { campaign: CampaignRow }) {
+  const { data: names } = useQuery({
+    queryKey: [
+      "campaign-config-names",
+      campaign.id,
+      campaign.agent_config_id,
+      campaign.phone_number_id,
+    ],
+    queryFn: async () => {
+      const [agent, number] = await Promise.all([
+        campaign.agent_config_id
+          ? supabase
+              .from("agent_configs")
+              .select("agent_name")
+              .eq("id", campaign.agent_config_id)
+              .maybeSingle()
+          : Promise.resolve({ data: null }),
+        campaign.phone_number_id
+          ? supabase
+              .from("phone_numbers")
+              .select("e164")
+              .eq("id", campaign.phone_number_id)
+              .maybeSingle()
+          : Promise.resolve({ data: null }),
+      ]);
+      return {
+        agent: (agent.data as { agent_name: string | null } | null)?.agent_name ?? null,
+        number: (number.data as { e164: string } | null)?.e164 ?? null,
+      };
+    },
+  });
+  const s = (campaign.schedule ?? {}) as {
+    startDate?: string;
+    endDate?: string;
+    windowStart?: string;
+    windowEnd?: string;
+    days?: number[];
+    timezone?: string;
+  };
+  const days =
+    s.days?.length && s.days.length < 7
+      ? [...s.days]
+          .sort()
+          .map((d) => DAY_NAMES[d])
+          .join(", ")
+      : "Every day";
+  const rows: [string, string][] = [
+    ["Agent", campaign.agent_config_id ? (names?.agent ?? "Your AI receptionist") : "Not chosen"],
+    ["Caller number", campaign.phone_number_id ? (names?.number ?? "…") : "Not chosen"],
+    ["Starts", s.startDate ?? "When launched"],
+    ["Ends", s.endDate ?? "No end date"],
+    ["Calling days", days],
+    [
+      "Calling hours",
+      s.windowStart && s.windowEnd
+        ? `${s.windowStart}–${s.windowEnd} (${s.timezone ?? "Asia/Kolkata"})`
+        : "09:00–21:00 India time",
+    ],
+    ["Attempts per contact", String(campaign.max_attempts)],
+    [
+      "Retries",
+      campaign.max_attempts > 1 && campaign.retry_statuses?.length
+        ? `After ${campaign.retry_after_minutes} min, when ${campaign.retry_statuses.join(", ").replace(/_/g, " ")}`
+        : "No retries",
+    ],
+    [
+      "Budget",
+      campaign.budget_limit
+        ? `₹${(campaign.budget_limit / 100).toLocaleString("en-IN")}`
+        : "No limit",
+    ],
+  ];
+  const blocked = configEditBlockedReason(campaign.status);
+  return (
+    <SectionCard
+      title="Configuration"
+      {...(campaign.description ? { description: campaign.description } : {})}
+      actions={
+        blocked ? (
+          <span className="text-xs text-muted-foreground">{blocked}</span>
+        ) : (
+          <Link
+            to="/app/campaigns/$campaignId/edit"
+            params={{ campaignId: campaign.id }}
+            className="text-sm font-medium text-info hover:underline"
+          >
+            Edit
+          </Link>
+        )
+      }
+    >
+      {!campaign.phone_number_id && !blocked ? (
+        <p className="mb-3 text-xs text-warning">
+          No caller number yet. Edit the configuration to choose one; it is needed before calls can
+          start.
+        </p>
+      ) : null}
+      <dl className="grid gap-x-6 gap-y-1.5 text-sm sm:grid-cols-2">
+        {rows.map(([k, v]) => (
+          <div key={k} className="flex justify-between gap-3 border-b border-border/50 py-1">
+            <dt className="text-muted-foreground">{k}</dt>
+            <dd className="text-right">{v}</dd>
+          </div>
+        ))}
+      </dl>
+    </SectionCard>
+  );
+}
+
+function ImportHistory({ campaignId }: { campaignId: string }) {
+  const { data: uploads, isError, refetch } = useQuery(campaignUploadsQuery(campaignId));
+  return (
+    <SectionCard title="Contact imports">
+      {isError ? (
+        <ErrorState message="Could not load import history." onRetry={() => void refetch()} />
+      ) : uploads?.length ? (
+        <ul className="divide-y divide-border text-sm">
+          {uploads.map((u) => (
+            <li key={u.id} className="py-2">
+              <p className="font-medium">{u.filename ?? "Import"}</p>
+              <p className="text-xs text-muted-foreground">
+                {formatDateTime(u.created_at)} · {describeUploadRow(u)}
+              </p>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-sm text-muted-foreground">No contacts imported yet.</p>
+      )}
+    </SectionCard>
+  );
+}
+
+/** Only events the campaign row actually records. */
+function CampaignActivity({ campaign }: { campaign: CampaignRow }) {
+  const events = (
+    [
+      ["Created", campaign.created_at],
+      ["Call instructions confirmed", campaign.context_reviewed_at],
+      ["Launched", campaign.launched_at],
+      ["Paused", campaign.paused_at],
+      ["Completed", campaign.completed_at],
+      ["Cancelled", campaign.cancelled_at],
+    ] as [string, string | null][]
+  )
+    .filter(([, at]) => Boolean(at))
+    .sort((a, b) => (a[1]! < b[1]! ? -1 : 1));
+  return (
+    <SectionCard title="Activity">
+      <ol className="space-y-2 text-sm">
+        {events.map(([label, at]) => (
+          <li key={label} className="flex justify-between gap-3">
+            <span>{label}</span>
+            <span className="text-xs text-muted-foreground tabular">{formatDateTime(at)}</span>
+          </li>
+        ))}
+      </ol>
+    </SectionCard>
   );
 }

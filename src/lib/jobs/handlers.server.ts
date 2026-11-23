@@ -3,6 +3,7 @@ import type { Database } from "@/integrations/supabase/types";
 import { PermanentJobError, type QueueStore } from "./queue.server.ts";
 import type { JobHandler } from "./runner.server.ts";
 import type { ReconcileDeps } from "../sarvam-reconciliation.server.ts";
+import { staleWebhookClaims, WEBHOOK_MAX_ATTEMPTS } from "../telephony/webhook-claim.server.ts";
 
 /**
  * Job kinds and their handlers. Deliberately absent: payment expiry (payment
@@ -77,7 +78,13 @@ async function defaultReconcileDeps(
         attemptId: input.attemptId,
         // Checked programmatically: Sarvam's own attempt record says it is final.
         confirmedCheckedInSarvam: true,
+        // Automatic: capped like webhook deliveries, so a poisoned event cannot loop forever.
+        maxAttempts: WEBHOOK_MAX_ATTEMPTS,
       }),
+    verifyDuration: async (callId, durationSeconds) => {
+      const { verifyCallDuration } = await import("@/lib/telephony/call-finalization.server");
+      return verifyCallDuration(supabaseAdmin, callId, durationSeconds);
+    },
   };
 }
 
@@ -109,7 +116,8 @@ export function buildJobHandlers(deps: HandlerDeps): Record<string, JobHandler> 
         .select("id, organization_id")
         .eq("provider", "sarvam")
         .eq("direction", "outbound")
-        .in("status", ["initiated", "outcome_unknown"])
+        // Unresolved calls, and connected calls whose duration is on billing hold (F3).
+        .or("status.in.(initiated,outcome_unknown),billing_hold.eq.duration_unknown")
         .not("provider_call_id", "is", null)
         .lt("started_at", new Date(t.getTime() - RECONCILE_MIN_AGE_MS).toISOString())
         .gt("started_at", new Date(t.getTime() - RECONCILE_MAX_AGE_MS).toISOString())
@@ -132,7 +140,14 @@ export function buildJobHandlers(deps: HandlerDeps): Record<string, JobHandler> 
         await import("../sarvam-reconciliation.server.ts");
       const unconfirmed = await flagStartsWithoutAttempt(supabaseAdmin, t);
       const releasedClaims = await releaseOrphanedCampaignClaims(supabaseAdmin, t);
-      return { candidates: data?.length ?? 0, enqueued, unconfirmed, releasedClaims };
+      const webhookClaims = await staleWebhookClaims(supabaseAdmin, t);
+      return {
+        candidates: data?.length ?? 0,
+        enqueued,
+        unconfirmed,
+        releasedClaims,
+        webhookClaims,
+      };
     },
 
     "sarvam.reconcile_call": async (job) => {

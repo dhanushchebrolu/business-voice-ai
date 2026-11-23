@@ -48,28 +48,47 @@ describe("telephony webhook route — signature verification and idempotency (un
     );
   });
 
-  test("dedupes via the existing webhook_events (provider, event_id) unique index before any side effect", () => {
-    assert.match(routeSrc, /from\("webhook_events"\)\s*\.insert\(/);
-    assert.match(routeSrc, /code.*!==\s*"23505"/);
+  test("claims the event in webhook_events (unique provider + event_id) before any side effect", () => {
+    const claim = routeSrc.indexOf("await claimWebhookEvent(supabaseAdmin,");
+    assert.ok(claim > -1 && claim < routeSrc.indexOf("await processTelephonyEvent("));
     assert.match(routeSrc, /"ok \(duplicate\)"/);
   });
 
-  test("the webhook_events row is built by telephonyWebhookEventRow; the raw webhook is never stored", () => {
-    assert.match(routeSrc, /from\("webhook_events"\)\.insert\(eventRow\)/);
+  test("the claimed row carries telephonyWebhookEventRow's identifiers-only payload; the raw webhook is never stored", () => {
+    assert.match(routeSrc, /payload: eventRow\.payload,/);
     assert.match(routeSrc, /telephonyWebhookEventRow\(providerId, event\)/);
     assert.doesNotMatch(routeSrc, /payload:\s*event\.raw/);
   });
 
-  test("a re-delivered event whose earlier processing failed is claimed and retried; a processed one stays a duplicate", () => {
-    const dup = routeSrc.slice(routeSrc.indexOf('!== "23505"'), routeSrc.indexOf("try {"));
-    assert.match(dup, /\.update\(\{ error: null \}\)/, "clearing error claims the retry");
-    assert.match(dup, /\.is\("processed_at", null\)/, "never reprocesses a processed event");
-    assert.match(
-      dup,
-      /\.not\("error", "is", null\)/,
-      "only events that actually failed are retried",
+  test("receipt is not completion: processed only after processing, fenced by the claim token", () => {
+    const tail = routeSrc.slice(routeSrc.indexOf("const claim = claimed.claim;"));
+    assert.match(tail, /await processTelephonyEvent\(providerId, event, waitUntil, \{ claim \}\);/);
+    assert.ok(
+      tail.indexOf("await processTelephonyEvent(") <
+        tail.indexOf("await completeWebhookEvent(supabaseAdmin, claim);"),
+      "completed only after processing succeeds",
     );
-    assert.match(dup, /if \(!claimed\?\.length\) return new Response\("ok \(duplicate\)"\)/);
+    assert.match(
+      tail,
+      /await failWebhookEvent\(supabaseAdmin, claim,/,
+      "a failure stays retryable",
+    );
+    assert.match(
+      tail,
+      /if \(err instanceof WebhookClaimLostError\) return new Response\("ok \(superseded\)"\);/,
+    );
+  });
+
+  test("a live claim elsewhere asks for redelivery; a capped event stops retrying", () => {
+    assert.match(
+      routeSrc,
+      /if \(claimed\.result === "in_progress"\)\s*return new Response\("Processing in progress", \{ status: 503 \}\);/,
+    );
+    assert.match(
+      routeSrc,
+      /if \(claimed\.result === "exhausted"\) return new Response\("ok \(gave up\)"\);/,
+    );
+    assert.match(routeSrc, /maxAttempts: WEBHOOK_MAX_ATTEMPTS,/);
   });
 });
 
@@ -239,7 +258,7 @@ describe("telephony webhook route — duplicate/racing inbound callbacks never c
     assert.match(nearby, /\(insertError as \{ code\?: string \}\)\.code === "23505"/);
     assert.match(nearby, /\.eq\("provider", providerId\)/);
     assert.match(nearby, /\.eq\("provider_call_id", event\.providerCallId\)/);
-    assert.match(nearby, /await applyCallEvent\(existingRow, event, source\);/);
+    assert.match(nearby, /await applyCallEvent\(existingRow, event, source, options\.claim\);/);
   });
 
   test("both the insert path and the applyCallEvent update path log a success event carrying provider_call_id and call_id (never a raw payload/secret)", () => {
@@ -630,7 +649,7 @@ describe("telephony webhook route — Exotel/Vobiz Passthru/Voicebot deadlock fi
       routeSrc.indexOf("async function processTelephonyEvent"),
     );
     assert.match(handlerSrc, /const waitUntil = getRequestWaitUntil\(request\);/);
-    assert.match(handlerSrc, /processTelephonyEvent\(providerId, event, waitUntil\)/);
+    assert.match(handlerSrc, /processTelephonyEvent\(providerId, event, waitUntil, \{ claim \}\)/);
   });
 
   test("processTelephonyEvent accepts waitUntil as an explicit parameter, not a module-level/global — a global would race across concurrent in-flight requests on the same Worker isolate", () => {

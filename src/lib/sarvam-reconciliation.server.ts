@@ -16,25 +16,33 @@ import type { ResolutionOutcome } from "./sarvam-call-resolution.server.ts";
  *     -> needs_operator: nothing can tie it to a Sarvam attempt safely;
  *   - attempt not found yet, or Sarvam will retry it -> pending (checked again later);
  *   - connected / no_answer / failed -> resolved.
+ *
+ * It also recovers the duration of a connected call on billing hold (F3:
+ * `completed` with billing_hold = 'duration_unknown'): only a positive
+ * duration Sarvam reports for that exact attempt is recorded
+ * (verifyCallDuration), and billing then runs once, capped at the admission
+ * reservation. A connected attempt without a usable duration is never turned
+ * into 0 seconds: the call resolves `completed` and is held instead.
  */
 
 export type ReconcileResult =
   | { state: "already_final"; status: string }
   | { state: "needs_operator"; reason: string }
   | { state: "pending"; reason: string }
-  | { state: "resolved"; outcome: ResolutionOutcome; durationSeconds: number };
+  | { state: "resolved"; outcome: ResolutionOutcome; durationSeconds: number | undefined }
+  | { state: "duration_verified"; durationSeconds: number };
 
 /** Sarvam's attempt -> a final outcome, or null when it is not final yet. */
 export function outcomeFromAttempt(
   attempt: SarvamAttemptSummary,
-): { outcome: ResolutionOutcome; durationSeconds: number } | null {
+): { outcome: ResolutionOutcome; durationSeconds: number | undefined } | null {
   if (attempt.nextActionStatus?.toLowerCase() === "retry") return null;
   switch (attempt.connectivityStatus?.toLowerCase()) {
-    case "connected":
-      return {
-        outcome: "completed",
-        durationSeconds: Math.max(0, Math.round(attempt.durationSeconds)),
-      };
+    case "connected": {
+      const seconds = Math.round(attempt.durationSeconds);
+      // No usable duration: left unknown (the call goes on billing hold), never 0.
+      return { outcome: "completed", durationSeconds: seconds > 0 ? seconds : undefined };
+    }
     case "no_answer":
       return { outcome: "no_answer", durationSeconds: 0 };
     case "failed":
@@ -54,9 +62,11 @@ export interface ReconcileDeps {
   resolve: (input: {
     callId: string;
     outcome: ResolutionOutcome;
-    durationSeconds: number;
+    durationSeconds: number | undefined;
     attemptId: string;
   }) => Promise<unknown>;
+  /** Records a verified duration for a held call and bills it once (verifyCallDuration). */
+  verifyDuration: (callId: string, durationSeconds: number) => Promise<unknown>;
   now?: () => Date;
 }
 
@@ -73,13 +83,14 @@ export async function reconcileSarvamCall(
   const { data: call } = await supabaseAdmin
     .from("call_logs")
     .select(
-      "id, organization_id, provider, direction, status, provider_call_id, phone_number_id, started_at",
+      "id, organization_id, provider, direction, status, provider_call_id, phone_number_id, started_at, billing_hold",
     )
     .eq("id", callId)
     .maybeSingle();
   if (!call || call.provider !== "sarvam" || call.direction !== "outbound")
     return { state: "needs_operator", reason: "not a Sarvam outbound call" };
-  if (call.status !== "initiated" && call.status !== "outcome_unknown")
+  const held = call.status === "completed" && call.billing_hold === "duration_unknown";
+  if (call.status !== "initiated" && call.status !== "outcome_unknown" && !held)
     return { state: "already_final", status: call.status };
   if (!call.provider_call_id)
     return { state: "needs_operator", reason: "no Sarvam attempt id was recorded for this call" };
@@ -119,6 +130,16 @@ export async function reconcileSarvamCall(
     until,
   );
   if (!attempt) return { state: "pending", reason: "Sarvam has not reported this attempt yet" };
+  if (held) {
+    const seconds = outcomeFromAttempt(attempt)?.durationSeconds;
+    if (attempt.connectivityStatus?.toLowerCase() !== "connected" || seconds === undefined)
+      return {
+        state: "pending",
+        reason: "Sarvam's record of this attempt has no usable duration yet",
+      };
+    await deps.verifyDuration(call.id, seconds);
+    return { state: "duration_verified", durationSeconds: seconds };
+  }
   const final = outcomeFromAttempt(attempt);
   if (!final)
     return {

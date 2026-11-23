@@ -95,7 +95,7 @@ export function CallsHistory({
                       {new Date(call.started_at).toLocaleString()}
                     </td>
                     <td className="px-3 py-2.5 tabular text-xs">
-                      {formatDuration(call.duration_seconds)}
+                      {call.billing_hold ? "—" : formatDuration(call.duration_seconds)}
                     </td>
                     <td className="px-3 py-2.5 text-xs">
                       {call.language ? languageLabel(call.language) : "—"}
@@ -133,7 +133,14 @@ export function CallsHistory({
             <div className="space-y-5 px-4 pb-8">
               <dl className="grid grid-cols-2 gap-3 text-sm">
                 <Meta label="Started" value={new Date(selected.started_at).toLocaleString()} />
-                <Meta label="Duration" value={formatDuration(selected.duration_seconds)} />
+                <Meta
+                  label="Duration"
+                  value={
+                    selected.billing_hold
+                      ? "Being verified"
+                      : formatDuration(selected.duration_seconds)
+                  }
+                />
                 <Meta label="Direction" value={selected.direction} />
                 <Meta label="Status" value={callStatusLabel(selected.status)} />
                 <Meta
@@ -145,7 +152,10 @@ export function CallsHistory({
                   label="Agent version"
                   value={selected.agent_version ? `v${selected.agent_version}` : "—"}
                 />
-                {selected.customer_charge != null ? (
+                {selected.billing_hold ? (
+                  // F3: connected, duration not yet verified; never shown (or billed) as ₹0.
+                  <Meta label="Charge" value="Pending: call length being verified" />
+                ) : selected.customer_charge != null ? (
                   <Meta
                     label="Charge"
                     value={formatMoney(selected.customer_charge, selected.currency ?? "INR")}

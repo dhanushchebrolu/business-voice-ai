@@ -9,6 +9,7 @@ import {
 } from "@/lib/platform-admin.server";
 import { validateSarvamEnv } from "@/lib/telephony.server";
 import { computeProvisioningState } from "@/lib/provisioning-state";
+import { parseWalletAdjustment, type WalletAdjustmentKind } from "@/lib/wallet-adjustment";
 import type { Database } from "@/integrations/supabase/types";
 
 /**
@@ -584,37 +585,41 @@ export const setFeatureLock = createServerFn({ method: "POST" })
     return { ok: true as const };
   });
 
-/** Immutable wallet credit/debit. Never edits history. */
+/**
+ * Immutable wallet credit/debit. Never edits history. Idempotent per request
+ * id (wallet-adjustment.server.ts): a retry, double submit or second tab with
+ * the same id posts nothing new; the same id with other values is refused.
+ */
 export const adjustWallet = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((input: { orgId: string; amount: number; kind: string; reason: string }) => {
-    if (!input?.orgId) throw new Error("orgId is required");
-    if (!Number.isFinite(input.amount) || input.amount === 0)
-      throw new Error("Amount must be a non-zero number");
-    if (!input.reason?.trim()) throw new Error("A reason is required");
-    return input;
-  })
+  .inputValidator(
+    (input: {
+      orgId: string;
+      amount: number;
+      kind?: WalletAdjustmentKind;
+      reason: string;
+      idempotencyKey: string;
+    }) => parseWalletAdjustment(input ?? {}),
+  )
   .handler(async ({ data, context }) => {
     const admin = await assertPlatformAdmin(context.supabase, context.userId, "wallet.write");
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { postWalletAdjustment } = await import("@/lib/wallet-adjustment.server");
 
-    const { error } = await supabaseAdmin.from("wallet_transactions").insert({
-      organization_id: data.orgId,
-      amount: Math.round(data.amount),
-      kind: data.kind || "manual_adjustment",
-      description: data.reason,
-      created_by: admin.userId,
+    const { applied } = await postWalletAdjustment(supabaseAdmin, {
+      ...data,
+      createdBy: admin.userId,
     });
-    if (error) throw error;
-
-    await writeAudit(admin, {
-      action: data.amount > 0 ? "wallet.credited" : "wallet.debited",
-      entityType: "wallet_transaction",
-      organizationId: data.orgId,
-      newValue: { amount: Math.round(data.amount), kind: data.kind },
-      reason: data.reason,
-    });
-    return { ok: true as const };
+    // Audited once, by the request that wrote the row; a repeat changed nothing.
+    if (applied)
+      await writeAudit(admin, {
+        action: data.amount > 0 ? "wallet.credited" : "wallet.debited",
+        entityType: "wallet_transaction",
+        organizationId: data.orgId,
+        newValue: { amount: data.amount, kind: data.kind, idempotencyKey: data.idempotencyKey },
+        reason: data.reason,
+      });
+    return { ok: true as const, duplicate: !applied };
   });
 
 /** Read every platform setting (admins see private keys too). */

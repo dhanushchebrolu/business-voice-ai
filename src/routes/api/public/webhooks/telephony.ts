@@ -3,6 +3,13 @@ import { getRequestWaitUntil } from "@/lib/background-task.server";
 import { maskCallSid } from "@/lib/telephony/media-session-authorization.server";
 import { processTelephonyEvent } from "@/lib/telephony/telephony-event-processing.server";
 import { telephonyWebhookEventRow } from "@/lib/telephony/webhook-correlation.server";
+import {
+  claimWebhookEvent,
+  completeWebhookEvent,
+  failWebhookEvent,
+  WEBHOOK_MAX_ATTEMPTS,
+  WebhookClaimLostError,
+} from "@/lib/telephony/webhook-claim.server";
 
 /**
  * Inbound telephony provider webhook — the single entry point every
@@ -109,49 +116,43 @@ async function handleTelephonyWebhook(request: Request): Promise<Response> {
 
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
-  // Idempotency: the unique (provider, event_id) index rejects replays,
-  // exactly like the Razorpay webhook (spec §10/§Q/§O). The row holds
-  // identifiers only, never the raw webhook (see telephonyWebhookEventRow).
-  const { error: dedupeError } = await supabaseAdmin.from("webhook_events").insert(eventRow);
-  if (dedupeError) {
-    if ((dedupeError as { code?: string }).code !== "23505") {
-      console.error("telephony:webhook_store_failed", dedupeError.message);
-      return new Response("Storage error", { status: 500 });
-    }
-    // A replay of an event that already failed processing is retried, not dropped: otherwise a
-    // provider re-delivery after a transient error could never record the call. Clearing `error`
-    // claims the retry, so two concurrent re-deliveries cannot both process it.
-    const { data: claimed } = await supabaseAdmin
-      .from("webhook_events")
-      .update({ error: null })
-      .eq("provider", providerId)
-      .eq("event_id", eventId)
-      .is("processed_at", null)
-      .not("error", "is", null)
-      .select("id");
-    if (!claimed?.length) return new Response("ok (duplicate)");
-    console.info("telephony:webhook_retrying_failed_event", {
+  // Idempotency: one row per (provider, event_id), claimed with a lease and a
+  // token (claimWebhookEvent). Receipt is not completion: processed_at is set
+  // only after the event's effects are applied, and an unfinished event (its
+  // processor crashed, or recorded an error) is taken over by the next
+  // delivery or the reconciler. The row holds identifiers only, never the raw
+  // webhook (see telephonyWebhookEventRow).
+  let claimed;
+  try {
+    claimed = await claimWebhookEvent(supabaseAdmin, {
       provider: providerId,
-      event_id: eventId,
+      eventId,
+      eventType: eventRow.event_type,
+      payload: eventRow.payload,
+      maxAttempts: WEBHOOK_MAX_ATTEMPTS,
     });
+  } catch (err) {
+    console.error("telephony:webhook_store_failed", (err as Error).message);
+    return new Response("Storage error", { status: 500 });
   }
+  if (claimed.result === "processed") return new Response("ok (duplicate)");
+  // Another processor holds a live claim: ask the provider to deliver again later.
+  if (claimed.result === "in_progress")
+    return new Response("Processing in progress", { status: 503 });
+  // Stopped retrying (logged by claimWebhookEvent); the reconciler / an operator resolves the call.
+  if (claimed.result === "exhausted") return new Response("ok (gave up)");
+  const claim = claimed.claim;
 
   try {
-    await processTelephonyEvent(providerId, event, waitUntil);
-    await supabaseAdmin
-      .from("webhook_events")
-      .update({ processed_at: new Date().toISOString() })
-      .eq("provider", providerId)
-      .eq("event_id", eventId);
+    await processTelephonyEvent(providerId, event, waitUntil, { claim });
   } catch (err) {
+    // Lost the claim to a takeover: this processor applied nothing; the new holder finishes.
+    if (err instanceof WebhookClaimLostError) return new Response("ok (superseded)");
     console.error("telephony:webhook_processing_failed", (err as Error).message);
-    await supabaseAdmin
-      .from("webhook_events")
-      .update({ error: (err as Error).message })
-      .eq("provider", providerId)
-      .eq("event_id", eventId);
+    await failWebhookEvent(supabaseAdmin, claim, (err as Error).message).catch(() => undefined);
     return new Response("Processing error", { status: 500 });
   }
+  await completeWebhookEvent(supabaseAdmin, claim);
 
   return new Response("ok");
 }
