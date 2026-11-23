@@ -166,6 +166,7 @@ instant-outbound API takes no idempotency key: an ambiguous start is held in
 | 2026-11-21 11:12:09 | `f8737bfb-3afb-4393-a098-ea45e6b6a5bf` | `b828823` | 44897430318 green                             | `7ba8937d-1325-4205-bf85-c96550d07393` | Verified                 |
 | 2026-11-21 11:58:37 | `85bf47fe-2ba4-4ef8-a124-e7d58d687f6b` | `b5311c8` | 44901049838 green                             | `f8737bfb-3afb-4393-a098-ea45e6b6a5bf` | Verified                 |
 | 2026-11-21 12:31:09 | `d5512be9-5d5a-4bfa-bf31-89d5a1181574` | `30a56c5` | 44903657296 green                             | `85bf47fe-2ba4-4ef8-a124-e7d58d687f6b` | Verified                 |
+| 2026-11-23 14:08:44 | `a72542d2-c894-489b-a818-7e809566b376` | `fa498dc` | 45188543353 green                             | `d5512be9-5d5a-4bfa-bf31-89d5a1181574` | Verified                 |
 
 Procedure for each: clean worktree at the exact commit, `bun install
 --frozen-lockfile`, `npm run build` with the live Worker's own
@@ -181,9 +182,23 @@ ran `sweep.call_finalization` and `campaign.dispatch` with 0 failures and no
 alert; every `campaign.dispatch` job in the last hour `skipped: disabled`; no
 new outbound call.
 
+Post-deploy verification of `a72542d2` (commit
+`fa498dc3f214ca346db737d0c1291982057a5360`, Worker `klyro`, after outbound
+reliability migrations 20261123090000-20261128090000): 100% traffic; 28
+bindings identical to `d5512be9` (names, types, plain-text value hashes; same
+compatibility date; `CAMPAIGN_DISPATCH_ENABLED` absent); bundle carries the
+production Supabase URL and no placeholder; the 20261128090000 verification
+`all_pass` and every outbound migration's recorded text matches; every
+`campaign.dispatch` job since the deploy `skipped: disabled`; 0 numbers
+outbound-enabled; payment enforcement off; no new call, webhook event or
+ledger row; scheduled jobs succeeded with 0 dead; campaign and call-history
+pages load from the new build. Rollback not required.
+
 Rollback (code only; no migration involved):
 
 ```powershell
+# Outbound reliability Worker fa498dc (back to 30a56c5):
+npx wrangler versions deploy d5512be9-5d5a-4bfa-bf31-89d5a1181574@100% --name klyro --yes
 # Booking reply template only (keeps the shared prompt core):
 npx wrangler versions deploy f8737bfb-3afb-4393-a098-ea45e6b6a5bf@100% --name klyro --yes
 # Shared prompt core only (keeps B1, D1, R1, H3):
