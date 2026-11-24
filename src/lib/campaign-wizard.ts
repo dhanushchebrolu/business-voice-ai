@@ -493,6 +493,31 @@ export function isEligibleCallerNumber(n: {
 }
 
 /**
+ * The caller-number picker's choices: eligible numbers (selectable) and the
+ * workspace's other numbers with why they can't call out. Released numbers no
+ * longer belong to the workspace, so they are in neither list. Display only:
+ * saving and launching re-check the number on the server.
+ */
+export function callerNumberChoices<
+  N extends {
+    id: string;
+    e164: string;
+    status: string | null;
+    outbound_enabled: boolean | null;
+    provider?: string | null;
+  },
+>(numbers: N[]): { eligible: N[]; ineligible: { id: string; e164: string; reason: string }[] } {
+  const listed = numbers.filter((n) => n.status !== "released");
+  return {
+    eligible: listed.filter(isEligibleCallerNumber),
+    ineligible: listed.flatMap((n) => {
+      const reason = callerNumberIneligibility(n);
+      return reason ? [{ id: n.id, e164: n.e164, reason }] : [];
+    }),
+  };
+}
+
+/**
  * Checks everything a save stores. A draft may leave the agent and caller
  * number unchosen and the instructions unconfirmed, but every value it does
  * store must be valid (name and purpose are always required).

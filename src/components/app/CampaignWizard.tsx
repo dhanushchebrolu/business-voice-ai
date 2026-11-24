@@ -30,8 +30,7 @@ import {
   combineAudience,
   csvToTable,
   describeImportResult,
-  callerNumberIneligibility,
-  isEligibleCallerNumber,
+  callerNumberChoices,
   mappingProblems,
   openingLinePreview,
   previewAudience,
@@ -141,15 +140,11 @@ export function CampaignWizard({
       return data;
     },
   });
-  // Only this workspace's own numbers (RLS + organization filter) that may call out.
-  const eligibleNumbers = (numbers ?? []).filter(isEligibleCallerNumber);
-  // The rest, shown with why they cannot call out (inbound-only, inactive, not Sarvam).
-  // Released numbers are no longer the workspace's, so they are not listed at all.
-  const ineligibleNumbers = (numbers ?? []).flatMap((n) => {
-    if (n.status === "released") return [];
-    const reason = callerNumberIneligibility(n);
-    return reason ? [{ id: n.id, e164: n.e164, reason }] : [];
-  });
+  // This workspace's own numbers (RLS + organization filter): those that may call out, and
+  // the rest with why not (released numbers are not listed at all).
+  const { eligible: eligibleNumbers, ineligible: ineligibleNumbers } = callerNumberChoices(
+    numbers ?? [],
+  );
   const businessName = ws?.business?.name ?? null;
   const visibleSteps = editing
     ? WIZARD_STEPS.map((_, i) => i).filter((i) => i !== AUDIENCE_STEP)

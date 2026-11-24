@@ -59,6 +59,7 @@ function setup(campaigns: Row[] = []) {
       phone_numbers: [
         { id: "num_a", organization_id: ORG, status: "active", outbound_enabled: true },
         { id: "num_a_off", organization_id: ORG, status: "active", outbound_enabled: false },
+        { id: "num_a_released", organization_id: ORG, status: "released", outbound_enabled: true },
         { id: "num_b", organization_id: OTHER, status: "active", outbound_enabled: true },
       ],
     },
@@ -212,6 +213,15 @@ describe("editing updates the same campaign", () => {
         confirm: false,
       }),
       /does not belong to this workspace/,
+    );
+    // A released number sent by a client (the picker never offers one) is refused too.
+    await assert.rejects(
+      save(t, {
+        campaignId: "camp_1",
+        wizard: { ...WIZARD, phoneNumberId: "num_a_released" },
+        confirm: false,
+      }),
+      /This number is released\./,
     );
     assert.equal(t.campaigns()[0]!["phone_number_id"], undefined, "nothing was written");
   });

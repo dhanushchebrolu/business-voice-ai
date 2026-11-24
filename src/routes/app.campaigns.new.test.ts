@@ -160,22 +160,20 @@ describe("editing", () => {
   });
 
   test("only this workspace's outbound-enabled numbers are offered, and none is explained", () => {
-    assert.match(wizard, /\(numbers \?\? \[\]\)\.filter\(isEligibleCallerNumber\)/);
+    assert.match(
+      wizard,
+      /const \{ eligible: eligibleNumbers, ineligible: ineligibleNumbers \} = callerNumberChoices\(\s*numbers \?\? \[\],?\s*\);/,
+    );
     assert.match(wizard, /None of your numbers is enabled for outbound calling yet/);
     assert.match(wizard, /Choosing a number does not start any calls\./);
   });
 
-  test("released numbers are not listed as 'cannot call out'; other ineligible numbers are, with their reason", () => {
-    const block = wizard.slice(
-      wizard.indexOf("const ineligibleNumbers ="),
-      wizard.indexOf("const businessName"),
+  test("only eligible numbers are selectable; ineligible ones are shown disabled with their reason", () => {
+    assert.match(
+      wizard,
+      /\{eligibleNumbers\.map\(\(n\) => \(\s*<SelectItem key=\{n\.id\} value=\{n\.id\}>/,
     );
-    assert.match(block, /if \(n\.status === "released"\) return \[\];/);
-    assert.match(block, /const reason = callerNumberIneligibility\(n\);/);
-    assert.ok(
-      block.indexOf('n.status === "released"') < block.indexOf("callerNumberIneligibility(n)"),
-      "released numbers are dropped before the reason is computed",
-    );
+    assert.match(wizard, /<SelectItem key=\{n\.id\} value=\{n\.id\} disabled>/);
   });
 });
 

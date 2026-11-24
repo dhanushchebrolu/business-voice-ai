@@ -244,6 +244,7 @@ describe("campaign launch: every guard refuses before anything changes", () => {
       { number: { outbound_enabled: false } },
     ],
     ["a non-Sarvam caller number", deps, "caller_number", { number: { provider: "vobiz" } }],
+    ["a released caller number", deps, "caller_number", { number: { status: "released" } }],
     [
       "another workspace's caller number",
       deps,

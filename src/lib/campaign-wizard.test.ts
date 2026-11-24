@@ -9,6 +9,7 @@ import {
   campaignConfigRow,
   combineAudience,
   configEditBlockedReason,
+  callerNumberChoices,
   isEligibleCallerNumber,
   joinExtraInstructions,
   parseWizardState,
@@ -516,5 +517,60 @@ describe("status and caller-number rules", () => {
     assert.ok(Number.isNaN(parsed.controls.maxAttempts), "a string is not a number");
     assert.deepEqual(parsed.schedule.days, [1]);
     assert.equal(parseWizardState(null), null);
+  });
+});
+
+describe("callerNumberChoices: the caller-number picker", () => {
+  const n = (
+    id: string,
+    over: Partial<{ status: string; provider: string; outbound_enabled: boolean }>,
+  ) => ({
+    id,
+    e164: `+9179000000${id}`,
+    status: "active",
+    provider: "sarvam",
+    outbound_enabled: true,
+    ...over,
+  });
+  // Smile Dental's numbers as they are in production: three released, one Vobiz, one Sarvam (outbound off).
+  const numbers = [
+    n("01", { status: "released", outbound_enabled: false }),
+    n("02", { status: "released", provider: "exotel", outbound_enabled: false }),
+    n("03", { status: "released", provider: "exotel", outbound_enabled: true }),
+    n("04", { provider: "Vobiz", outbound_enabled: false }),
+    n("05", { outbound_enabled: false }),
+    n("06", {}),
+  ];
+  const { eligible, ineligible } = callerNumberChoices(numbers);
+
+  test("released numbers appear in neither list, so they can never be chosen", () => {
+    const shown = [...eligible.map((x) => x.id), ...ineligible.map((x) => x.id)];
+    for (const id of ["01", "02", "03"]) assert.ok(!shown.includes(id), `released ${id} is hidden`);
+  });
+
+  test("an active Vobiz number is listed as ineligible: campaigns call only from Sarvam numbers", () => {
+    assert.match(
+      ineligible.find((x) => x.id === "04")?.reason ?? "",
+      /Campaigns call only from Sarvam numbers/,
+    );
+  });
+
+  test("an active Sarvam number with outbound off is listed with that reason", () => {
+    assert.match(
+      ineligible.find((x) => x.id === "05")?.reason ?? "",
+      /not enabled for outbound calls yet/,
+    );
+  });
+
+  test("an active, outbound-enabled Sarvam number is the only selectable one", () => {
+    assert.deepEqual(
+      eligible.map((x) => x.id),
+      ["06"],
+    );
+    assert.ok(!ineligible.some((x) => x.id === "06"));
+  });
+
+  test("the eligibility rule itself is unchanged: a released number is still ineligible", () => {
+    assert.equal(isEligibleCallerNumber(numbers[0]!), false);
   });
 });
