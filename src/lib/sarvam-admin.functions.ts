@@ -1233,6 +1233,7 @@ export const resolveUnknownSarvamCall = createServerFn({ method: "POST" })
       entityType: "call_log",
       entityId: data.callId,
       organizationId: result.organizationId,
+      oldValue: { status: result.previous.status, failureReason: result.previous.failureReason },
       newValue: {
         resolution: data.resolution,
         status: result.status,

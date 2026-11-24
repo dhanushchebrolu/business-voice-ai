@@ -87,7 +87,13 @@ export async function resolveUnknownSarvamCall(
   supabaseAdmin: SupabaseClient<Database>,
   input: ResolveUnknownCallInput,
   deps: ResolutionDeps = {},
-): Promise<{ status: string; organizationId: string; finalization: FinalizationResult["state"] }> {
+): Promise<{
+  status: string;
+  organizationId: string;
+  finalization: FinalizationResult["state"];
+  /** What the call was before this resolution, for the audit log. */
+  previous: { status: string; failureReason: string | null };
+}> {
   const processEvent = deps.processEvent ?? sharedProcessEvent;
   const finalize =
     deps.finalize ??
@@ -99,12 +105,13 @@ export async function resolveUnknownSarvamCall(
   const { data: call } = await supabaseAdmin
     .from("call_logs")
     .select(
-      "id, organization_id, provider, direction, status, provider_call_id, campaign_id, campaign_contact_id",
+      "id, organization_id, provider, direction, status, provider_call_id, campaign_id, campaign_contact_id, failure_reason",
     )
     .eq("id", input.callId)
     .maybeSingle();
   if (!call || call.provider !== "sarvam" || call.direction !== "outbound")
     throw new Error("Sarvam outbound call not found.");
+  const previous = { status: call.status, failureReason: call.failure_reason ?? null };
   if (!isResolvableSarvamCall(call))
     throw new Error(`This call doesn't need resolving (status: ${call.status}).`);
   // `initiated` may still be live (Sarvam accepted it), or its start request
@@ -119,7 +126,10 @@ export async function resolveUnknownSarvamCall(
       .from("call_logs")
       .update({
         status: "failed",
-        failure_reason: "Resolved by an operator: the call was not placed.",
+        // Keeps the provider's own answer (e.g. a 402) as the evidence behind the decision.
+        failure_reason: `Resolved by an operator: the call was not placed.${
+          previous.failureReason ? ` Earlier: ${previous.failureReason}` : ""
+        }`,
         ended_at: new Date().toISOString(),
         resolution_source: "operator",
         resolved_by: input.resolvedBy ?? null,
@@ -135,6 +145,7 @@ export async function resolveUnknownSarvamCall(
       status: "failed",
       organizationId: call.organization_id,
       finalization: finalized.state,
+      previous,
     };
   }
 
@@ -240,5 +251,10 @@ export async function resolveUnknownSarvamCall(
   // (and finishes it if that pass didn't).
   const finalized =
     after.finalization_state === "done" ? { state: "done" as const } : await finalize(call.id);
-  return { status: outcome, organizationId: call.organization_id, finalization: finalized.state };
+  return {
+    status: outcome,
+    organizationId: call.organization_id,
+    finalization: finalized.state,
+    previous,
+  };
 }

@@ -480,6 +480,70 @@ describe("operator resolution", () => {
     assert.equal(env.charges.length, 0);
   });
 
+  test("held-call recovery (a start Sarvam answered with an ambiguous error): not placed keeps the provider's answer as evidence, no charge", async () => {
+    const env = setup();
+    await startFailure(env, timeout());
+    const held = String(env.db.call(CALL_ID)["failure_reason"]);
+    assert.equal(env.db.call(CALL_ID)["status"], "outcome_unknown");
+    const result = await resolveUnknownSarvamCall(
+      env.db as never,
+      { callId: CALL_ID, resolution: "not_placed", resolvedBy: "admin_1" },
+      deps(env),
+    );
+    assert.deepEqual(result.previous, { status: "outcome_unknown", failureReason: held });
+    const call = env.db.call(CALL_ID);
+    assert.equal(call["status"], "failed");
+    assert.equal(call["resolution_source"], "operator");
+    assert.equal(call["resolved_by"], "admin_1");
+    assert.ok(call["ended_at"], "the call is closed, so it no longer reserves the wallet");
+    assert.equal(
+      call["failure_reason"],
+      `Resolved by an operator: the call was not placed. Earlier: ${held}`,
+    );
+    assert.equal(env.charges.length, 0, "never billed");
+  });
+
+  test("held-call recovery is idempotent: resolving it a second time is refused and changes nothing", async () => {
+    const env = setup();
+    await startFailure(env, timeout());
+    const failures: string[] = [];
+    await resolveUnknownSarvamCall(
+      env.db as never,
+      { callId: CALL_ID, resolution: "not_placed" },
+      deps(env, failures),
+    );
+    const after = { ...env.db.call(CALL_ID) };
+    await assert.rejects(
+      resolveUnknownSarvamCall(
+        env.db as never,
+        { callId: CALL_ID, resolution: "not_placed" },
+        deps(env, failures),
+      ),
+      /doesn't need resolving \(status: failed\)/,
+    );
+    await assert.rejects(
+      resolveUnknownSarvamCall(
+        env.db as never,
+        { callId: CALL_ID, resolution: "placed", outcome: "completed", durationSeconds: 60 },
+        deps(env, failures),
+      ),
+      /doesn't need resolving/,
+      "a resolved call can't be re-resolved the other way either",
+    );
+    assert.deepEqual(env.db.call(CALL_ID), after);
+    assert.deepEqual(failures, [CALL_ID], "finalization ran exactly once");
+    assert.equal(env.charges.length, 0);
+  });
+
+  test("the resolution's audit entry records the call's previous status and failure reason", () => {
+    const fn = readFileSync(new URL("./sarvam-admin.functions.ts", import.meta.url), "utf8");
+    const block = fn.slice(fn.indexOf('action: "SARVAM_CALL_OUTCOME_RESOLVED"'));
+    assert.match(
+      block.slice(0, 400),
+      /oldValue: \{ status: result\.previous\.status, failureReason: result\.previous\.failureReason \}/,
+    );
+  });
+
   test("placed + connected bills once; the real webhook arriving later is rejected", async () => {
     const env = setup();
     await startFailure(env, timeout());
