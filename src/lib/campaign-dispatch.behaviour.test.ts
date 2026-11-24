@@ -67,6 +67,8 @@ function setup(contactCount: number) {
   }
   const db = memorySupabase({
     tables: {
+      // Campaign calling is enabled per workspace by ClickAI (20261129090000).
+      organizations: [{ id: ORG, campaign_dispatch_enabled: true }],
       campaigns: [
         {
           id: CAMPAIGN,
@@ -290,6 +292,28 @@ describe("campaign dispatch — the global outbound kill switch", () => {
     // Switched back on: the same campaign dials.
     await dispatchDueCampaigns({ deps: t.deps });
     assert.equal(t.dialed.length, 3);
+  });
+});
+
+describe("campaign dispatch — only workspaces ClickAI enabled for campaigns", () => {
+  test("a running campaign in a workspace without campaign calling is never claimed or dialled", async () => {
+    const t = setup(3);
+    (t.table("organizations")[0] as Record<string, unknown>)["campaign_dispatch_enabled"] = false;
+    const summary = await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 0);
+    assert.equal(summary.campaignsConsidered, 0);
+    assert.ok(t.table("campaign_contacts").every((c) => c["status"] === "pending"));
+    // Enabled by ClickAI: the same campaign dials.
+    (t.table("organizations")[0] as Record<string, unknown>)["campaign_dispatch_enabled"] = true;
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 3);
+  });
+
+  test("a workspace whose authorization cannot be read is treated as not enabled", async () => {
+    const t = setup(2);
+    t.table("organizations").length = 0;
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 0);
   });
 });
 

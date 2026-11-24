@@ -65,18 +65,38 @@ describe("app.campaigns.$campaignId.tsx — non-idempotent campaign actions can'
   });
 });
 
-describe("app.campaigns.$campaignId.tsx — launching is not available in the campaign MVP", () => {
-  test("the Launch/Resume button is always disabled and has no click handler", () => {
-    const idx = code.indexOf('{["draft", "scheduled", "paused"].includes(campaign.status)');
-    const block = code.slice(idx, code.indexOf("</Button>", idx));
-    assert.match(block, /\n\s*disabled\n/);
-    assert.doesNotMatch(block, /onClick=/);
-  });
+// Launching used to be impossible from this page (the button was always disabled).
+// It is now gated by the server's own readiness checks: the button stays disabled
+// until every check passes, asks for confirmation, can't be fired twice, and the
+// server re-runs every check (campaign-launch.server.test.ts). Global dispatch
+// (CAMPAIGN_DISPATCH_ENABLED) and per-workspace authorization stay the switches.
+const control = readFileSync(
+  new URL("../components/app/CampaignLaunchControl.tsx", import.meta.url),
+  "utf8",
+).replace(/\r\n/g, "\n");
 
-  test("the page cannot launch or resume a campaign at all", () => {
+describe("app.campaigns.$campaignId.tsx — launch is gated by the server's readiness checks", () => {
+  test("the page launches only through CampaignLaunchButton, never a bare button or direct call", () => {
+    const idx = code.indexOf('{["draft", "scheduled", "paused"].includes(campaign.status)');
+    const block = code.slice(idx, code.indexOf("/>", idx));
+    assert.match(block, /<CampaignLaunchButton/);
     assert.doesNotMatch(code, /launchCampaign\s*\(/);
     assert.doesNotMatch(code, /resumeCampaign/);
-    assert.doesNotMatch(code, /import \{[^}]*launchCampaign/);
+    assert.match(code, /<CampaignLaunchChecklist campaignId=\{campaignId\} \/>/);
+  });
+
+  test("the button is disabled until every server check passes, and while a launch is in flight", () => {
+    assert.match(control, /const ready = readiness\?\.ready === true;/);
+    assert.match(control, /disabled=\{!ready \|\| pending\}/);
+    assert.match(control, /if \(pending\) return;/);
+    assert.match(control, /getCampaignLaunchReadiness\(\{ data: \{ campaignId \} \}\)/);
+  });
+
+  test("launching asks for confirmation first and reports every blocker the server returns", () => {
+    assert.match(control, /<AlertDialog open=\{confirming\}/);
+    assert.match(control, /onClick=\{\(\) => setConfirming\(true\)\}/);
+    assert.match(control, /launchCampaign\(\{ data: \{ campaignId \} \}\)/);
+    assert.match(control, /result\.blockers\.map\(\(b\) => b\.label\)/);
   });
 
   test("the configuration, import history and activity sections render only saved data", () => {

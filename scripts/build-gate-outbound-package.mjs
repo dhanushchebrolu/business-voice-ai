@@ -25,7 +25,8 @@ const OUT = arg("--out", join(root, "docs"));
 
 // One entry per migration. `absent`/`present` are SQL booleans for its objects;
 // `newColumns` are left out of the data fingerprint (adding a column changes to_jsonb).
-// Every outbound reliability migration (20261123-20261128) is described.
+// Every outbound reliability migration (20261123-20261128) and the campaign
+// authorization migration (20261129) are described.
 
 // A function by signature: invoker (not SECURITY DEFINER), owned by postgres, empty
 // search_path, executable by service_role only. `source` adds a prosrc condition.
@@ -185,6 +186,21 @@ const GATES = {
      AND ${fn(BILLING_SIG, srcHas(BILLING_SIG, "BILLING_ON_HOLD"))}
      AND ${fn(FENCED_SIG, srcHas(FENCED_SIG, "billing_hold"))}`,
     newColumns: { call_logs: ["billing_hold"] },
+  },
+  20261129090000: {
+    name: "campaign_dispatch_authorization",
+    previous: "20261128090000",
+    rollback: "docs/production-rollback-20261129090000-campaign-dispatch-authorization.sql",
+    absent: `${noCols("organizations", ["campaign_dispatch_enabled"])}
+     AND to_regprocedure('public.guard_campaign_dispatch_enabled()') IS NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_organizations_campaign_dispatch_guard')`,
+    present: `${cols("organizations", ["campaign_dispatch_enabled"])} = 'campaign_dispatch_enabled:boolean:NO:false'
+     AND (SELECT count(*) FROM public.organizations WHERE campaign_dispatch_enabled) = 0
+     AND (SELECT NOT prosecdef AND pg_get_userbyid(proowner) = 'postgres' AND proconfig = ARRAY['search_path=""']
+            FROM pg_proc WHERE oid = to_regprocedure('public.guard_campaign_dispatch_enabled()'))
+     AND NOT has_function_privilege('authenticated', 'public.guard_campaign_dispatch_enabled()', 'EXECUTE')
+     AND (SELECT tgenabled = 'O' AND tgrelid = 'public.organizations'::regclass FROM pg_trigger WHERE tgname = 'trg_organizations_campaign_dispatch_guard')`,
+    newColumns: {},
   },
 };
 

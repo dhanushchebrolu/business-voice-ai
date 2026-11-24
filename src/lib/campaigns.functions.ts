@@ -1,6 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
-import { checkTelephonyAccess, walletCanAffordOutbound } from "@/lib/telephony-guard.server";
 
 /**
  * Campaign lifecycle transitions (spec §24/§36/§37/§38). Creating or editing a
@@ -83,13 +82,36 @@ export const saveCampaignConfiguration = createServerFn({ method: "POST" })
     });
   });
 
-export const CAMPAIGN_LAUNCH_UNAVAILABLE_MESSAGE =
-  "Launching campaigns is not available yet. Your campaign is saved; no calls are placed.";
-
 interface LaunchCampaignInput {
   campaignId: string;
 }
 
+/** Every launch condition for the campaign page's checklist (read-only; any workspace member). */
+export const getCampaignLaunchReadiness = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: LaunchCampaignInput) => {
+    if (!input?.campaignId) throw new Error("campaignId is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const orgId = await campaignOrgId(context, data.campaignId, false);
+    const { defaultReadinessDeps, evaluateCampaignLaunchReadiness } =
+      await import("@/lib/campaign-launch-readiness.server");
+    const readiness = await evaluateCampaignLaunchReadiness(
+      await defaultReadinessDeps("view"),
+      orgId,
+      data.campaignId,
+    );
+    if (!readiness) throw new Error("Campaign not found.");
+    return readiness;
+  });
+
+/**
+ * Starts (or resumes) a campaign: every check in campaign-launch-readiness.server.ts
+ * runs server-side; any failure returns them all and changes nothing. Launching
+ * places no call itself, it only lets the dispatcher pick the campaign up.
+ * Idempotent: a campaign that is already running answers ok.
+ */
 export const launchCampaign = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: LaunchCampaignInput) => {
@@ -98,117 +120,14 @@ export const launchCampaign = createServerFn({ method: "POST" })
   })
   .handler(async ({ data, context }) => {
     const orgId = await campaignOrgId(context, data.campaignId, true);
-    // The global outbound kill switch: no campaign starts or resumes while it is on.
-    const {
-      outboundCallingDisabled,
-      outboundEmergencyStopActive,
-      OUTBOUND_DISABLED_MESSAGE,
-      OUTBOUND_EMERGENCY_STOP_MESSAGE,
-    } = await import("@/lib/outbound-eligibility.server");
-    if (outboundCallingDisabled()) throw new Error(OUTBOUND_DISABLED_MESSAGE);
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    // The database emergency stop (fails closed): no campaign starts or resumes.
-    if (await outboundEmergencyStopActive(supabaseAdmin))
-      throw new Error(OUTBOUND_EMERGENCY_STOP_MESSAGE);
-    // No campaign starts or resumes while campaign dispatch is switched off:
-    // launching is not part of the campaign-creation MVP.
-    const { campaignDispatchEnabled } = await import("@/lib/jobs/handlers.server");
-    if (!campaignDispatchEnabled()) throw new Error(CAMPAIGN_LAUNCH_UNAVAILABLE_MESSAGE);
-
-    const { data: campaign } = await supabaseAdmin
-      .from("campaigns")
-      .select("*")
-      .eq("id", data.campaignId)
-      .maybeSingle();
-    if (!campaign || campaign.organization_id !== orgId) throw new Error("Campaign not found.");
-    if (!["draft", "scheduled", "paused"].includes(campaign.status))
-      throw new Error(`Campaign is already ${campaign.status}.`);
-
-    if (!campaign.agent_config_id) throw new Error("Choose an AI voice agent before launching.");
-    // Retries only for unanswered calls, at least 15 minutes apart (also a database constraint).
-    const { retrySettingsProblem } = await import("@/lib/campaign-outcome");
-    const retryProblem = retrySettingsProblem(campaign);
-    if (retryProblem) throw new Error(retryProblem);
-    // Every call says only what the customer reviewed; the dispatcher refuses otherwise too.
-    if (!campaign.context_reviewed_at)
-      throw new Error("Review and save what the AI should say on these calls before launching.");
-    if (!campaign.phone_number_id) throw new Error("Choose a caller number before launching.");
-
-    // 1. Number is entitled + active + outbound-enabled (spec §24 steps 5-6),
-    // reusing the exact same gate the single-call outbound path already uses
-    // — no second authorization system for campaigns.
-    const gate = await checkTelephonyAccess(orgId, campaign.phone_number_id, "outbound");
-    if (!gate.allowed || !gate.phoneNumber)
-      throw new Error(gate.reason ?? "This number cannot make outbound calls.");
-
-    // 2. The agent must already be mapped to a real Sarvam app+version and
-    // the number's connection must already be registered — same
-    // prerequisites createSarvamInstantOutboundCall enforces per call, just
-    // checked once up front here so launch fails fast with a clear reason
-    // instead of every contact silently failing one at a time.
-    if (gate.phoneNumber.provider === "sarvam") {
-      if (!gate.phoneNumber.connection_id)
-        throw new Error("This number has no telephony connection configured.");
-      const { data: connection } = await supabaseAdmin
-        .from("telephony_connections")
-        .select("provider, provider_connection_id")
-        .eq("id", gate.phoneNumber.connection_id)
-        .maybeSingle();
-      if (!connection || connection.provider !== "sarvam" || !connection.provider_connection_id)
-        throw new Error(
-          "This number's Sarvam connection has not been registered yet — contact support.",
-        );
-
-      const { data: agentConfig } = await supabaseAdmin
-        .from("agent_configs")
-        .select(
-          "organization_id, sarvam_app_id, sarvam_outbound_app_id, sarvam_outbound_app_version, sarvam_outbound_ready_app_id, sarvam_outbound_ready_version",
-        )
-        .eq("id", campaign.agent_config_id)
-        .maybeSingle();
-      if (!agentConfig || agentConfig.organization_id !== orgId)
-        throw new Error("This campaign's agent does not belong to this organization.");
-      // Only the customer's registered, confirmed outbound agent (never the inbound one).
-      const { isOutboundReady, OUTBOUND_NOT_READY_MESSAGE } =
-        await import("@/lib/sarvam-outbound-mode.server");
-      if (!isOutboundReady(agentConfig)) throw new Error(OUTBOUND_NOT_READY_MESSAGE);
-    }
-
-    // 3. Billing: at least one call must be affordable right now (spec §43).
-    // The dispatcher re-checks this before every single dial too — this is
-    // just a fast, honest fail at launch time rather than silently queuing
-    // a campaign that can never actually dial.
-    const affordable = await walletCanAffordOutbound(orgId);
-    if (!affordable) throw new Error("Insufficient wallet balance to launch this campaign.");
-
-    // 4. There must be someone to call.
-    const { count: pendingCount } = await supabaseAdmin
-      .from("campaign_contacts")
-      .select("id", { count: "exact", head: true })
-      .eq("campaign_id", data.campaignId)
-      .in("status", ["pending", "retry_scheduled"]);
-    if (!pendingCount || pendingCount === 0)
-      throw new Error("Add at least one contact before launching this campaign.");
-
-    // 5. Only ClickAI's own dispatcher dials campaigns. The Sarvam-paced
-    // cohort mode would skip ClickAI's calling hours, country, do-not-call
-    // re-check, wallet, budget and in-flight limits, so it is refused.
-    if (campaign.dispatch_mode === "sarvam_campaign")
-      throw new Error(
-        "Sarvam-paced campaigns are not available: every campaign call goes through ClickAI's own safety checks. Switch this campaign to instant_outbound_fallback.",
-      );
-
-    // Only from the status checked above: a cancel that landed meanwhile wins.
-    const { data: launched, error: launchError } = await supabaseAdmin
-      .from("campaigns")
-      .update({ status: "running", launched_at: new Date().toISOString() })
-      .eq("id", data.campaignId)
-      .in("status", ["draft", "scheduled", "paused"])
-      .select("id");
-    if (launchError) throw launchError;
-    if (!launched?.length) throw new Error("The campaign changed status; reload and try again.");
-
-    return { ok: true };
+    const { launchCampaignFor } = await import("@/lib/campaign-launch.server");
+    const { defaultReadinessDeps } = await import("@/lib/campaign-launch-readiness.server");
+    return launchCampaignFor(
+      await defaultReadinessDeps("launch"),
+      orgId,
+      context.userId,
+      data.campaignId,
+    );
   });
 
 interface CampaignActionInput {

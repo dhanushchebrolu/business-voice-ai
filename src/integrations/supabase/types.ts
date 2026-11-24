@@ -1741,6 +1741,7 @@ export type Database = {
           archived_at: string | null;
           assigned_admin_id: string | null;
           business_type: string | null;
+          campaign_dispatch_enabled: boolean;
           city: string | null;
           client_id: string;
           contact_email: string | null;
@@ -1788,6 +1789,7 @@ export type Database = {
           archived_at?: string | null;
           assigned_admin_id?: string | null;
           business_type?: string | null;
+          campaign_dispatch_enabled?: boolean;
           city?: string | null;
           client_id?: string;
           contact_email?: string | null;
@@ -1835,6 +1837,7 @@ export type Database = {
           archived_at?: string | null;
           assigned_admin_id?: string | null;
           business_type?: string | null;
+          campaign_dispatch_enabled?: boolean;
           city?: string | null;
           client_id?: string;
           contact_email?: string | null;

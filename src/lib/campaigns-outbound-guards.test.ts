@@ -12,41 +12,57 @@ const src = readFileSync(new URL("./campaigns.functions.ts", import.meta.url), "
   /\r\n/g,
   "\n",
 );
-const launch = src.slice(src.indexOf("export const launchCampaign"));
+// Launch is campaign-launch.server.ts (launchCampaignFor): every check lives in
+// campaign-launch-readiness.server.ts, and any failing check returns before the
+// one status update. campaign-launch.server.test.ts proves each guard
+// behaviourally (one test per guard, the campaign left unchanged); these source
+// checks keep the wiring from drifting.
+const readSrc = (f: string) =>
+  readFileSync(new URL(f, import.meta.url), "utf8").replace(/\r\n/g, "\n");
+const launchFn = src.slice(src.indexOf("export const launchCampaign"));
+const launchModule = readSrc("./campaign-launch.server.ts");
+const readiness = readSrc("./campaign-launch-readiness.server.ts");
+const refusedBeforeRunning = () => {
+  const refuse = launchModule.indexOf("if (blockers.length > 0) {");
+  const running = launchModule.indexOf('.update({ status: "running"');
+  assert.ok(refuse > -1 && refuse < running, "any failing check returns before the status update");
+};
 
 describe("campaign launch and cohort upload obey the outbound safety switches", () => {
-  test("the kill switch refuses a launch before the campaign is read or anything is uploaded", () => {
-    const kill = launch.indexOf(
-      "if (outboundCallingDisabled()) throw new Error(OUTBOUND_DISABLED_MESSAGE);",
+  test("the kill switch is a launch check, wired to OUTBOUND_CALLING_DISABLED", () => {
+    assert.match(
+      launchFn,
+      /launchCampaignFor\(\s*await defaultReadinessDeps\("launch"\),\s*orgId,\s*context\.userId,\s*data\.campaignId,?\s*\)/,
     );
-    const read = launch.indexOf('.from("campaigns")');
-    const running = launch.indexOf('status: "running"');
-    assert.ok(kill > -1, "kill switch checked");
-    assert.ok(kill < read && read < running);
+    assert.match(readiness, /"kill_switch",[\s\S]{0,80}deps\.killSwitchOn\(\)/);
+    assert.match(readiness, /killSwitchOn: eligibility\.outboundCallingDisabled,/);
+    refusedBeforeRunning();
   });
 
   test("no cohort is ever uploaded: every campaign call goes through ClickAI's own dispatcher", () => {
     assert.doesNotMatch(src, /uploadCohort\(/);
-    const refuse = launch.indexOf('if (campaign.dispatch_mode === "sarvam_campaign")');
-    assert.ok(refuse > -1 && refuse < launch.indexOf('status: "running"'));
+    assert.match(readiness, /campaign\.dispatch_mode === "sarvam_campaign"/);
+    refusedBeforeRunning();
   });
 
   test("resume re-runs every launch check; pause, launch and cancel only move from the expected status", () => {
     assert.match(src, /export const resumeCampaign = launchCampaign;/);
     assert.match(src, /\.in\("status", fromStatuses\)\s*\.select\("id"\)/);
-    assert.match(src, /\.in\("status", \["draft", "scheduled", "paused"\]\)\s*\.select\("id"\)/);
+    assert.match(
+      launchModule,
+      /\.in\("status", \["draft", "scheduled", "paused"\]\)\s*\.select\("id"\)/,
+    );
     assert.match(src, /\.not\("status", "in", "\(completed,cancelled\)"\)/);
   });
 });
 
 describe("campaign launch refuses unsafe retry settings (GATE C4 H1)", () => {
-  test("checked after the campaign is read and before it is set running", () => {
-    const read = launch.indexOf('.from("campaigns")');
-    const check = launch.indexOf("const retryProblem = retrySettingsProblem(campaign);");
-    const refuse = launch.indexOf("if (retryProblem) throw new Error(retryProblem);");
-    const running = launch.indexOf('status: "running"');
-    assert.ok(check > -1 && refuse > check, "retry settings checked and refused");
-    assert.ok(read < check && refuse < running);
+  test("retry settings are a launch check, refused before the campaign is set running", () => {
+    assert.match(
+      readiness,
+      /add\("retry_settings", "Retry settings are valid", retrySettingsProblem\(campaign\)\);/,
+    );
+    refusedBeforeRunning();
   });
 });
 
@@ -74,33 +90,35 @@ describe("single calls: the calling hours are re-checked between admission and t
 
 describe("a campaign without a caller number can't be launched", () => {
   test("launch refuses a campaign with no caller number before anything is set running", () => {
-    const check = launch.indexOf(
-      'if (!campaign.phone_number_id) throw new Error("Choose a caller number before launching.");',
+    assert.match(
+      readiness,
+      /if \(!campaign\.phone_number_id\)\s*numberProblem\s*=\s*"Choose a caller number/,
     );
-    assert.ok(check > -1);
-    assert.ok(check < launch.indexOf('status: "running"'));
+    refusedBeforeRunning();
   });
 
   test("launch also refuses instructions saved only as a draft (not confirmed)", () => {
-    const check = launch.indexOf("if (!campaign.context_reviewed_at)");
-    assert.ok(check > -1 && check < launch.indexOf('status: "running"'));
+    assert.match(
+      readiness,
+      /campaign\.context_reviewed_at \? validateCampaignContext\(campaign\.context\) : null/,
+    );
+    refusedBeforeRunning();
   });
 });
 
 describe("campaign launch is unavailable while campaign dispatch is switched off", () => {
-  test("launch (and resume, the same function) refuses before the campaign is read or set running", () => {
-    const gate = launch.indexOf(
-      "if (!campaignDispatchEnabled()) throw new Error(CAMPAIGN_LAUNCH_UNAVAILABLE_MESSAGE);",
-    );
-    const read = launch.indexOf('.from("campaigns")');
-    const running = launch.indexOf('status: "running"');
-    assert.ok(gate > -1, "dispatch switch checked at launch");
-    assert.ok(gate < read && read < running);
+  test("launch (and resume, the same function) refuses while the dispatch switch is off", () => {
+    assert.match(readiness, /"dispatch_available",[\s\S]{0,80}!deps\.dispatchEnabled\(\)/);
+    refusedBeforeRunning();
     assert.match(src, /export const resumeCampaign = launchCampaign;/);
   });
 
   test("the switch is the dispatcher's own (CAMPAIGN_DISPATCH_ENABLED), not a second flag", async () => {
-    assert.match(launch, /await import\("@\/lib\/jobs\/handlers\.server"\)/);
+    assert.match(
+      readiness,
+      /const \{ campaignDispatchEnabled \} = await import\("\.\/jobs\/handlers\.server\.ts"\);/,
+    );
+    assert.match(readiness, /dispatchEnabled: campaignDispatchEnabled,/);
     const handlers = readFileSync(new URL("./jobs/handlers.server.ts", import.meta.url), "utf8");
     assert.match(
       handlers,

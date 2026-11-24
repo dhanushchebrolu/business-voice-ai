@@ -1,3 +1,4 @@
+import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import type { NormalizedCallStatus } from "./telephony/adapter";
 import { checkFeatureAccess } from "./feature-gate.server.ts";
@@ -280,6 +281,26 @@ export async function walletCanAffordOutbound(orgId: string, minutes = 1): Promi
   });
   if (error) return false;
   return Boolean(data);
+}
+
+/**
+ * walletCanAffordOutbound without the organization row lock, for display only
+ * (the campaign page's launch checklist): a plain read of the cached balance,
+ * so viewing a page never waits on, or holds up, admissions and debits.
+ * Enforcement still uses walletCanAffordOutbound and the admission functions.
+ */
+export async function walletBalanceCoversOutbound(orgId: string, minutes = 1): Promise<boolean> {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const rate = await getCallRate(orgId, "outbound");
+  if (rate.customerAmountPerMinute <= 0) return true;
+  // wallet_balances (migration 20261111090100) is not in the generated types yet.
+  const { data, error } = await (supabaseAdmin as unknown as SupabaseClient)
+    .from("wallet_balances")
+    .select("balance")
+    .eq("organization_id", orgId)
+    .maybeSingle();
+  if (error) return false;
+  return Number(data?.balance ?? 0) >= rate.customerAmountPerMinute * Math.max(1, minutes);
 }
 
 export interface FinalizeBillingResult {

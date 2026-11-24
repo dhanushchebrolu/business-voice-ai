@@ -188,8 +188,31 @@ export async function dispatchDueCampaigns(
     .eq("status", "running")
     .eq("dispatch_mode", "instant_outbound_fallback");
 
+  // Campaign calling is enabled per workspace by ClickAI
+  // (organizations.campaign_dispatch_enabled, 20261129090000), so the platform
+  // switch never starts another customer's campaigns. A failed read enables none.
+  const orgIds = [...new Set((campaigns ?? []).map((c) => c.organization_id))];
+  const { data: orgs, error: orgError } = orgIds.length
+    ? await supabaseAdmin
+        .from("organizations")
+        .select("id, campaign_dispatch_enabled")
+        .in("id", orgIds)
+    : { data: [], error: null };
+  if (orgError) console.error("campaign_dispatch:authorization_read_failed", orgError.message);
+  const authorized = new Set(
+    orgError
+      ? []
+      : (orgs ?? [])
+          .filter(
+            (o) =>
+              (o as { campaign_dispatch_enabled?: boolean }).campaign_dispatch_enabled === true,
+          )
+          .map((o) => o.id),
+  );
+
   for (const campaign of campaigns ?? []) {
     if (deps.now() >= deadline) break;
+    if (!authorized.has(campaign.organization_id)) continue;
     summary.campaignsConsidered++;
     try {
       const dialed = await dispatchOneCampaign(campaign, deps, deadline);

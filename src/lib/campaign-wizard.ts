@@ -461,12 +461,35 @@ export function configEditBlockedReason(status: string): string | null {
   return `This campaign is ${status}; its configuration can no longer be changed.`;
 }
 
-/** A caller number the campaign may use: the organization's own, active, outbound-enabled. */
+/** The campaign page query holding its launch checklist (campaign-launch-readiness.server.ts). */
+export const campaignReadinessKey = (campaignId: string) => ["campaign-readiness", campaignId];
+
+/**
+ * Why a number cannot be a campaign's caller number, or null when it can. The
+ * organization check is the caller's (RLS / server); this is the number's own
+ * state: active, outbound-enabled by ClickAI, and a Sarvam number (the only
+ * provider campaigns dial through). `provider` absent: not checked (old rows).
+ */
+export function callerNumberIneligibility(n: {
+  status: string | null;
+  outbound_enabled: boolean | null;
+  provider?: string | null;
+}): string | null {
+  if (n.status !== "active") return `This number is ${n.status ?? "not active"}.`;
+  if (n.provider !== undefined && n.provider !== "sarvam")
+    return "Campaigns call only from Sarvam numbers; this number is inbound-only for campaigns.";
+  if (n.outbound_enabled !== true)
+    return "This number is not enabled for outbound calls yet (inbound only). ClickAI support enables it.";
+  return null;
+}
+
+/** A caller number the campaign may use: the organization's own, active, outbound-enabled Sarvam number. */
 export function isEligibleCallerNumber(n: {
   status: string | null;
   outbound_enabled: boolean | null;
+  provider?: string | null;
 }): boolean {
-  return n.status === "active" && n.outbound_enabled === true;
+  return callerNumberIneligibility(n) === null;
 }
 
 /**

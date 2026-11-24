@@ -19,6 +19,10 @@ const cronRoute = readFileSync(
   "utf8",
 );
 const campaignsFn = readFileSync(new URL("./campaigns.functions.ts", import.meta.url), "utf8");
+const launchReadinessSrc = readFileSync(
+  new URL("./campaign-launch-readiness.server.ts", import.meta.url),
+  "utf8",
+);
 const webhookRoute =
   readFileSync(new URL("../routes/api/public/webhooks/telephony.ts", import.meta.url), "utf8") +
   "\n" +
@@ -85,9 +89,10 @@ describe("campaign dispatcher — architecture invariants", () => {
 
 describe("sarvam_campaign dispatch mode — removed", () => {
   test("launch refuses it outright and nothing uploads a cohort to Sarvam", () => {
+    // Launch checks live in campaign-launch-readiness.server.ts (behaviour: campaign-launch.server.test.ts).
     assert.match(
-      campaignsFn,
-      /if \(campaign\.dispatch_mode === "sarvam_campaign"\)\s*throw new Error\(/,
+      launchReadinessSrc,
+      /"dispatch_mode",[\s\S]{0,80}campaign\.dispatch_mode === "sarvam_campaign" &&/,
     );
     assert.doesNotMatch(campaignsFn, /uploadCohort|launchViaSarvamCampaign|KLYRO_DISPATCH_MODE/);
   });
@@ -140,8 +145,9 @@ describe("campaign lifecycle server functions — tenant isolation", () => {
   });
 
   test("launch re-validates entitlement/billing/readiness — it does not just flip a status column", () => {
-    assert.match(campaignsFn, /checkTelephonyAccess\(/);
-    assert.match(campaignsFn, /walletCanAffordOutbound\(/);
+    assert.match(campaignsFn, /launchCampaignFor\(\s*await defaultReadinessDeps\("launch"\)/);
+    assert.match(launchReadinessSrc, /checkTelephonyAccess\(orgId, numberId, "outbound"\)/);
+    assert.match(launchReadinessSrc, /walletCanAffordOutbound\(orgId\)/);
   });
 
   test("cancel stops future dialing for not-yet-attempted contacts", () => {

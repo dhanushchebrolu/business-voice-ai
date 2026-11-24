@@ -30,6 +30,7 @@ import {
   combineAudience,
   csvToTable,
   describeImportResult,
+  callerNumberIneligibility,
   isEligibleCallerNumber,
   mappingProblems,
   openingLinePreview,
@@ -142,6 +143,11 @@ export function CampaignWizard({
   });
   // Only this workspace's own numbers (RLS + organization filter) that may call out.
   const eligibleNumbers = (numbers ?? []).filter(isEligibleCallerNumber);
+  // The rest, shown with why they cannot call out (inbound-only, inactive, not Sarvam).
+  const ineligibleNumbers = (numbers ?? []).flatMap((n) => {
+    const reason = callerNumberIneligibility(n);
+    return reason ? [{ id: n.id, e164: n.e164, reason }] : [];
+  });
   const businessName = ws?.business?.name ?? null;
   const visibleSteps = editing
     ? WIZARD_STEPS.map((_, i) => i).filter((i) => i !== AUDIENCE_STEP)
@@ -1219,6 +1225,7 @@ export function CampaignWizard({
           businessName={businessName}
           callerNumber={callerNumber}
           eligibleNumbers={eligibleNumbers}
+          ineligibleNumbers={ineligibleNumbers}
           phoneNumberId={phoneNumberId}
           onPhoneNumber={setPhoneNumberId}
           audience={audience}
@@ -1401,6 +1408,7 @@ function ReviewStep({
   businessName,
   callerNumber,
   eligibleNumbers,
+  ineligibleNumbers = [],
   phoneNumberId,
   onPhoneNumber,
   audience,
@@ -1413,6 +1421,8 @@ function ReviewStep({
   businessName: string | null;
   callerNumber: string | null;
   eligibleNumbers: { id: string; e164: string }[];
+  /** This workspace's numbers that can't call out, each with the reason (shown, not selectable). */
+  ineligibleNumbers?: { id: string; e164: string; reason: string }[];
   phoneNumberId: string;
   onPhoneNumber: (id: string) => void;
   audience: ReturnType<typeof previewAudience>;
@@ -1457,8 +1467,24 @@ function ReviewStep({
                 {n.e164}
               </SelectItem>
             ))}
+            {ineligibleNumbers
+              .filter((n) => n.id !== phoneNumberId)
+              .map((n) => (
+                <SelectItem key={n.id} value={n.id} disabled>
+                  {n.e164} (cannot call out)
+                </SelectItem>
+              ))}
           </SelectContent>
         </Select>
+        {ineligibleNumbers.length > 0 ? (
+          <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
+            {ineligibleNumbers.map((n) => (
+              <li key={n.id}>
+                <span className="font-medium">{n.e164}</span>: {n.reason}
+              </li>
+            ))}
+          </ul>
+        ) : null}
         {eligibleNumbers.length === 0 ? (
           <p className="mt-2 text-xs text-muted-foreground">
             None of your numbers is enabled for outbound calling yet. ClickAI support enables a
@@ -1552,14 +1578,14 @@ function ReviewStep({
               </li>
             ))}
             <li className="flex items-start gap-2">
-              <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" /> Launching
-              campaigns is not available yet. Saving never places a call.
+              <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-warning" /> Saving never
+              places a call. Launch from the campaign page once every check passes.
             </li>
           </ul>
         </SectionCard>
       ) : (
         <p className="text-sm text-muted-foreground">
-          Launching campaigns is not available yet. Saving never places a call.
+          Saving never places a call. Launch from the campaign page once every check passes.
         </p>
       )}
     </div>

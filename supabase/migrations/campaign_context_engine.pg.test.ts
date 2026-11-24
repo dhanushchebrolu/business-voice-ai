@@ -546,6 +546,68 @@ describe("audit fixes: emergency stop, in-flight window, unbilled reservations, 
   });
 });
 
+describe("campaign launch and the wallet", () => {
+  // The campaign page's checklist reads wallet_balances with a plain SELECT
+  // (walletBalanceCoversOutbound); launch calls wallet_can_afford, which takes the
+  // organization lock that every admission and debit takes.
+  const pageRead = (org: Org) =>
+    `SELECT balance FROM public.wallet_balances WHERE organization_id = '${org.id}';`;
+
+  test("opening the campaign page takes no wallet lock: its read answers while an admission holds the organization lock; launch's check waits for it", async (t) => {
+    if (!ready(t)) return;
+    const org = newOrg(5 * PER_CALL);
+    const marker = `hold_${randomUUID().replace(/-/g, "")}`;
+    const holder = runAsync(
+      `BEGIN; SELECT 1 FROM public.organizations WHERE id = '${org.id}' FOR UPDATE; SELECT '${marker}', pg_sleep(4); COMMIT;`,
+    );
+    for (let i = 0; i < 100; i++) {
+      const held = rows(
+        `RESET ROLE; SELECT count(*) FROM pg_stat_activity WHERE state = 'active' AND query LIKE '%${marker}'', pg_sleep%';`,
+      );
+      if (held[0] === "1") break;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const read = run(`SET lock_timeout = '500ms';\n${pageRead(org)}`);
+    assert.equal(read.status, 0, read.stderr);
+    assert.match(read.stdout, new RegExp(`^${5 * PER_CALL}$`, "m"));
+    const locking = run(
+      `SET lock_timeout = '500ms';\nSELECT public.wallet_can_afford('${org.id}', 1);`,
+    );
+    assert.notEqual(locking.status, 0, "wallet_can_afford must wait for the organization lock");
+    assert.match(locking.stderr, /lock timeout/);
+    const held = await holder;
+    assert.equal(held.status, 0, held.stderr);
+  });
+
+  test("insufficient balance: the page read and launch's check agree", (t) => {
+    if (!ready(t)) return;
+    const org = newOrg(RATE - 1);
+    assert.deepEqual(rows(pageRead(org)), [String(RATE - 1)]);
+    assert.deepEqual(rows(`SELECT public.wallet_can_afford('${org.id}', ${RATE});`), ["f"]);
+    assert.deepEqual(rows(`SELECT public.wallet_can_afford('${org.id}', ${RATE - 1});`), ["t"]);
+  });
+
+  test("two campaigns launched together cannot spend past the wallet: their calls are admitted against one balance", async (t) => {
+    if (!ready(t)) return;
+    const org = newOrg(2 * PER_CALL); // covers exactly two worst-case calls
+    const second = randomUUID();
+    rows(`RESET ROLE; INSERT INTO public.campaigns (id, organization_id, name, status, phone_number_id, agent_config_id, context, context_version, context_reviewed_at)
+            VALUES ('${second}', '${org.id}', 'C2', 'running', '${org.number}', '${org.agent}', ${CONTEXT}, 1, now());`);
+    const jobs = [
+      ...Array.from({ length: 5 }, () => admitSql(org, claimed(org), 100)),
+      ...Array.from({ length: 5 }, () => admitSql(org, claimed(org, phone(), second), 100, second)),
+    ];
+    const results = await Promise.all(jobs.map((sql) => runAsync(sql)));
+    for (const r of results) assert.equal(r.status, 0, r.stderr);
+    const answers = results.map(
+      (r) => JSON.parse(r.stdout.trim().split("\n").pop()!) as Record<string, unknown>,
+    );
+    assert.equal(answers.filter((a) => a["result"] === "admitted").length, 2);
+    assert.equal(answers.filter((a) => a["reason"] === "insufficient_balance").length, 8);
+    assert.equal(callCount(org), 2);
+  });
+});
+
 describe("M5: calling hours inside both admissions (09:00-21:00 Asia/Kolkata)", () => {
   const at = (ist: string) => `SET clickai.admission_now = '2026-11-20 ${ist}+05:30';`;
   const singleAt = (org: Org, ist: string) =>

@@ -7,7 +7,7 @@ import {
   CONFIG_EDITABLE_STATUSES,
   campaignConfigRow,
   configEditBlockedReason,
-  isEligibleCallerNumber,
+  callerNumberIneligibility,
   parseWizardState,
   validateWizardConfig,
 } from "./campaign-wizard.ts";
@@ -111,14 +111,14 @@ export async function saveCampaignConfigurationFor(
   if (wizard.phoneNumberId) {
     const { data: number, error } = await admin
       .from("phone_numbers")
-      .select("id, organization_id, status, outbound_enabled")
+      .select("id, organization_id, status, outbound_enabled, provider")
       .eq("id", wizard.phoneNumberId)
       .maybeSingle();
     if (error) throw error;
     if (!number || number.organization_id !== organizationId)
       throw new Error("That caller number does not belong to this workspace.");
-    if (!isEligibleCallerNumber(number))
-      throw new Error("That number is not enabled for outbound calls.");
+    const ineligible = callerNumberIneligibility(number);
+    if (ineligible) throw new Error(ineligible);
   }
 
   const row: Record<string, unknown> = {

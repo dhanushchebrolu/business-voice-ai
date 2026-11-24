@@ -36,6 +36,11 @@ import {
 } from "@/components/app/primitives";
 import { describeQueryError } from "@/lib/query-error";
 import { CampaignContextPanel, CampaignInsights } from "@/components/app/CampaignContextPanel";
+import {
+  CampaignLaunchButton,
+  CampaignLaunchChecklist,
+} from "@/components/app/CampaignLaunchControl";
+import { campaignReadinessKey } from "@/lib/campaign-wizard";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -126,6 +131,7 @@ function CampaignDetailPage() {
       qc.invalidateQueries({ queryKey: ["campaign-stats", campaignId] }),
       qc.invalidateQueries({ queryKey: ["campaign-uploads", campaignId] }),
       qc.invalidateQueries({ queryKey: ["campaigns"] }),
+      qc.invalidateQueries({ queryKey: campaignReadinessKey(campaignId) }),
     ]);
   }
 
@@ -227,17 +233,13 @@ function CampaignDetailPage() {
               </Link>
             )}
             {["draft", "scheduled", "paused"].includes(campaign.status) ? (
-              // Launching is not available in this version: the button stays
-              // disabled and launchCampaign also refuses while campaign
-              // dispatch is switched off (CAMPAIGN_DISPATCH_ENABLED).
-              <Button
-                size="sm"
-                disabled
-                title="Launching campaigns is not available yet. Saving never places a call."
-                aria-describedby="launch-unavailable"
-              >
-                {campaign.status === "paused" ? "Resume" : "Launch campaign"}
-              </Button>
+              // Enabled only when every server-side launch check passes
+              // (campaign-launch-readiness.server.ts); launchCampaign re-runs them.
+              <CampaignLaunchButton
+                campaignId={campaignId}
+                status={campaign.status}
+                onLaunched={invalidate}
+              />
             ) : null}
             {campaign.status === "running" ? (
               <Button size="sm" variant="secondary" onClick={doPause} disabled={actionPending}>
@@ -253,10 +255,9 @@ function CampaignDetailPage() {
         }
       />
 
-      <p id="launch-unavailable" className="text-xs text-muted-foreground">
-        Launching campaigns is not available yet, so no calls are placed. You can set up, edit and
-        add contacts now.
-      </p>
+      {["draft", "scheduled", "paused"].includes(campaign.status) ? (
+        <CampaignLaunchChecklist campaignId={campaignId} />
+      ) : null}
 
       <CampaignConfiguration campaign={campaign} />
 

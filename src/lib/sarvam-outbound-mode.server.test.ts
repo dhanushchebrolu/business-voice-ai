@@ -264,14 +264,15 @@ describe("launch and admin wiring", () => {
   const read = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
 
   test("a campaign cannot launch on an agent version not confirmed for outbound", () => {
-    const src = read("./campaigns.functions.ts");
-    const launch = src.slice(
-      src.indexOf("export const launchCampaign"),
-      src.indexOf("function simpleTransition"),
+    // Launch checks live in campaign-launch-readiness.server.ts; launchCampaign runs them all
+    // (behaviour, including this refusal: campaign-launch.server.test.ts).
+    assert.match(
+      read("./campaign-launch-readiness.server.ts"),
+      /else if \(!isOutboundReady\(agent\)\)\s*agentProblem\s*=/,
     );
     assert.match(
-      launch,
-      /if \(!isOutboundReady\(agentConfig\)\) throw new Error\(OUTBOUND_NOT_READY_MESSAGE\)/,
+      read("./campaigns.functions.ts"),
+      /launchCampaignFor\(\s*await defaultReadinessDeps\("launch"\)/,
     );
   });
 
@@ -401,7 +402,11 @@ describe("admin Sarvam campaign status changes", () => {
 
   test("sarvam_campaign mode is refused at launch; no cohort is ever uploaded", () => {
     const src = readFileSync(new URL("./campaigns.functions.ts", import.meta.url), "utf8");
-    assert.match(src, /campaign\.dispatch_mode === "sarvam_campaign"/);
+    const readiness = readFileSync(
+      new URL("./campaign-launch-readiness.server.ts", import.meta.url),
+      "utf8",
+    );
+    assert.match(readiness, /campaign\.dispatch_mode === "sarvam_campaign"/);
     assert.doesNotMatch(src, /uploadCohort\(/);
   });
 });

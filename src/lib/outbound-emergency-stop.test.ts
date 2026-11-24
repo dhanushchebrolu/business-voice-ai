@@ -81,15 +81,25 @@ describe("campaign launch and resume refuse while the emergency stop is on", () 
     /\r\n/g,
     "\n",
   );
-  const launch = src.slice(src.indexOf("export const launchCampaign"));
+  // The checks live in campaign-launch-readiness.server.ts; campaign-launch.server.test.ts
+  // proves behaviourally that an engaged stop refuses the launch and changes nothing.
+  const read = (f: string) =>
+    readFileSync(new URL(f, import.meta.url), "utf8").replace(/\r\n/g, "\n");
+  const readiness = read("./campaign-launch-readiness.server.ts");
+  const launchModule = read("./campaign-launch.server.ts");
 
   test("launch checks the stop, with a clear message, before the campaign can be set running", () => {
-    const check = launch.indexOf(
-      "if (await outboundEmergencyStopActive(supabaseAdmin))\n      throw new Error(OUTBOUND_EMERGENCY_STOP_MESSAGE);",
+    assert.match(readiness, /const stopped = await deps\.emergencyStopActive\(\);/);
+    assert.match(
+      readiness,
+      /emergencyStopActive: \(\) => eligibility\.outboundEmergencyStopActive\(supabaseAdmin\),/,
     );
-    const running = launch.indexOf('status: "running"');
-    assert.ok(check > -1, "emergency stop checked");
-    assert.ok(check < launch.indexOf('.from("campaigns")') && check < running);
+    assert.match(
+      readiness,
+      /"emergency_stop",[\s\S]{0,60}stopped && "ClickAI's emergency stop is engaged/,
+    );
+    const refuse = launchModule.indexOf("if (blockers.length > 0) {");
+    assert.ok(refuse > -1 && refuse < launchModule.indexOf('.update({ status: "running"'));
   });
 
   test("resume is the same function as launch, so it runs the same check", () => {
