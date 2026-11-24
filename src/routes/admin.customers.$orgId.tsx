@@ -5,11 +5,7 @@ import { useRef, useState } from "react";
 import { ArrowLeft, Lock, Unlock, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import { getCustomerDetail, setFeatureLock, adjustWallet } from "@/lib/admin.functions";
-import {
-  getProvisioningReadiness,
-  getKlyroRuntimeReadiness,
-  setCampaignCallingEnabled,
-} from "@/lib/admin-clients.functions";
+import { getProvisioningReadiness, getKlyroRuntimeReadiness } from "@/lib/admin-clients.functions";
 import { retryProvisioning } from "@/lib/telephony-admin.functions";
 import { testSarvamInboundDeployment, testSarvamOutboundCall } from "@/lib/sarvam-admin.functions";
 import { getProfitAnalytics } from "@/lib/admin-finance.functions";
@@ -111,7 +107,6 @@ function CustomerDetail() {
   const retry = useServerFn(retryProvisioning);
   const runInboundTest = useServerFn(testSarvamInboundDeployment);
   const runOutboundTest = useServerFn(testSarvamOutboundCall);
-  const saveCampaignCalling = useServerFn(setCampaignCallingEnabled);
   const queryClient = useQueryClient();
 
   const [lockTarget, setLockTarget] = useState<{
@@ -126,7 +121,6 @@ function CustomerDetail() {
   const [retryOpen, setRetryOpen] = useState(false);
   const [inboundTestOpen, setInboundTestOpen] = useState(false);
   const [outboundTestOpen, setOutboundTestOpen] = useState(false);
-  const [campaignCallingOpen, setCampaignCallingOpen] = useState(false);
   const [testDestinationNumber, setTestDestinationNumber] = useState("");
 
   const { data, isLoading, error, refetch } = useQuery({
@@ -187,8 +181,6 @@ function CustomerDetail() {
   const lastActivity = data.calls[0]?.started_at ?? data.audit[0]?.created_at ?? null;
   const hasActivePhoneNumber = data.numbers.some((n) => n.status === "active");
   const isDemoOrg = data.business?.is_demo === true;
-  const campaignCallingEnabled =
-    (org as { campaign_dispatch_enabled?: boolean }).campaign_dispatch_enabled === true;
   // Same "candidate number" derivation as computeProvisioningStateForAdminView
   // (admin.functions.ts) — the number these live-test actions target.
   const testTargetNumber =
@@ -558,39 +550,6 @@ function CustomerDetail() {
           </div>
         </div>
       </SectionCard>
-
-      <SectionCard
-        title="Campaign calling"
-        description="Whether this workspace's customers may launch campaigns. Places no call: campaigns still need the platform switch, a ready agent and number, the pilot allowlist and funds."
-        actions={
-          <StatusPill tone={campaignCallingEnabled ? "live" : "idle"}>
-            {campaignCallingEnabled ? "Enabled" : "Not enabled"}
-          </StatusPill>
-        }
-      >
-        <Button size="sm" variant="outline" onClick={() => setCampaignCallingOpen(true)}>
-          {campaignCallingEnabled ? "Disable campaign calling" : "Enable campaign calling"}
-        </Button>
-      </SectionCard>
-
-      <ReasonDialog
-        open={campaignCallingOpen}
-        onOpenChange={setCampaignCallingOpen}
-        title={campaignCallingEnabled ? "Disable campaign calling?" : "Enable campaign calling?"}
-        description={
-          campaignCallingEnabled
-            ? "This workspace's campaigns can no longer launch or be dialled."
-            : "This workspace's customers can launch campaigns once every other check passes. No call is placed now."
-        }
-        confirmLabel={campaignCallingEnabled ? "Disable" : "Enable"}
-        onConfirm={async (reason) => {
-          await saveCampaignCalling({
-            data: { orgId, enabled: !campaignCallingEnabled, reason },
-          });
-          setCampaignCallingOpen(false);
-          await invalidate();
-        }}
-      />
 
       <SarvamOutboundPanel
         orgId={org.id}

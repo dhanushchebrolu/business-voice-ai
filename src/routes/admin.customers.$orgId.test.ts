@@ -54,10 +54,3 @@ describe("admin.customers.$orgId.tsx — readiness/klyroReadiness/profit errors 
     assert.match(block, /<ErrorState/);
   });
 });
-
-describe("admin.customers.$orgId.tsx — campaign calling authorization", () => {
-  test("is toggled through the audited, admin-gated server function with a required reason", () => {
-    assert.match(src, /setCampaignCallingEnabled/);
-    assert.match(src, /enabled: !campaignCallingEnabled, reason/);
-  });
-});
