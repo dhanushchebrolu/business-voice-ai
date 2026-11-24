@@ -10,6 +10,7 @@ import {
   combineAudience,
   configEditBlockedReason,
   callerNumberChoices,
+  callerNumberIneligibility,
   isEligibleCallerNumber,
   joinExtraInstructions,
   parseWizardState,
@@ -520,6 +521,30 @@ describe("status and caller-number rules", () => {
   });
 });
 
+describe("callerNumberIneligibility: each reason is named", () => {
+  const ok = { status: "active", provider: "sarvam", outbound_enabled: true, connection_id: "c1" };
+  test("an active, connected, outbound-enabled Sarvam number is selectable (any workspace)", () => {
+    assert.equal(callerNumberIneligibility(ok), null);
+    assert.equal(isEligibleCallerNumber(ok), true);
+  });
+  test("each blocker has its own reason", () => {
+    assert.match(callerNumberIneligibility({ ...ok, status: "released" })!, /released/);
+    assert.match(callerNumberIneligibility({ ...ok, provider: "vobiz" })!, /only from Sarvam/);
+    assert.match(
+      callerNumberIneligibility({ ...ok, connection_id: null })!,
+      /setup with Sarvam is not finished/,
+    );
+    assert.match(
+      callerNumberIneligibility({ ...ok, outbound_enabled: false })!,
+      /switched off on this number/,
+    );
+  });
+  test("a number whose connection isn't loaded is not blocked for that reason", () => {
+    const { connection_id: _omit, ...withoutConnection } = ok;
+    assert.equal(callerNumberIneligibility(withoutConnection), null);
+  });
+});
+
 describe("callerNumberChoices: the caller-number picker", () => {
   const n = (
     id: string,
@@ -558,7 +583,7 @@ describe("callerNumberChoices: the caller-number picker", () => {
   test("an active Sarvam number with outbound off is listed with that reason", () => {
     assert.match(
       ineligible.find((x) => x.id === "05")?.reason ?? "",
-      /not enabled for outbound calls yet/,
+      /switched off on this number/,
     );
   });
 

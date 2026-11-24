@@ -204,7 +204,7 @@ describe("editing updates the same campaign", () => {
         wizard: { ...WIZARD, phoneNumberId: "num_a_off" },
         confirm: false,
       }),
-      /not enabled for outbound/,
+      /switched off on this number/,
     );
     await assert.rejects(
       save(t, {

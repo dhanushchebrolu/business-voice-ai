@@ -474,12 +474,16 @@ export function callerNumberIneligibility(n: {
   status: string | null;
   outbound_enabled: boolean | null;
   provider?: string | null;
+  /** null: the number is not linked to a telephony connection. Absent: not checked. */
+  connection_id?: string | null;
 }): string | null {
   if (n.status !== "active") return `This number is ${n.status ?? "not active"}.`;
   if (n.provider !== undefined && n.provider !== "sarvam")
     return "Campaigns call only from Sarvam numbers; this number is inbound-only for campaigns.";
+  if (n.connection_id === null)
+    return "This number's calling setup with Sarvam is not finished. ClickAI support completes it.";
   if (n.outbound_enabled !== true)
-    return "This number is not enabled for outbound calls yet (inbound only). ClickAI support enables it.";
+    return "Outbound calling is switched off on this number (it still answers inbound calls). ClickAI support switches it on.";
   return null;
 }
 
@@ -488,6 +492,7 @@ export function isEligibleCallerNumber(n: {
   status: string | null;
   outbound_enabled: boolean | null;
   provider?: string | null;
+  connection_id?: string | null;
 }): boolean {
   return callerNumberIneligibility(n) === null;
 }
@@ -505,6 +510,7 @@ export function callerNumberChoices<
     status: string | null;
     outbound_enabled: boolean | null;
     provider?: string | null;
+    connection_id?: string | null;
   },
 >(numbers: N[]): { eligible: N[]; ineligible: { id: string; e164: string; reason: string }[] } {
   const listed = numbers.filter((n) => n.status !== "released");

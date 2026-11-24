@@ -344,7 +344,7 @@ describe("caller-number eligibility (shared by the picker, the save and launch)"
     );
     assert.match(
       callerNumberIneligibility({ status: "active", outbound_enabled: false, provider: "sarvam" })!,
-      /inbound only/,
+      /switched off on this number/,
     );
     assert.match(
       callerNumberIneligibility({ status: "active", outbound_enabled: true, provider: "vobiz" })!,
