@@ -144,7 +144,9 @@ export function CampaignWizard({
   // Only this workspace's own numbers (RLS + organization filter) that may call out.
   const eligibleNumbers = (numbers ?? []).filter(isEligibleCallerNumber);
   // The rest, shown with why they cannot call out (inbound-only, inactive, not Sarvam).
+  // Released numbers are no longer the workspace's, so they are not listed at all.
   const ineligibleNumbers = (numbers ?? []).flatMap((n) => {
+    if (n.status === "released") return [];
     const reason = callerNumberIneligibility(n);
     return reason ? [{ id: n.id, e164: n.e164, reason }] : [];
   });
