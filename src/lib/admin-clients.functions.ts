@@ -823,46 +823,6 @@ export const setPaymentOverride = createServerFn({ method: "POST" })
     return { ok: true as const };
   });
 
-/**
- * Enables or disables campaign calling for one workspace
- * (organizations.campaign_dispatch_enabled, 20261129090000). Campaigns of a
- * workspace that is not enabled can't launch and are never dispatched, even
- * with the platform switch CAMPAIGN_DISPATCH_ENABLED on. Places no call.
- */
-export const setCampaignCallingEnabled = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
-  .inputValidator((input: { orgId: string; enabled: boolean; reason: string }) => {
-    if (!input?.orgId) throw new Error("orgId is required");
-    if (typeof input.enabled !== "boolean") throw new Error("enabled must be true or false");
-    if (!input.reason?.trim()) throw new Error("A reason is required");
-    return input;
-  })
-  .handler(async ({ data, context }) => {
-    const admin = await assertPlatformAdmin(context.supabase, context.userId, "customers.write");
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { data: before } = await supabaseAdmin
-      .from("organizations")
-      .select("campaign_dispatch_enabled")
-      .eq("id", data.orgId)
-      .maybeSingle();
-    if (!before) throw new Error("Client not found");
-    const { error } = await supabaseAdmin
-      .from("organizations")
-      .update({ campaign_dispatch_enabled: data.enabled })
-      .eq("id", data.orgId);
-    if (error) throw error;
-    await writeAudit(admin, {
-      action: data.enabled ? "CAMPAIGN_CALLING_ENABLED" : "CAMPAIGN_CALLING_DISABLED",
-      entityType: "organization",
-      entityId: data.orgId,
-      organizationId: data.orgId,
-      oldValue: before,
-      newValue: { campaign_dispatch_enabled: data.enabled },
-      reason: data.reason,
-    });
-    return { ok: true as const };
-  });
-
 /* ------------------------------------------------------------------ */
 /* Central entitlement system — admin grants                           */
 /* ------------------------------------------------------------------ */

@@ -146,6 +146,35 @@ describe("prior relationship", () => {
   });
 });
 
+describe("OUTBOUND_PILOT_RESTRICTION=off ends the pilot list for every customer", () => {
+  const SW = "OUTBOUND_PILOT_RESTRICTION";
+  function withSwitch(value: string | undefined, fn: () => void) {
+    const prior = process.env[SW];
+    const priorList = process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"];
+    delete process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"];
+    if (value === undefined) delete process.env[SW];
+    else process.env[SW] = value;
+    try {
+      fn();
+    } finally {
+      if (prior === undefined) delete process.env[SW];
+      else process.env[SW] = prior;
+      if (priorList !== undefined) process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"] = priorList;
+    }
+  }
+  test("off: any valid number is allowed, an invalid one is still refused", () =>
+    withSwitch(" OFF ", () => {
+      assert.equal(isOutboundDestinationAllowlisted("+919876543210"), true);
+      assert.equal(isOutboundDestinationAllowlisted("not a number"), false);
+    }));
+  test("unset or any other value keeps the pilot list closed", () => {
+    for (const value of [undefined, "", "false", "0", "on", "off please"])
+      withSwitch(value, () =>
+        assert.equal(isOutboundDestinationAllowlisted("+919876543210"), false, String(value)),
+      );
+  });
+});
+
 describe("pilot allowlist (SARVAM_OUTBOUND_TEST_ALLOWLIST) fails closed (GATE C4 H2)", () => {
   const KEY = "SARVAM_OUTBOUND_TEST_ALLOWLIST";
   function withAllowlist(value: string | undefined, fn: () => void) {

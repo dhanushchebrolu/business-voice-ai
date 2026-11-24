@@ -295,25 +295,24 @@ describe("campaign dispatch — the global outbound kill switch", () => {
   });
 });
 
-describe("campaign dispatch — only workspaces ClickAI enabled for campaigns", () => {
-  test("a running campaign in a workspace without campaign calling is never claimed or dialled", async () => {
+describe("campaign dispatch — no per-workspace approval, but the plan and entitlement gate stays", () => {
+  test("a running campaign dials without any per-workspace flag (legacy campaign_dispatch_enabled is ignored)", async () => {
     const t = setup(3);
     (t.table("organizations")[0] as Record<string, unknown>)["campaign_dispatch_enabled"] = false;
-    const summary = await dispatchDueCampaigns({ deps: t.deps });
-    assert.equal(t.dialed.length, 0);
-    assert.equal(summary.campaignsConsidered, 0);
-    assert.ok(t.table("campaign_contacts").every((c) => c["status"] === "pending"));
-    // Enabled by ClickAI: the same campaign dials.
-    (t.table("organizations")[0] as Record<string, unknown>)["campaign_dispatch_enabled"] = true;
     await dispatchDueCampaigns({ deps: t.deps });
     assert.equal(t.dialed.length, 3);
   });
 
-  test("a workspace whose authorization cannot be read is treated as not enabled", async () => {
-    const t = setup(2);
-    t.table("organizations").length = 0;
+  test("a workspace whose phone entitlement is denied is never claimed or dialled", async () => {
+    const t = setup(3);
+    t.deps.checkTelephonyAccess = (async () => ({
+      allowed: false,
+      reason: "Phone calling is not included in your plan.",
+      phoneNumber: null,
+    })) as never;
     await dispatchDueCampaigns({ deps: t.deps });
     assert.equal(t.dialed.length, 0);
+    assert.ok(t.table("campaign_contacts").every((c) => c["status"] === "pending"));
   });
 });
 

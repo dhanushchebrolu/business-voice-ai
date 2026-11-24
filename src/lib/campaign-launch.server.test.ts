@@ -199,12 +199,6 @@ describe("campaign launch: every guard refuses before anything changes", () => {
       "provider",
     ],
     [
-      "the workspace not authorized for campaigns",
-      deps,
-      "workspace_authorized",
-      { org: { campaign_dispatch_enabled: false } },
-    ],
-    [
       "Sarvam-paced (cohort) mode",
       deps,
       "dispatch_mode",
@@ -302,29 +296,26 @@ describe("campaign launch: every guard refuses before anything changes", () => {
   });
 
   test("all failing checks are reported together, with an actionable detail each", async () => {
-    const db = world({
-      campaign: { phone_number_id: null },
-      org: { campaign_dispatch_enabled: false },
-    });
+    const db = world({ campaign: { phone_number_id: null } });
     const r = await evaluateCampaignLaunchReadiness(
       deps(db, { dispatchEnabled: () => false }),
       ORG,
       CAMPAIGN,
     );
     const failing = r!.checks.filter((c) => !c.ok);
-    assert.deepEqual(failing.map((c) => c.key).sort(), [
-      "caller_number",
-      "dispatch_available",
-      "workspace_authorized",
-    ]);
+    assert.deepEqual(failing.map((c) => c.key).sort(), ["caller_number", "dispatch_available"]);
     for (const c of failing)
       assert.ok(c.detail && c.detail.length > 10, `${c.key} explains itself`);
   });
 
-  test("an organization row that cannot be read fails closed", async () => {
-    const db = world({ org: { campaign_dispatch_enabled: undefined } });
+  test("no per-workspace approval is required: a workspace with the legacy flag off launches", async () => {
+    const db = world({ org: { campaign_dispatch_enabled: false } });
     const r = await evaluateCampaignLaunchReadiness(deps(db), ORG, CAMPAIGN);
-    assert.equal(r!.checks.find((c) => c.key === "workspace_authorized")!.ok, false);
+    assert.equal(r!.ready, true);
+    assert.equal(
+      r!.checks.some((c) => c.key === ("workspace_authorized" as never)),
+      false,
+    );
   });
 });
 

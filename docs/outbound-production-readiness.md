@@ -408,3 +408,14 @@ Applied to Sarvam app `Smile-Denta-a17cec18-1c23` (console, owner signed in):
 ClickAI still dials **v2** (`sarvam_outbound_app_version` and ready version
 2): registering and confirming v3 is a separate approval. Inbound agent
 unchanged (v5). Rollback: keep ClickAI on v2 (no change needed).
+
+## Leaving the pilot: two platform settings, no per-customer steps
+
+Customers launch their own campaigns once these are set on the Worker (variables only, no database edits):
+
+| Variable                     | Value  | Effect                                                                                                                                                                                                         |
+| ---------------------------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CAMPAIGN_DISPATCH_ENABLED`  | `true` | The every-minute `campaign.dispatch` job dials launched campaigns. Off: launch is refused with "Campaign calling is not switched on for the platform yet", so a campaign can never sit at `running` undialled. |
+| `OUTBOUND_PILOT_RESTRICTION` | `off`  | Ends the pilot destination list for every outbound path (campaigns, single calls, the voice agent). Anything else, or unset, keeps `SARVAM_OUTBOUND_TEST_ALLOWLIST` fail-closed.                               |
+
+There is no per-workspace approval (`organizations.campaign_dispatch_enabled` is no longer read). What still gates a customer: phone entitlement and plan, wallet funds for the maximum call length, campaign budget, an active outbound-enabled Sarvam number with a registered connection, an outbound-confirmed agent, opt-outs, calling hours (09:00–21:00 IST), per-campaign concurrency, idempotent launch, the emergency stop (`outbound.calling_paused`) and `OUTBOUND_CALLING_DISABLED`. Provisioning sets `outbound_enabled` when it activates a number; a hand-mapped number needs it set once.

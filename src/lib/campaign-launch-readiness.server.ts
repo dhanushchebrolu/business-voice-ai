@@ -18,7 +18,6 @@ export type LaunchCheckKey =
   | "kill_switch"
   | "emergency_stop"
   | "dispatch_available"
-  | "workspace_authorized"
   | "provider"
   | "campaign_status"
   | "dispatch_mode"
@@ -147,21 +146,6 @@ export async function evaluateCampaignLaunchReadiness(
     "Calling provider is configured",
     !provider.ok &&
       `${provider.reason ?? "The calling provider is not configured."} Contact ClickAI support.`,
-  );
-
-  // Workspace: campaign calling is enabled per organization by ClickAI, so one
-  // campaign (or the platform switch) can never start another customer's campaigns.
-  const { data: org, error: orgError } = await db
-    .from("organizations")
-    .select("id, campaign_dispatch_enabled")
-    .eq("id", orgId)
-    .maybeSingle();
-  add(
-    "workspace_authorized",
-    "Campaign calling is enabled for this workspace",
-    (orgError ||
-      !(org as { campaign_dispatch_enabled?: boolean } | null)?.campaign_dispatch_enabled) &&
-      "Campaign calling has not been enabled for this workspace yet. ClickAI support enables it.",
   );
 
   // Campaign.

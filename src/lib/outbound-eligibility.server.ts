@@ -102,6 +102,11 @@ export async function outboundEmergencyStopActive(db: Admin): Promise<boolean> {
   }
 }
 
+/** OUTBOUND_PILOT_RESTRICTION=off: the platform is out of pilot, customers dial their own contacts. */
+export function pilotRestrictionOff(): boolean {
+  return process.env["OUTBOUND_PILOT_RESTRICTION"]?.trim().toLowerCase() === "off";
+}
+
 export const OUTBOUND_TEST_ALLOWLIST_MESSAGE =
   "Outbound calling is limited to approved test numbers right now.";
 
@@ -117,6 +122,9 @@ export const OUTBOUND_TEST_ALLOWLIST_MESSAGE =
 export function isOutboundDestinationAllowlisted(destination: string): boolean {
   const to = normalizeCustomerPhone(destination, null);
   if (!to) return false;
+  // Production: one platform setting ends the pilot restriction for every customer.
+  // Only the explicit value "off" does; unset, empty or anything else keeps the list.
+  if (pilotRestrictionOff()) return true;
   return (process.env["SARVAM_OUTBOUND_TEST_ALLOWLIST"] ?? "")
     .split(",")
     .map((entry) => normalizeCustomerPhone(entry.trim(), null))
