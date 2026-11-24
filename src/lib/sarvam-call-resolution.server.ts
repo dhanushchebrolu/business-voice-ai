@@ -122,6 +122,13 @@ export async function resolveUnknownSarvamCall(
     );
 
   if (input.resolution === "not_placed") {
+    // An attempt id means Sarvam accepted the start, so "never started" is only
+    // true if the operator checked Sarvam; without one, the 402-style rejection
+    // on the record is the evidence.
+    if (call.provider_call_id && input.confirmedCheckedInSarvam !== true)
+      throw new Error(
+        "Sarvam has an attempt id for this call, so it may have been placed. Confirm you checked its status in Sarvam first.",
+      );
     const { data: changed, error } = await supabaseAdmin
       .from("call_logs")
       .update({

@@ -73,7 +73,10 @@ function AdminCalls() {
   const [attemptId, setAttemptId] = useState("");
   const [checkedInSarvam, setCheckedInSarvam] = useState(false);
   // Sarvam accepted an `initiated` call, so it may still be ringing or in progress.
-  const mayBeActive = resolving?.status === "initiated";
+  // An attempt id also means Sarvam accepted it, so "not placed" needs the same check.
+  const mayBeActive =
+    resolving?.status === "initiated" ||
+    (resolution === "not_placed" && resolving?.hasProviderCallId === true);
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["admin-calls", orgId, needsReview],

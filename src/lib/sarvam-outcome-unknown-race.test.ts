@@ -503,6 +503,28 @@ describe("operator resolution", () => {
     assert.equal(env.charges.length, 0, "never billed");
   });
 
+  test("not placed on a call that has a Sarvam attempt id needs the operator's Sarvam check, and changes nothing without it", async () => {
+    const env = setup();
+    await startFailure(env, timeout());
+    env.db.call(CALL_ID)["provider_call_id"] = "att_real";
+    const before = { ...env.db.call(CALL_ID) };
+    await assert.rejects(
+      resolveUnknownSarvamCall(
+        env.db as never,
+        { callId: CALL_ID, resolution: "not_placed" },
+        deps(env),
+      ),
+      /may have been placed/,
+    );
+    assert.deepEqual(env.db.call(CALL_ID), before);
+    await resolveUnknownSarvamCall(
+      env.db as never,
+      { callId: CALL_ID, resolution: "not_placed", confirmedCheckedInSarvam: true },
+      deps(env),
+    );
+    assert.equal(env.db.call(CALL_ID)["status"], "failed");
+  });
+
   test("held-call recovery is idempotent: resolving it a second time is refused and changes nothing", async () => {
     const env = setup();
     await startFailure(env, timeout());
