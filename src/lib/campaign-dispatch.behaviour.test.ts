@@ -450,6 +450,27 @@ describe("campaign dispatch — start results", () => {
     assert.equal(t.dialed.length, 1, "not dialled again");
   });
 
+  test("an account-level rejection (402 out of credits) ends the run: contact given back, attempt not used, campaign paused", async () => {
+    for (const status of [401, 402, 403]) {
+      const t = setup(3);
+      t.table("campaigns")[0]!["retry_statuses"] = ["failed"];
+      t.deps.finalize = async (callId) => {
+        const cc = t.table("campaign_contacts").find((c) => c["current_call_id"] === callId);
+        if (cc) Object.assign(cc, { status: "retry_scheduled" });
+      };
+      t.failDial.err = new TelephonyAdapterError("Sarvam account refused.", status, false);
+      await dispatchDueCampaigns({ deps: t.deps });
+      assert.equal(t.dialed.length, 1, `${status}: only one request reaches Sarvam`);
+      assert.equal(t.table("call_logs")[0]!["status"], "failed");
+      assert.equal(t.table("call_logs")[0]!["resolution_source"], "start_failure");
+      for (const cc of t.table("campaign_contacts")) {
+        assert.equal(cc["status"], "pending", `${status}: every contact untouched`);
+        assert.equal(cc["attempts"], 0);
+      }
+      assert.equal(t.table("campaigns")[0]!["status"], "paused");
+    }
+  });
+
   test("a failed attempt_id write is retried; the placed call is never marked failed", async () => {
     const t = setup(1);
     t.db.failNext("call_logs", "update", { code: "57014", message: "statement timeout" });

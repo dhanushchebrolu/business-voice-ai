@@ -11,6 +11,10 @@ import { getTelephonyAdapter, sarvamOutboundWebhookUrl } from "./telephony.serve
 import { checkTelephonyAccess } from "./telephony-guard.server.ts";
 import { OUTBOUND_MAX_CALL_SECONDS_CAP } from "./agent-roles.ts";
 import { SarvamTelephonyAdapter } from "./telephony/sarvam-provider.server.ts";
+import { TelephonyAdapterError } from "./telephony/adapter.ts";
+
+/** Sarvam answers that mean the account, not the contact, is the problem. */
+const ACCOUNT_REJECTION_STATUSES = new Set([401, 402, 403]);
 import { TEMPLATE_AGENT_COLUMNS, templateCallVariables } from "./sarvam-tenant-variables.server.ts";
 import { isWithinCallingWindow, type CampaignSchedule } from "./campaign-schedule.ts";
 import { normalizeCustomerPhone } from "./phone-number.ts";
@@ -637,6 +641,24 @@ async function dispatchOneCampaign(
       await persistStartResult(supabaseAdmin, call.id, result);
       dialed++;
     } catch (err) {
+      // The Sarvam account itself refused (bad key, out of credits, no access):
+      // every other contact would fail the same way and burn its attempts, so
+      // this one is given back untouched, the campaign pauses for the
+      // customer, and the run ends.
+      if (
+        err instanceof TelephonyAdapterError &&
+        !err.outcomeUnknown &&
+        ACCOUNT_REJECTION_STATUSES.has(err.status)
+      ) {
+        await stopBeforeDial(err.message);
+        await supabaseAdmin
+          .from("campaigns")
+          .update({ status: "paused", paused_at: new Date().toISOString() })
+          .eq("id", campaign.id)
+          .eq("status", "running");
+        skipped++;
+        break;
+      }
       // Race-safe: only a call still `initiated` is changed, and the contact
       // only follows when that change happened. Ambiguous errors hold both in
       // outcome_unknown (no retry); definite rejections fail and may retry.
