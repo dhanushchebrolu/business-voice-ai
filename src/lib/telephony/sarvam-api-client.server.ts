@@ -174,6 +174,11 @@ function mapErrorResponse(status: number, parsed: unknown, rawText: string): Tel
       return new TelephonyAdapterError(`Sarvam rejected the request as invalid.${suffix}`, 400);
     case 401:
       return new TelephonyAdapterError("Sarvam rejected the API key as invalid or expired.", 401);
+    case 402:
+      return new TelephonyAdapterError(
+        `Sarvam refused the request: the Sarvam account is out of credits. Top up Sarvam credits, then try again.${suffix}`,
+        402,
+      );
     case 403:
       return new TelephonyAdapterError("Sarvam denied access to this org/workspace/resource.", 403);
     case 429:
@@ -251,12 +256,12 @@ async function sarvamRequest<T>(
 
 /**
  * Responses that prove Sarvam rejected the request without acting on it:
- * malformed input, authentication/authorization, unknown resource,
- * validation. Everything else — 5xx, 408, 409, and 429 (Sarvam doesn't
+ * malformed input, authentication/authorization, insufficient account
+ * credits (402: no call is placed), unknown resource, validation. Everything else — 5xx, 408, 409, and 429 (Sarvam doesn't
  * document that a rate-limited outbound request was never placed) — leaves
  * the outcome unknown.
  */
-const DEFINITE_REJECTION_STATUSES = new Set([400, 401, 403, 404, 422]);
+const DEFINITE_REJECTION_STATUSES = new Set([400, 401, 402, 403, 404, 422]);
 
 /** Retry-After as delay-seconds or an HTTP date; undefined when absent or unreadable. */
 export function parseRetryAfter(value: string | null, now = Date.now()): number | undefined {

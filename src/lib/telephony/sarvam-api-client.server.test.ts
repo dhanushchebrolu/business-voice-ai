@@ -442,7 +442,7 @@ describe("outcome classification — definite rejection vs unknown", () => {
     throw new Error("expected a rejection");
   };
 
-  for (const status of [400, 401, 403, 404, 422]) {
+  for (const status of [400, 401, 402, 403, 404, 422]) {
     test(`${status} is a definite rejection (outcomeUnknown false)`, async () => {
       assert.equal(await classify(status), false);
     });
@@ -452,6 +452,20 @@ describe("outcome classification — definite rejection vs unknown", () => {
       assert.equal(await classify(status), true);
     });
   }
+
+  test("402 (Sarvam out of credits) says so, so the admin knows what to fix", async () => {
+    await assert.rejects(
+      () =>
+        listCampaigns({
+          ...baseConfig,
+          fetchImpl: mockFetch(402, { error: { message: "Insufficient Balance" } }),
+        }),
+      (err: unknown) =>
+        err instanceof TelephonyAdapterError &&
+        err.status === 402 &&
+        /out of credits/.test(err.message),
+    );
+  });
 
   test("errors built without the flag default to a definite outcome", () => {
     assert.equal(new TelephonyAdapterError("x", 503).outcomeUnknown, false);
