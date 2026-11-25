@@ -66,14 +66,17 @@ export function LiveConversationSeconds() {
     };
   }, []);
 
+  const text = display === null ? "—" : formatSeconds(display);
+  // The column is narrow on tablets: shrink long totals so they never spill into the next stat.
+  const size = text.length >= 9 ? "0.6em" : text.length >= 7 ? "0.75em" : undefined;
+
   return (
-    <>
-      <span className="inline-block min-w-[9ch] tabular-nums" aria-live="off">
-        {display === null ? "—" : formatSeconds(display)}
-      </span>
-      <span className="sr-only">seconds of conversations handled</span>
+    // The Live label floats above the number, so it never changes the stat's height or wraps.
+    <span className="relative inline-block whitespace-nowrap tabular-nums" aria-live="off">
+      <span style={size ? { fontSize: size } : undefined}>{text}</span>
+      <span className="sr-only"> seconds of conversations handled</span>
       <span
-        className="ml-3 inline-flex translate-y-[-0.6em] items-center gap-1.5 align-middle font-vmono text-[10px] font-medium uppercase tracking-[0.14em] text-[var(--vx-accent)]"
+        className="absolute bottom-full left-0 mb-3 inline-flex items-center gap-1.5 font-vmono text-[10px] font-medium uppercase tracking-[0.14em] text-[var(--vx-accent)]"
         aria-hidden="true"
       >
         <span
@@ -81,6 +84,6 @@ export function LiveConversationSeconds() {
         />
         Live
       </span>
-    </>
+    </span>
   );
 }
