@@ -71,6 +71,7 @@ const ORG_A = randomUUID();
 const ORG_B = randomUUID();
 const NUMBER = randomUUID();
 const OLD_RUN = randomUUID();
+const LIVE_NUMBER = randomUUID();
 
 function run(sql: string): RunResult {
   return execSql!(`\\pset format unaligned\n\\pset tuples_only on\nSET ROLE service_role;\n${sql}`);
@@ -136,6 +137,8 @@ before(() => {
     return;
   }
   const prep = execSql(`
+    INSERT INTO public.phone_numbers (id, organization_id, e164, provider, status, inbound_enabled, outbound_enabled)
+      VALUES ('${LIVE_NUMBER}', '${ORG_B}', '+917900000010', 'sarvam', 'active', true, true);
     ALTER TABLE supabase_migrations.schema_migrations ADD COLUMN name text, ADD COLUMN statements text[];
     INSERT INTO supabase_migrations.schema_migrations (version, name) VALUES ('20261202090000', 'customer_outbound_concurrency');
     INSERT INTO public.platform_settings (key, value) VALUES
@@ -206,6 +209,64 @@ describe("gate scripts for 20261203090000 (disposable cluster rehearsal)", () =>
       ),
       ["0"],
     );
+  });
+
+  const fingerprint = () =>
+    owner(
+      `SELECT md5(coalesce((SELECT string_agg(to_jsonb(n)::text, '|' ORDER BY id) FROM public.phone_numbers n), '') ||
+              coalesce((SELECT string_agg(to_jsonb(s)::text, '|' ORDER BY key) FROM public.platform_settings s), ''));`,
+    )[0];
+
+  test("an unrelated outbound-enabled live number does NOT block the additive migration", (t) => {
+    if (!ready(t)) return;
+    assert.deepEqual(
+      owner(`SELECT outbound_enabled::text FROM public.phone_numbers WHERE id = '${LIVE_NUMBER}';`),
+      ["true"],
+    );
+    const before = fingerprint();
+    const r = execSql!(`BEGIN;\n${script("execute")}\nCOMMIT;`);
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(script("execute"), /outbound safety state/);
+    // No number and no outbound/payment setting was touched.
+    assert.equal(fingerprint(), before);
+    assert.deepEqual(
+      owner(
+        `SELECT status || ':' || outbound_enabled::text FROM public.phone_numbers WHERE id = '${LIVE_NUMBER}';`,
+      ),
+      ["active:true"],
+    );
+    // Put the database back to "before" for the remaining tests (rollback is rehearsed last).
+    const back = execSql!(`BEGIN;\n${script("rollback")}\nCOMMIT;`);
+    assert.equal(back.status, 0, back.stderr);
+    assert.equal(fingerprint(), before);
+  });
+
+  test("conflicting objects, duplicate active jobs and a wrong history position are still refused", (t) => {
+    if (!ready(t)) return;
+    // An object of the migration already exists.
+    owner(`ALTER TABLE public.provisioning_runs ADD COLUMN failure_code text;`);
+    let r = execSql!(`BEGIN;\n${script("execute")}\nCOMMIT;`);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /OBJECTS_ALREADY_EXIST/);
+    owner(`ALTER TABLE public.provisioning_runs DROP COLUMN failure_code;`);
+    // Two active jobs for one number (the new unique index could not be built).
+    owner(
+      `INSERT INTO public.provisioning_runs (organization_id, trigger, status, phone_number_id)
+         VALUES ('${ORG_A}', 'customer_activate', 'waiting', '${NUMBER}'), ('${ORG_B}', 'customer_activate', 'waiting', '${NUMBER}');`,
+    );
+    r = execSql!(`BEGIN;\n${script("execute")}\nCOMMIT;`);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /OBJECTS_ALREADY_EXIST/);
+    owner(`DELETE FROM public.provisioning_runs WHERE status = 'waiting';`);
+    // The history is not at the expected previous migration.
+    owner(`INSERT INTO supabase_migrations.schema_migrations (version) VALUES ('29991231000000');`);
+    r = execSql!(`BEGIN;\n${script("execute")}\nCOMMIT;`);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /UNEXPECTED_HISTORY/);
+    owner(`DELETE FROM supabase_migrations.schema_migrations WHERE version = '29991231000000';`);
+    // A tampered migration text is caught by the recorded-text check (checksum in the header is informational).
+    assert.match(script("execute"), /GATE_20261203090000_CHECK: recorded migration text differs/);
+    assert.match(script("execute"), /SET LOCAL lock_timeout = '5s'/);
   });
 
   test("execute applies the migration, records history and keeps existing data", (t) => {

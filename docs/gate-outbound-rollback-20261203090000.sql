@@ -61,7 +61,10 @@ DELETE FROM supabase_migrations.schema_migrations WHERE version = '2026120309000
 
 DO $check$
 BEGIN
-  IF NOT (NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'provisioning_runs'
+  IF NOT ((SELECT count(*) FROM (SELECT phone_number_id FROM public.provisioning_runs
+        WHERE phone_number_id IS NOT NULL AND status IN ('pending', 'running', 'waiting')
+        GROUP BY phone_number_id HAVING count(*) > 1) dup) = 0
+     AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'provisioning_runs'
                   AND column_name IN ('step_states', 'current_job_step', 'last_checkpoint', 'failure_code', 'retryable', 'next_attempt_at', 'max_attempts', 'diagnostics', 'customer_message', 'idempotency_key', 'sarvam_agent_id'))
      AND to_regclass('public.provisioning_run_events') IS NULL
      AND to_regclass('public.operator_bridge_tokens') IS NULL
@@ -81,7 +84,10 @@ $check$;
 SELECT json_build_object(
   'rolled_back', '20261203090000',
   'latest_migration', (SELECT max(version) FROM supabase_migrations.schema_migrations),
-  'objects_absent', (NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'provisioning_runs'
+  'objects_absent', ((SELECT count(*) FROM (SELECT phone_number_id FROM public.provisioning_runs
+        WHERE phone_number_id IS NOT NULL AND status IN ('pending', 'running', 'waiting')
+        GROUP BY phone_number_id HAVING count(*) > 1) dup) = 0
+     AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'provisioning_runs'
                   AND column_name IN ('step_states', 'current_job_step', 'last_checkpoint', 'failure_code', 'retryable', 'next_attempt_at', 'max_attempts', 'diagnostics', 'customer_message', 'idempotency_key', 'sarvam_agent_id'))
      AND to_regclass('public.provisioning_run_events') IS NULL
      AND to_regclass('public.operator_bridge_tokens') IS NULL

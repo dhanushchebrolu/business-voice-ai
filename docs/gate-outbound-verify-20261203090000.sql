@@ -25,11 +25,7 @@ SELECT json_build_object(
      AND NOT has_table_privilege('service_role', 'public.operator_bridge_tokens', 'DELETE')
      AND NOT has_table_privilege('anon', 'public.operator_bridge_tokens', 'SELECT')
      AND NOT has_table_privilege('authenticated', 'public.operator_bridge_tokens', 'SELECT')
-     AND (SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'public.provisioning_runs'::regclass AND conname = 'provisioning_runs_max_attempts_check' AND convalidated) IS NOT NULL)
-    AND ((SELECT value FROM public.platform_settings WHERE key = 'outbound.calling_paused') = '{"enabled": false}'::jsonb
-     AND (SELECT count(*) FROM public.phone_numbers WHERE outbound_enabled) = 0
-     AND (SELECT count(*) FROM public.campaigns WHERE status IN ('running', 'scheduled', 'queued')) = 0
-     AND (SELECT value -> 'enabled' FROM public.platform_settings WHERE key = 'billing.payment_required') = 'false'::jsonb),
+     AND (SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'public.provisioning_runs'::regclass AND conname = 'provisioning_runs_max_attempts_check' AND convalidated) IS NOT NULL),
   'latest_migration', (SELECT max(version) FROM supabase_migrations.schema_migrations),
   'objects_present', ((SELECT string_agg(column_name || ':' || data_type || ':' || is_nullable || ':' || coalesce(column_default, '-'), ',' ORDER BY column_name)
         FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'provisioning_runs'
@@ -51,10 +47,6 @@ SELECT json_build_object(
      AND NOT has_table_privilege('anon', 'public.operator_bridge_tokens', 'SELECT')
      AND NOT has_table_privilege('authenticated', 'public.operator_bridge_tokens', 'SELECT')
      AND (SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'public.provisioning_runs'::regclass AND conname = 'provisioning_runs_max_attempts_check' AND convalidated) IS NOT NULL),
-  'outbound_safety_unchanged', ((SELECT value FROM public.platform_settings WHERE key = 'outbound.calling_paused') = '{"enabled": false}'::jsonb
-     AND (SELECT count(*) FROM public.phone_numbers WHERE outbound_enabled) = 0
-     AND (SELECT count(*) FROM public.campaigns WHERE status IN ('running', 'scheduled', 'queued')) = 0
-     AND (SELECT value -> 'enabled' FROM public.platform_settings WHERE key = 'billing.payment_required') = 'false'::jsonb),
   'transaction_read_only', current_setting('transaction_read_only')
 ) AS gate_outbound_verify;
 rollback;

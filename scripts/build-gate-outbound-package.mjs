@@ -224,7 +224,14 @@ GATES[20261203090000] = {
   rollback: "docs/production-rollback-20261203090000-voice-provisioning-job.sql",
   // provisioning_runs is fingerprinted too: existing runs must survive unchanged.
   extraTables: ["provisioning_runs"],
-  absent: `${noCols("provisioning_runs", JOB_COLS)}
+  // Adds job infrastructure only: no outbound, number or routing change, so the outbound
+  // safety state is not a precondition (the fingerprint proves nothing was modified).
+  outboundPrecondition: false,
+  // The new one-active-job-per-number index must be buildable: refuse if the data already breaks it.
+  absent: `(SELECT count(*) FROM (SELECT phone_number_id FROM public.provisioning_runs
+        WHERE phone_number_id IS NOT NULL AND status IN ('pending', 'running', 'waiting')
+        GROUP BY phone_number_id HAVING count(*) > 1) dup) = 0
+     AND ${noCols("provisioning_runs", JOB_COLS)}
      AND to_regclass('public.provisioning_run_events') IS NULL
      AND to_regclass('public.operator_bridge_tokens') IS NULL
      AND to_regclass('public.idx_provisioning_runs_one_active_number') IS NULL
@@ -312,11 +319,26 @@ const identityGuard = `  IF (SELECT system_identifier::text FROM pg_control_syst
     RAISE EXCEPTION '${P}_WRONG_DATABASE: database %', current_database();
   END IF;`;
 
-// Unchanged by every outbound gate: these must hold before and after.
-const SAFETY = `(SELECT value FROM public.platform_settings WHERE key = 'outbound.calling_paused') = '{"enabled": false}'::jsonb
+// Unchanged by every outbound gate: these must hold before and after. A gate for an
+// additive migration that has nothing to do with outbound calling (outboundPrecondition:
+// false) does not require the outbound state to be in any particular shape; the data
+// fingerprint (phone_numbers, platform_settings, campaigns, call_logs ...) still proves
+// the migration changed no number, setting or campaign.
+const SAFETY =
+  gate.outboundPrecondition === false
+    ? "true"
+    : `(SELECT value FROM public.platform_settings WHERE key = 'outbound.calling_paused') = '{"enabled": false}'::jsonb
      AND (SELECT count(*) FROM public.phone_numbers WHERE outbound_enabled) = 0
      AND (SELECT count(*) FROM public.campaigns WHERE status IN ('running', 'scheduled', 'queued')) = 0
      AND (SELECT value -> 'enabled' FROM public.platform_settings WHERE key = 'billing.payment_required') = 'false'::jsonb`;
+
+const safetyIf = (msg) =>
+  gate.outboundPrecondition === false
+    ? ""
+    : `  IF NOT (${SAFETY}) THEN
+    RAISE EXCEPTION '${P}_${msg}';
+  END IF;
+`;
 
 const execute = `${header(`Outbound gate: execution script for migration ${VERSION} (${gate.name}).`)}
 -- ===== Guard: abort before any change unless this is the expected database in the expected state =====
@@ -329,10 +351,7 @@ ${identityGuard}
   IF NOT (${gate.absent}) THEN
     RAISE EXCEPTION '${P}_OBJECTS_ALREADY_EXIST';
   END IF;
-  IF NOT (${SAFETY}) THEN
-    RAISE EXCEPTION '${P}_PRECONDITION: outbound safety state differs from the audit (stop, number, campaign or payment setting)';
-  END IF;
-  PERFORM set_config('gate_outbound.data_before', md5(${FINGERPRINT}), true);
+${safetyIf("PRECONDITION: outbound safety state differs from the audit (stop, number, campaign or payment setting)")}  PERFORM set_config('gate_outbound.data_before', md5(${FINGERPRINT}), true);
 END
 $guard$;
 
@@ -354,10 +373,7 @@ BEGIN
   IF md5(${FINGERPRINT}) IS DISTINCT FROM current_setting('gate_outbound.data_before', true) THEN
     RAISE EXCEPTION '${P}_CHECK: existing data changed';
   END IF;
-  IF NOT (${SAFETY}) THEN
-    RAISE EXCEPTION '${P}_CHECK: outbound safety state changed';
-  END IF;
-END
+${safetyIf("CHECK: outbound safety state changed")}END
 $check$;
 
 SELECT json_build_object(
@@ -419,12 +435,10 @@ SELECT json_build_object(
   'all_pass', (SELECT system_identifier::text FROM pg_control_system()) = '${SYSTEM_ID}'
     AND (SELECT max(version) FROM supabase_migrations.schema_migrations) = '${VERSION}'
     AND (SELECT md5(statements[1]) FROM supabase_migrations.schema_migrations WHERE version = '${VERSION}') = '${md5(migration)}'
-    AND (${gate.present})
-    AND (${SAFETY}),
+    AND (${gate.present})${gate.outboundPrecondition === false ? "" : `\n    AND (${SAFETY})`},
   'latest_migration', (SELECT max(version) FROM supabase_migrations.schema_migrations),
   'objects_present', (${gate.present}),
-  'outbound_safety_unchanged', (${SAFETY}),
-  'transaction_read_only', current_setting('transaction_read_only')
+${gate.outboundPrecondition === false ? "" : `  'outbound_safety_unchanged', (${SAFETY}),\n`}  'transaction_read_only', current_setting('transaction_read_only')
 ) AS gate_outbound_verify;
 rollback;
 `;
