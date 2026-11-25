@@ -1259,3 +1259,146 @@ describe("campaign dispatch — the database emergency stop (GATE C4 H3)", () =>
     assert.equal(order[order.indexOf("DIAL") - 1], "platform_settings");
   });
 });
+
+describe("campaign dispatch — a running campaign pauses only for a real reason (production incident 2026-11-25)", () => {
+  const campaign = (t: ReturnType<typeof setup>) => t.table("campaigns")[0]!;
+  const transient: [string, TelephonyAdapterError][] = [
+    ["a timeout", new TelephonyAdapterError("Sarvam did not respond in time.", 503, true)],
+    ["a 5xx", new TelephonyAdapterError("Sarvam is temporarily unavailable.", 503, true)],
+    ["a 429", new TelephonyAdapterError("Sarvam rate-limited this request.", 429, true)],
+  ];
+
+  test("a call in progress does not pause the campaign, and the rest of its contacts are still dialled", async () => {
+    const t = setup(3);
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 3);
+    assert.ok(
+      t.table("call_logs").every((c) => c["status"] === "initiated"),
+      "every call is still in progress",
+    );
+    assert.equal(
+      campaign(t)["status"],
+      "running",
+      "in-flight calls keep it running, not paused or complete",
+    );
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(campaign(t)["status"], "running");
+    assert.equal(t.dialed.length, 3, "a second tick redials nobody");
+  });
+
+  for (const [name, err] of transient) {
+    test(`${name} on one contact holds only that contact; the campaign keeps running and is never redialled`, async () => {
+      const t = setup(3);
+      t.onDial.fn = (n) => {
+        t.failDial.err = n === 1 ? err : undefined;
+      };
+      await dispatchDueCampaigns({ deps: t.deps });
+      assert.equal(campaign(t)["status"], "running");
+      assert.equal(t.dialed.length, 3, "the other contacts are still dialled");
+      assert.equal(t.table("campaign_contacts")[0]!["status"], "outcome_unknown");
+      await dispatchDueCampaigns({ deps: t.deps });
+      assert.equal(t.dialed.length, 3, "an ambiguous start is never retried automatically");
+      assert.equal(campaign(t)["status"], "running");
+    });
+  }
+
+  test("a definite rejection of one contact's request (400) fails that contact only", async () => {
+    const t = setup(3);
+    t.onDial.fn = (n) => {
+      t.failDial.err =
+        n === 1
+          ? new TelephonyAdapterError("Sarvam rejected the request as invalid.", 400, false)
+          : undefined;
+    };
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(campaign(t)["status"], "running");
+    assert.equal(t.dialed.length, 3);
+    assert.equal(t.table("call_logs")[0]!["status"], "failed");
+  });
+
+  test("refusals that are not about the budget never pause it, whatever the reason", async () => {
+    for (const reason of [
+      "insufficient_balance",
+      "in_flight_limit",
+      "outbound_paused",
+      "context_changed",
+      "campaign_not_running",
+      "max_call_length_not_set",
+      "admission_error",
+    ]) {
+      const t = setup(2);
+      t.admission.refuse = reason;
+      await dispatchDueCampaigns({ deps: t.deps });
+      assert.equal(campaign(t)["status"], "running", reason);
+      assert.equal(t.requests.length, 0, `${reason}: nothing dialled`);
+    }
+  });
+
+  test("only the budget pauses it, and only when no call has been admitted yet or the budget is truly spent", async () => {
+    const t = setup(2);
+    t.admission.refuse = "budget_exhausted";
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(campaign(t)["status"], "paused");
+    assert.ok(campaign(t)["paused_at"], "the pause is stamped");
+    assert.ok(
+      t.table("campaign_contacts").every((c) => c["status"] === "pending" && c["attempts"] === 0),
+    );
+  });
+
+  test("a campaign the customer paused stays paused: a tick neither considers nor resumes it", async () => {
+    const t = setup(3);
+    campaign(t)["status"] = "paused";
+    const summary = await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(summary.campaignsConsidered, 0);
+    assert.equal(t.dialed.length, 0);
+    assert.equal(campaign(t)["status"], "paused");
+  });
+
+  test("a stale budget refusal never pauses a campaign the customer already paused or cancelled", async () => {
+    for (const status of ["paused", "cancelled"]) {
+      const t = setup(1);
+      t.admission.refuse = "budget_exhausted";
+      t.onBeforeClaim.fn = () => {
+        campaign(t)["status"] = status;
+      };
+      await dispatchDueCampaigns({ deps: t.deps });
+      assert.equal(campaign(t)["status"], status);
+      assert.equal(campaign(t)["paused_at"] ?? null, null, "no new pause stamp is written");
+    }
+  });
+
+  test("two overlapping ticks cannot pause it twice or dial anyone twice", async () => {
+    const t = setup(3);
+    t.admission.refuse = "budget_exhausted";
+    await Promise.all([
+      dispatchDueCampaigns({ deps: t.deps }),
+      dispatchDueCampaigns({ deps: t.deps }),
+    ]);
+    assert.equal(campaign(t)["status"], "paused");
+    assert.equal(t.dialed.length, 0);
+    assert.ok(t.table("campaign_contacts").every((c) => c["attempts"] === 0));
+  });
+
+  test("it completes only once every contact is finished", async () => {
+    const t = setup(2);
+    t.table("campaign_contacts")[0]!["status"] = "completed";
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.table("campaign_contacts").filter((c) => c["status"] === "completed").length, 1);
+    assert.equal(campaign(t)["status"], "running", "a contact is still in progress");
+    for (const cc of t.table("campaign_contacts")) cc["status"] = "completed";
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(campaign(t)["status"], "completed");
+  });
+
+  test("the emergency stop still stops dialling, without pausing or cancelling the campaign", async () => {
+    const t = setup(2);
+    (t.db.tables["platform_settings"] ??= []).push({
+      key: "outbound.calling_paused",
+      value: { enabled: true },
+    });
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 0);
+    assert.equal(campaign(t)["status"], "running");
+    assert.ok(t.table("campaign_contacts").every((c) => c["status"] === "pending"));
+  });
+});

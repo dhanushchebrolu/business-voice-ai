@@ -69,17 +69,26 @@ export interface ReadinessDeps {
    * uses the locking check (wallet_can_afford); the page's checklist a plain read.
    */
   walletCanAfford: (orgId: string) => Promise<boolean>;
+  /** What the customer pays per outbound minute (paise): the rate admission reserves a call at. */
+  outboundRatePerMinute: (orgId: string) => Promise<number>;
 }
 
 const LAUNCHABLE = ["draft", "scheduled", "paused"];
+
+/** Paise as the rupee amount customers see. */
+const rupees = (paise: number) => `₹${(paise / 100).toLocaleString("en-IN")}`;
 
 /** "view" (the checklist) never locks; "launch" uses the locking wallet check. */
 export async function defaultReadinessDeps(purpose: "view" | "launch"): Promise<ReadinessDeps> {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   const eligibility = await import("./outbound-eligibility.server.ts");
   const { campaignDispatchEnabled } = await import("./jobs/handlers.server.ts");
-  const { checkTelephonyAccess, walletCanAffordOutbound, walletBalanceCoversOutbound } =
-    await import("./telephony-guard.server.ts");
+  const {
+    checkTelephonyAccess,
+    walletCanAffordOutbound,
+    walletBalanceCoversOutbound,
+    getCallRate,
+  } = await import("./telephony-guard.server.ts");
   const { getTelephonyAdapter, sarvamOutboundWebhookUrl } = await import("./telephony.server.ts");
   const { SarvamTelephonyAdapter } = await import("./telephony/sarvam-provider.server.ts");
   return {
@@ -100,6 +109,8 @@ export async function defaultReadinessDeps(purpose: "view" | "launch"): Promise<
     },
     walletCanAfford: (orgId) =>
       purpose === "launch" ? walletCanAffordOutbound(orgId) : walletBalanceCoversOutbound(orgId),
+    outboundRatePerMinute: async (orgId) =>
+      (await getCallRate(orgId, "outbound")).customerAmountPerMinute,
   };
 }
 
@@ -169,6 +180,8 @@ export async function evaluateCampaignLaunchReadiness(
   add("retry_settings", "Retry settings are valid", retrySettingsProblem(campaign));
 
   let agentProblem: string | null = null;
+  // The longest one call can run: admission reserves this many minutes per call.
+  let capMinutes: number | null = null;
   if (!campaign.agent_config_id) agentProblem = "Choose an AI voice agent.";
   else {
     const { data: agent } = await db
@@ -184,6 +197,7 @@ export async function evaluateCampaignLaunchReadiness(
       agentProblem = "The agent's outbound version has not been confirmed by ClickAI support yet.";
     else if (!agent.sarvam_outbound_max_call_seconds)
       agentProblem = "The agent's maximum call length has not been set by ClickAI support yet.";
+    else capMinutes = Math.ceil(agent.sarvam_outbound_max_call_seconds / 60);
   }
   add("agent", "Outbound agent is ready", agentProblem);
 
@@ -279,8 +293,17 @@ export async function evaluateCampaignLaunchReadiness(
       .eq("campaign_id", campaignId)
       .eq("organization_id", orgId);
     const spend = campaignSpend(calls ?? []);
-    if (spend.spent + spend.reserved >= campaign.budget_limit)
+    const committed = spend.spent + spend.reserved;
+    if (committed >= campaign.budget_limit)
       budgetProblem = "This campaign's budget is used up. Raise the budget to continue.";
+    else if (capMinutes !== null) {
+      // The rule admission applies to every call: what is committed plus the most this
+      // call can cost must fit. Checked here too, so a budget that can never pay for a
+      // call is caught at launch instead of pausing the campaign when it first dials.
+      const worstCase = capMinutes * (await deps.outboundRatePerMinute(orgId));
+      if (committed + worstCase > campaign.budget_limit)
+        budgetProblem = `The budget (${rupees(campaign.budget_limit)}) cannot cover the most one call can cost (${rupees(worstCase)}: up to ${capMinutes} ${capMinutes === 1 ? "minute" : "minutes"} per call). Raise the budget to at least ${rupees(committed + worstCase)}.`;
+    }
   }
   add("budget", "Campaign budget remains", budgetProblem);
 

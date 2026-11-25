@@ -125,6 +125,7 @@ function deps(
     isAllowlisted: () => true,
     numberGate: async () => ({ allowed: true }),
     walletCanAfford: async () => true,
+    outboundRatePerMinute: async () => 400,
     ...over,
   };
 }
@@ -286,6 +287,82 @@ describe("campaign launch: every guard refuses before anything changes", () => {
       resolution_source: "provider",
     });
     assert.ok((await blockedBy(db, deps(db))).includes("budget"));
+  });
+
+  describe("the budget must cover one call, the rule admission applies (production incident 2026-11-25)", () => {
+    const billedCall = (charge: number) => ({
+      campaign_id: CAMPAIGN,
+      organization_id: ORG,
+      status: "completed",
+      customer_charge: charge,
+      billing_applied_at: "2026-11-24T00:00:00Z",
+      billing_cap_minutes: 5,
+      billing_rate_per_minute: 400,
+      resolution_source: "provider",
+    });
+    const budgetDetail = async (db: ReturnType<typeof world>) => {
+      const r = await evaluateCampaignLaunchReadiness(deps(db), ORG, CAMPAIGN);
+      return r!.checks.find((c) => c.key === "budget")!;
+    };
+
+    test("a budget below the most one call can cost is refused at launch, with the figures, and changes nothing", async () => {
+      // Production: budget 1,000 paise (₹10); one call is up to 5 min x 400 paise = ₹20.
+      const db = world({ campaign: { budget_limit: 1000 } });
+      const check = await budgetDetail(db);
+      assert.equal(check.ok, false);
+      assert.match(check.detail!, /₹10/);
+      assert.match(check.detail!, /₹20/);
+      assert.match(check.detail!, /up to 5 minutes/);
+      assert.match(check.detail!, /at least ₹20/);
+      const r = await launchCampaignFor(deps(db), ORG, "user_1", CAMPAIGN);
+      assert.equal(r.ok, false);
+      assert.equal(status(db), "draft", "it never reaches running, so it can't pause itself");
+      assert.deepEqual(
+        audits(db),
+        ["CAMPAIGN_LAUNCH_BLOCKED"],
+        "the refusal is audited, nothing else is",
+      );
+    });
+
+    test("a budget of exactly one worst-case call launches", async () => {
+      const db = world({ campaign: { budget_limit: 2000 } });
+      assert.equal((await budgetDetail(db)).ok, true);
+      const r = await launchCampaignFor(deps(db), ORG, "user_1", CAMPAIGN);
+      assert.equal(r.ok, true);
+      assert.equal(status(db), "running");
+    });
+
+    test("what is already spent counts: the rest of the budget must still cover a call", async () => {
+      const db = world({ campaign: { budget_limit: 5000 } });
+      db.tables["call_logs"]!.push(billedCall(4000)); // ₹40 spent, ₹10 left, a call can cost ₹20
+      const check = await budgetDetail(db);
+      assert.equal(check.ok, false);
+      assert.match(check.detail!, /at least ₹60/);
+    });
+
+    test("a spent budget keeps its own message", async () => {
+      const db = world({ campaign: { budget_limit: 1000 } });
+      db.tables["call_logs"]!.push(billedCall(1000));
+      assert.match((await budgetDetail(db)).detail!, /used up/);
+    });
+
+    test("no budget, or a free outbound rate, never trips it", async () => {
+      assert.equal((await budgetDetail(world({ campaign: { budget_limit: null } }))).ok, true);
+      const free = world({ campaign: { budget_limit: 1000 } });
+      const r = await evaluateCampaignLaunchReadiness(
+        deps(free, { outboundRatePerMinute: async () => 0 }),
+        ORG,
+        CAMPAIGN,
+      );
+      assert.equal(r!.checks.find((c) => c.key === "budget")!.ok, true);
+    });
+
+    test("resuming a campaign that paused for its budget is refused until the budget is raised", async () => {
+      const db = world({ campaign: { status: "paused", budget_limit: 1000 } });
+      const r = await launchCampaignFor(deps(db), ORG, "user_1", CAMPAIGN);
+      assert.equal(r.ok, false);
+      assert.equal(status(db), "paused");
+    });
   });
 
   test("a cancelled campaign cannot be launched", async () => {
