@@ -35,7 +35,12 @@ import { SarvamIntegrationPanel } from "@/components/admin/SarvamIntegrationPane
 import { OutboundAgentPanel } from "@/components/admin/OutboundAgentPanel";
 import { VoiceLanguagePanel } from "@/components/admin/VoiceLanguagePanel";
 import { ReasonDialog } from "@/components/admin/ReasonDialog";
-import { JOB_STEPS, type StepStates } from "@/lib/voice-provisioning-job";
+import {
+  FAILURE_HINTS,
+  JOB_STEPS,
+  type FailureCode,
+  type StepStates,
+} from "@/lib/voice-provisioning-job";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
@@ -582,6 +587,11 @@ function ProvisioningDetail() {
               {queueStatus(latest)}
             </StatusPill>
             {latest.failure_code ? <code>{latest.failure_code}</code> : null}
+            {latest.failure_code && FAILURE_HINTS[latest.failure_code as FailureCode] ? (
+              <span className="text-muted-foreground" data-testid="failure-hint">
+                {FAILURE_HINTS[latest.failure_code as FailureCode]}
+              </span>
+            ) : null}
             {latest.status === "failed" || latest.status === "pending" ? (
               <StatusPill tone={latest.retryable ? "ready" : "error"}>
                 {latest.retryable ? "retryable" : "permanent until fixed"}

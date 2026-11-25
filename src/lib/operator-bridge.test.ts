@@ -153,6 +153,7 @@ describe("MCP protocol", () => {
       "get_agent_work_order",
       "issue_agent_credential",
       "list_agent_work_orders",
+      "report_blocker",
       "submit_agent_result",
     ]);
     assert.deepEqual(await rpc("ping"), { jsonrpc: "2.0", id: 7, result: {} });
@@ -356,5 +357,198 @@ describe("credential issuance", () => {
       JSON.stringify(db.tables["provisioning_run_events"] ?? []),
       new RegExp(issued.body.token),
     );
+  });
+});
+
+describe("operator view of a work order", () => {
+  const prepared = async (caps?: Record<string, boolean>) => {
+    const db = waitingWorld();
+    db.tables["organizations"]![0]!["name"] = "New Clinic Pvt Ltd";
+    await first(db);
+    const d = bridgeDeps(db, caps ? { loadSnapshot: async () => snapshot(caps) } : {});
+    const id = (await listWorkOrders(db.client))[0]!.workOrderId;
+    return { db, d, id };
+  };
+
+  test("carries everything the operator needs and no full phone number or secret", async () => {
+    const { db, d, id } = await prepared();
+    const order = await getWorkOrder(db.client, id, d);
+    assert.equal(order.status, "WAITING_FOR_AGENT_CREATION");
+    assert.equal(order.customer, "New Clinic Pvt Ltd");
+    assert.equal(order.customerId, ORG);
+    assert.equal(order.jobId, id);
+    assert.equal(order.businessType, "dental_clinic");
+    assert.equal(order.assignedNumber, "••••0002");
+    assert.equal(order.template.kind, "universal_master");
+    assert.equal(order.template.masterAgentAppId, "Master-agent");
+    assert.ok(order.agent.voiceLanguage);
+    assert.ok(order.agent.enabledCapabilities.length);
+    assert.equal(order.summary.services, 1);
+    assert.ok(
+      order.checklist.every((c) => c.ok),
+      JSON.stringify(order.checklist),
+    );
+    assert.doesNotMatch(JSON.stringify(order), /7900000002|token_hash/);
+    assert.match(order.instructions[0]!, /report_blocker/);
+  });
+
+  test("template profile follows the tools: Booking with booking tools, otherwise Enquiry", async () => {
+    const enquiry = await prepared({ capture_lead: true });
+    const e = await getWorkOrder(enquiry.db.client, enquiry.id, enquiry.d);
+    assert.equal(e.template.profile, "enquiry");
+    const booking = await prepared({ calendar_book: true, capture_lead: true });
+    const order = await getWorkOrder(booking.db.client, booking.id, booking.d);
+    assert.equal(order.template.profile, "booking");
+    assert.ok(order.summary.tools.includes("check_availability"));
+  });
+});
+
+describe("missing Sarvam authentication", () => {
+  test("report_blocker parks the job for the operator: no retry, nothing created, visible in the list", async () => {
+    const db = waitingWorld();
+    await first(db);
+    const d = bridgeDeps(db);
+    const id = (await listWorkOrders(db.client))[0]!.workOrderId;
+    const r = await call(db, d, "report_blocker", {
+      workOrderId: id,
+      reason: "sarvam_auth_required",
+    });
+    assert.equal(r.isError, false);
+    assert.match(r.body.message, /Sign in/i);
+    const run = db.tables["provisioning_runs"]![0]!;
+    assert.equal(run["failure_code"], "WAITING_FOR_OPERATOR");
+    assert.equal(run["status"], "waiting");
+    assert.equal(run["next_attempt_at"] ?? null, null);
+    assert.equal((await listWorkOrders(db.client))[0]!.blocked, true);
+    assert.equal(db.tables["agent_configs"]![0]!["sarvam_app_id"], null);
+    assert.equal(num(db, "num_new")["status"], "provisioning");
+    // The sweep never retries an operator-blocked job: it only resumes once an agent exists.
+    const { sweepProvisioningRetries } = await import("./provisioning-runs.server.ts");
+    const started: string[] = [];
+    await sweepProvisioningRetries(db.client, {
+      now: new Date(NOW.getTime() + 3600_000),
+      run: async (_a, i) => {
+        started.push(i.organizationId);
+        return { runId: id, claimed: true, status: "succeeded", result: null };
+      },
+    });
+    assert.deepEqual(started, []);
+    // After the operator signs in again, the same job continues to completion.
+    const fp = (await getWorkOrder(db.client, id, d)).fingerprint;
+    const done = await call(db, d, "submit_agent_result", {
+      workOrderId: id,
+      agentId: "Built-agent-1",
+      version: 3,
+      fingerprint: fp,
+    });
+    assert.equal(done.body.status, "registered");
+    assert.equal(db.tables["provisioning_runs"]!.length, 1, "same job, no new one");
+    assert.equal(num(db, "num_new")["status"], "active");
+  });
+
+  test("blocker reports for unknown jobs are refused", async () => {
+    const db = waitingWorld();
+    const r = await call(db, bridgeDeps(db), "report_blocker", {
+      workOrderId: "nope",
+      reason: "sarvam_auth_required",
+    });
+    assert.equal(r.body.error, "not_found");
+  });
+});
+
+describe("recovery and ownership", () => {
+  test("agent built but the result never arrived: the second run reuses the same agent id, no duplicate registration", async () => {
+    const db = waitingWorld();
+    await first(db);
+    const d = bridgeDeps(db);
+    const id = (await listWorkOrders(db.client))[0]!.workOrderId;
+    const fp = (await getWorkOrder(db.client, id, d)).fingerprint;
+    // Attempt 1: the call never reached ClickAI, so nothing is recorded.
+    assert.equal(db.tables["agent_configs"]![0]!["sarvam_app_id"], null);
+    // Attempt 2: the operator finds the agent by its exact name and reports it.
+    const args = { workOrderId: id, agentId: "Built-agent-1", version: 3, fingerprint: fp };
+    assert.equal((await call(db, d, "submit_agent_result", args)).body.status, "registered");
+    assert.equal(
+      (await call(db, d, "submit_agent_result", args)).body.status,
+      "already_registered",
+    );
+    assert.equal(db.tables["provisioning_runs"]!.length, 1);
+  });
+
+  test("a customer that is already live is never served or written", async () => {
+    const db = waitingWorld();
+    await first(db);
+    db.tables["provisioning_runs"]!.push({
+      id: "run_live",
+      organization_id: OTHER,
+      status: "succeeded",
+      current_step: "active",
+      phone_number_id: "num_other",
+      step_states: {},
+    });
+    const d = bridgeDeps(db);
+    assert.equal((await listWorkOrders(db.client)).length, 1);
+    const get = await call(db, d, "get_agent_work_order", { workOrderId: "run_live" });
+    assert.equal(get.body.error, "not_found");
+    const submit = await call(db, d, "submit_agent_result", {
+      workOrderId: "run_live",
+      agentId: "Built-agent-1",
+      version: 3,
+      fingerprint: "x",
+    });
+    assert.equal(submit.body.error, "not_found");
+    assert.equal(db.tables["agent_configs"]![1]!["sarvam_app_id"], "Other-app");
+    assert.equal(num(db, "num_other")["provider_deployment_id"], "dep-other");
+  });
+
+  test("a job whose customer already has a different agent refuses the submitted one", async () => {
+    const db = waitingWorld();
+    (db.tables["provisioning_runs"] ??= []).push({
+      id: "run_other",
+      organization_id: OTHER,
+      status: "waiting",
+      current_step: "waiting_for_agent",
+      phone_number_id: "num_other",
+      step_states: {},
+    });
+    const r = await call(db, bridgeDeps(db), "submit_agent_result", {
+      workOrderId: "run_other",
+      agentId: "Built-agent-1",
+      version: 3,
+      fingerprint: "anything",
+    });
+    assert.equal(r.isError, true);
+    assert.equal(db.tables["agent_configs"]![1]!["sarvam_app_id"], "Other-app");
+  });
+
+  test("activation is blocked when the deployment does not show the submitted agent version", async () => {
+    const db = waitingWorld();
+    await first(db);
+    const d = bridgeDeps(db, {
+      resume: async (org) =>
+        runProvisioning(
+          db.client,
+          { organizationId: org, trigger: "admin_retry", force: true },
+          (a, o, h) =>
+            runProvisioningPipeline(
+              a,
+              o,
+              pipelineFor(db, { appId: "Built-agent-1", appVersion: 9 }),
+              h.onStep,
+            ),
+          () => NOW,
+        ),
+    });
+    const id = (await listWorkOrders(db.client))[0]!.workOrderId;
+    const fp = (await getWorkOrder(db.client, id, d)).fingerprint;
+    await call(db, d, "submit_agent_result", {
+      workOrderId: id,
+      agentId: "Built-agent-1",
+      version: 3,
+      fingerprint: fp,
+    });
+    assert.notEqual(num(db, "num_new")["status"], "active");
+    assert.equal(db.tables["provisioning_runs"]![0]!["failure_code"], "DEPLOYMENT_VERIFY_FAILED");
+    assert.notEqual(db.tables["provisioning_runs"]![0]!["status"], "succeeded");
   });
 });

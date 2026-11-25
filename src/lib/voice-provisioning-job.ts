@@ -86,7 +86,8 @@ export type FailureCode =
   | "NUMBER_NOT_ASSIGNED"
   | "NUMBER_UNUSABLE"
   | "PROVIDER_SETUP_PENDING"
-  | "PROVIDER_CAPABILITY_UNVERIFIED"
+  | "AWAITING_AGENT_CREATION"
+  | "WAITING_FOR_OPERATOR"
   | "PROVIDER_AUTH_EXPIRED"
   | "PROVIDER_PERMISSION_DENIED"
   | "AGENT_CREATE_FAILED"
@@ -101,6 +102,21 @@ export type FailureCode =
   | "PROVIDER_ACTION_REQUIRED"
   | "INTERNAL_ERROR"
   | "RETRIES_EXHAUSTED";
+
+/** What an admin should do about a failure code (shown next to the code). */
+export const FAILURE_HINTS: Partial<Record<FailureCode, string>> = {
+  AWAITING_AGENT_CREATION:
+    "Waiting for the operator: process this work order with Claude Code (Provisioning page → Agent builder).",
+  WAITING_FOR_OPERATOR:
+    "The operator reported it cannot continue (usually Sarvam sign-in expired). Sign in to the Sarvam MCP and process the work order again.",
+  PROVIDER_AUTH_EXPIRED: "The provider rejected our authorization. Sign in again, then retry.",
+  PROVIDER_PERMISSION_DENIED:
+    "The provider credential is not allowed to do this. Fix its permissions.",
+  PROVIDER_ACTION_REQUIRED:
+    "Sarvam refused an action: resolve it in the Sarvam console, then retry.",
+  RETRIES_EXHAUSTED:
+    "Automatic retries are used up. Check the diagnostics, then use Retry provisioning.",
+};
 
 export const MAX_AUTOMATIC_ATTEMPTS = 5;
 const BACKOFF_BASE_MS = 30_000;
@@ -154,7 +170,7 @@ const WAITING: Record<string, { code: FailureCode | null; message: string }> = {
     message: "Our team is preparing your voice assistant. We will let you know when it is live.",
   },
   waiting_for_agent: {
-    code: "PROVIDER_CAPABILITY_UNVERIFIED",
+    code: "AWAITING_AGENT_CREATION",
     message: "Our team is setting up your voice agent. We will let you know when it is live.",
   },
   // Inbound is live; the outbound agent is an internal follow-up.

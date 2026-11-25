@@ -3,7 +3,7 @@ import type { Database } from "@/integrations/supabase/types";
 import type { AgentSnapshot } from "./agent-instructions.ts";
 import { buildUniversalAgentConfig } from "./universal-agent-config.ts";
 import { customerAgentName, registerProvisionedAgent } from "./sarvam-agent-provisioner.server.ts";
-import { sanitizeDiagnostic } from "./voice-provisioning-job.ts";
+import { maskPhone, sanitizeDiagnostic } from "./voice-provisioning-job.ts";
 
 /**
  * Operator bridge: the supported way to automate Sarvam agent authoring.
@@ -159,7 +159,7 @@ async function agentOf(admin: Admin, organizationId: string) {
 export async function listWorkOrders(admin: Admin) {
   const { data, error } = await admin
     .from("provisioning_runs")
-    .select("id, organization_id, current_step, phone_number_id, created_at")
+    .select("id, organization_id, current_step, phone_number_id, created_at, failure_code")
     .eq("status", "waiting")
     .in("current_step", WORK_ORDER_STATES)
     .order("created_at", { ascending: true })
@@ -169,8 +169,17 @@ export async function listWorkOrders(admin: Admin) {
   for (const r of data ?? []) {
     const agent = await agentOf(admin, r.organization_id);
     if (!agent?.business_id) continue;
+    const { data: org } = await admin
+      .from("organizations")
+      .select("name")
+      .eq("id", r.organization_id)
+      .maybeSingle();
     out.push({
       workOrderId: r.id,
+      customerId: r.organization_id,
+      customer: org?.name ?? "(unknown)",
+      /** Set when an operator reported it cannot continue (for example Sarvam sign-in required). */
+      blocked: r.failure_code === "WAITING_FOR_OPERATOR",
       agentName: customerAgentName(r.organization_id, agent.id),
       stage:
         r.current_step === "waiting_for_integration_credential"
@@ -222,11 +231,56 @@ export async function getWorkOrder(admin: Admin, runId: string, deps: WorkOrderD
     .maybeSingle();
   if (credError) throw credError;
   const agentName = customerAgentName(run.organization_id, agent.id);
+  const [{ data: org }, { data: number }] = await Promise.all([
+    admin.from("organizations").select("name").eq("id", run.organization_id).maybeSingle(),
+    run.phone_number_id
+      ? admin
+          .from("phone_numbers")
+          .select("e164, sarvam_number_confirmed_at")
+          .eq("id", run.phone_number_id)
+          .eq("organization_id", run.organization_id)
+          .maybeSingle()
+      : Promise.resolve({ data: null }),
+  ]);
+  const active = (xs: { is_active: boolean }[]) => xs.filter((x) => x.is_active).length;
+  const booking = config.capabilities.some(
+    (c) => c.enabled && (c.id === "appointment_booking" || c.id === "restaurant_reservations"),
+  );
   return {
     workOrderId: run.id,
+    status: "WAITING_FOR_AGENT_CREATION" as const,
+    jobId: run.id,
+    customerId: run.organization_id,
+    customer: org?.name ?? "(unknown)",
     agentName,
     businessType: snapshot.business.business_type,
+    // The one universal master agent; "profile" says which tool set this customer gets
+    // (booking tools on = Booking, otherwise Enquiry), matching the generated tool list.
+    template: {
+      kind: "universal_master" as const,
+      profile: booking ? ("booking" as const) : ("enquiry" as const),
+      masterAgentAppId: deps.masterAgentAppId,
+    },
     templateAgentAppId: deps.masterAgentAppId,
+    assignedNumber: maskPhone(number?.e164),
+    summary: {
+      services: active(snapshot.services),
+      faqs: active(snapshot.faqs),
+      rules: active(snapshot.rules),
+      openDays: snapshot.hours.filter((h) => !h.is_closed).length,
+      tools: config.tools.enable,
+    },
+    checklist: [
+      { item: "Onboarding data complete for every enabled capability", ok: true },
+      { item: "Business category set", ok: Boolean(snapshot.business.business_type?.trim()) },
+      { item: "Voice and languages valid", ok: true },
+      {
+        item: "Number assigned to this customer and confirmed in Sarvam",
+        ok: Boolean(number?.sarvam_number_confirmed_at),
+      },
+      { item: "Master template configured in ClickAI", ok: Boolean(deps.masterAgentAppId) },
+      { item: "Agent integration credential issued", ok: Boolean(cred) },
+    ],
     fingerprint: config.fingerprint,
     credentialIssued: Boolean(cred),
     agent: {
@@ -237,6 +291,7 @@ export async function getWorkOrder(admin: Admin, runId: string, deps: WorkOrderD
       voiceLanguage: config.voiceLanguage,
     },
     instructions: [
+      "0. Check Sarvam sign-in first by listing agents. If that fails with an authorization error, call report_blocker (reason sarvam_auth_required) and STOP; do not retry, do not use any other route.",
       `1. List existing agents; if one named "${agentName}" exists, reuse it (never create a second).`,
       "2. Otherwise clone the template agent (templateAgentAppId) under that exact name with configure_agent.",
       "3. If credentialIssued is false, call issue_agent_credential ONCE and use the token as the Bearer secret of every HTTP tool (masked/secret field; never echo it).",
@@ -376,4 +431,36 @@ export async function submitAgentResult(
     },
   );
   return { status: "registered" as const, jobResumed: resumed };
+}
+
+/**
+ * The operator's client cannot continue (typically Sarvam sign-in expired). The
+ * job stays parked, visibly "waiting for operator"; nothing retries and nothing
+ * is created. The next get_agent_work_order / submit simply continues.
+ */
+export async function reportBlocker(
+  admin: Admin,
+  input: { workOrderId: string; reason: string; message?: string | undefined },
+  auth: Extract<BridgeAuth, { ok: true }>,
+) {
+  const run = await openRun(admin, input.workOrderId);
+  if (!run) throw new BridgeError("not_found", "No open work order with that id.");
+  const reason = input.reason === "sarvam_auth_required" ? "sarvam_auth_required" : "other";
+  const message =
+    reason === "sarvam_auth_required"
+      ? "Sarvam sign-in is required: sign in to the Sarvam Voice Agents MCP in your client (24 h session), then process this work order again."
+      : sanitizeDiagnostic(input.message ?? "The operator could not continue.", 300);
+  const { error } = await admin
+    .from("provisioning_runs")
+    .update({
+      failure_code: "WAITING_FOR_OPERATOR",
+      retryable: null,
+      diagnostics: { blocker: reason, note: message } as never,
+    })
+    .eq("id", run.id)
+    .eq("organization_id", run.organization_id)
+    .eq("status", "waiting");
+  if (error) throw error;
+  await bridgeAudit(admin, auth, run, "operator_blocked", { reason });
+  return { status: "recorded" as const, message };
 }

@@ -216,7 +216,7 @@ describe("agent creation (mocked provider API)", () => {
     const { d, calls } = deps(db); // no ensureAgent: Sarvam has no documented create API
     const r = await run0(db, d);
     assert.equal(r.status, "waiting");
-    assert.equal(runRow(db)["failure_code"], "PROVIDER_CAPABILITY_UNVERIFIED");
+    assert.equal(runRow(db)["failure_code"], "AWAITING_AGENT_CREATION");
     assert.equal(runRow(db)["current_job_step"], "creating_agent");
     assert.equal(calls.create, 0);
     const view = await loadActivationView(db.client, ORG);

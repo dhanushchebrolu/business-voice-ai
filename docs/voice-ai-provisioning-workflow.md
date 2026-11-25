@@ -34,7 +34,7 @@ Nothing buys/claims a number, places a call, or touches billing.
   valid 24 h with no refresh token**. That is a human-in-the-loop tool, not a server-to-server API, so
   it is deliberately not automated here (no headless SSO, no stored tokens, no undocumented endpoints).
   `unsupportedAgentProvisioner` stays the only implementation: `creating_agent` ends in `waiting`
-  (`PROVIDER_CAPABILITY_UNVERIFIED`). Handoff: registering the agent (admin "Register agent")
+  (`AWAITING_AGENT_CREATION`). Handoff: registering the agent (admin "Register agent")
   immediately re-runs the customer's open job, and the scheduled sweep continues it if that call fails.
   If Sarvam ships a keyed agent API, implement `AgentProvisioner` and return it from
   `defaultAgentProvisioner()`.
@@ -155,3 +155,43 @@ Sarvam-side work and the exact `configure_agent` field mapping comes from `sarva
 client. 2) Sign in to `sarvam-voice-agents` (`/mcp` → Authenticate; repeat daily). 3) Ask: "Process the
 pending ClickAI agent work orders." 4) Review the agents it builds (Sarvam prompts approval for every
 write). 5) Revoke the token when done.
+
+## Final workflow: Claude-assisted agent step (2026-11-27)
+
+ClickAI cannot call Claude Code's MCP session, and Sarvam offers no service credential, so the agent
+authoring step is operator-assisted through the existing bridge; the rest is automatic.
+
+1. Customer finishes onboarding. Admin assigns a number (Sarvam number, confirmed in Sarvam).
+2. Customer clicks **Activate Number**. ClickAI validates onboarding, category, capabilities, voice and
+   language, number ownership, and eligibility (existing phone gate), then creates the one idempotent job
+   (one active job per customer and per number).
+3. The job stops at **`WAITING_FOR_AGENT_CREATION`** (`failure_code AWAITING_AGENT_CREATION`; customer sees
+   "our team is setting up your voice agent"). It appears under **Provisioning → Agent builder**.
+4. Operator, in Claude Code with both MCP servers connected (`sarvam-voice-agents` signed in, and
+   `clickai-operator` with a bridge token): "Process the pending ClickAI agent work orders."
+5. Claude: `list_agent_work_orders` → `get_agent_work_order` (customer, category, ids, masked number,
+   template + Booking/Enquiry profile, voice/languages, capabilities, summary counts, checklist, ready
+   prompt/tools/variables, fingerprint, steps) → checks Sarvam sign-in → reads the playbook/schema →
+   reuses the agent named exactly `clickai-…` or clones the master template → configures → validates →
+   commits → `submit_agent_result {agentId, version, fingerprint}`.
+6. ClickAI validates (format, job ownership, fingerprint still current, not a master template, not another
+   customer's agent), stores agent id/version, marks voice settings applied, and **resumes the same job**:
+   create/adopt deployment → attach the assigned number → read back and verify agent/version/number/
+   webhook → activate only if every check passes. Customer dashboard shows Active.
+
+**No Sarvam sign-in:** Claude calls `report_blocker(sarvam_auth_required)` and stops. The job shows
+`WAITING_FOR_OPERATOR` ("Sarvam sign-in needed") on the admin page; nothing retries or loops, nothing is
+created. After signing in, the same work order continues (same job, no duplicates).
+
+**Lost result:** the agent exists but `submit_agent_result` never arrived → the next run finds the agent by
+its deterministic name and submits again; resubmitting the same id and version is a no-op.
+
+**Template:** the repo has ONE universal master agent (`SARVAM_MASTER_AGENT_APP_ID`); the "Booking" vs
+"Enquiry" distinction is the tool set generated from the customer's capabilities (`template.profile`),
+not two Sarvam templates. Add a second master only if Sarvam tools ever need to differ per app.
+
+**Verification limit:** Sarvam has no agent read API, so ClickAI cannot confirm the agent id/version exists
+before the deployment call; it validates everything it can (above) and Sarvam must accept the deployment
+for that id/version, after which ClickAI reads the deployment back and compares agent, version, number and
+webhook before activating. A wrong id/version therefore stops at deployment verification, never at
+activation.

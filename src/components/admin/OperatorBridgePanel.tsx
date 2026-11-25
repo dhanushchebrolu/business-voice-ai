@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
 import { Copy } from "lucide-react";
@@ -70,6 +71,29 @@ export function OperatorBridgePanel() {
           <p className="text-xs text-muted-foreground" data-testid="authoring-status">
             Unattended agent creation: <strong>not available yet</strong>. {data!.authoring.blocker}
           </p>
+          {data!.workOrders.length ? (
+            <ul className="divide-y divide-border text-xs" data-testid="work-orders">
+              {data!.workOrders.map((w) => (
+                <li key={w.workOrderId} className="flex flex-wrap items-center gap-2 py-1">
+                  <Link
+                    to="/admin/provisioning/$orgId"
+                    params={{ orgId: w.customerId }}
+                    className="font-medium underline-offset-2 hover:underline"
+                  >
+                    {w.customer}
+                  </Link>
+                  <StatusPill tone={w.blocked ? "error" : "ready"}>
+                    {w.blocked
+                      ? "waiting for operator: Sarvam sign-in needed"
+                      : w.stage === "needs_credential"
+                        ? "waiting for agent credential"
+                        : "waiting for agent creation"}
+                  </StatusPill>
+                  <code className="text-muted-foreground">{w.agentName}</code>
+                </li>
+              ))}
+            </ul>
+          ) : null}
           {data!.tokens.length ? (
             <ul className="text-xs text-muted-foreground">
               {data!.tokens.map((t) => (

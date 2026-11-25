@@ -5,6 +5,7 @@ import {
   getWorkOrder,
   issueCredentialForRun,
   listWorkOrders,
+  reportBlocker,
   submitAgentResult,
   type BridgeAuth,
   type WorkOrderDeps,
@@ -46,6 +47,21 @@ export const BRIDGE_TOOLS = [
       type: "object",
       properties: { workOrderId: { type: "string" } },
       required: ["workOrderId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "report_blocker",
+    description:
+      "Stop cleanly when you cannot continue, e.g. Sarvam MCP authentication is missing or expired (reason sarvam_auth_required). ClickAI marks the job waiting for the operator, shows it in the admin page, and does not retry. Call this instead of looping.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workOrderId: { type: "string" },
+        reason: { type: "string", enum: ["sarvam_auth_required", "other"] },
+        message: { type: "string" },
+      },
+      required: ["workOrderId", "reason"],
       additionalProperties: false,
     },
   },
@@ -124,6 +140,21 @@ export async function handleBridgeRpc(
           return ok(req.id, text({ error: "invalid", message: "workOrderId is required" }, true));
         if (name === "get_agent_work_order")
           return ok(req.id, text(await getWorkOrder(admin, id, deps)));
+        if (name === "report_blocker")
+          return ok(
+            req.id,
+            text(
+              await reportBlocker(
+                admin,
+                {
+                  workOrderId: id,
+                  reason: String(args["reason"] ?? "other"),
+                  message: typeof args["message"] === "string" ? args["message"] : undefined,
+                },
+                auth,
+              ),
+            ),
+          );
         if (name === "issue_agent_credential")
           return ok(req.id, text(await issueCredentialForRun(admin, id, auth)));
         return ok(
