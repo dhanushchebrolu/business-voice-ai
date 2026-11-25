@@ -1211,8 +1211,44 @@ describe("service validation, requested times and honest callbacks", () => {
         callback_recorded: false,
         lead_id: null,
         opted_out: false,
+        appointment_changed: null,
+        changed_booking_id: null,
       },
     );
+  });
+
+  test("callFacts reports a moved or cancelled appointment only from ClickAI's own ok record", () => {
+    const facts = (events: Parameters<typeof callFacts>[0]) => callFacts(events);
+    const moved = facts([
+      {
+        kind: "reschedule_appointment",
+        status: "ok",
+        detail: { booking_id: "b1", outcome: "rescheduled" },
+      },
+    ]);
+    assert.equal(moved.appointment_changed, "rescheduled");
+    assert.equal(moved.changed_booking_id, "b1");
+    const cancelled = facts([
+      { kind: "reschedule_appointment", status: "ok", detail: { booking_id: "b1" } },
+      {
+        kind: "cancel_appointment",
+        status: "ok",
+        detail: { booking_id: "b1", outcome: "cancelled" },
+      },
+    ]);
+    assert.equal(cancelled.appointment_changed, "cancelled", "the last confirmed change wins");
+    for (const status of ["error", "rejected"]) {
+      const none = facts([
+        {
+          kind: "reschedule_appointment",
+          status,
+          detail: { booking_id: "b1", outcome: "not_changed" },
+        },
+        { kind: "cancel_appointment", status, detail: { booking_id: "b1" } },
+      ]);
+      assert.equal(none.appointment_changed, null, status);
+      assert.equal(none.changed_booking_id, null);
+    }
   });
 
   test("the context carries each tenant's own greeting", async () => {
@@ -1665,10 +1701,13 @@ describe("dual agents: the outbound agent's credential is limited by role", () =
     const cfg = sarvamToolConfiguration("https://clickai.in", "outbound");
     assert.deepEqual(cfg.tools.map((t) => t.name).sort(), [
       "book_appointment",
+      "cancel_appointment",
       "check_availability",
       "clickai_business_context",
       "get_business_info",
+      "list_appointments",
       "record_call_outcome",
+      "reschedule_appointment",
     ]);
     // Booking sends ClickAI's own call id, so the server books for the dialled number.
     const bookTool = cfg.tools.find((t) => t.name === "book_appointment")!;
@@ -1704,5 +1743,319 @@ describe("dual agents: the outbound agent's credential is limited by role", () =
         (t) => t.name === "book_appointment",
       ),
     );
+  });
+});
+
+describe("outbound agents can look at, move and cancel the dialled person's own appointments", () => {
+  const OUT_ID = "9a14e45f-ceea-467e-a4a9-1c1c1c1c1c1c";
+  const DIALLED = "+919811122233";
+  const OTHER_PERSON = "+919000000099";
+  const BIZ = "biz-org-smile";
+  // 2026-11-11 10:00 IST is NOW; these are tomorrow 15:00 IST and the day after 10:00 IST.
+  const TOMORROW_3PM = "2026-11-12T09:30:00.000Z";
+  const outRow = (over: Record<string, unknown> = {}) =>
+    (db.tables["call_logs"] ??= []).push({
+      id: OUT_ID,
+      organization_id: ORG_SMILE,
+      provider: "sarvam",
+      direction: "outbound",
+      status: "initiated",
+      started_at: NOW.toISOString(),
+      destination_number: DIALLED,
+      ...over,
+    });
+  const bookingRow = (id: string, over: Record<string, unknown> = {}) =>
+    (db.tables["bookings"] ??= []).push({
+      id,
+      organization_id: ORG_SMILE,
+      business_id: BIZ,
+      customer_phone: DIALLED,
+      status: "CONFIRMED",
+      start_at: TOMORROW_3PM,
+      end_at: "2026-11-12T10:00:00.000Z",
+      service_id: "svc-org-smile",
+      ...over,
+    });
+  async function outboundToken(role = "outbound") {
+    const { token, hash, prefix } = await generateIntegrationToken();
+    db.tables["sarvam_agent_integrations"]!.push({
+      id: `int-appt-${role}`,
+      organization_id: ORG_SMILE,
+      agent_config_id: `agent-${ORG_SMILE}`,
+      token_hash: hash,
+      token_prefix: prefix,
+      status: "active",
+      expires_at: null,
+      role,
+    });
+    const agent = db.tables["agent_configs"]!.find((a) => a["organization_id"] === ORG_SMILE)!;
+    Object.assign(agent, { sarvam_outbound_app_id: "Out-smile", sarvam_outbound_app_version: 1 });
+    return token;
+  }
+  const run = async (
+    tool: string,
+    token: string,
+    body: Record<string, unknown>,
+    over: Partial<AgentApiDeps> = {},
+  ) => {
+    const res = await handleSarvamAgentRequest(
+      sarvamRequest(`tools/${tool}`, token, {
+        interaction_id: "20261125/appt-1",
+        clickai_call_id: OUT_ID,
+        ...body,
+      }),
+      tool,
+      { ...deps(), ...over },
+    );
+    return {
+      status: res.status,
+      body: (await res.json()) as {
+        ok: boolean;
+        appointments?: { appointment_id: string; date: string; time: string; service: string }[];
+        result?: {
+          success: boolean;
+          rescheduled?: boolean;
+          cancelled?: boolean;
+          error?: { code: string; message: string };
+          data?: Record<string, unknown>;
+        };
+      },
+    };
+  };
+  const lastEvent = (kind: string) =>
+    (db.tables["sarvam_agent_events"] ?? []).filter((e) => e["kind"] === kind).at(-1);
+  const movedTo = () => {
+    const calls: { name: string; input: Record<string, unknown> }[] = [];
+    const executeTool: AgentApiDeps["executeTool"] = async (_c, name, input) => {
+      calls.push({ name, input });
+      return { content: JSON.stringify({ success: true, data: { id: input["bookingId"] } }) };
+    };
+    return { calls, executeTool };
+  };
+
+  test("list: only this number's own upcoming, active appointments in this business", async () => {
+    outRow();
+    bookingRow("mine-1");
+    bookingRow("mine-2", {
+      start_at: "2026-11-13T04:30:00.000Z",
+      end_at: "2026-11-13T05:00:00.000Z",
+    });
+    bookingRow("someone-else", { customer_phone: OTHER_PERSON });
+    bookingRow("past", {
+      start_at: "2026-11-10T04:30:00.000Z",
+      end_at: "2026-11-10T05:00:00.000Z",
+    });
+    bookingRow("cancelled", { status: "CANCELLED" });
+    bookingRow("other-business", { business_id: "biz-other" });
+    bookingRow("other-org", { organization_id: ORG_ABC });
+    const token = await outboundToken();
+    const r = await run("list_appointments", token, {});
+    assert.equal(r.status, 200);
+    assert.deepEqual(
+      r.body.appointments!.map((a) => a.appointment_id),
+      ["mine-1", "mine-2"],
+    );
+    assert.deepEqual(r.body.appointments![0], {
+      appointment_id: "mine-1",
+      date: "2026-11-12",
+      time: "15:00",
+      service: "Consultation",
+    });
+    assert.equal(lastEvent("list_appointments")!["status"], "ok");
+  });
+
+  test("reschedule: the booking engine moves it, keeping its length, and the audit says so", async () => {
+    outRow();
+    bookingRow("mine-1");
+    const token = await outboundToken();
+    const { calls, executeTool } = movedTo();
+    const r = await run(
+      "reschedule_appointment",
+      token,
+      { appointment_id: "mine-1", date: "2026-11-14", time: "11:00" },
+      { executeTool },
+    );
+    assert.equal(r.body.result!.success, true);
+    assert.equal(r.body.result!.rescheduled, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.name, "reschedule_appointment");
+    assert.deepEqual(calls[0]!.input, {
+      bookingId: "mine-1",
+      newStartIso: "2026-11-14T05:30:00.000Z", // 11:00 IST
+      newEndIso: "2026-11-14T06:00:00.000Z", // the same 30 minutes
+    });
+    const event = lastEvent("reschedule_appointment")!;
+    assert.equal(event["status"], "ok");
+    assert.equal((event["detail"] as { outcome: string }).outcome, "rescheduled");
+  });
+
+  test("reschedule: a slot taken, a backend error or an unreadable reply is never reported as moved", async () => {
+    outRow();
+    bookingRow("mine-1");
+    const token = await outboundToken();
+    const replies = [
+      {
+        content: JSON.stringify({
+          success: false,
+          error: {
+            code: "SLOT_NO_LONGER_AVAILABLE",
+            message: "That time slot is no longer available.",
+          },
+        }),
+      },
+      {
+        content: JSON.stringify({
+          success: false,
+          error: { code: "TOOL_NOT_PERMITTED", message: "Not permitted." },
+        }),
+        isError: true,
+      },
+      { content: "not json at all" },
+      { content: JSON.stringify({ data: {} }) },
+    ];
+    for (const reply of replies) {
+      const r = await run(
+        "reschedule_appointment",
+        token,
+        { appointment_id: "mine-1", date: "2026-11-14", time: "11:00" },
+        { executeTool: async () => reply },
+      );
+      assert.equal(r.body.ok, false, reply.content);
+      assert.equal(r.body.result!.success, false);
+      assert.equal(r.body.result!.rescheduled, undefined, "never a confirmation");
+      assert.ok(r.body.result!.error!.code);
+      const detail = lastEvent("reschedule_appointment")!["detail"] as { outcome: string };
+      assert.equal(detail.outcome, "not_changed");
+    }
+  });
+
+  test("reschedule: another person's appointment, an unknown id or a time in the past changes nothing", async () => {
+    outRow();
+    bookingRow("someone-else", { customer_phone: OTHER_PERSON });
+    bookingRow("mine-1");
+    const token = await outboundToken();
+    const { calls, executeTool } = movedTo();
+    for (const body of [
+      { appointment_id: "someone-else", date: "2026-11-14", time: "11:00" },
+      { appointment_id: "does-not-exist", date: "2026-11-14", time: "11:00" },
+    ]) {
+      const r = await run("reschedule_appointment", token, body, { executeTool });
+      assert.equal(r.body.result!.success, false);
+      assert.equal(r.body.result!.error!.code, "APPOINTMENT_NOT_FOUND");
+    }
+    const past = await run(
+      "reschedule_appointment",
+      token,
+      { appointment_id: "mine-1", date: "2026-11-11", time: "08:00" },
+      { executeTool },
+    );
+    assert.equal(past.body.result!.error!.code, "TIME_IN_PAST");
+    assert.equal(calls.length, 0, "the booking engine was never asked");
+  });
+
+  test("cancel: needs the person's confirmation first, then cancels exactly that appointment", async () => {
+    outRow();
+    bookingRow("mine-1");
+    const token = await outboundToken();
+    const cancelled: Record<string, unknown>[] = [];
+    const cancelAppointment: AgentApiDeps["cancelAppointment"] = async (input) => {
+      cancelled.push(input as unknown as Record<string, unknown>);
+      return { success: true };
+    };
+    const asked = await run(
+      "cancel_appointment",
+      token,
+      { appointment_id: "mine-1" },
+      { cancelAppointment },
+    );
+    assert.equal(asked.body.result!.error!.code, "CONFIRMATION_REQUIRED");
+    assert.equal(cancelled.length, 0);
+    const done = await run(
+      "cancel_appointment",
+      token,
+      { appointment_id: "mine-1", confirmed: "true" },
+      { cancelAppointment },
+    );
+    assert.equal(done.body.result!.cancelled, true);
+    assert.equal(cancelled.length, 1);
+    assert.equal(cancelled[0]!["bookingId"], "mine-1");
+    assert.equal(cancelled[0]!["organizationId"], ORG_SMILE);
+    assert.equal(
+      (lastEvent("cancel_appointment")!["detail"] as { outcome: string }).outcome,
+      "cancelled",
+    );
+  });
+
+  test("cancel: a refused cancellation (capability off, error) is never reported as cancelled", async () => {
+    outRow();
+    bookingRow("mine-1");
+    const token = await outboundToken();
+    const r = await run(
+      "cancel_appointment",
+      token,
+      { appointment_id: "mine-1", confirmed: true },
+      {
+        cancelAppointment: async () => ({
+          success: false,
+          error: {
+            code: "TOOL_NOT_PERMITTED",
+            message: "This agent is not permitted to use calendar_cancel.",
+          },
+        }),
+      },
+    );
+    assert.equal(r.body.ok, false);
+    assert.equal(r.body.result!.success, false);
+    assert.equal(r.body.result!.cancelled, undefined);
+    assert.equal(r.body.result!.error!.code, "TOOL_NOT_PERMITTED");
+  });
+
+  test("an inbound credential, an unverified call and an ended call cannot touch appointments", async () => {
+    bookingRow("mine-1");
+    const { calls, executeTool } = movedTo();
+    const inbound = await outboundToken("inbound");
+    outRow();
+    const asInbound = await run("list_appointments", inbound, {});
+    assert.equal(asInbound.body.result!.error!.code, "OUTBOUND_ONLY");
+    const token = await outboundToken();
+    const unverified = await run("list_appointments", token, { clickai_call_id: "" });
+    assert.equal(unverified.body.result!.error!.code, "OUTBOUND_CALL_NOT_VERIFIED");
+    db.tables["call_logs"] = [];
+    outRow({ status: "completed" });
+    const ended = await run(
+      "reschedule_appointment",
+      token,
+      { appointment_id: "mine-1", date: "2026-11-14", time: "11:00" },
+      { executeTool },
+    );
+    assert.equal(ended.body.result!.error!.code, "OUTBOUND_CALL_NOT_OPEN");
+    assert.equal(calls.length, 0);
+  });
+
+  test("another customer's credential never sees this customer's appointments", async () => {
+    outRow();
+    bookingRow("mine-1");
+    const { token, hash, prefix } = await generateIntegrationToken();
+    db.tables["sarvam_agent_integrations"]!.push({
+      id: "int-abc-out",
+      organization_id: ORG_ABC,
+      agent_config_id: `agent-${ORG_ABC}`,
+      token_hash: hash,
+      token_prefix: prefix,
+      status: "active",
+      expires_at: null,
+      role: "outbound",
+    });
+    Object.assign(
+      db.tables["agent_configs"]!.find((a) => a["organization_id"] === ORG_ABC)!,
+      {
+        sarvam_outbound_app_id: "Out-abc",
+        sarvam_outbound_app_version: 1,
+      },
+    );
+    // ABC's credential names SMILE's outbound call id: the call is not ABC's, so it is not verified.
+    const r = await run("list_appointments", token, {});
+    assert.equal(r.body.result!.error!.code, "OUTBOUND_CALL_NOT_VERIFIED");
+    assert.equal(r.body.appointments, undefined);
   });
 });

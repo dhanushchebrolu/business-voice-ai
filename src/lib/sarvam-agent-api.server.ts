@@ -348,6 +348,10 @@ export interface AgentApiDeps {
     name: string,
     input: Record<string, unknown>,
   ) => Promise<{ content: string; isError?: boolean }>;
+  /** Defaults to the booking engine's cancel_calendar_event. */
+  cancelAppointment?: (
+    input: CancelAppointmentInput,
+  ) => Promise<{ success: true } | { success: false; error: { code: string; message: string } }>;
 }
 
 /** agent_configs.capabilities keys for lead capture and message taking (universal-agent-config.ts). */
@@ -360,6 +364,9 @@ export const AGENT_TOOLS = [
   "get_business_info",
   "check_availability",
   "book_appointment",
+  "list_appointments",
+  "reschedule_appointment",
+  "cancel_appointment",
   "request_callback",
   "record_call_outcome",
 ] as const;
@@ -375,8 +382,19 @@ export function callFacts(events: { kind: string; status: string; detail: unknow
   callback_recorded: boolean;
   lead_id: string | null;
   opted_out: boolean;
+  /** An existing appointment moved or cancelled on this call (ClickAI's own confirmation only). */
+  appointment_changed: "rescheduled" | "cancelled" | null;
+  changed_booking_id: string | null;
 } {
   const d = (e: { detail: unknown }) => (e.detail ?? {}) as Record<string, unknown>;
+  const changed = events
+    .filter(
+      (e) =>
+        e.status === "ok" &&
+        (e.kind === "reschedule_appointment" || e.kind === "cancel_appointment") &&
+        typeof d(e)["booking_id"] === "string",
+    )
+    .at(-1);
   const s = (v: unknown) => (typeof v === "string" ? v : null);
   const checks = events.filter((e) => e.kind === "check_availability" && e.status === "ok");
   const lastCheck = checks.at(-1);
@@ -398,6 +416,12 @@ export function callFacts(events: { kind: string; status: string; detail: unknow
     callback_recorded: Boolean(callback),
     lead_id: callback ? s(d(callback)["lead_id"]) : null,
     opted_out: events.some((e) => e.kind === "call_outcome" && d(e)["opted_out"] === true),
+    appointment_changed: changed
+      ? changed.kind === "cancel_appointment"
+        ? "cancelled"
+        : "rescheduled"
+      : null,
+    changed_booking_id: changed ? s(d(changed)["booking_id"]) : null,
   };
 }
 export type AgentTool = (typeof AGENT_TOOLS)[number];
@@ -598,6 +622,226 @@ export async function outboundCallForTool(
       OPEN_OUTBOUND_STATUSES.includes(data.status ?? "") &&
       Number.isFinite(started) &&
       now.getTime() - started < OUTBOUND_BOOKING_WINDOW_MS,
+  };
+}
+
+/** Statuses of a booking the person can still move or cancel. */
+const CHANGEABLE_BOOKING_STATUSES = ["CONFIRMED", "RESCHEDULED"];
+
+export interface CancelAppointmentInput {
+  organizationId: string;
+  businessId: string;
+  bookingId: string;
+  reason: string;
+}
+
+interface AppointmentToolArgs {
+  deps: AgentApiDeps;
+  auth: AuthenticatedIntegration;
+  tool: "list_appointments" | "reschedule_appointment" | "cancel_appointment";
+  body: Record<string, unknown>;
+  interactionId: string | undefined;
+  now: Date;
+  toolCtx: ToolExecutionContext;
+  execute: NonNullable<AgentApiDeps["executeTool"]>;
+}
+
+/**
+ * list_appointments / reschedule_appointment / cancel_appointment: the person ClickAI
+ * dialled can look at, move or cancel THEIR OWN upcoming appointments. Identity is
+ * the number ClickAI itself dialled (its call row, still open); the agent supplies
+ * only an appointment id, which must be one of that number's own upcoming bookings
+ * in this business. Moving and cancelling go through the booking engine (conflict
+ * checks, the customer's permissions, the calendar), and success is reported only
+ * when the engine says so: a failure is never confirmed. Outbound agents only.
+ */
+async function handleAppointmentTool(a: AppointmentToolArgs): Promise<Response> {
+  const { deps, auth, tool, body, interactionId, now, toolCtx, execute } = a;
+  const refuse = async (code: string, message: string) => {
+    await audit(deps, auth, tool, "rejected", interactionId, {
+      outbound_call: true,
+      error_code: code,
+    });
+    return json({
+      ok: true,
+      outbound_call: true,
+      result: { success: false, error: { code, message } },
+    });
+  };
+  if (auth.role !== "outbound")
+    return refuse(
+      "OUTBOUND_ONLY",
+      "Not done: appointments cannot be changed on this call. Give the business phone number.",
+    );
+  if (!interactionId) return json({ ok: false, error: "interaction_id is required" }, 400);
+  const call = await outboundCallForTool(deps, auth, body, now);
+  if (!call)
+    return refuse(
+      "OUTBOUND_CALL_NOT_VERIFIED",
+      "Not done: ClickAI could not identify this call. Say nothing was changed and give the business phone number.",
+    );
+  if (!call.open || !call.phone)
+    return refuse(
+      "OUTBOUND_CALL_NOT_OPEN",
+      "Not done: this call can no longer change appointments. Say nothing was changed and give the business phone number.",
+    );
+  const { data: business } = await deps.supabaseAdmin
+    .from("businesses")
+    .select("organization_id, timezone")
+    .eq("id", auth.businessId)
+    .maybeSingle();
+  if (!business || business.organization_id !== auth.organizationId)
+    return json({ ok: false, error: "business_not_found", guidance: SAFE_GUIDANCE });
+
+  // Only this number's own upcoming appointments in this business, never anyone else's.
+  const { data: rows, error: rowsError } = await deps.supabaseAdmin
+    .from("bookings")
+    .select("id, status, start_at, end_at, service_id, customer_phone")
+    .eq("organization_id", auth.organizationId)
+    .eq("business_id", auth.businessId)
+    .eq("customer_phone", call.phone);
+  if (rowsError) throw rowsError;
+  const upcoming = (rows ?? [])
+    .filter(
+      (b) =>
+        CHANGEABLE_BOOKING_STATUSES.includes(String(b.status)) &&
+        Date.parse(String(b.start_at)) > now.getTime(),
+    )
+    .sort((x, y) => Date.parse(String(x.start_at)) - Date.parse(String(y.start_at)))
+    .slice(0, 5);
+  const { data: services } = await deps.supabaseAdmin
+    .from("services")
+    .select("id, name")
+    .eq("business_id", auth.businessId);
+  const serviceName = (id: unknown) => (services ?? []).find((s) => s.id === id)?.name ?? null;
+  const describe = (b: (typeof upcoming)[number]) => {
+    const at = localNow(new Date(String(b.start_at)), business.timezone);
+    return {
+      appointment_id: b.id,
+      date: at.date,
+      time: at.time,
+      service: serviceName(b.service_id),
+    };
+  };
+
+  if (tool === "list_appointments") {
+    await audit(deps, auth, tool, "ok", interactionId, {
+      outbound_call: true,
+      count: upcoming.length,
+    });
+    return json({
+      ok: true,
+      outbound_call: true,
+      timezone: business.timezone,
+      appointments: upcoming.map(describe),
+    });
+  }
+
+  const appointmentId = str(body, "appointment_id", 64);
+  const target = upcoming.find((b) => b.id === appointmentId);
+  if (!target)
+    return refuse(
+      "APPOINTMENT_NOT_FOUND",
+      "Not changed: ClickAI has no upcoming appointment with that id for this phone number. Say nothing was changed and give the business phone number.",
+    );
+
+  const failed = async (code: string, message: string) => {
+    await audit(deps, auth, tool, "error", interactionId, {
+      outbound_call: true,
+      booking_id: target.id,
+      error_code: code,
+      outcome: "not_changed",
+    });
+    return json({
+      ok: false,
+      outbound_call: true,
+      result: { success: false, error: { code, message } },
+    });
+  };
+
+  if (tool === "cancel_appointment") {
+    if (!(body["confirmed"] === true || body["confirmed"] === "true"))
+      return refuse(
+        "CONFIRMATION_REQUIRED",
+        "Not cancelled yet: ask the person to confirm they want to cancel it, then try again.",
+      );
+    const cancel = deps.cancelAppointment ?? defaultCancelAppointment(deps.supabaseAdmin);
+    const result = await cancel({
+      organizationId: auth.organizationId,
+      businessId: auth.businessId,
+      bookingId: target.id,
+      reason: "Cancelled by the customer on a ClickAI outbound call",
+    });
+    if (!result.success) return failed(result.error.code, result.error.message);
+    await audit(deps, auth, tool, "ok", interactionId, {
+      outbound_call: true,
+      booking_id: target.id,
+      outcome: "cancelled",
+    });
+    return json({
+      ok: true,
+      outbound_call: true,
+      result: { success: true, cancelled: true, data: { appointment_id: target.id } },
+    });
+  }
+
+  // reschedule_appointment
+  const date = str(body, "date", 10);
+  const time = str(body, "time", 5);
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !time || !/^\d{2}:\d{2}$/.test(time))
+    return json({ ok: false, error: "date must be YYYY-MM-DD and time HH:mm" }, 400);
+  const start = zonedWallTimeToUtc(date, time, business.timezone);
+  if (start.getTime() <= now.getTime())
+    return refuse(
+      "TIME_IN_PAST",
+      "Not changed: that time has already passed. Ask for a later time.",
+    );
+  const length = Date.parse(String(target.end_at)) - Date.parse(String(target.start_at));
+  const end = new Date(start.getTime() + length);
+  const out = await execute(toolCtx, "reschedule_appointment", {
+    bookingId: target.id,
+    newStartIso: start.toISOString(),
+    newEndIso: end.toISOString(),
+  });
+  let parsed: { success?: boolean; error?: { code?: string; message?: string } } = {};
+  try {
+    parsed = JSON.parse(out.content);
+  } catch {
+    /* an unreadable reply is a failure */
+  }
+  if (out.isError || parsed.success !== true)
+    return failed(
+      parsed.error?.code ?? "RESCHEDULE_FAILED",
+      parsed.error?.message ?? "The appointment could not be moved.",
+    );
+  await audit(deps, auth, tool, "ok", interactionId, {
+    outbound_call: true,
+    booking_id: target.id,
+    outcome: "rescheduled",
+    date,
+    time,
+  });
+  return json({
+    ok: true,
+    outbound_call: true,
+    result: {
+      success: true,
+      rescheduled: true,
+      data: { appointment_id: target.id, date, time },
+    },
+  });
+}
+
+/** The booking engine's cancel (capability-checked, calendar event removed), as a plain result. */
+function defaultCancelAppointment(supabaseAdmin: Client) {
+  return async (
+    input: CancelAppointmentInput,
+  ): Promise<{ success: true } | { success: false; error: { code: string; message: string } }> => {
+    const { cancel_calendar_event } = await import("./calendar/calendar-tools.server.ts");
+    const result = await cancel_calendar_event(supabaseAdmin, input);
+    return result.success
+      ? { success: true }
+      : { success: false, error: { code: result.error.code, message: result.error.message } };
   };
 }
 
@@ -973,6 +1217,22 @@ export async function handleSarvamAgentRequest(
       source: "voice",
     };
     const execute = deps.executeTool ?? (await defaultExecuteTool(deps.supabaseAdmin));
+
+    if (
+      tool === "list_appointments" ||
+      tool === "reschedule_appointment" ||
+      tool === "cancel_appointment"
+    )
+      return handleAppointmentTool({
+        deps,
+        auth,
+        tool,
+        body,
+        interactionId,
+        now,
+        toolCtx,
+        execute,
+      });
 
     if (tool === "check_availability" || tool === "book_appointment") {
       const date = str(body, "date", 10);
@@ -1360,7 +1620,9 @@ export function sarvamToolConfiguration(
   const allowed = new Set<string>(
     OUTBOUND_AGENT_TOOLS.filter((t) => !options.tools || options.tools.includes(t)),
   );
-  const specs = inbound.tools.filter((t) => allowed.has(t.name));
+  const specs = [...inbound.tools, ...appointmentToolSpecs(inbound.tools)].filter((t) =>
+    allowed.has(t.name),
+  );
   const promptOptions = { role, tools: specs.map((t) => t.name), healthcare } as const;
   return {
     role,
@@ -1405,6 +1667,67 @@ export function sarvamToolConfiguration(
     systemPrompt: buildSarvamAgentPrompt(promptOptions),
     allowlistIps: inbound.allowlistIps,
   };
+}
+
+/**
+ * The outbound agent's tools for the dialled person's own appointments. Declared only on
+ * the outbound template (never inbound: ClickAI's API refuses them for an inbound
+ * credential), built from the book_appointment spec so the address and credential match.
+ * Each reply template says "changed" only when ClickAI's reply says it was.
+ */
+function appointmentToolSpecs(inboundTools: SarvamToolSpec[]): SarvamToolSpec[] {
+  const book = inboundTools.find((t) => t.name === "book_appointment");
+  if (!book) return [];
+  const root = book.url.replace("/tools/book_appointment", "");
+  const common = {
+    lifecycle: "run" as const,
+    method: "POST" as const,
+    auth: book.auth,
+  };
+  const ids = { interaction_id: "@Interaction ID", clickai_call_id: "@clickai_call_id" };
+  const notChanged =
+    "{% else %}NOT CHANGED{% if result and result.error and result.error.message %} ({{ result.error.message }}){% endif %}. Nothing was changed: the appointment is exactly as it was. Say clearly that it was not changed, and give the business phone number.{% endif %}";
+  return [
+    {
+      ...common,
+      name: "list_appointments",
+      url: `${root}/tools/list_appointments`,
+      body: { ...ids },
+      purpose:
+        "The person's own upcoming appointments for the number ClickAI dialled (appointment_id, date, time, service). Read back only what it returns.",
+    },
+    {
+      ...common,
+      name: "reschedule_appointment",
+      url: `${root}/tools/reschedule_appointment`,
+      body: {
+        ...ids,
+        appointment_id: "the appointment_id list_appointments returned",
+        date: "YYYY-MM-DD (the NEW date)",
+        time: "HH:mm (24-hour, business local time, the NEW time)",
+      },
+      purpose:
+        "Moves that appointment to a time check_availability returned. Say it is moved only when the reply says RESCHEDULED.",
+      responseTemplate:
+        "{% if ok and result.success and result.rescheduled %}RESCHEDULED: ClickAI moved the appointment to {{ result.data.date }} at {{ result.data.time }}. Tell them the new day, date and time." +
+        '{% elif result and result.error and result.error.code == "SLOT_NO_LONGER_AVAILABLE" %}NOT CHANGED: that time was just taken. The appointment is still at its old time. Call check_availability again for that date and offer only times it returns.' +
+        notChanged,
+    },
+    {
+      ...common,
+      name: "cancel_appointment",
+      url: `${root}/tools/cancel_appointment`,
+      body: {
+        ...ids,
+        appointment_id: "the appointment_id list_appointments returned",
+        confirmed: "true only after the person clearly said to cancel this appointment",
+      },
+      purpose: "Cancels that appointment. Say it is cancelled only when the reply says CANCELLED.",
+      responseTemplate:
+        "{% if ok and result.success and result.cancelled %}CANCELLED: ClickAI cancelled the appointment. Tell them it is cancelled." +
+        notChanged.replace("NOT CHANGED", "NOT CANCELLED").replace("not changed", "not cancelled"),
+    },
+  ];
 }
 
 function inboundToolConfiguration(

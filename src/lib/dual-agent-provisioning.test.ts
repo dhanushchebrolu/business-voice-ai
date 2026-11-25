@@ -120,9 +120,18 @@ describe("central templates", () => {
     for (const caps of [{}, everything]) {
       const c = buildOutboundAgentConfig(snapshot(caps), VOICE);
       // Booking only with the customer's booking capability; the rest always.
+      // (changing or cancelling needs its own toggle on top of booking: see the next test)
+      const appointmentTools = [
+        "book_appointment",
+        "list_appointments",
+        "reschedule_appointment",
+        "cancel_appointment",
+      ];
       assert.deepEqual(
         c.tools.enable,
-        OUTBOUND_AGENT_TOOLS.filter((t) => t !== "book_appointment" || caps === everything),
+        OUTBOUND_AGENT_TOOLS.filter(
+          (t) => !appointmentTools.includes(t) || (caps === everything && t === "book_appointment"),
+        ),
       );
       for (const t of OUTBOUND_FORBIDDEN_TOOLS)
         assert.ok(!(c.tools.enable as string[]).includes(t), t);
@@ -154,8 +163,8 @@ describe("central templates", () => {
     assert.equal(a.fingerprint, buildOutboundAgentConfig(snapshot({}), VOICE).fingerprint);
     assert.match(
       a.fingerprint,
-      /^o6-[0-9a-f]{8}$/,
-      "outbound template version 6 (shared prompt and reply templates)",
+      /^o7-[0-9a-f]{8}$/,
+      "outbound template version 7 (language rules, appointment tools)",
     );
     assert.match(buildUniversalAgentConfig(snapshot({}), VOICE).fingerprint, /^u1-[0-9a-f]{8}$/);
   });
@@ -544,7 +553,7 @@ describe("outbound template (v2 call settings, v3 booking): post-call variables 
 
   test("call settings: 300 s hard maximum, voicemail detection with a fixed message, no transfer", () => {
     const c = buildOutboundAgentConfig(snapshot({}), VOICE);
-    assert.equal(c.templateVersion, 6);
+    assert.equal(c.templateVersion, 7);
     assert.deepEqual(c.callHandling, {
       maxCallSeconds: 300,
       voicemailDetection: true,
@@ -567,5 +576,67 @@ describe("outbound template (v2 call settings, v3 booking): post-call variables 
     );
     assert.doesNotMatch(outboundVoicemailMessage("Smile Dental"), /\{\{|@|\d{6,}/);
     assert.ok(outboundVoicemailMessage("x".repeat(500)).length < 200);
+  });
+});
+
+describe("the outbound agent's appointment tools follow the customer's own capabilities", () => {
+  const booking = { calendar_book: true };
+  const names = (caps: Record<string, boolean>) =>
+    buildOutboundAgentConfig(snapshot(caps), VOICE).tools.enable as string[];
+  const changeTools = ["list_appointments", "reschedule_appointment", "cancel_appointment"];
+
+  test("no booking capability: no appointment tools at all, even if the toggles for changing are on", () => {
+    for (const caps of [{}, { reschedule_appointment: true, cancel_appointment: true }]) {
+      const enabled = names(caps);
+      for (const t of ["book_appointment", ...changeTools]) assert.ok(!enabled.includes(t), t);
+    }
+  });
+
+  test("booking only: it books, but cannot look up, move or cancel", () => {
+    const enabled = names(booking);
+    assert.ok(enabled.includes("book_appointment"));
+    for (const t of changeTools) assert.ok(!enabled.includes(t), t);
+  });
+
+  test("rescheduling on: lookup and reschedule, not cancel", () => {
+    const enabled = names({ ...booking, reschedule_appointment: true });
+    assert.deepEqual(
+      changeTools.filter((t) => enabled.includes(t)),
+      ["list_appointments", "reschedule_appointment"],
+    );
+  });
+
+  test("cancelling on: lookup and cancel, not reschedule", () => {
+    const enabled = names({ ...booking, cancel_appointment: true });
+    assert.deepEqual(
+      changeTools.filter((t) => enabled.includes(t)),
+      ["list_appointments", "cancel_appointment"],
+    );
+  });
+
+  test("either the dashboard toggle or the backend key counts (an agent saved before the key existed)", () => {
+    const viaKeys = names({ ...booking, calendar_reschedule: true, calendar_cancel: true });
+    const viaToggles = names({
+      ...booking,
+      reschedule_appointment: true,
+      cancel_appointment: true,
+    });
+    for (const enabled of [viaKeys, viaToggles])
+      for (const t of changeTools) assert.ok(enabled.includes(t), t);
+  });
+
+  test("the generated prompt and template match: tools present, prompt section present, and not otherwise", () => {
+    const full = buildOutboundAgentConfig(
+      snapshot({ ...booking, reschedule_appointment: true, cancel_appointment: true }),
+      VOICE,
+    );
+    assert.match(full.systemPrompt, /## Existing appointments/);
+    assert.match(full.systemPrompt, /tool:reschedule_appointment/);
+    assert.match(full.systemPrompt, /tool:cancel_appointment/);
+    const plain = buildOutboundAgentConfig(snapshot(booking), VOICE);
+    assert.doesNotMatch(plain.systemPrompt, /## Existing appointments/);
+    assert.doesNotMatch(plain.systemPrompt, /reschedule_appointment|cancel_appointment/);
+    assert.match(plain.systemPrompt, /cannot do that, give \{\{business_phone\}\} once/);
+    assert.notEqual(full.fingerprint, plain.fingerprint);
   });
 });

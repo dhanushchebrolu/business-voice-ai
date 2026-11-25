@@ -290,14 +290,16 @@ describe("booking reply template (generated for both channels)", () => {
     "utf8",
   );
 
-  test("only check_availability and book_appointment carry reply templates", () => {
+  test("only the booking and appointment-change tools carry reply templates", () => {
+    const withTemplate = new Set([
+      "book_appointment",
+      "check_availability",
+      "reschedule_appointment",
+      "cancel_appointment",
+    ]);
     for (const tpl of [inboundTpl, outboundTpl])
       for (const t of tpl.tools)
-        assert.equal(
-          Boolean(t.responseTemplate),
-          t.name === "book_appointment" || t.name === "check_availability",
-          t.name,
-        );
+        assert.equal(Boolean(t.responseTemplate), withTemplate.has(t.name), t.name);
   });
 
   test("it produces exactly the reply words the prompt reacts to, confirmed only on success", () => {

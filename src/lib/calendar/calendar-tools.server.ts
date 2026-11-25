@@ -30,6 +30,7 @@ import {
   type AvailabilitySlot,
   type BusinessHourOverride,
 } from "./calendar-service.server.ts";
+import { CAPABILITY_PERMISSION_KEYS } from "../business-types.ts";
 import { businessDayUtcBounds } from "./timezone.ts";
 import {
   createBooking,
@@ -260,7 +261,12 @@ export async function assertToolPermission(
     return { errorCode: "AGENT_NOT_FOUND", message: "No agent is configured for this business." };
   }
   const capabilities = (agent.capabilities as Record<string, unknown>) ?? {};
-  if (capabilities[permission] !== true) {
+  // The backend key, or the dashboard toggle it is derived from (business-types.ts
+  // CAPABILITY_PERMISSION_KEYS): an agent saved before the key existed has the toggle only.
+  const toggle = Object.entries(CAPABILITY_PERMISSION_KEYS).find(
+    ([, key]) => key === permission,
+  )?.[0];
+  if (capabilities[permission] !== true && !(toggle && capabilities[toggle] === true)) {
     return {
       errorCode: "TOOL_NOT_PERMITTED",
       message: `This agent is not permitted to use ${permission}.`,

@@ -1,4 +1,5 @@
 import type { AgentSnapshot } from "./agent-instructions.ts";
+import { isCapabilityEnabled } from "./business-types.ts";
 import { normalizeCustomerPhone } from "./phone-number.ts";
 import { sarvamAgentConfigPatch, validateVoiceLanguageSettings } from "./sarvam-voice-catalog.ts";
 import {
@@ -355,7 +356,18 @@ export function buildOutboundAgentConfig(
       : voiceLanguageConfig(voiceLanguage);
   // Booking follows the customer's own capability, exactly as on the inbound agent.
   const canBook = buildUniversalAgentConfig(s).tools.enable.includes("book_appointment");
-  const enable = OUTBOUND_AGENT_TOOLS.filter((t) => t !== "book_appointment" || canBook);
+  // Changing or cancelling an appointment follows the customer's own toggles (either the
+  // dashboard id or the backend key counts), and needs booking itself to be on.
+  const caps = s.agent.capabilities ?? {};
+  const canReschedule = canBook && isCapabilityEnabled(caps, "reschedule_appointment");
+  const canCancel = canBook && isCapabilityEnabled(caps, "cancel_appointment");
+  const allowedByCapability: Record<string, boolean> = {
+    book_appointment: canBook,
+    reschedule_appointment: canReschedule,
+    cancel_appointment: canCancel,
+    list_appointments: canReschedule || canCancel,
+  };
+  const enable = OUTBOUND_AGENT_TOOLS.filter((t) => allowedByCapability[t] ?? true);
   const core = {
     role: "outbound" as const,
     templateVersion: OUTBOUND_AGENT_TEMPLATE_VERSION,

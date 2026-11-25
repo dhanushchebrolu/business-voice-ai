@@ -38,6 +38,11 @@ export const OUTBOUND_AGENT_TOOLS = [
   "get_business_info",
   "check_availability",
   "book_appointment",
+  // The person's own appointments, found by the number ClickAI dialled; each is on the
+  // template only when the customer's capability for it is on.
+  "list_appointments",
+  "reschedule_appointment",
+  "cancel_appointment",
   "record_call_outcome",
 ] as const;
 
@@ -61,6 +66,9 @@ export function roleAllowsAgentApi(role: AgentRole, tool: string | undefined): b
     tool === "get_business_info" ||
     tool === "check_availability" ||
     tool === "book_appointment" ||
+    tool === "list_appointments" ||
+    tool === "reschedule_appointment" ||
+    tool === "cancel_appointment" ||
     tool === "record_call_outcome"
   );
 }
