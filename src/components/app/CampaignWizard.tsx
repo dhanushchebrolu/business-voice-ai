@@ -1,4 +1,5 @@
 import { Link, useBlocker, useNavigate } from "@tanstack/react-router";
+import { OutboundConcurrencyCard } from "@/components/app/OutboundConcurrencyCard";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -1204,10 +1205,14 @@ export function CampaignWizard({
               going over.
             </p>
           </div>
+          {orgId ? (
+            <div className="mt-5">
+              <OutboundConcurrencyCard organizationId={orgId} />
+            </div>
+          ) : null}
           <div className="mt-5 rounded-md border border-border bg-surface/50 px-4 py-3 text-sm">
             <p className="font-medium">Fixed by ClickAI (not adjustable per campaign)</p>
             <ul className="mt-1 list-disc space-y-0.5 pl-5 text-muted-foreground">
-              <li>At most {PLATFORM_PACING.maxInFlightPerCampaign} calls in progress at once.</li>
               <li>At most {PLATFORM_PACING.contactsPerMinute} new calls started per minute.</li>
               <li>Calls last at most 5 minutes; your wallet must cover each call.</li>
             </ul>

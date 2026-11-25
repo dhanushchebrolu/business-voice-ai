@@ -167,6 +167,7 @@ before(() => {
   const bizB = randomUUID();
   const seed = execSql(`
     INSERT INTO public.organizations (id, name, owner_id) VALUES ('${ORG_A}', 'Clinic A', '${randomUUID()}'), ('${ORG_B}', 'Clinic B', '${randomUUID()}');
+    UPDATE public.organizations SET outbound_concurrency = 50; -- the per-customer cap is covered in customer_outbound_concurrency.pg.test.ts
     INSERT INTO public.businesses (id, organization_id, name, timezone) VALUES ('${biz}', '${ORG_A}', 'A', 'Asia/Kolkata'), ('${bizB}', '${ORG_B}', 'B', 'Asia/Kolkata');
     INSERT INTO public.agent_configs (organization_id, business_id) VALUES ('${ORG_A}', '${biz}'), ('${ORG_B}', '${bizB}') ON CONFLICT (business_id) DO NOTHING;
     INSERT INTO public.sarvam_agent_integrations (id, organization_id, agent_config_id, token_hash, token_prefix, role)

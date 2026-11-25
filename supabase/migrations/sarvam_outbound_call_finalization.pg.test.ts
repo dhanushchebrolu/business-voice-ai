@@ -182,6 +182,10 @@ before(() => {
     }
   }
   if (!seeded) setupFailure = `migration ${FIX} not found`;
+  // These fixtures open several calls at once; the per-customer cap has its own file
+  // (customer_outbound_concurrency.pg.test.ts), so give them room here.
+  sql(`ALTER TABLE public.organizations ALTER COLUMN outbound_concurrency SET DEFAULT 50;
+      UPDATE public.organizations SET outbound_concurrency = 50;`);
 });
 
 after(() => {

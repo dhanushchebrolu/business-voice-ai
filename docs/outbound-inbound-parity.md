@@ -90,3 +90,11 @@ Until this is done for a customer, their live outbound agent behaves as it was b
 - That outbound calls reach `context` before the person speaks (the live-call counter and
   the shared call slots both assume an outbound call's first `context` request marks the
   answer; it did on the test call).
+
+## Customer-selectable outbound concurrency
+
+The platform has one limit on simultaneous Sarvam calls (`outbound.max_concurrent_calls`, default 4). Each customer chooses how many of those their **outbound** calls may use (`organizations.outbound_concurrency`, default 2 when unset); the rest is kept for incoming calls. The cap follows the platform limit if it changes (`min(choice, limit)`), so the customer's options are always 1..limit.
+
+Enforced in `enforce_outbound_concurrency()` (migration `20261202090000`), under the same global lock as the platform limit: the platform limit first (live incoming calls count toward it), then the customer's own unfinished outbound calls across every campaign and single call. A refusal rolls back the admission, so nothing is reserved or charged; the dispatcher leaves the contact untouched and tries again on the next tick. Lowering the setting never ends a call; new calls wait until fewer than the cap are running.
+
+Known limit: the reserve for incoming calls is per customer (limit minus that customer's cap). With several customers dialling, their outbound calls together can fill the platform limit; incoming calls of every customer still count toward it.

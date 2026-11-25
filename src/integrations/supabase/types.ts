@@ -1793,6 +1793,7 @@ export type Database = {
           assigned_admin_id: string | null;
           business_type: string | null;
           campaign_dispatch_enabled: boolean;
+          outbound_concurrency: number | null;
           city: string | null;
           client_id: string;
           contact_email: string | null;
@@ -1841,6 +1842,7 @@ export type Database = {
           assigned_admin_id?: string | null;
           business_type?: string | null;
           campaign_dispatch_enabled?: boolean;
+          outbound_concurrency?: number | null;
           city?: string | null;
           client_id?: string;
           contact_email?: string | null;
@@ -1889,6 +1891,7 @@ export type Database = {
           assigned_admin_id?: string | null;
           business_type?: string | null;
           campaign_dispatch_enabled?: boolean;
+          outbound_concurrency?: number | null;
           city?: string | null;
           client_id?: string;
           contact_email?: string | null;

@@ -16,6 +16,7 @@ import {
 } from "@/lib/sarvam-admin.functions";
 import { ReasonDialog } from "@/components/admin/ReasonDialog";
 import { CallDetailDialog } from "@/components/admin/CallDetailDialog";
+import { OutboundConcurrencyAdmin } from "@/components/admin/OutboundConcurrencyAdmin";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -137,6 +138,8 @@ function AdminCalls() {
           tone={profit >= 0 ? "accent" : "default"}
         />
       </div>
+
+      <OutboundConcurrencyAdmin />
 
       <SectionCard title={`${rows.length} calls`}>
         {rows.length === 0 ? (

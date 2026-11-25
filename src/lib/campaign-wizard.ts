@@ -33,8 +33,8 @@ export const PLATFORM_CALLING_HOURS = {
   end: "21:00",
   timeZone: "Asia/Kolkata",
 } as const;
-/** Fixed by the dispatcher (campaign-dispatch.server.ts); not configurable per campaign. */
-export const PLATFORM_PACING = { maxInFlightPerCampaign: 3, contactsPerMinute: 20 } as const;
+/** Fixed by the dispatcher (campaign-dispatch.server.ts); not configurable per campaign. Simultaneous calls are the customer's own setting (outbound-concurrency.ts). */
+export const PLATFORM_PACING = { contactsPerMinute: 20 } as const;
 /** Only these destinations are dialled today (OUTBOUND_ALLOWED_COUNTRY_CODES default). */
 export const DIALLABLE_PREFIX = "+91";
 /** Rows per import (wizard, campaign page and server): one import is one transaction under the Data API's 8 s timeout. */

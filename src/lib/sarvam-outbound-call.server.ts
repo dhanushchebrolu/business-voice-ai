@@ -8,6 +8,7 @@ import {
 } from "./telephony.server.ts";
 import { SarvamTelephonyAdapter } from "./telephony/sarvam-provider.server.ts";
 import { TelephonyAdapterError } from "./telephony/adapter.ts";
+import { orgBusyMessage, orgLimitFromError } from "./outbound-concurrency.ts";
 import { UNRESOLVED_SARVAM_STATUSES } from "./sarvam-call-review.ts";
 import { normalizeCustomerPhone } from "./phone-number.ts";
 import { finalizeTerminalCallSafely } from "./telephony/call-finalization.server.ts";
@@ -98,6 +99,8 @@ export function admissionRefusalMessage(reason: unknown): string {
       return OUTBOUND_EMERGENCY_STOP_MESSAGE;
     case "provider_concurrency_limit":
       return PROVIDER_BUSY_MESSAGE;
+    case "org_concurrency_limit":
+      return "Your outbound limit of simultaneous calls is reached. The next call starts when one finishes.";
     case "outside_calling_hours":
       return CALLING_HOURS_MESSAGE;
     default:
@@ -462,6 +465,9 @@ export async function sendSarvamInstantOutboundCall(
     // The database refused the call row: every shared Sarvam slot is taken (nothing was reserved).
     if (/PROVIDER_CONCURRENCY_LIMIT/.test(admissionError.message))
       throw new Error(PROVIDER_BUSY_MESSAGE);
+    // The customer's own outbound limit (their campaign setting) is reached.
+    const ownCap = orgLimitFromError(admissionError.message);
+    if (ownCap !== null) throw new Error(orgBusyMessage(ownCap));
     throw admissionError;
   }
   const admitted = (admission ?? {}) as {

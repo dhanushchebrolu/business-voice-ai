@@ -12,6 +12,7 @@ import { checkTelephonyAccess } from "./telephony-guard.server.ts";
 import { OUTBOUND_MAX_CALL_SECONDS_CAP } from "./agent-roles.ts";
 import { SarvamTelephonyAdapter } from "./telephony/sarvam-provider.server.ts";
 import { TelephonyAdapterError } from "./telephony/adapter.ts";
+import { readOrgCap } from "./outbound-concurrency.server.ts";
 
 /** Sarvam answers that mean the account, not the contact, is the problem. */
 const ACCOUNT_REJECTION_STATUSES = new Set([401, 402, 403]);
@@ -73,27 +74,6 @@ const MAX_CONTACTS_PER_CAMPAIGN_PER_TICK = 20;
  * The most outbound calls (single and campaign) one customer may have open at
  * once while a campaign dials; checked atomically by admit_campaign_outbound_call.
  */
-/**
- * Fallback when the shared slot limit cannot be read: Sarvam's default of 4
- * simultaneous calls on the account (outbound_concurrency(), migration
- * 20261201090000, is the real, shared limit and is enforced where the call is written).
- */
-export const CAMPAIGN_MAX_IN_FLIGHT = 4;
-
-/** The shared call-slot limit (platform_settings 'outbound.max_concurrent_calls'), or the Sarvam default. */
-export async function readSlotLimit(supabaseAdmin: SupabaseClient<Database>): Promise<number> {
-  try {
-    const rpc = supabaseAdmin.rpc.bind(supabaseAdmin) as unknown as (
-      fn: string,
-    ) => PromiseLike<{ data: { slot_limit?: number }[] | null; error: unknown }>;
-    const { data, error } = await rpc("outbound_concurrency");
-    const limit = data?.[0]?.slot_limit;
-    if (!error && typeof limit === "number" && Number.isInteger(limit) && limit >= 1) return limit;
-  } catch {
-    /* fall back to the default */
-  }
-  return CAMPAIGN_MAX_IN_FLIGHT;
-}
 
 /** admit_campaign_outbound_call's answer. */
 export type CampaignAdmission =
@@ -148,8 +128,11 @@ export interface DispatchDeps {
   ) => Promise<Record<string, unknown>>;
   finalize: (callId: string) => Promise<unknown>;
   now: () => number;
-  /** The shared call-slot limit; read from the database when absent. */
-  slotLimit?: () => Promise<number>;
+  /**
+   * The customer's outbound cap (their choice, within the platform limit); read from the
+   * database when absent. Every campaign of the customer shares it.
+   */
+  outboundCap?: (organizationId: string) => Promise<number>;
 }
 
 export interface DispatchOptions {
@@ -337,8 +320,11 @@ async function dispatchOneCampaign(
     .order("created_at")
     .limit(MAX_CONTACTS_PER_CAMPAIGN_PER_TICK);
 
-  // One customer may use every shared slot; the database keeps the total within the limit.
-  const maxInFlight = await (deps.slotLimit ?? (() => readSlotLimit(supabaseAdmin)))();
+  // The customer's own cap, shared by all their campaigns; the database enforces it (and the
+  // platform-wide limit) atomically where each call is written.
+  const maxInFlight = await (deps.outboundCap ?? ((org) => readOrgCap(supabaseAdmin, org)))(
+    campaign.organization_id,
+  );
   let dialed = 0;
   let skipped = 0;
   let emergencyStop = false;
@@ -829,6 +815,9 @@ export async function admitCampaignCall(
     // The database refused the call row: every shared Sarvam slot is taken (nothing was reserved).
     if (/PROVIDER_CONCURRENCY_LIMIT/.test(error.message))
       return { result: "refused", reason: "provider_concurrency_limit" };
+    // ...or the customer's own cap is (nothing was reserved either way).
+    if (/ORG_CONCURRENCY_LIMIT/.test(error.message))
+      return { result: "refused", reason: "org_concurrency_limit" };
     throw new Error(error.message);
   }
   const answer = (data ?? {}) as Record<string, unknown>;

@@ -730,13 +730,13 @@ describe("campaign dispatch — the hard maximum call length", () => {
     }
   };
 
-  test("every call goes through admission with the shared slot limit (4 by default) and its own call id", async () => {
+  test("every call goes through admission with the customer's own cap (2 until they choose) and its own call id", async () => {
     const t = setup(2);
     await dispatchDueCampaigns({ deps: t.deps });
     assert.equal(t.requests.length, 2);
     assert.equal(t.admission.requests.length, 2);
     for (const req of t.admission.requests) {
-      assert.equal(req.maxInFlight, 4);
+      assert.equal(req.maxInFlight, 2);
       assert.equal(req.retryAttempt, 0);
       const cc = t.table("campaign_contacts").find((c) => c["id"] === req.campaignContactId)!;
       assert.equal(cc["current_call_id"], req.callId, "admitted for exactly the claimed call");
@@ -1417,7 +1417,7 @@ describe("campaign dispatch — shared call slots (migration 20261201090000)", (
       occupied +
       t.table("call_logs").filter((c) => UNFINISHED.includes(String(c["status"]))).length;
     const base = t.deps.admitCampaignCall;
-    t.deps.slotLimit = async () => LIMIT;
+    t.deps.outboundCap = async () => LIMIT;
     t.deps.admitCampaignCall = async (req) =>
       inUse() >= LIMIT ? { result: "refused", reason: "provider_concurrency_limit" } : base(req);
     return { inUse };
@@ -1548,11 +1548,175 @@ describe("campaign dispatch — shared call slots (migration 20261201090000)", (
     assert.equal(t.dialed.length, 0);
   });
 
-  test("the per-customer cap follows the shared limit (read from the database, default 4)", async () => {
+  test("the cap admission is asked for is the customer's own cap", async () => {
     const t = setup(2);
     withSharedSlots(t);
-    t.deps.slotLimit = async () => 6;
+    t.deps.outboundCap = async () => 6;
     await dispatchDueCampaigns({ deps: t.deps });
     assert.ok(t.admission.requests.every((r) => r.maxInFlight === 6));
+  });
+});
+
+describe("customer-selected outbound concurrency", () => {
+  /**
+   * What the database enforces for one dial: the customer's own unfinished outbound calls
+   * (every campaign, `sameCustomerElsewhere` for the ones this run does not see) must be under
+   * their cap, and the whole account (everyone's outbound plus live inbound) under the limit.
+   */
+  function allocator(
+    t: ReturnType<typeof setup>,
+    o: {
+      limit?: number;
+      cap: number;
+      otherCustomers?: number;
+      inbound?: number;
+      sameCustomerElsewhere?: number;
+    },
+  ) {
+    const UNFINISHED = ["initiated", "ringing", "answered", "in_progress", "outcome_unknown"];
+    const limit = o.limit ?? 4;
+    const state = { cap: o.cap, inbound: o.inbound ?? 0 };
+    const own = () =>
+      (o.sameCustomerElsewhere ?? 0) +
+      t.table("call_logs").filter((c) => UNFINISHED.includes(String(c["status"]))).length;
+    const total = () => own() + (o.otherCustomers ?? 0) + state.inbound;
+    const base = t.deps.admitCampaignCall;
+    t.deps.outboundCap = async () => state.cap;
+    t.deps.admitCampaignCall = async (req) => {
+      if (own() >= state.cap) return { result: "refused", reason: "org_concurrency_limit" };
+      if (total() >= limit) return { result: "refused", reason: "provider_concurrency_limit" };
+      return base(req);
+    };
+    return { state, own, total };
+  }
+  const started = (t: ReturnType<typeof setup>) =>
+    t.table("call_logs").filter((c) => c["status"] === "initiated").length;
+
+  test("a customer who has not chosen is held to 2 (the default), and admission is asked for 2", async () => {
+    const t = setup(6);
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.ok(t.admission.requests.length > 0);
+    assert.ok(t.admission.requests.every((r) => r.maxInFlight === 2));
+  });
+
+  for (const [choice, reserved] of [
+    [1, 3],
+    [2, 2],
+    [3, 1],
+    [4, 0],
+  ] as const) {
+    test(`choosing ${choice}: exactly ${choice} outbound calls run, ${reserved} slots stay clear for incoming calls`, async () => {
+      const t = setup(8);
+      const a = allocator(t, { cap: choice });
+      await dispatchDueCampaigns({ deps: t.deps });
+      assert.equal(started(t), choice);
+      assert.equal(4 - a.own(), reserved, "what is left over is what inbound may use");
+      const waiting = t.table("campaign_contacts").filter((c) => c["status"] === "pending");
+      assert.equal(waiting.length, 8 - choice);
+      assert.ok(waiting.every((c) => c["attempts"] === 0));
+      assert.equal(t.table("campaigns")[0]!["status"], "running", "waiting never pauses");
+    });
+  }
+
+  test("calls start together up to the choice, then the next contact waits for one to finish", async () => {
+    const t = setup(6);
+    allocator(t, { cap: 2 });
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(started(t), 2);
+    t.table("call_logs")[0]!["status"] = "completed";
+    t.table("campaign_contacts")[0]!["status"] = "completed";
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(started(t), 2, "one finished, one new started: never more than 2 at once");
+    assert.equal(t.dialed.length, 3);
+  });
+
+  test("incoming calls use their reserved slots, and a customer at 2 still has them while outbound is full", async () => {
+    const t = setup(6);
+    const a = allocator(t, { cap: 2 });
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(started(t), 2);
+    // Two incoming calls arrive: the account is exactly full, and outbound did not take their room.
+    a.state.inbound = 2;
+    assert.equal(a.total(), 4);
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(started(t), 2, "nothing more starts while the line is full");
+  });
+
+  test("a live incoming call counts toward the account limit and shrinks what outbound can start", async () => {
+    const t = setup(6);
+    allocator(t, { cap: 4, inbound: 2 });
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(started(t), 2, "cap 4, but two incoming calls already hold half the account");
+  });
+
+  test("other customers' outbound calls count too: the account limit cannot be gone around", async () => {
+    const t = setup(6);
+    allocator(t, { cap: 4, otherCustomers: 3 });
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(started(t), 1);
+  });
+
+  test("another campaign of the same customer shares the cap", async () => {
+    const t = setup(6);
+    allocator(t, { cap: 3, sameCustomerElsewhere: 2 });
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(started(t), 1, "3 allowed, 2 already running in the customer's other campaign");
+  });
+
+  test("a customer with a bigger platform limit than the default can be offered more", async () => {
+    const t = setup(10);
+    allocator(t, { cap: 6, limit: 8 });
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(started(t), 6);
+  });
+
+  test("lowering the choice while calls run ends nothing and holds new calls until activity falls", async () => {
+    const t = setup(10);
+    const a = allocator(t, { cap: 4 });
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(started(t), 4);
+    a.state.cap = 2;
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(started(t), 4, "the four running calls are untouched, and none is added");
+    assert.ok(t.table("call_logs").every((c) => c["status"] === "initiated"));
+    for (const c of t.table("call_logs").slice(0, 2)) c["status"] = "completed";
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(started(t), 2, "two running is the cap now: nothing starts yet");
+    t.table("call_logs")[2]!["status"] = "completed";
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(started(t), 2, "one finished, one new started, still within 2");
+  });
+
+  test("overlapping runs never take more than the choice and never dial anyone twice", async () => {
+    const t = setup(10);
+    const a = allocator(t, { cap: 2 });
+    await Promise.all([
+      dispatchDueCampaigns({ deps: t.deps }),
+      dispatchDueCampaigns({ deps: t.deps }),
+      dispatchDueCampaigns({ deps: t.deps }),
+    ]);
+    assert.ok(a.own() <= 2, `running ${a.own()}`);
+    assert.equal(new Set(t.dialed).size, t.dialed.length);
+  });
+
+  test("a refusal because of the customer's own cap leaves the contact untouched and never pauses", async () => {
+    const t = setup(3);
+    allocator(t, { cap: 1 });
+    await dispatchDueCampaigns({ deps: t.deps });
+    const waiting = t.table("campaign_contacts").filter((c) => c["status"] === "pending");
+    assert.equal(waiting.length, 2);
+    assert.equal(t.table("campaigns")[0]!["status"], "running");
+    assert.ok(t.table("campaign_contacts").every((c) => c["status"] !== "failed"));
+  });
+
+  test("the emergency stop still wins, whatever the choice", async () => {
+    const t = setup(4);
+    allocator(t, { cap: 4 });
+    (t.db.tables["platform_settings"] ??= []).push({
+      key: "outbound.calling_paused",
+      value: { enabled: true },
+    });
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 0);
   });
 });

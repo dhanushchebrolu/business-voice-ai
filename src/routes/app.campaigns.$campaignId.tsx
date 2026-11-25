@@ -37,6 +37,7 @@ import {
 import { describeQueryError } from "@/lib/query-error";
 import { CampaignContextPanel, CampaignInsights } from "@/components/app/CampaignContextPanel";
 import { CampaignAnalytics } from "@/components/app/CampaignAnalytics";
+import { OutboundConcurrencyCard } from "@/components/app/OutboundConcurrencyCard";
 import {
   CampaignLaunchButton,
   CampaignLaunchChecklist,
@@ -265,6 +266,8 @@ function CampaignDetailPage() {
       <CampaignContextPanel campaign={campaign} onSaved={invalidate} />
 
       <CampaignInsights campaignId={campaignId} status={campaign.status} onChanged={invalidate} />
+
+      <OutboundConcurrencyCard organizationId={campaign.organization_id} />
 
       <CampaignAnalytics campaignId={campaignId} />
 

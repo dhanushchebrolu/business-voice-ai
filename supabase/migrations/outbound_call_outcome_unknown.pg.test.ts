@@ -152,7 +152,10 @@ before(() => {
   // set out of the way so it doesn't refuse their fixtures.
   const slots = sql(
     `INSERT INTO public.platform_settings (key, value) VALUES ('outbound.max_concurrent_calls', '{"limit": 50}'::jsonb)
-     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;`,
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+     -- and so is the per-customer cap (customer_outbound_concurrency.pg.test.ts): every fixture customer gets 50
+     ALTER TABLE public.organizations ALTER COLUMN outbound_concurrency SET DEFAULT 50;
+     UPDATE public.organizations SET outbound_concurrency = 50;`,
   );
   if (slots.status !== 0) setupFailure = `slot limit setup failed: ${slots.stderr}`;
 });
