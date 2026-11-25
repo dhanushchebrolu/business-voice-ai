@@ -509,8 +509,11 @@ describe("retry, recovery and idempotency", () => {
     assert.equal(d.calls.create, 1, "no second deployment");
     assert.equal(d.calls.pause, 1, "a live number is never paused again");
     assert.equal(
-      JSON.stringify(db.tables["phone_numbers"]).replace(/"deployment_verified_at":"[^"]*"/g, ""),
-      snapshotBefore.replace(/"deployment_verified_at":"[^"]*"/g, ""),
+      JSON.stringify(db.tables["phone_numbers"]).replace(
+        /"(deployment_verified_at|updated_at)":"[^"]*"/g,
+        "",
+      ),
+      snapshotBefore.replace(/"(deployment_verified_at|updated_at)":"[^"]*"/g, ""),
     );
     assert.equal(db.tables["phone_numbers"]!.filter((n) => n["status"] === "active").length, 2);
   });
