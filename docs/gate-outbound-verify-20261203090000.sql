@@ -5,7 +5,7 @@ begin transaction read only;
 SELECT json_build_object(
   'all_pass', (SELECT system_identifier::text FROM pg_control_system()) = '7678069749886157684'
     AND (SELECT max(version) FROM supabase_migrations.schema_migrations) = '20261203090000'
-    AND (SELECT md5(statements[1]) FROM supabase_migrations.schema_migrations WHERE version = '20261203090000') = 'd1bddf1a38b069f6256fe7ff34cc810a'
+    AND (SELECT md5(statements[1]) FROM supabase_migrations.schema_migrations WHERE version = '20261203090000') = '7e99cde470c59dc5ad3c57af27620ca9'
     AND ((SELECT string_agg(column_name || ':' || data_type || ':' || is_nullable || ':' || coalesce(column_default, '-'), ',' ORDER BY column_name)
         FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'provisioning_runs'
          AND column_name IN ('step_states', 'current_job_step', 'last_checkpoint', 'failure_code', 'retryable', 'next_attempt_at', 'max_attempts', 'diagnostics', 'customer_message', 'idempotency_key', 'sarvam_agent_id'))
@@ -19,6 +19,12 @@ SELECT json_build_object(
      AND NOT has_table_privilege('service_role', 'public.provisioning_run_events', 'DELETE')
      AND NOT has_table_privilege('anon', 'public.provisioning_run_events', 'SELECT')
      AND NOT has_table_privilege('authenticated', 'public.provisioning_run_events', 'SELECT')
+     AND (SELECT relrowsecurity FROM pg_class WHERE oid = 'public.operator_bridge_tokens'::regclass)
+     AND has_table_privilege('service_role', 'public.operator_bridge_tokens', 'INSERT')
+     AND has_table_privilege('service_role', 'public.operator_bridge_tokens', 'UPDATE')
+     AND NOT has_table_privilege('service_role', 'public.operator_bridge_tokens', 'DELETE')
+     AND NOT has_table_privilege('anon', 'public.operator_bridge_tokens', 'SELECT')
+     AND NOT has_table_privilege('authenticated', 'public.operator_bridge_tokens', 'SELECT')
      AND (SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'public.provisioning_runs'::regclass AND conname = 'provisioning_runs_max_attempts_check' AND convalidated) IS NOT NULL)
     AND ((SELECT value FROM public.platform_settings WHERE key = 'outbound.calling_paused') = '{"enabled": false}'::jsonb
      AND (SELECT count(*) FROM public.phone_numbers WHERE outbound_enabled) = 0
@@ -38,6 +44,12 @@ SELECT json_build_object(
      AND NOT has_table_privilege('service_role', 'public.provisioning_run_events', 'DELETE')
      AND NOT has_table_privilege('anon', 'public.provisioning_run_events', 'SELECT')
      AND NOT has_table_privilege('authenticated', 'public.provisioning_run_events', 'SELECT')
+     AND (SELECT relrowsecurity FROM pg_class WHERE oid = 'public.operator_bridge_tokens'::regclass)
+     AND has_table_privilege('service_role', 'public.operator_bridge_tokens', 'INSERT')
+     AND has_table_privilege('service_role', 'public.operator_bridge_tokens', 'UPDATE')
+     AND NOT has_table_privilege('service_role', 'public.operator_bridge_tokens', 'DELETE')
+     AND NOT has_table_privilege('anon', 'public.operator_bridge_tokens', 'SELECT')
+     AND NOT has_table_privilege('authenticated', 'public.operator_bridge_tokens', 'SELECT')
      AND (SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'public.provisioning_runs'::regclass AND conname = 'provisioning_runs_max_attempts_check' AND convalidated) IS NOT NULL),
   'outbound_safety_unchanged', ((SELECT value FROM public.platform_settings WHERE key = 'outbound.calling_paused') = '{"enabled": false}'::jsonb
      AND (SELECT count(*) FROM public.phone_numbers WHERE outbound_enabled) = 0

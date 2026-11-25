@@ -2594,6 +2594,39 @@ export type Database = {
         };
         Relationships: [];
       };
+      operator_bridge_tokens: {
+        Row: {
+          created_at: string;
+          created_by: string;
+          expires_at: string;
+          id: string;
+          last_used_at: string | null;
+          revoked_at: string | null;
+          token_hash: string;
+          token_prefix: string;
+        };
+        Insert: {
+          created_at?: string;
+          created_by: string;
+          expires_at: string;
+          id?: string;
+          last_used_at?: string | null;
+          revoked_at?: string | null;
+          token_hash: string;
+          token_prefix: string;
+        };
+        Update: {
+          created_at?: string;
+          created_by?: string;
+          expires_at?: string;
+          id?: string;
+          last_used_at?: string | null;
+          revoked_at?: string | null;
+          token_hash?: string;
+          token_prefix?: string;
+        };
+        Relationships: [];
+      };
       provisioning_run_events: {
         Row: {
           created_at: string;

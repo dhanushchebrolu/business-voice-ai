@@ -207,6 +207,32 @@ describe("20261203090000 voice provisioning job", () => {
     fails(`DELETE FROM public.provisioning_run_events;`, /permission denied/);
   });
 
+  test("operator bridge tokens are short-lived, hash-unique and service-role only", (t) => {
+    if (!ready(t)) return;
+    rows(
+      `INSERT INTO public.operator_bridge_tokens (token_hash, token_prefix, created_by, expires_at)
+         VALUES ('h1', 'cbr_abcd', '${OWNER}', now() + interval '8 hours');`,
+    );
+    fails(
+      `INSERT INTO public.operator_bridge_tokens (token_hash, token_prefix, created_by, expires_at)
+         VALUES ('h2', 'cbr_abcd', '${OWNER}', now() + interval '48 hours');`,
+      /operator_bridge_tokens_short_lived/,
+    );
+    fails(
+      `INSERT INTO public.operator_bridge_tokens (token_hash, token_prefix, created_by, expires_at)
+         VALUES ('h1', 'cbr_abcd', '${OWNER}', now() + interval '1 hour');`,
+      /operator_bridge_tokens_token_hash_key/,
+    );
+    rows(`UPDATE public.operator_bridge_tokens SET revoked_at = now() WHERE token_hash = 'h1';`);
+    fails(`DELETE FROM public.operator_bridge_tokens;`, /permission denied/);
+    for (const role of ["anon", "authenticated"]) {
+      const r = execSql!(`SET ROLE ${role};
+SELECT count(*) FROM public.operator_bridge_tokens;`);
+      assert.notEqual(r.status, 0, role);
+      assert.match(r.stderr, /permission denied/);
+    }
+  });
+
   test("the rollback refuses while events exist, then removes only what the migration added", (t) => {
     if (!ready(t)) return;
     const sql = readFileSync(ROLLBACK, "utf8");

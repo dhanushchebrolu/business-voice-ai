@@ -62,3 +62,22 @@ ALTER TABLE public.provisioning_run_events ENABLE ROW LEVEL SECURITY;
 -- service_role too: default privileges would otherwise leave it UPDATE/DELETE (the trail is append-only).
 REVOKE ALL ON public.provisioning_run_events FROM PUBLIC, anon, authenticated, service_role;
 GRANT SELECT, INSERT ON public.provisioning_run_events TO service_role;
+
+-- Operator bridge: short-lived, revocable tokens that let a platform admin's own
+-- MCP client (signed in to Sarvam by that person) pull agent work orders from
+-- ClickAI and report the agent it built. Only a SHA-256 hash is stored; the raw
+-- token is shown once. No Sarvam credential is ever stored here.
+CREATE TABLE IF NOT EXISTS public.operator_bridge_tokens (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  token_hash text NOT NULL UNIQUE,
+  token_prefix text NOT NULL,
+  created_by uuid NOT NULL,
+  expires_at timestamptz NOT NULL,
+  revoked_at timestamptz,
+  last_used_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT operator_bridge_tokens_short_lived CHECK (expires_at <= created_at + interval '24 hours')
+);
+ALTER TABLE public.operator_bridge_tokens ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.operator_bridge_tokens FROM PUBLIC, anon, authenticated, service_role;
+GRANT SELECT, INSERT, UPDATE ON public.operator_bridge_tokens TO service_role;

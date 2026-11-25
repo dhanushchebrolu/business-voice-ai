@@ -476,7 +476,7 @@ export async function runProvisioningPipeline(
       return done(
         5,
         "waiting_for_agent",
-        "copy the universal master agent in Sarvam, apply this customer's generated configuration and credential, commit it, then register its agent id and version (Sarvam has no documented agent-creation API; needs live verification if one is added).",
+        "the agent has to be built in Sarvam by a signed-in operator (Sarvam has no unattended agent API): connect an MCP client to the ClickAI operator bridge on the Provisioning page and let it process this work order, or copy the master agent by hand and register its agent id and version. The job continues by itself once the agent is registered.",
       );
     if (ensured.kind !== "ready")
       return done(5, "failed", ensured.message, null, {

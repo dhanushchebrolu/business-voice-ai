@@ -100,51 +100,18 @@ export const issueSarvamIntegrationCredential = createServerFn({ method: "POST" 
     const { supabaseAdmin, agent } = await customerAgent(data.orgId);
     if (!agent) throw new Error("This customer has no agent yet.");
     const role = data.role;
-    const { generateIntegrationToken } = await import("@/lib/sarvam-agent-api.server");
-    const { token, hash, prefix } = await generateIntegrationToken();
-    const expiresAt = data.expiresInDays
-      ? new Date(Date.now() + data.expiresInDays * 86_400_000).toISOString()
-      : null;
-
-    const { data: active } = await supabaseAdmin
-      .from("sarvam_agent_integrations")
-      .select("id")
-      .eq("agent_config_id", agent.id)
-      .eq("role", role)
-      .eq("status", "active")
-      .maybeSingle();
-    let integrationId: string;
-    if (active) {
-      const { error } = await supabaseAdmin
-        .from("sarvam_agent_integrations")
-        .update({
-          token_hash: hash,
-          token_prefix: prefix,
-          rotated_at: new Date().toISOString(),
-          expires_at: expiresAt,
-        })
-        .eq("id", active.id)
-        .eq("role", role)
-        .eq("status", "active");
-      if (error) throw error;
-      integrationId = active.id;
-    } else {
-      const { data: created, error } = await supabaseAdmin
-        .from("sarvam_agent_integrations")
-        .insert({
-          organization_id: data.orgId,
-          agent_config_id: agent.id,
-          token_hash: hash,
-          token_prefix: prefix,
-          expires_at: expiresAt,
-          created_by: context.userId,
-          role,
-        })
-        .select("id")
-        .single();
-      if (error) throw error;
-      integrationId = created.id;
-    }
+    const { issueIntegrationCredential } =
+      await import("@/lib/sarvam-integration-credential.server");
+    const issued = await issueIntegrationCredential(supabaseAdmin, {
+      organizationId: data.orgId,
+      agentConfigId: agent.id,
+      role,
+      expiresInDays: data.expiresInDays,
+      createdBy: context.userId,
+    });
+    const { token, prefix, expiresAt } = issued;
+    const active = issued.rotated;
+    const integrationId = issued.integrationId;
     await writeAudit(admin, {
       action: active ? "SARVAM_INTEGRATION_ROTATED" : "SARVAM_INTEGRATION_CREATED",
       entityType: "sarvam_agent_integration",

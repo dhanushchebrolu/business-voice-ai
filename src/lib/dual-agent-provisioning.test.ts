@@ -500,9 +500,11 @@ describe("wiring (source checks)", () => {
     );
     assert.match(body, /outboundRegistrationGate\(/);
     assert.match(body, /SARVAM_OUTBOUND_AGENT_REGISTERED/);
-    const integ = read("./sarvam-integration.functions.ts");
-    assert.match(integ, /\.eq\("role", role\)\s*\.eq\("status", "active"\)/);
-    assert.match(integ, /role,\n\s*\}\)/, "the new credential is stored with its role");
+    // The credential logic lives in one shared helper (admin screen + operator bridge).
+    const integ = read("./sarvam-integration-credential.server.ts");
+    assert.match(integ, /\.eq\("role", input\.role\)\s*\.eq\("status", "active"\)/);
+    assert.match(integ, /role: input\.role,/, "the new credential is stored with its role");
+    assert.match(read("./sarvam-integration.functions.ts"), /\brole,\s*expiresInDays/);
   });
 
   test("the inbound credential checks pin role inbound", () => {

@@ -23,3 +23,4 @@ ALTER TABLE public.provisioning_runs
   DROP COLUMN IF EXISTS customer_message,
   DROP COLUMN IF EXISTS idempotency_key,
   DROP COLUMN IF EXISTS sarvam_agent_id;
+DROP TABLE IF EXISTS public.operator_bridge_tokens;

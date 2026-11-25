@@ -14,6 +14,7 @@ import {
   StatusPill,
 } from "@/components/app/primitives";
 import { Input } from "@/components/ui/input";
+import { OperatorBridgePanel } from "@/components/admin/OperatorBridgePanel";
 
 export const Route = createFileRoute("/admin/provisioning/")({
   component: ProvisioningQueue,
@@ -44,6 +45,7 @@ function ProvisioningQueue() {
         title="Provisioning"
         description="Each customer's dedicated Sarvam agent, deployment and number. The latest provisioning job per customer."
       />
+      <OperatorBridgePanel />
       <div className="flex flex-wrap items-center gap-2">
         <Input
           aria-label="Search customers or numbers"

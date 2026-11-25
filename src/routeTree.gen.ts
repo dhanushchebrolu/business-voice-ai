@@ -84,6 +84,7 @@ import { Route as ApiPublicCronSweepSipRoomsRouteImport } from './routes/api/pub
 import { Route as ApiPublicCronSyncGoogleCalendarsRouteImport } from './routes/api/public/cron/sync-google-calendars'
 import { Route as ApiPublicCronWhatsappDispatchRouteImport } from './routes/api/public/cron/whatsapp-dispatch'
 import { Route as ApiPublicCronWhatsappRepliesRouteImport } from './routes/api/public/cron/whatsapp-replies'
+import { Route as ApiPublicOperatorMcpRouteImport } from './routes/api/public/operator/mcp'
 import { Route as ApiPublicSarvamClientContextRouteImport } from './routes/api/public/sarvam/client-context'
 import { Route as ApiPublicStatsConversationTimeRouteImport } from './routes/api/public/stats/conversation-time'
 import { Route as ApiPublicWebhooksGoogleCalendarRouteImport } from './routes/api/public/webhooks/google-calendar'
@@ -489,6 +490,11 @@ const ApiPublicCronWhatsappRepliesRoute =
     path: '/api/public/cron/whatsapp-replies',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicOperatorMcpRoute = ApiPublicOperatorMcpRouteImport.update({
+  id: '/api/public/operator/mcp',
+  path: '/api/public/operator/mcp',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiPublicSarvamClientContextRoute =
   ApiPublicSarvamClientContextRouteImport.update({
     id: '/api/public/sarvam/client-context',
@@ -668,6 +674,7 @@ export interface FileRoutesByFullPath {
   '/api/public/cron/sync-google-calendars': typeof ApiPublicCronSyncGoogleCalendarsRoute
   '/api/public/cron/whatsapp-dispatch': typeof ApiPublicCronWhatsappDispatchRoute
   '/api/public/cron/whatsapp-replies': typeof ApiPublicCronWhatsappRepliesRoute
+  '/api/public/operator/mcp': typeof ApiPublicOperatorMcpRoute
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
   '/api/public/stats/conversation-time': typeof ApiPublicStatsConversationTimeRoute
   '/api/public/webhooks/google-calendar': typeof ApiPublicWebhooksGoogleCalendarRoute
@@ -757,6 +764,7 @@ export interface FileRoutesByTo {
   '/api/public/cron/sync-google-calendars': typeof ApiPublicCronSyncGoogleCalendarsRoute
   '/api/public/cron/whatsapp-dispatch': typeof ApiPublicCronWhatsappDispatchRoute
   '/api/public/cron/whatsapp-replies': typeof ApiPublicCronWhatsappRepliesRoute
+  '/api/public/operator/mcp': typeof ApiPublicOperatorMcpRoute
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
   '/api/public/stats/conversation-time': typeof ApiPublicStatsConversationTimeRoute
   '/api/public/webhooks/google-calendar': typeof ApiPublicWebhooksGoogleCalendarRoute
@@ -852,6 +860,7 @@ export interface FileRoutesById {
   '/api/public/cron/sync-google-calendars': typeof ApiPublicCronSyncGoogleCalendarsRoute
   '/api/public/cron/whatsapp-dispatch': typeof ApiPublicCronWhatsappDispatchRoute
   '/api/public/cron/whatsapp-replies': typeof ApiPublicCronWhatsappRepliesRoute
+  '/api/public/operator/mcp': typeof ApiPublicOperatorMcpRoute
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
   '/api/public/stats/conversation-time': typeof ApiPublicStatsConversationTimeRoute
   '/api/public/webhooks/google-calendar': typeof ApiPublicWebhooksGoogleCalendarRoute
@@ -948,6 +957,7 @@ export interface FileRouteTypes {
     | '/api/public/cron/sync-google-calendars'
     | '/api/public/cron/whatsapp-dispatch'
     | '/api/public/cron/whatsapp-replies'
+    | '/api/public/operator/mcp'
     | '/api/public/sarvam/client-context'
     | '/api/public/stats/conversation-time'
     | '/api/public/webhooks/google-calendar'
@@ -1037,6 +1047,7 @@ export interface FileRouteTypes {
     | '/api/public/cron/sync-google-calendars'
     | '/api/public/cron/whatsapp-dispatch'
     | '/api/public/cron/whatsapp-replies'
+    | '/api/public/operator/mcp'
     | '/api/public/sarvam/client-context'
     | '/api/public/stats/conversation-time'
     | '/api/public/webhooks/google-calendar'
@@ -1131,6 +1142,7 @@ export interface FileRouteTypes {
     | '/api/public/cron/sync-google-calendars'
     | '/api/public/cron/whatsapp-dispatch'
     | '/api/public/cron/whatsapp-replies'
+    | '/api/public/operator/mcp'
     | '/api/public/sarvam/client-context'
     | '/api/public/stats/conversation-time'
     | '/api/public/webhooks/google-calendar'
@@ -1184,6 +1196,7 @@ export interface RootRouteChildren {
   ApiPublicCronSyncGoogleCalendarsRoute: typeof ApiPublicCronSyncGoogleCalendarsRoute
   ApiPublicCronWhatsappDispatchRoute: typeof ApiPublicCronWhatsappDispatchRoute
   ApiPublicCronWhatsappRepliesRoute: typeof ApiPublicCronWhatsappRepliesRoute
+  ApiPublicOperatorMcpRoute: typeof ApiPublicOperatorMcpRoute
   ApiPublicSarvamClientContextRoute: typeof ApiPublicSarvamClientContextRoute
   ApiPublicStatsConversationTimeRoute: typeof ApiPublicStatsConversationTimeRoute
   ApiPublicWebhooksGoogleCalendarRoute: typeof ApiPublicWebhooksGoogleCalendarRoute
@@ -1729,6 +1742,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicCronWhatsappRepliesRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/operator/mcp': {
+      id: '/api/public/operator/mcp'
+      path: '/api/public/operator/mcp'
+      fullPath: '/api/public/operator/mcp'
+      preLoaderRoute: typeof ApiPublicOperatorMcpRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/sarvam/client-context': {
       id: '/api/public/sarvam/client-context'
       path: '/api/public/sarvam/client-context'
@@ -2025,6 +2045,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicCronSyncGoogleCalendarsRoute: ApiPublicCronSyncGoogleCalendarsRoute,
   ApiPublicCronWhatsappDispatchRoute: ApiPublicCronWhatsappDispatchRoute,
   ApiPublicCronWhatsappRepliesRoute: ApiPublicCronWhatsappRepliesRoute,
+  ApiPublicOperatorMcpRoute: ApiPublicOperatorMcpRoute,
   ApiPublicSarvamClientContextRoute: ApiPublicSarvamClientContextRoute,
   ApiPublicStatsConversationTimeRoute: ApiPublicStatsConversationTimeRoute,
   ApiPublicWebhooksGoogleCalendarRoute: ApiPublicWebhooksGoogleCalendarRoute,

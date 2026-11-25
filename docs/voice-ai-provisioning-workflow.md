@@ -111,3 +111,47 @@ Run from the main checkout, only after explicit approval:
 `npx supabase db query --remote=eorazvlmqwunmhwviocn --yes -f docs/gate-outbound-execute-20261203090000.sql`, then the verify script.
 Rehearsed (wrong-identity refusal, execute, refuse twice, verify, rollback) on a disposable cluster by
 `supabase/migrations/voice_provisioning_job_gate.pg.test.ts`.
+
+## Operator bridge: Sarvam agent authoring (2026-11-26 investigation)
+
+**Findings (official docs only).** Agent create/clone/configure/commit exists only in the Voice
+Agents MCP server ([mcp](https://docs.sarvam.ai/voice-agents/mcp),
+[genie](https://docs.sarvam.ai/voice-agents/build/genie),
+[api intro](https://docs.sarvam.ai/voice-agents/api/introduction)): tools `configure_agent`
+(create/update/clone), `agents` (commit), `create_http_tool`, `configure_deployment`, etc. Its
+standard discovery metadata (`/.well-known/oauth-authorization-server` on `mcp.sarvam.ai/voice-agents`)
+lists only `authorization_code` (+ `refresh_token`) with PKCE, public clients, no `client_credentials`;
+the docs state the token lasts 24 h, no refresh token, one workspace per login. The REST API key
+(`X-API-Key`) reaches deployments, campaigns and analytics, not agents. So: **no supported
+service-to-service route; a backend cannot create agents unattended.** Storing a personal 24 h token as a
+server secret, scraping the dashboard or guessing endpoints are all out of bounds.
+
+**What is implemented instead: a secure operator bridge** (`operator-bridge*.server.ts`,
+`/api/public/operator/mcp`, admin panel on `/admin/provisioning`). ClickAI exposes its own small MCP
+server. A platform admin creates a bridge token (≤ 12 h, revocable, hash-only, audited) and adds it to
+their own MCP client next to the Sarvam MCP server, which they sign in to themselves. The client then:
+
+1. `list_agent_work_orders`: customers whose job waits at the agent step (clicked Activate, onboarding
+   valid, number assigned and confirmed).
+2. `get_agent_work_order`: deterministic agent name, template (master) agent id, generated prompt, HTTP
+   tool specs, input variables, voice, languages, capabilities, fingerprint, and the steps.
+3. `issue_agent_credential`: the customer agent's ClickAI tool token, once (never rotates an existing one).
+4. Builds the agent with Sarvam's own tools (reuse by name, else clone template, configure, commit).
+5. `submit_agent_result {agentId, version, fingerprint}`: ClickAI refuses a stale fingerprint, a master
+   template, a malformed id or an agent registered to another customer (existing unique index), registers
+   it, marks voice settings applied to that exact version, and **resumes the job immediately** (scheduled
+   sweep is the backstop). The job then does everything documented REST allows: create/adopt deployment
+   with the already-assigned number, pause, verify, resume, read back, activate.
+
+Properties: no Sarvam token ever reaches ClickAI; a bridge token grants only these four operations;
+every call is idempotent (name lookup, same id+version no-op, one deployment per number); the event
+trail records each bridge action (token prefix only); expired/revoked tokens get a clear 401 and the
+operator mints a new one; Sarvam's own 24 h sign-in is the operator's daily routine. Migration
+`20261203090000` now also creates `operator_bridge_tokens` (service-role only, ≤ 24 h CHECK); the gate
+scripts were rebuilt. Nothing here is verified against live Sarvam: the operator's client does the
+Sarvam-side work and the exact `configure_agent` field mapping comes from `sarvam://schemas/agent-config`.
+
+**Operator runbook.** 1) `/admin/provisioning` → "Create bridge token" → copy the command into your MCP
+client. 2) Sign in to `sarvam-voice-agents` (`/mcp` → Authenticate; repeat daily). 3) Ask: "Process the
+pending ClickAI agent work orders." 4) Review the agents it builds (Sarvam prompts approval for every
+write). 5) Revoke the token when done.

@@ -185,30 +185,14 @@ export async function ensureCustomerAgent(
     return fail(e, "AGENT_VERIFY_FAILED", "could not verify the agent");
   }
 
-  // Register: the same rules as the admin registration (one customer per agent, never a template).
   try {
-    const { applySarvamAgentMapping } = await import("./sarvam-agent-registration.server.ts");
-    await applySarvamAgentMapping(admin, {
-      agentConfigId: ctx.agentConfigId,
+    await registerProvisionedAgent(admin, {
       organizationId: ctx.organizationId,
-      sarvamAppId: appId,
-      sarvamAppVersion: version,
+      agentConfigId: ctx.agentConfigId,
+      appId,
+      version,
       masterAgentAppId: ctx.masterAgentAppId,
     });
-    // Configuring applied the saved voice and languages to this version.
-    const { data: applied, error } = await admin
-      .from("agent_voice_language_settings")
-      .update({
-        status: "applied",
-        applied_sarvam_app_id: appId,
-        applied_sarvam_app_version: version,
-        applied_at: new Date().toISOString(),
-      })
-      .eq("agent_config_id", ctx.agentConfigId)
-      .eq("organization_id", ctx.organizationId)
-      .select("id");
-    if (error) throw error;
-    if (!applied?.length) throw new Error("voice and language settings not found");
   } catch (e) {
     return {
       kind: "failed",
@@ -217,4 +201,44 @@ export async function ensureCustomerAgent(
     };
   }
   return { kind: "ready", appId, version, createdNow };
+}
+
+/**
+ * Registers a provisioned agent for a customer: the same rules as the admin
+ * registration (one customer per agent, never a master template, never an
+ * outbound agent), and records that the saved voice and languages were applied
+ * to this exact agent version. Re-registering the same id and version is a no-op.
+ * Throws with a plain message when a rule refuses it.
+ */
+export async function registerProvisionedAgent(
+  admin: Admin,
+  input: {
+    organizationId: string;
+    agentConfigId: string;
+    appId: string;
+    version: number;
+    masterAgentAppId: string | null;
+  },
+): Promise<void> {
+  const { applySarvamAgentMapping } = await import("./sarvam-agent-registration.server.ts");
+  await applySarvamAgentMapping(admin, {
+    agentConfigId: input.agentConfigId,
+    organizationId: input.organizationId,
+    sarvamAppId: input.appId,
+    sarvamAppVersion: input.version,
+    masterAgentAppId: input.masterAgentAppId,
+  });
+  const { data: applied, error } = await admin
+    .from("agent_voice_language_settings")
+    .update({
+      status: "applied",
+      applied_sarvam_app_id: input.appId,
+      applied_sarvam_app_version: input.version,
+      applied_at: new Date().toISOString(),
+    })
+    .eq("agent_config_id", input.agentConfigId)
+    .eq("organization_id", input.organizationId)
+    .select("id");
+  if (error) throw error;
+  if (!applied?.length) throw new Error("voice and language settings not found");
 }

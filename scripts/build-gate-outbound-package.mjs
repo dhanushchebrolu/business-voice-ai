@@ -226,6 +226,7 @@ GATES[20261203090000] = {
   extraTables: ["provisioning_runs"],
   absent: `${noCols("provisioning_runs", JOB_COLS)}
      AND to_regclass('public.provisioning_run_events') IS NULL
+     AND to_regclass('public.operator_bridge_tokens') IS NULL
      AND to_regclass('public.idx_provisioning_runs_one_active_number') IS NULL
      AND to_regclass('public.idx_provisioning_runs_due') IS NULL`,
   present: `${cols("provisioning_runs", JOB_COLS)}
@@ -239,6 +240,12 @@ GATES[20261203090000] = {
      AND NOT has_table_privilege('service_role', 'public.provisioning_run_events', 'DELETE')
      AND NOT has_table_privilege('anon', 'public.provisioning_run_events', 'SELECT')
      AND NOT has_table_privilege('authenticated', 'public.provisioning_run_events', 'SELECT')
+     AND (SELECT relrowsecurity FROM pg_class WHERE oid = 'public.operator_bridge_tokens'::regclass)
+     AND has_table_privilege('service_role', 'public.operator_bridge_tokens', 'INSERT')
+     AND has_table_privilege('service_role', 'public.operator_bridge_tokens', 'UPDATE')
+     AND NOT has_table_privilege('service_role', 'public.operator_bridge_tokens', 'DELETE')
+     AND NOT has_table_privilege('anon', 'public.operator_bridge_tokens', 'SELECT')
+     AND NOT has_table_privilege('authenticated', 'public.operator_bridge_tokens', 'SELECT')
      AND ${conDef("provisioning_runs", "provisioning_runs_max_attempts_check")} IS NOT NULL`,
   newColumns: { provisioning_runs: JOB_COLS },
 };
