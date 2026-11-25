@@ -213,6 +213,24 @@ const STYLE = `## Speaking Style
 - Use what the person already told you (service, date, time, name); never ask for it again. If they correct you, accept the correction, confirm it once and continue.
 - Explain a limitation once; do not repeat the same explanation later in the call.`;
 
+/**
+ * Language behaviour, shared by both roles. The agent's language list and automatic
+ * switching live in the Sarvam agent (voice-language settings); this is the instruction
+ * that makes the model USE them: follow the person's language from their first words,
+ * with no request needed. Without it the model stays in the opening line's language until
+ * asked (the outbound failure of 2026-11-25).
+ */
+export const LANGUAGE = `## Language
+
+- Reply in the language the person is speaking, among the languages this agent is set up for, from their very first words: Telugu with Telugu, Hindi with Hindi, English with English. Never ask which language they prefer and never wait for them to ask you to switch.
+- If they change language, change with them on your very next turn and stay in it until they change again.
+- If they mix languages (for example Telugu with English words, or Hindi with English), answer in the language they use most and use the same English words they used. Do not translate their mixed speech back, and do not correct it.
+- Keep names, service and product names, medical or technical terms, addresses, numbers and times exactly as they are. Do not translate or respell them unless the person does.
+- Stay in their language for follow-up questions, confirmations, bookings, objections and the closing.
+- Tool names, tool inputs and dates sent to tools keep their required format (English field names, YYYY-MM-DD, HH:mm) whatever language you speak.
+- If you did not understand them, ask them to repeat it in the language they just used. Do not switch to English unless they speak English.
+- The opening line is fixed; after the person's first reply, follow their language.`;
+
 /** The one booking section both channels use. */
 function booking(o: SarvamPromptOptions, can: Can): string {
   const inbound = o.role === "inbound";
@@ -358,6 +376,7 @@ export function buildSarvamAgentPrompt(o: SarvamPromptOptions): string {
     situation(o, can),
     facts(o, can),
     STYLE,
+    LANGUAGE,
     booking(o, can),
     emergencies(o),
     o.role === "inbound" ? inboundConversation(can) : outboundConversation(can),
