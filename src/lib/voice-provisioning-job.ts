@@ -13,6 +13,7 @@ export const JOB_STEPS = [
   { key: "creating_agent", label: "Creating your voice agent" },
   { key: "configuring_agent", label: "Configuring your voice agent" },
   { key: "verifying_agent", label: "Verifying your voice agent" },
+  { key: "authorizing_tools", label: "Securing your agent's connections" },
   { key: "creating_deployment", label: "Creating your phone deployment" },
   { key: "verifying_deployment", label: "Verifying your deployment" },
   { key: "connecting_number", label: "Connecting your phone number" },
@@ -87,6 +88,7 @@ export type FailureCode =
   | "NUMBER_UNUSABLE"
   | "PROVIDER_SETUP_PENDING"
   | "AWAITING_AGENT_CREATION"
+  | "TOOL_AUTH_PENDING"
   | "WAITING_FOR_OPERATOR"
   | "PROVIDER_AUTH_EXPIRED"
   | "PROVIDER_PERMISSION_DENIED"
@@ -107,6 +109,8 @@ export type FailureCode =
 export const FAILURE_HINTS: Partial<Record<FailureCode, string>> = {
   AWAITING_AGENT_CREATION:
     "Waiting for the operator: process this work order with Claude Code (Provisioning page → Agent builder).",
+  TOOL_AUTH_PENDING:
+    "The agent and its six tools exist in Sarvam. Select the ClickAI credential on each tool in the Sarvam console, then confirm with confirm_tool_authentication.",
   WAITING_FOR_OPERATOR:
     "The operator reported it cannot continue (usually Sarvam sign-in expired). Sign in to the Sarvam MCP and process the work order again.",
   PROVIDER_AUTH_EXPIRED: "The provider rejected our authorization. Sign in again, then retry.",
@@ -168,6 +172,11 @@ const WAITING: Record<string, { code: FailureCode | null; message: string }> = {
   waiting_for_integration_credential: {
     code: "PROVIDER_SETUP_PENDING",
     message: "Our team is preparing your voice assistant. We will let you know when it is live.",
+  },
+  waiting_for_tool_authentication: {
+    code: "TOOL_AUTH_PENDING",
+    message:
+      "Our team is securing your voice agent's connections. We will let you know when it is live.",
   },
   waiting_for_agent: {
     code: "AWAITING_AGENT_CREATION",

@@ -6,6 +6,7 @@ import {
   issueCredentialForRun,
   listWorkOrders,
   reportBlocker,
+  reportToolsCreated,
   submitAgentResult,
   type BridgeAuth,
   type WorkOrderDeps,
@@ -66,9 +67,30 @@ export const BRIDGE_TOOLS = [
     },
   },
   {
+    name: "report_tools_created",
+    description:
+      "Report that the customer's agent was cloned from the COMMITTED master version and all six ClickAI tools were created on it (no credentials; the MCP cannot set them). ClickAI shows the job as waiting for tool authentication with this agent id. Call it BEFORE the credentials are selected in the Sarvam console and before committing. Safe to repeat for the same agent.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workOrderId: { type: "string" },
+        agentId: { type: "string" },
+        clonedFrom: {
+          type: "object",
+          properties: { agentId: { type: "string" }, version: { type: "integer", minimum: 1 } },
+          required: ["agentId", "version"],
+          additionalProperties: false,
+        },
+        tools: { type: "array", items: { type: "string" }, minItems: 6, maxItems: 6 },
+      },
+      required: ["workOrderId", "agentId", "clonedFrom", "tools"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "submit_agent_result",
     description:
-      "Report the committed Sarvam agent (id + version) built from a work order. ClickAI registers it and continues provisioning (deployment, number routing, verification, activation). Safe to repeat.",
+      "Report the COMMITTED Sarvam agent (id + version) after report_tools_created, after the credentials were selected on the draft in the Sarvam console and the committed version was read back showing a credential on all six tools. ClickAI registers it and continues provisioning (deployment, number routing, verification, activation). Safe to repeat.",
     inputSchema: {
       type: "object",
       properties: {
@@ -76,8 +98,24 @@ export const BRIDGE_TOOLS = [
         agentId: { type: "string" },
         version: { type: "integer", minimum: 1 },
         fingerprint: { type: "string" },
+        toolAuth: {
+          type: "array",
+          description:
+            "Read back from the COMMITTED version: one entry per tool with the credential type it shows (bearer, api_key or basic). Never include a secret value.",
+          items: {
+            type: "object",
+            properties: {
+              name: { type: "string" },
+              authType: { type: "string", enum: ["bearer", "api_key", "basic", "none"] },
+            },
+            required: ["name", "authType"],
+            additionalProperties: false,
+          },
+          minItems: 6,
+          maxItems: 6,
+        },
       },
-      required: ["workOrderId", "agentId", "version", "fingerprint"],
+      required: ["workOrderId", "agentId", "version", "fingerprint", "toolAuth"],
       additionalProperties: false,
     },
   },
@@ -155,6 +193,28 @@ export async function handleBridgeRpc(
               ),
             ),
           );
+        if (name === "report_tools_created") {
+          const from = (args["clonedFrom"] ?? {}) as { agentId?: unknown; version?: unknown };
+          return ok(
+            req.id,
+            text(
+              await reportToolsCreated(
+                admin,
+                {
+                  workOrderId: id,
+                  appId: String(args["agentId"] ?? ""),
+                  clonedFrom: {
+                    agentId: String(from.agentId ?? ""),
+                    version: Number(from.version),
+                  },
+                  tools: args["tools"],
+                },
+                auth,
+                deps,
+              ),
+            ),
+          );
+        }
         if (name === "issue_agent_credential")
           return ok(req.id, text(await issueCredentialForRun(admin, id, auth)));
         return ok(
@@ -167,6 +227,7 @@ export async function handleBridgeRpc(
                 appId: String(args["agentId"] ?? ""),
                 version: Number(args["version"]),
                 fingerprint: String(args["fingerprint"] ?? ""),
+                toolAuth: args["toolAuth"],
               },
               auth,
               deps,

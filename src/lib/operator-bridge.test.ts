@@ -12,6 +12,7 @@ import {
   type WorkOrderDeps,
 } from "./operator-bridge.server.ts";
 import { AUTH_FAILURE_MESSAGE, handleBridgeRpc } from "./operator-bridge-mcp.server.ts";
+import { CLICKAI_TOOL_NAMES } from "./sarvam-agent-tools-spec.ts";
 import { ORG, OTHER, snapshot, world, deps, num } from "./provisioning-test-world.test-helper.ts";
 
 /**
@@ -64,6 +65,7 @@ function bridgeDeps(
     loadSnapshot: async () => snapshot(),
     baseUrl: "https://clickai.example",
     masterAgentAppId: "Master-agent",
+    masterAgentVersion: 2,
     resume: async (org) => {
       resumed.push(org);
       return runProvisioning(
@@ -82,7 +84,15 @@ const auth = (db: World): Extract<BridgeAuth, { ok: true }> => {
   return { ok: true, tokenId: "tok_1", createdBy: USER, prefix: "cbr_abcd" };
 };
 
-const call = async (db: World, d: WorkOrderDeps, name: string, args: Record<string, unknown>) => {
+const SIX = [...CLICKAI_TOOL_NAMES];
+const bearerFor = (names: readonly string[]) => names.map((name) => ({ name, authType: "bearer" }));
+
+const rawCall = async (
+  db: World,
+  d: WorkOrderDeps,
+  name: string,
+  args: Record<string, unknown>,
+) => {
   const out = await handleBridgeRpc(db.client, auth(db), d, {
     jsonrpc: "2.0",
     id: 1,
@@ -91,6 +101,24 @@ const call = async (db: World, d: WorkOrderDeps, name: string, args: Record<stri
   });
   const result = (out as { result: { content: { text: string }[]; isError?: boolean } }).result;
   return { body: JSON.parse(result.content[0]!.text), isError: Boolean(result.isError) };
+};
+
+/**
+ * The operator's whole flow for tests that are not about the checkpoint itself: a submit
+ * first reports the six tools for that agent (once), and carries credential evidence.
+ */
+const call = async (db: World, d: WorkOrderDeps, name: string, args: Record<string, unknown>) => {
+  if (name === "submit_agent_result" && args["toolAuth"] === undefined) {
+    const prior = await rawCall(db, d, "report_tools_created", {
+      workOrderId: args["workOrderId"],
+      agentId: args["agentId"],
+      clonedFrom: { agentId: "Master-agent", version: 2 },
+      tools: SIX,
+    });
+    void prior;
+    return rawCall(db, d, name, { ...args, toolAuth: bearerFor(SIX) });
+  }
+  return rawCall(db, d, name, args);
 };
 
 describe("bridge tokens", () => {
@@ -154,6 +182,7 @@ describe("MCP protocol", () => {
       "issue_agent_credential",
       "list_agent_work_orders",
       "report_blocker",
+      "report_tools_created",
       "submit_agent_result",
     ]);
     assert.deepEqual(await rpc("ping"), { jsonrpc: "2.0", id: 7, result: {} });
@@ -186,8 +215,17 @@ describe("work orders", () => {
     assert.equal(order.templateAgentAppId, "Master-agent");
     assert.ok(order.fingerprint);
     assert.equal(order.credentialIssued, true);
-    assert.ok(order.agent.systemPrompt.length > 100);
-    assert.ok(order.agent.httpTools.length > 0);
+    assert.equal(order.tools.length, 6);
+    assert.equal(
+      order.clone.prompt.action,
+      "replace_prompt",
+      "a lead-capture-only customer needs a different prompt than the full master",
+    );
+    assert.match((order.clone.prompt as { text: string }).text, /## Guardrails/);
+    assert.doesNotMatch(
+      (order.clone.prompt as { text: string }).text,
+      /Reply in the language the person is speaking/,
+    );
     assert.match(order.instructions.join(" "), /submit_agent_result/);
     const text = JSON.stringify(order);
     assert.doesNotMatch(text, /token_hash|Bearer [A-Za-z0-9]{20}|org_other|agent_other|7900000001/);
@@ -261,7 +299,11 @@ describe("submitting the built agent", () => {
     const again = await call(db, d, "submit_agent_result", args);
     assert.equal(again.isError, false);
     assert.equal(again.body.status, "already_registered");
-    assert.equal(d.resumed.length, 1);
+    assert.equal(
+      d.resumed.length,
+      2,
+      "one resume for the tools report, one for the registration; the repeat adds none",
+    );
     assert.equal(db.tables["provisioning_runs"]!.length, 1);
   });
 
@@ -275,7 +317,11 @@ describe("submitting the built agent", () => {
     });
     assert.equal(r.body.error, "conflict");
     assert.equal(db.tables["agent_configs"]![0]!["sarvam_app_id"], null);
-    assert.equal(d.resumed.length, 0);
+    assert.equal(
+      d.resumed.length,
+      1,
+      "only the tools report resumed the job; nothing was registered",
+    );
   });
 
   test("the master template, malformed ids and bad versions are refused", async () => {

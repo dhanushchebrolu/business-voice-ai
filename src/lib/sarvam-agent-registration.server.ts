@@ -14,13 +14,29 @@ import type { Database } from "@/integrations/supabase/types";
  * only this organization's unlinked numbers are linked to the agent.
  */
 
+import {
+  DEFAULT_MASTER_AGENT_APP_ID,
+  DEFAULT_MASTER_AGENT_VERSION,
+} from "./sarvam-agent-tools-spec.ts";
+
 type Admin = SupabaseClient<Database>;
 
 /** Sarvam agent ids look like "Conversatio-9c6a04cd-3334". */
 export const SARVAM_APP_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{2,80}$/;
 
+/**
+ * The ClickAI master template customers are cloned from. The environment
+ * variable overrides the built-in default (the committed master) so the
+ * "never map a customer to the master" rules hold even before it is set.
+ */
 export function masterAgentAppId(): string | null {
-  return process.env["SARVAM_MASTER_AGENT_APP_ID"]?.trim() || null;
+  return process.env["SARVAM_MASTER_AGENT_APP_ID"]?.trim() || DEFAULT_MASTER_AGENT_APP_ID;
+}
+
+/** The COMMITTED master version customers are cloned from (never the mutable draft). */
+export function masterAgentVersion(): number {
+  const v = Number(process.env["SARVAM_MASTER_AGENT_VERSION"]?.trim());
+  return Number.isInteger(v) && v >= 1 ? v : DEFAULT_MASTER_AGENT_VERSION;
 }
 
 /** The outbound master template's Sarvam app id; never a customer's agent either. */

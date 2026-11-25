@@ -272,7 +272,8 @@ export async function runProvisioning(
         } as unknown as Json,
         next_attempt_at:
           kind === "retry" ? new Date(now().getTime() + backoffMs(streak)).toISOString() : null,
-        sarvam_agent_id: agentRow?.sarvam_app_id ?? null,
+        // Keep an agent id reported by the operator until the version is registered.
+        ...(agentRow?.sarvam_app_id ? { sarvam_agent_id: agentRow.sarvam_app_id } : {}),
         finished_at: terminal ? nowIso() : null,
         ...(kind === "failed" || kind === "retry"
           ? { last_error: sanitizeDiagnostic(f.note), last_error_at: nowIso() }
@@ -408,7 +409,11 @@ export async function sweepProvisioningRetries(
       .eq("status", "waiting")
       // Only a customer's own activation click authorizes going live automatically.
       .eq("trigger", "customer_activate")
-      .in("current_step", ["waiting_for_agent", "waiting_for_voice_language"])
+      .in("current_step", [
+        "waiting_for_agent",
+        "waiting_for_voice_language",
+        "waiting_for_tool_authentication",
+      ])
       .limit(25),
   ]);
   for (const r of [due, stuck, waiting]) if (r.error) throw r.error;

@@ -6,6 +6,7 @@ import type { ProvisioningState } from "./provisioning-state.ts";
 import { normalizeCustomerPhone } from "./phone-number.ts";
 import { buildUniversalAgentConfig, type UniversalAgentConfig } from "./universal-agent-config.ts";
 import type { FailureCode, JobStepKey } from "./voice-provisioning-job.ts";
+import { DEFAULT_MASTER_AGENT_APP_ID } from "./sarvam-agent-tools-spec.ts";
 import type { EnsureAgentContext, EnsureAgentOutcome } from "./sarvam-agent-provisioner.server.ts";
 
 /**
@@ -95,6 +96,13 @@ export interface PipelineDeps {
   /** The outbound master template's Sarvam app id; never a customer's outbound agent. */
   outboundMasterAgentAppId?: string | null;
   now: () => Date;
+  /** The agent an operator reported (tools created, credentials pending), before any version is registered. */
+  reportedAgent?: (admin: Admin, organizationId: string) => Promise<{ appId: string } | null>;
+  /** Tool-authentication checkpoint lookup (defaults to the job event trail). */
+  toolAuthStatus?: (
+    admin: Admin,
+    input: { organizationId: string; appId: string; version: number },
+  ) => Promise<{ required: boolean; confirmed: boolean }>;
   /**
    * Creates/configures/verifies/registers the customer's own Sarvam agent when
    * the provider supports it. Absent or "unsupported": the pipeline waits for
@@ -240,7 +248,8 @@ export async function defaultPipelineDeps(): Promise<PipelineDeps> {
     getDeployment: async (id) => sarvamAdapter().getDeployment(id),
     setDeploymentStatus: async (id, action) => sarvamAdapter().setDeploymentStatus(id, action),
     syncDeployments: syncAgentDeployments,
-    masterAgentAppId: process.env["SARVAM_MASTER_AGENT_APP_ID"]?.trim() || null,
+    masterAgentAppId:
+      process.env["SARVAM_MASTER_AGENT_APP_ID"]?.trim() || DEFAULT_MASTER_AGENT_APP_ID,
     outboundMasterAgentAppId: process.env["SARVAM_OUTBOUND_MASTER_AGENT_APP_ID"]?.trim() || null,
     now: () => new Date(),
     ensureAgent: async (a, ctx) => {
@@ -472,6 +481,23 @@ export async function runProvisioningPipeline(
           onStep: step,
         })
       : { kind: "unsupported" };
+    if (ensured.kind === "unsupported") {
+      // The operator already built the agent and its tools; only the credentials (a console
+      // step) and the commit are pending: say so, with the agent id, instead of "waiting for agent".
+      const lookup =
+        deps.reportedAgent ?? (await import("./tool-auth-checkpoint.server.ts")).reportedAgent;
+      const reported = await lookup(admin, organizationId);
+      if (reported) {
+        await step("authorizing_tools");
+        return done(
+          6,
+          "waiting_for_tool_authentication",
+          `agent ${reported.appId} and its six tools exist in Sarvam; credentials are not confirmed. Select the ClickAI credential on each tool in the Sarvam console, commit the agent, then submit it.`,
+          null,
+          { code: "TOOL_AUTH_PENDING", retryable: false },
+        );
+      }
+    }
     if (ensured.kind === "unsupported")
       return done(
         5,
@@ -516,6 +542,30 @@ export async function runProvisioningPipeline(
       "waiting_for_voice_language",
       `the saved voice and languages are not recorded as applied to Sarvam agent ${agent.sarvam_app_id} version ${agent.sarvam_app_version}. Apply them in Sarvam, commit, and register that agent and version.`,
     );
+
+  // 6b. Tool authentication checkpoint. An agent built through the operator bridge has
+  // its six tools created without credentials (Sarvam's MCP cannot set them); the number
+  // is not deployed or activated until the operator confirms they were selected in the
+  // Sarvam console, for THIS agent id and version. A live number is only re-verified, and
+  // hand-registered agents (every live customer today) are never gated.
+  await step("authorizing_tools");
+  if (!(number.status === "active" && number.inbound_enabled)) {
+    const lookup =
+      deps.toolAuthStatus ?? (await import("./tool-auth-checkpoint.server.ts")).toolAuthStatus;
+    const gate = await lookup(admin, {
+      organizationId,
+      appId: agent.sarvam_app_id!,
+      version: agent.sarvam_app_version!,
+    });
+    if (gate.required && !gate.confirmed)
+      return done(
+        6,
+        "waiting_for_tool_authentication",
+        `agent ${agent.sarvam_app_id} version ${agent.sarvam_app_version} has its six tools but no credentials yet: select the ClickAI credential on each tool in the Sarvam console, then confirm with confirm_tool_authentication.`,
+        null,
+        { code: "TOOL_AUTH_PENDING", retryable: false },
+      );
+  }
 
   // 7. Deployment (create or adopt; never a duplicate).
   await step("creating_deployment");

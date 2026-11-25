@@ -114,6 +114,7 @@ describe("valid activation", () => {
         "step_started:preparing",
         "step_started:creating_agent",
         "step_started:verifying_agent",
+        "step_started:authorizing_tools",
         "step_started:creating_deployment",
         "step_started:verifying_deployment",
         "step_started:connecting_number",

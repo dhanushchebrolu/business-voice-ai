@@ -195,3 +195,26 @@ before the deployment call; it validates everything it can (above) and Sarvam mu
 for that id/version, after which ClickAI reads the deployment back and compares agent, version, number and
 webhook before activating. A wrong id/version therefore stops at deployment verification, never at
 activation.
+
+## Cloning the committed master and the tool-authentication checkpoint
+
+- **Master reference:** `ClickAI-Mas-002f42d7-604f`, **committed version 2** (defaults in
+  `sarvam-agent-tools-spec.ts`; `SARVAM_MASTER_AGENT_APP_ID` / `SARVAM_MASTER_AGENT_VERSION` override).
+  The work order's `clone` block carries `clone_from` and `clone_version`; never a draft.
+- **Tools are not cloned.** The work order lists all six tools (`clickai_business_context` on start,
+  `get_business_info`, `check_availability`, `book_appointment`, `request_callback` during the call,
+  `record_call_outcome` on end) with the exact v2 connector config: typed `interaction_id` /
+  `user_identifier` system-variable bindings, timeouts, failure messages, reply templates, saved
+  variables. No `auth` is included (the MCP cannot set it) and nothing customer-specific is in them.
+- **Checkpoint (job step `authorizing_tools`):**
+  1. Operator clones, issues the credential, recreates the six tools, then calls `report_tools_created`.
+     The job parks as `waiting_for_tool_authentication` (`TOOL_AUTH_PENDING`) showing the agent id.
+  2. A human selects the credential on each tool in the Sarvam console (before commit; committed
+     versions are frozen), commits, and reads the committed version back.
+  3. `submit_agent_result` with `toolAuth` evidence for all six tools registers the version, records
+     `tool_auth_confirmed` and resumes the **same job**, which deploys, routes and activates.
+- **Never active while pending:** the pipeline refuses to deploy/activate a not-yet-live number until
+  the confirmation for that agent **and version** exists. Live numbers and hand-registered agents
+  (no `agent_tools_created` event) are never gated.
+- **Reliability:** reports and submits are idempotent; a second different agent for the same customer
+  is refused; partial tool creation (not six) is refused and can be completed and re-reported.

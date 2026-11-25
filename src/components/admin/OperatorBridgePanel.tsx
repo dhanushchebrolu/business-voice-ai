@@ -87,9 +87,11 @@ export function OperatorBridgePanel() {
                       ? "waiting for operator: Sarvam sign-in needed"
                       : w.stage === "needs_credential"
                         ? "waiting for agent credential"
-                        : "waiting for agent creation"}
+                        : w.stage === "needs_tool_authentication"
+                          ? "tools created: select credentials in the Sarvam console"
+                          : "waiting for agent creation"}
                   </StatusPill>
-                  <code className="text-muted-foreground">{w.agentName}</code>
+                  <code className="text-muted-foreground">{w.agentId ?? w.agentName}</code>
                 </li>
               ))}
             </ul>
