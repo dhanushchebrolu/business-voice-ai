@@ -301,3 +301,137 @@ export const getCampaignStats = createServerFn({ method: "GET" })
       bookingCapable: false,
     };
   });
+
+/** Most calls and contacts one report reads; a bigger campaign says so rather than showing a partial number as whole. */
+export const REPORT_ROW_LIMIT = 5000;
+
+export interface CampaignAnalyticsResponse {
+  analytics: import("@/lib/campaign-analytics").CampaignAnalytics;
+  truncated: boolean;
+  generatedAt: string;
+}
+
+/**
+ * The campaign's report (campaign-analytics.ts), from its calls, contacts and the stored analysis
+ * of each finished call. Read-only; any member of the campaign's workspace. Everything is scoped
+ * to the campaign's own organization, whatever the request says.
+ */
+export const getCampaignAnalytics = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { campaignId: string }) => {
+    if (!input?.campaignId) throw new Error("campaignId is required");
+    return input;
+  })
+  .handler(async ({ data, context }): Promise<CampaignAnalyticsResponse> => {
+    const orgId = await campaignOrgId(context, data.campaignId, false);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { buildCampaignAnalytics } = await import("@/lib/campaign-analytics");
+    const { CallAnalysisSchema } = await import("@/lib/call-analysis");
+
+    const [contactsRes, callsRes, analysesRes, leadsRes] = await Promise.all([
+      supabaseAdmin
+        .from("campaign_contacts")
+        .select("id, status, attempts, excluded_reason, output_variables, contacts(name, phone)")
+        .eq("campaign_id", data.campaignId)
+        .eq("organization_id", orgId)
+        .limit(REPORT_ROW_LIMIT),
+      supabaseAdmin
+        .from("call_logs")
+        .select(
+          "id, campaign_contact_id, status, duration_seconds, started_at, customer_charge, billing_applied_at, resolution_source, recording_url",
+        )
+        .eq("campaign_id", data.campaignId)
+        .eq("organization_id", orgId)
+        .limit(REPORT_ROW_LIMIT),
+      supabaseAdmin
+        .from("call_analyses")
+        .select("call_id, status, source, analysis")
+        .eq("campaign_id", data.campaignId)
+        .eq("organization_id", orgId)
+        .limit(REPORT_ROW_LIMIT),
+      supabaseAdmin
+        .from("leads")
+        .select("id", { count: "exact", head: true })
+        .eq("campaign_id", data.campaignId)
+        .eq("organization_id", orgId),
+    ]);
+    for (const r of [contactsRes, callsRes, analysesRes, leadsRes]) if (r.error) throw r.error;
+
+    const analyses = (analysesRes.data ?? []).flatMap((row) => {
+      const parsed = CallAnalysisSchema.safeParse(row.analysis);
+      // A stored analysis that no longer validates is left out, never shown half-read.
+      return parsed.success
+        ? [{ callId: row.call_id, status: row.status, source: row.source, analysis: parsed.data }]
+        : [];
+    });
+
+    const analytics = buildCampaignAnalytics({
+      contacts: (contactsRes.data ?? []).map((c) => {
+        const person = c.contacts as { name: string | null; phone: string | null } | null;
+        return {
+          id: c.id,
+          status: c.status,
+          attempts: c.attempts,
+          excludedReason: c.excluded_reason,
+          outputVariables: c.output_variables,
+          name: person?.name ?? null,
+          phone: person?.phone ?? null,
+        };
+      }),
+      calls: (callsRes.data ?? []).map((c) => ({
+        id: c.id,
+        campaignContactId: c.campaign_contact_id,
+        status: c.status,
+        durationSeconds: c.duration_seconds ?? 0,
+        startedAt: c.started_at,
+        customerCharge: c.customer_charge ?? 0,
+        billingApplied: Boolean(c.billing_applied_at),
+        resolutionSource: c.resolution_source,
+        hasRecording: Boolean(c.recording_url),
+      })),
+      analyses,
+      leadsCaptured: leadsRes.count ?? 0,
+    });
+    return {
+      analytics,
+      truncated:
+        (contactsRes.data?.length ?? 0) >= REPORT_ROW_LIMIT ||
+        (callsRes.data?.length ?? 0) >= REPORT_ROW_LIMIT,
+      generatedAt: new Date().toISOString(),
+    };
+  });
+
+export interface CampaignCallDetail {
+  callId: string;
+  transcript: { role: "agent" | "user"; text: string }[];
+  recordingUrl: string | null;
+  summary: string | null;
+}
+
+/** One call's transcript and recording, for the report's contact detail. Only a call of this campaign. */
+export const getCampaignCallDetail = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { campaignId: string; callId: string }) => {
+    if (!input?.campaignId || !input?.callId) throw new Error("campaignId and callId are required");
+    return input;
+  })
+  .handler(async ({ data, context }): Promise<CampaignCallDetail> => {
+    const orgId = await campaignOrgId(context, data.campaignId, false);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { readTranscript } = await import("@/lib/call-analysis");
+    const { data: call, error } = await supabaseAdmin
+      .from("call_logs")
+      .select("id, transcript, recording_url, summary")
+      .eq("id", data.callId)
+      .eq("campaign_id", data.campaignId)
+      .eq("organization_id", orgId)
+      .maybeSingle();
+    if (error) throw error;
+    if (!call) throw new Error("Call not found.");
+    return {
+      callId: call.id,
+      transcript: readTranscript(call.transcript),
+      recordingUrl: call.recording_url,
+      summary: call.summary,
+    };
+  });

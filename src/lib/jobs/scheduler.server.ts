@@ -49,6 +49,7 @@ export function periodicJobs(now: Date): { kind: string; idempotencyKey: string 
       kind: "sweep.call_outcome_reconcile",
       idempotencyKey: `sweep.call_outcome_reconcile:${fiveMinute}`,
     },
+    { kind: "sweep.call_analysis", idempotencyKey: `sweep.call_analysis:${minute}` },
     {
       kind: "sweep.call_variable_retention",
       idempotencyKey: `sweep.call_variable_retention:${iso.slice(0, 13)}`,

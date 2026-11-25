@@ -527,6 +527,57 @@ export type Database = {
           },
         ];
       };
+      call_analyses: {
+        Row: {
+          analysis: Json;
+          analyzed_at: string | null;
+          attempts: number;
+          call_id: string;
+          campaign_contact_id: string | null;
+          campaign_id: string | null;
+          created_at: string;
+          id: string;
+          last_error: string | null;
+          model: string | null;
+          organization_id: string;
+          source: string;
+          status: string;
+          updated_at: string;
+        };
+        Insert: {
+          analysis: Json;
+          analyzed_at?: string | null;
+          attempts?: number;
+          call_id: string;
+          campaign_contact_id?: string | null;
+          campaign_id?: string | null;
+          created_at?: string;
+          id?: string;
+          last_error?: string | null;
+          model?: string | null;
+          organization_id: string;
+          source: string;
+          status: string;
+          updated_at?: string;
+        };
+        Update: {
+          analysis?: Json;
+          analyzed_at?: string | null;
+          attempts?: number;
+          call_id?: string;
+          campaign_contact_id?: string | null;
+          campaign_id?: string | null;
+          created_at?: string;
+          id?: string;
+          last_error?: string | null;
+          model?: string | null;
+          organization_id?: string;
+          source?: string;
+          status?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
       call_logs: {
         Row: {
           agent_version: number | null;

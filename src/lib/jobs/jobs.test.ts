@@ -144,6 +144,7 @@ describe("scheduled tick", () => {
         "campaign.dispatch",
         "sweep.sarvam_reconcile",
         "sweep.call_outcome_reconcile",
+        "sweep.call_analysis",
         "sweep.call_variable_retention",
         "jobs.prune",
       ].map((k) => [
@@ -156,11 +157,12 @@ describe("scheduled tick", () => {
     const now = new Date("2026-11-11T10:00:30Z");
     const first = await runScheduledTick({ supabaseAdmin, store, handlers, now });
     const second = await runScheduledTick({ supabaseAdmin, store, handlers, now });
-    assert.equal(first.enqueued.length, 6);
+    assert.equal(first.enqueued.length, 7);
     assert.equal(second.enqueued.length, 0, "same bucket: nothing new");
     assert.deepEqual(ran.sort(), [
       "campaign.dispatch",
       "jobs.prune",
+      "sweep.call_analysis",
       "sweep.call_finalization",
       "sweep.call_outcome_reconcile",
       "sweep.call_variable_retention",
@@ -178,11 +180,35 @@ describe("handlers", () => {
       "campaign.dispatch",
       "jobs.prune",
       "sarvam.reconcile_call",
+      "sweep.call_analysis",
       "sweep.call_finalization",
       "sweep.call_outcome_reconcile",
       "sweep.call_variable_retention",
       "sweep.sarvam_reconcile",
     ]);
+  });
+
+  test("the analysis sweep runs every minute and reports what it did", async () => {
+    const a = periodicJobs(new Date("2026-11-25T10:00:10Z"));
+    const b = periodicJobs(new Date("2026-11-25T10:01:10Z"));
+    const key = (jobs: ReturnType<typeof periodicJobs>) =>
+      jobs.find((j) => j.kind === "sweep.call_analysis")!.idempotencyKey;
+    assert.notEqual(key(a), key(b), "a new job each minute");
+    let at: Date | null = null;
+    const handlers = buildJobHandlers({
+      supabaseAdmin: {} as never,
+      store: new FakeStore(),
+      now: () => new Date("2026-11-25T10:00:00Z"),
+      analyzeCalls: async (now) => {
+        at = now;
+        return { considered: 2, analyzed: 2 };
+      },
+    });
+    assert.deepEqual(await handlers["sweep.call_analysis"]!({ payload: {} } as Job), {
+      considered: 2,
+      analyzed: 2,
+    });
+    assert.equal(at!.toISOString(), "2026-11-25T10:00:00.000Z");
   });
 
   test("the variable retention sweep runs hourly and reports what it cleared", async () => {

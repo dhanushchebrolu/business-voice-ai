@@ -36,6 +36,7 @@ import {
 } from "@/components/app/primitives";
 import { describeQueryError } from "@/lib/query-error";
 import { CampaignContextPanel, CampaignInsights } from "@/components/app/CampaignContextPanel";
+import { CampaignAnalytics } from "@/components/app/CampaignAnalytics";
 import {
   CampaignLaunchButton,
   CampaignLaunchChecklist,
@@ -264,6 +265,8 @@ function CampaignDetailPage() {
       <CampaignContextPanel campaign={campaign} onSaved={invalidate} />
 
       <CampaignInsights campaignId={campaignId} status={campaign.status} onChanged={invalidate} />
+
+      <CampaignAnalytics campaignId={campaignId} />
 
       <SectionCard title="Progress" description={`${total} contacts enrolled`}>
         <div className="flex flex-wrap gap-2">

@@ -21,6 +21,9 @@ import { staleWebhookClaims, WEBHOOK_MAX_ATTEMPTS } from "../telephony/webhook-c
  *   sweep.call_outcome_reconcile  record end-of-call outcomes Sarvam's on-end
  *                           tool never delivered, from the stored call-end
  *                           webhook (idempotent; see call-outcome-reconciliation)
+ *   sweep.call_analysis     analyse finished outbound calls (transcript and ClickAI's own
+ *                           records) into the stored analysis campaign reports read
+ *                           (idempotent, bounded retries; see call-analysis.server)
  *   sweep.call_variable_retention  clear stored final agent variables once the
  *                           recovery window (and outbound finalization) is over
  *   jobs.prune              delete succeeded jobs older than 7 days
@@ -51,6 +54,8 @@ export interface HandlerDeps {
   expireVariables?: (now: Date) => Promise<Record<string, unknown>>;
   /** End-of-call outcome recovery; defaults to reconcileCallOutcomes. */
   reconcileOutcomes?: (now: Date) => Promise<Record<string, unknown>>;
+  /** Analysis of finished outbound calls for campaign reports; defaults to sweepCallAnalyses. */
+  analyzeCalls?: (now: Date) => Promise<Record<string, unknown>>;
   /** Campaign dispatcher; defaults to dispatchDueCampaigns. */
   dispatchCampaigns?: (options: { deadline: number }) => Promise<Record<string, unknown>>;
 }
@@ -215,6 +220,22 @@ export function buildJobHandlers(deps: HandlerDeps): Record<string, JobHandler> 
           >;
         });
       return reconcile(now());
+    },
+
+    "sweep.call_analysis": async () => {
+      const analyze =
+        deps.analyzeCalls ??
+        (async () => {
+          const { sweepCallAnalyses, defaultAnalysisDeps } =
+            await import("../call-analysis.server.ts");
+          // A couple per run: a model call can take several seconds and a job times out at 20 s.
+          return (await sweepCallAnalyses(
+            supabaseAdmin,
+            { ...(await defaultAnalysisDeps()), now },
+            2,
+          )) as unknown as Record<string, unknown>;
+        });
+      return analyze(now());
     },
 
     "sweep.call_variable_retention": async () => {
