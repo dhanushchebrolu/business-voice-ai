@@ -85,6 +85,7 @@ import { Route as ApiPublicCronSyncGoogleCalendarsRouteImport } from './routes/a
 import { Route as ApiPublicCronWhatsappDispatchRouteImport } from './routes/api/public/cron/whatsapp-dispatch'
 import { Route as ApiPublicCronWhatsappRepliesRouteImport } from './routes/api/public/cron/whatsapp-replies'
 import { Route as ApiPublicSarvamClientContextRouteImport } from './routes/api/public/sarvam/client-context'
+import { Route as ApiPublicStatsConversationTimeRouteImport } from './routes/api/public/stats/conversation-time'
 import { Route as ApiPublicWebhooksGoogleCalendarRouteImport } from './routes/api/public/webhooks/google-calendar'
 import { Route as ApiPublicWebhooksInstagramRouteImport } from './routes/api/public/webhooks/instagram'
 import { Route as ApiPublicWebhooksLivekitRouteImport } from './routes/api/public/webhooks/livekit'
@@ -494,6 +495,12 @@ const ApiPublicSarvamClientContextRoute =
     path: '/api/public/sarvam/client-context',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicStatsConversationTimeRoute =
+  ApiPublicStatsConversationTimeRouteImport.update({
+    id: '/api/public/stats/conversation-time',
+    path: '/api/public/stats/conversation-time',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicWebhooksGoogleCalendarRoute =
   ApiPublicWebhooksGoogleCalendarRouteImport.update({
     id: '/api/public/webhooks/google-calendar',
@@ -662,6 +669,7 @@ export interface FileRoutesByFullPath {
   '/api/public/cron/whatsapp-dispatch': typeof ApiPublicCronWhatsappDispatchRoute
   '/api/public/cron/whatsapp-replies': typeof ApiPublicCronWhatsappRepliesRoute
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
+  '/api/public/stats/conversation-time': typeof ApiPublicStatsConversationTimeRoute
   '/api/public/webhooks/google-calendar': typeof ApiPublicWebhooksGoogleCalendarRoute
   '/api/public/webhooks/instagram': typeof ApiPublicWebhooksInstagramRoute
   '/api/public/webhooks/livekit': typeof ApiPublicWebhooksLivekitRoute
@@ -750,6 +758,7 @@ export interface FileRoutesByTo {
   '/api/public/cron/whatsapp-dispatch': typeof ApiPublicCronWhatsappDispatchRoute
   '/api/public/cron/whatsapp-replies': typeof ApiPublicCronWhatsappRepliesRoute
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
+  '/api/public/stats/conversation-time': typeof ApiPublicStatsConversationTimeRoute
   '/api/public/webhooks/google-calendar': typeof ApiPublicWebhooksGoogleCalendarRoute
   '/api/public/webhooks/instagram': typeof ApiPublicWebhooksInstagramRoute
   '/api/public/webhooks/livekit': typeof ApiPublicWebhooksLivekitRoute
@@ -844,6 +853,7 @@ export interface FileRoutesById {
   '/api/public/cron/whatsapp-dispatch': typeof ApiPublicCronWhatsappDispatchRoute
   '/api/public/cron/whatsapp-replies': typeof ApiPublicCronWhatsappRepliesRoute
   '/api/public/sarvam/client-context': typeof ApiPublicSarvamClientContextRoute
+  '/api/public/stats/conversation-time': typeof ApiPublicStatsConversationTimeRoute
   '/api/public/webhooks/google-calendar': typeof ApiPublicWebhooksGoogleCalendarRoute
   '/api/public/webhooks/instagram': typeof ApiPublicWebhooksInstagramRoute
   '/api/public/webhooks/livekit': typeof ApiPublicWebhooksLivekitRoute
@@ -939,6 +949,7 @@ export interface FileRouteTypes {
     | '/api/public/cron/whatsapp-dispatch'
     | '/api/public/cron/whatsapp-replies'
     | '/api/public/sarvam/client-context'
+    | '/api/public/stats/conversation-time'
     | '/api/public/webhooks/google-calendar'
     | '/api/public/webhooks/instagram'
     | '/api/public/webhooks/livekit'
@@ -1027,6 +1038,7 @@ export interface FileRouteTypes {
     | '/api/public/cron/whatsapp-dispatch'
     | '/api/public/cron/whatsapp-replies'
     | '/api/public/sarvam/client-context'
+    | '/api/public/stats/conversation-time'
     | '/api/public/webhooks/google-calendar'
     | '/api/public/webhooks/instagram'
     | '/api/public/webhooks/livekit'
@@ -1120,6 +1132,7 @@ export interface FileRouteTypes {
     | '/api/public/cron/whatsapp-dispatch'
     | '/api/public/cron/whatsapp-replies'
     | '/api/public/sarvam/client-context'
+    | '/api/public/stats/conversation-time'
     | '/api/public/webhooks/google-calendar'
     | '/api/public/webhooks/instagram'
     | '/api/public/webhooks/livekit'
@@ -1172,6 +1185,7 @@ export interface RootRouteChildren {
   ApiPublicCronWhatsappDispatchRoute: typeof ApiPublicCronWhatsappDispatchRoute
   ApiPublicCronWhatsappRepliesRoute: typeof ApiPublicCronWhatsappRepliesRoute
   ApiPublicSarvamClientContextRoute: typeof ApiPublicSarvamClientContextRoute
+  ApiPublicStatsConversationTimeRoute: typeof ApiPublicStatsConversationTimeRoute
   ApiPublicWebhooksGoogleCalendarRoute: typeof ApiPublicWebhooksGoogleCalendarRoute
   ApiPublicWebhooksInstagramRoute: typeof ApiPublicWebhooksInstagramRoute
   ApiPublicWebhooksLivekitRoute: typeof ApiPublicWebhooksLivekitRoute
@@ -1722,6 +1736,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicSarvamClientContextRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/stats/conversation-time': {
+      id: '/api/public/stats/conversation-time'
+      path: '/api/public/stats/conversation-time'
+      fullPath: '/api/public/stats/conversation-time'
+      preLoaderRoute: typeof ApiPublicStatsConversationTimeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/webhooks/google-calendar': {
       id: '/api/public/webhooks/google-calendar'
       path: '/api/public/webhooks/google-calendar'
@@ -2005,6 +2026,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiPublicCronWhatsappDispatchRoute: ApiPublicCronWhatsappDispatchRoute,
   ApiPublicCronWhatsappRepliesRoute: ApiPublicCronWhatsappRepliesRoute,
   ApiPublicSarvamClientContextRoute: ApiPublicSarvamClientContextRoute,
+  ApiPublicStatsConversationTimeRoute: ApiPublicStatsConversationTimeRoute,
   ApiPublicWebhooksGoogleCalendarRoute: ApiPublicWebhooksGoogleCalendarRoute,
   ApiPublicWebhooksInstagramRoute: ApiPublicWebhooksInstagramRoute,
   ApiPublicWebhooksLivekitRoute: ApiPublicWebhooksLivekitRoute,

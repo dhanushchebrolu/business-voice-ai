@@ -1,5 +1,6 @@
 import { INTEGRATION_GROUPS } from "@/lib/integrations-catalog";
 import { Enter, H2, Marquee, MONO_P, RollNumber, ScrollFill, VxSection } from "./primitives";
+import { LiveConversationSeconds } from "./live-conversation-seconds";
 
 const AVAILABLE = INTEGRATION_GROUPS.flatMap((g) =>
   g.items.filter((i) => i.status === "Available"),
@@ -33,7 +34,7 @@ export function ConnectsWith() {
 /* ───── 01 The gap ───── */
 
 const STATS = [
-  [String(4), "Product areas", "Voice, WhatsApp, appointments, workflows"],
+  [null, "Seconds of conversations handled", "Live total across every ClickAI customer"],
   [
     String(AVAILABLE.length),
     "Integrations available today",
@@ -63,7 +64,7 @@ export function Gap() {
           <Enter key={label} delay={i * 40}>
             <div className="py-8 sm:px-6 sm:first:pl-0">
               <dd className="font-vmono text-[44px] font-medium leading-none tracking-[-0.04em] text-[var(--vx-ink)] sm:text-[56px]">
-                <RollNumber value={value} />
+                {value === null ? <LiveConversationSeconds /> : <RollNumber value={value} />}
               </dd>
               <dt className="mt-5 font-vmono text-[11px] font-medium uppercase tracking-[0.1em] text-[var(--vx-ink)]">
                 {label}
