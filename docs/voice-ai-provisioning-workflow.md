@@ -25,12 +25,19 @@ Nothing buys/claims a number, places a call, or touches billing.
 
 ## Honest limits (needs live verification)
 
-- **Sarvam documents no agent create/clone/configure/commit API.** `unsupportedAgentProvisioner`
-  is the only shipped implementation, so `creating_agent` ends in `waiting` with code
-  `PROVIDER_CAPABILITY_UNVERIFIED` and an admin registers the customer's agent by hand (existing
-  admin screen); the job then resumes. Implementing `AgentProvisioner` against a real API is the
-  only change needed; its find-before-create, ambiguous-timeout and verify-before-register logic is
-  already tested with mocks.
+- **Sarvam agent authoring (checked 2026-11-25 against docs.sarvam.ai/voice-agents/llms.txt,
+  /api/introduction.md and /mcp.md):** the public REST API (`X-API-Key`) covers deployments,
+  campaigns, instant outbound, analytics, boards, tests, webhook configs, experiments and BYOK, with
+  **no agent create/clone/configure/commit endpoint**. The only documented route is the Voice Agents
+  MCP server (`https://mcp.sarvam.ai/voice-agents`), which does expose agent create/clone/configure/
+  commit but authenticates through interactive Sarvam SSO OAuth, one org/workspace per login, **token
+  valid 24 h with no refresh token**. That is a human-in-the-loop tool, not a server-to-server API, so
+  it is deliberately not automated here (no headless SSO, no stored tokens, no undocumented endpoints).
+  `unsupportedAgentProvisioner` stays the only implementation: `creating_agent` ends in `waiting`
+  (`PROVIDER_CAPABILITY_UNVERIFIED`). Handoff: registering the agent (admin "Register agent")
+  immediately re-runs the customer's open job, and the scheduled sweep continues it if that call fails.
+  If Sarvam ships a keyed agent API, implement `AgentProvisioner` and return it from
+  `defaultAgentProvisioner()`.
 - The Vobiz→Sarvam connection is not a separate API call: Sarvam routes a rented number through the
   deployment. Whether a number is already on the customer's Sarvam connection is confirmed by an
   admin (existing `waiting_for_number_confirmation`); Sarvam has no number list/import API.
@@ -46,10 +53,15 @@ Nothing buys/claims a number, places a call, or touches billing.
   (deployment adopted, agent looked up by deterministic name `clickai-<org8>-<agent8>` first).
   `step_states`, `current_job_step`, `last_checkpoint` record where it is.
 - Transient failures (`retryable`): pending + `next_attempt_at` (30 s, 1 m, 2 m, 4 m …, capped 15 m),
-  at most 5 attempts, then `failed` / `RETRIES_EXHAUSTED` (retryable by hand). Permanent failures
-  (`retryable = false`) are never retried automatically. A sweeper route
-  `POST /api/public/cron/provisioning-retry` (Bearer `LOVABLE_CRON_SECRET`, **must be scheduled every
-  minute externally like the other cron routes**) runs due jobs and stuck `running` ones.
+  at most 5 _consecutive failed_ attempts (clicks or sweeps that merely found the job waiting do not
+  count), then `failed` / `RETRIES_EXHAUSTED` (retryable by hand). Permanent failures
+  (`retryable = false`) are never retried automatically.
+- **Scheduling uses the existing system**: job kind `sweep.provisioning_retry` is enqueued every
+  minute by `periodicJobs` (`src/lib/jobs/scheduler.server.ts`), driven by the Worker cron
+  `* * * * *` in `wrangler.json` via `server/plugins/scheduled-jobs.ts`. No extra trigger or
+  secret. It resumes due retries, crashed (`running` > 10 min) jobs, and customer-started jobs
+  waiting for an agent that has since been registered. Bounded to 3 jobs / 15 s per tick. Kill switch:
+  `JOBS_SCHEDULER_ENABLED=false` (stops all sweeps).
 - Ambiguous timeouts: never blindly recreated; lookup first (agent by name, deployment by number).
 - Failure codes: see `FailureCode` in `src/lib/voice-provisioning-job.ts`. Customers only get a
   fixed plain message; admins get code, step, sanitized note, failing check ids, event trail.
@@ -76,10 +88,26 @@ anon/authenticated grants). Customers read only through owner-checked server fun
 
 ## Live verification checklist (not done)
 
-1. Review, then apply the migration with a guarded single-transaction gate script (not produced yet).
-2. Schedule `provisioning-retry` every minute.
+1. Review, then apply the migration with the gate scripts (see "Migration gate"); the latest applied migration must be `20261202090000`.
+2. Nothing to schedule: the sweep rides the existing Worker cron.
 3. On a **test** customer (never Smile Dental) with an admin-confirmed, unused Sarvam number and a
    hand-registered agent: press Activate; expect steps to reach `complete`, number `active`.
 4. Check in Sarvam: one deployment, paused→active, routes only that number; ClickAI row verified ids set.
 5. Press Activate again / reload during the run: no second deployment or job.
 6. Only then one supervised inbound test call.
+
+## Migration gate (20261203090000): built, NOT executed
+
+`node scripts/build-gate-outbound-package.mjs 20261203090000` regenerates these (rebuild if the
+migration or rollback file changes; the embedded SHA-256 records the gated text):
+
+| File                                             | Purpose                                                                                                                                                                                                                                                                                                     |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `docs/gate-outbound-execute-20261203090000.sql`  | one-transaction apply: guards (system identifier, database, latest migration `20261202090000`, objects absent, outbound-safety state), the migration byte for byte, history row, in-transaction check including a fingerprint proving existing data (`provisioning_runs` and the other tables) is unchanged |
+| `docs/gate-outbound-verify-20261203090000.sql`   | read-only post-apply verification (`all_pass`)                                                                                                                                                                                                                                                              |
+| `docs/gate-outbound-rollback-20261203090000.sql` | guarded undo (latest migration only); refuses while `provisioning_run_events` has rows unless `SET LOCAL rollback.discard_job_data = 'yes';` is added at the top                                                                                                                                            |
+
+Run from the main checkout, only after explicit approval:
+`npx supabase db query --remote=eorazvlmqwunmhwviocn --yes -f docs/gate-outbound-execute-20261203090000.sql`, then the verify script.
+Rehearsed (wrong-identity refusal, execute, refuse twice, verify, rollback) on a disposable cluster by
+`supabase/migrations/voice_provisioning_job_gate.pg.test.ts`.

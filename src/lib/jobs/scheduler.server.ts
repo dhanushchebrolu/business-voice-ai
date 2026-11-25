@@ -44,6 +44,10 @@ export function periodicJobs(now: Date): { kind: string; idempotencyKey: string 
   return [
     { kind: "sweep.call_finalization", idempotencyKey: `sweep.call_finalization:${minute}` },
     { kind: "campaign.dispatch", idempotencyKey: `campaign.dispatch:${minute}` },
+    {
+      kind: "sweep.provisioning_retry",
+      idempotencyKey: `sweep.provisioning_retry:${minute}`,
+    },
     { kind: "sweep.sarvam_reconcile", idempotencyKey: `sweep.sarvam_reconcile:${fiveMinute}` },
     {
       kind: "sweep.call_outcome_reconcile",

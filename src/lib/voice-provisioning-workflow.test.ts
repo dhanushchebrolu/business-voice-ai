@@ -1,7 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { runProvisioningPipeline, type PipelineDeps } from "./provisioning-pipeline.server.ts";
-import { runProvisioning } from "./provisioning-runs.server.ts";
+import { runProvisioning, sweepProvisioningRetries } from "./provisioning-runs.server.ts";
 import { loadActivationView, startVoiceActivation } from "./voice-activation.server.ts";
 import {
   ensureCustomerAgent,
@@ -704,5 +704,80 @@ describe("admin visibility", () => {
       "stuck",
     );
     assert.equal(queueStatus({ status: "failed", current_step: null }), "failed");
+  });
+});
+
+describe("scheduled sweep and retry bound", () => {
+  const sweep = (db: World, now = NOW) => {
+    const started: string[] = [];
+    return sweepProvisioningRetries(db.client, {
+      now,
+      run: async (_a, i) => {
+        started.push(`${i.organizationId}:${i.trigger}`);
+        return { runId: "r", claimed: true, status: "succeeded", result: null };
+      },
+    }).then((r) => ({ ...r, started }));
+  };
+
+  test("a due retry is resumed; a future one is not", async () => {
+    const db = world();
+    await run0(db, deps(db, { deployment: { appVersion: 9 } }).d);
+    assert.equal((await sweep(db)).started.length, 0, "not due yet");
+    const later = new Date(NOW.getTime() + 24 * 3600_000);
+    assert.deepEqual((await sweep(db, later)).started, [`${ORG}:customer_activate`]);
+  });
+
+  test("a crashed (stale running) job is picked up", async () => {
+    const db = world();
+    await run0(db, deps(db).d);
+    Object.assign(runRow(db), { status: "running", finished_at: null });
+    runRow(db)["updated_at"] = new Date(NOW.getTime() - 3600_000).toISOString();
+    const r = await sweep(db);
+    assert.equal(r.stuck, 1);
+    assert.equal(r.started.length, 1);
+  });
+
+  test("a customer job waiting for the agent continues once the agent is registered, not before", async () => {
+    const db = noAgentWorld();
+    await run0(db, deps(db).d);
+    assert.equal(runRow(db)["status"], "waiting");
+    assert.equal((await sweep(db)).started.length, 0, "still no agent");
+    Object.assign(db.tables["agent_configs"]![0]!, {
+      sarvam_app_id: "Hand-made-1",
+      sarvam_app_version: 1,
+    });
+    assert.deepEqual((await sweep(db)).started, [`${ORG}:customer_activate`]);
+  });
+
+  test("a waiting job started by another trigger is never resumed automatically", async () => {
+    const db = noAgentWorld();
+    await run0(db, deps(db).d);
+    runRow(db)["trigger"] = "setup_fee";
+    Object.assign(db.tables["agent_configs"]![0]!, {
+      sarvam_app_id: "Hand-made-1",
+      sarvam_app_version: 1,
+    });
+    assert.equal((await sweep(db)).started.length, 0);
+  });
+
+  test("clicks that only found the job waiting do not use up the retry bound", async () => {
+    const db = noAgentWorld();
+    for (let i = 0; i < MAX_AUTOMATIC_ATTEMPTS + 2; i++)
+      await run0(db, deps(db).d, { force: true });
+    assert.equal(runRow(db)["status"], "waiting");
+    // One transient failure afterwards is still retried, not declared exhausted.
+    Object.assign(db.tables["agent_configs"]![0]!, {
+      sarvam_app_id: "Customer-app-1",
+      sarvam_app_version: 1,
+    });
+    const vl = db.tables["agent_voice_language_settings"]![0]!;
+    Object.assign(vl, {
+      status: "applied",
+      applied_sarvam_app_id: "Customer-app-1",
+      applied_sarvam_app_version: 1,
+    });
+    await run0(db, deps(db, { deployment: { appVersion: 9 } }).d, { force: true });
+    assert.equal(runRow(db)["status"], "pending");
+    assert.equal(runRow(db)["failure_code"], "DEPLOYMENT_VERIFY_FAILED");
   });
 });

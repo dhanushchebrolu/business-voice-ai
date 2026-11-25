@@ -26,6 +26,8 @@ import { staleWebhookClaims, WEBHOOK_MAX_ATTEMPTS } from "../telephony/webhook-c
  *                           (idempotent, bounded retries; see call-analysis.server)
  *   sweep.call_variable_retention  clear stored final agent variables once the
  *                           recovery window (and outbound finalization) is over
+ *   sweep.provisioning_retry  resume due automatic retries, crashed attempts and jobs waiting
+ *                           on an agent that has since been registered (provisioning-runs.server)
  *   jobs.prune              delete succeeded jobs older than 7 days
  */
 
@@ -249,6 +251,11 @@ export function buildJobHandlers(deps: HandlerDeps): Record<string, JobHandler> 
           >;
         });
       return expire(now());
+    },
+
+    "sweep.provisioning_retry": async () => {
+      const { sweepProvisioningRetries } = await import("../provisioning-runs.server.ts");
+      return { ...(await sweepProvisioningRetries(supabaseAdmin, { now: now() })) };
     },
 
     "jobs.prune": async () => {

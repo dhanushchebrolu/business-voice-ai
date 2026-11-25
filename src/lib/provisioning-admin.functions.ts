@@ -476,12 +476,25 @@ export const registerCustomerSarvamAgent = createServerFn({ method: "POST" })
     // A customer that already has a deployment is re-verified now: until the
     // new agent/version is verified, the admission gate serves no business data.
     let reverify: { state: string | null; note: string | null } | null = null;
-    if (detail.numbers.some((n) => n.provider === "sarvam" && n.provider_deployment_id)) {
+    // The same goes for a customer whose activation job is waiting for this agent:
+    // registering it continues the job now (the scheduled sweep is the backstop).
+    const { data: openJob, error: openJobError } = await supabaseAdmin
+      .from("provisioning_runs")
+      .select("id")
+      .eq("organization_id", data.orgId)
+      .in("status", ["pending", "running", "waiting"])
+      .limit(1);
+    if (openJobError) throw openJobError;
+    if (
+      detail.numbers.some((n) => n.provider === "sarvam" && n.provider_deployment_id) ||
+      (openJob ?? []).length
+    ) {
       const { runProvisioning } = await import("@/lib/provisioning-runs.server");
       const run = await runProvisioning(supabaseAdmin, {
         organizationId: data.orgId,
         trigger: "admin_retry",
         createdBy: admin.userId,
+        force: true,
       });
       reverify = { state: run.result?.state ?? null, note: run.result?.note ?? null };
     }

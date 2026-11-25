@@ -81,6 +81,19 @@ const TENANT_FKS = (composite) =>
     )
     .join("\n     AND ");
 
+const JOB_COLS = [
+  "step_states",
+  "current_job_step",
+  "last_checkpoint",
+  "failure_code",
+  "retryable",
+  "next_attempt_at",
+  "max_attempts",
+  "diagnostics",
+  "customer_message",
+  "idempotency_key",
+  "sarvam_agent_id",
+];
 const GATES = {
   20261123090000: {
     name: "campaign_creation_idempotency",
@@ -204,6 +217,32 @@ const GATES = {
   },
 };
 
+GATES[20261203090000] = {
+  name: "voice_provisioning_job",
+  // The latest migration applied to production before this one.
+  previous: "20261202090000",
+  rollback: "docs/production-rollback-20261203090000-voice-provisioning-job.sql",
+  // provisioning_runs is fingerprinted too: existing runs must survive unchanged.
+  extraTables: ["provisioning_runs"],
+  absent: `${noCols("provisioning_runs", JOB_COLS)}
+     AND to_regclass('public.provisioning_run_events') IS NULL
+     AND to_regclass('public.idx_provisioning_runs_one_active_number') IS NULL
+     AND to_regclass('public.idx_provisioning_runs_due') IS NULL`,
+  present: `${cols("provisioning_runs", JOB_COLS)}
+         = 'current_job_step:text:YES:-,customer_message:text:YES:-,diagnostics:jsonb:YES:-,failure_code:text:YES:-,idempotency_key:text:YES:-,last_checkpoint:text:YES:-,max_attempts:integer:NO:5,next_attempt_at:timestamp with time zone:YES:-,retryable:boolean:YES:-,sarvam_agent_id:text:YES:-,step_states:jsonb:NO:''{}''::jsonb'
+     AND ${idxDef("idx_provisioning_runs_one_active_number")} LIKE 'CREATE UNIQUE INDEX idx_provisioning_runs_one_active_number ON public.provisioning_runs USING btree (phone_number_id) WHERE %'
+     AND ${idxDef("idx_provisioning_runs_due")} LIKE 'CREATE INDEX idx_provisioning_runs_due ON public.provisioning_runs USING btree (next_attempt_at) WHERE %'
+     AND (SELECT relrowsecurity FROM pg_class WHERE oid = 'public.provisioning_run_events'::regclass)
+     AND has_table_privilege('service_role', 'public.provisioning_run_events', 'SELECT')
+     AND has_table_privilege('service_role', 'public.provisioning_run_events', 'INSERT')
+     AND NOT has_table_privilege('service_role', 'public.provisioning_run_events', 'UPDATE')
+     AND NOT has_table_privilege('service_role', 'public.provisioning_run_events', 'DELETE')
+     AND NOT has_table_privilege('anon', 'public.provisioning_run_events', 'SELECT')
+     AND NOT has_table_privilege('authenticated', 'public.provisioning_run_events', 'SELECT')
+     AND ${conDef("provisioning_runs", "provisioning_runs_max_attempts_check")} IS NOT NULL`,
+  newColumns: { provisioning_runs: JOB_COLS },
+};
+
 const VERSION = process.argv[2];
 const gate = GATES[VERSION];
 if (!gate) throw new Error(`no gate described for ${VERSION}`);
@@ -237,11 +276,12 @@ const TABLES = [
   "wallet_transactions",
   "webhook_events",
 ];
+const ALL_TABLES = [...TABLES, ...(gate.extraTables ?? [])];
 const fp = (t) => {
   const drop = (gate.newColumns[t] ?? []).map((c) => ` - '${c}'`).join("");
   return `(SELECT '${t}:' || count(*) || ':' || coalesce(md5(string_agg((to_jsonb(x)${drop})::text, '|' ORDER BY (to_jsonb(x)${drop})::text)), '-') FROM public.${t} x)`;
 };
-const FINGERPRINT = TABLES.map(fp).join(" || ';' || ");
+const FINGERPRINT = ALL_TABLES.map(fp).join(" || ';' || ");
 
 const header = (title) => `-- ${title}
 -- Target: Supabase project eorazvlmqwunmhwviocn, database "${DATABASE}",

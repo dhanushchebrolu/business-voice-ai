@@ -73,10 +73,15 @@ function NumbersPage() {
   const activate = useServerFn(activateMyNumber);
   const fetchActivation = useServerFn(getMyActivationStatus);
   const [activating, setActivating] = useState(false);
-  const { data: activation, refetch: refetchActivation } = useQuery({
+  const {
+    data: activation,
+    isLoading: activationLoading,
+    isError: activationError,
+    refetch: refetchActivation,
+  } = useQuery({
     queryKey: ["my-activation", orgId],
     enabled: Boolean(orgId),
-    queryFn: () => fetchActivation({ data: { orgId: orgId! } }).catch(() => null),
+    queryFn: () => fetchActivation({ data: { orgId: orgId! } }),
     // Real progress: poll while the backend job is running or retrying.
     refetchInterval: (q) => (activating || q.state.data?.busy ? 3000 : false),
   });
@@ -222,23 +227,41 @@ function NumbersPage() {
                           <ActivationProgress view={activation} />
                         </>
                       ) : null}
-                      <Button
-                        size="sm"
-                        className="mt-3"
-                        disabled={
-                          activating ||
-                          Boolean(activation?.busy) ||
-                          activation?.phase === "completed" ||
-                          (activation?.phase === "failed" && !activation.canRetry)
-                        }
-                        onClick={onActivate}
-                      >
-                        {activating || activation?.busy
-                          ? "Activating…"
-                          : activation?.phase === "failed" || activation?.phase === "waiting"
-                            ? "Try again"
-                            : "Activate number"}
-                      </Button>
+                      {activationError ? (
+                        <p className="mt-2 text-xs text-destructive" role="alert">
+                          We could not load your activation status.{" "}
+                          <button
+                            type="button"
+                            className="underline"
+                            onClick={() => refetchActivation()}
+                          >
+                            Retry
+                          </button>
+                        </p>
+                      ) : null}
+                      {/* A permanent failure waits for the ClickAI team: no button to press. */}
+                      {activation?.phase === "completed" ||
+                      (activation?.phase === "failed" && !activation.canRetry) ? null : (
+                        <Button
+                          size="sm"
+                          className="mt-3"
+                          disabled={
+                            activating ||
+                            activationLoading ||
+                            activationError ||
+                            Boolean(activation?.busy)
+                          }
+                          onClick={onActivate}
+                        >
+                          {activating || activation?.busy
+                            ? "Activating…"
+                            : activation?.phase === "failed"
+                              ? "Try again"
+                              : activation?.phase === "waiting"
+                                ? "Check again"
+                                : "Activate number"}
+                        </Button>
+                      )}
                     </div>
                   ) : (
                     <p className="mt-1.5 text-xl font-medium text-muted-foreground">

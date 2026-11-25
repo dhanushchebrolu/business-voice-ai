@@ -142,6 +142,7 @@ describe("scheduled tick", () => {
       [
         "sweep.call_finalization",
         "campaign.dispatch",
+        "sweep.provisioning_retry",
         "sweep.sarvam_reconcile",
         "sweep.call_outcome_reconcile",
         "sweep.call_analysis",
@@ -157,7 +158,7 @@ describe("scheduled tick", () => {
     const now = new Date("2026-11-11T10:00:30Z");
     const first = await runScheduledTick({ supabaseAdmin, store, handlers, now });
     const second = await runScheduledTick({ supabaseAdmin, store, handlers, now });
-    assert.equal(first.enqueued.length, 7);
+    assert.equal(first.enqueued.length, 8);
     assert.equal(second.enqueued.length, 0, "same bucket: nothing new");
     assert.deepEqual(ran.sort(), [
       "campaign.dispatch",
@@ -166,6 +167,7 @@ describe("scheduled tick", () => {
       "sweep.call_finalization",
       "sweep.call_outcome_reconcile",
       "sweep.call_variable_retention",
+      "sweep.provisioning_retry",
       "sweep.sarvam_reconcile",
     ]);
     assert.equal(first.health.alert, true);
@@ -184,6 +186,7 @@ describe("handlers", () => {
       "sweep.call_finalization",
       "sweep.call_outcome_reconcile",
       "sweep.call_variable_retention",
+      "sweep.provisioning_retry",
       "sweep.sarvam_reconcile",
     ]);
   });

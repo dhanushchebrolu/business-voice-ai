@@ -155,7 +155,9 @@ export async function runProvisioning(
 
   const { data: current, error: readError } = await admin
     .from("provisioning_runs")
-    .select("id, status, attempts, updated_at, next_attempt_at, max_attempts, step_states")
+    .select(
+      "id, status, attempts, updated_at, next_attempt_at, max_attempts, step_states, diagnostics",
+    )
     .eq("id", runId)
     .single();
   if (readError) throw readError;
@@ -194,6 +196,12 @@ export async function runProvisioning(
 
   const attempt = current.attempts + 1;
   const maxAttempts = current.max_attempts ?? MAX_AUTOMATIC_ATTEMPTS;
+  // Only consecutive failed attempts count toward the retry bound: clicks and
+  // sweeps that merely found the job waiting must not use it up.
+  const previousStreak = Number(
+    (current.diagnostics as { retryStreak?: number } | null)?.retryStreak ?? 0,
+  );
+  const streak = previousStreak + 1;
   const run = { id: runId, organizationId: input.organizationId };
   let states = (current.step_states ?? {}) as StepStates;
   let currentKey: JobStepKey = "validating";
@@ -257,12 +265,13 @@ export async function runProvisioning(
         diagnostics: {
           attempt,
           maxAttempts,
+          retryStreak: kind === "retry" ? streak : 0,
           step: currentKey,
           note: sanitizeDiagnostic(f.note),
           ...f.extra,
         } as unknown as Json,
         next_attempt_at:
-          kind === "retry" ? new Date(now().getTime() + backoffMs(attempt)).toISOString() : null,
+          kind === "retry" ? new Date(now().getTime() + backoffMs(streak)).toISOString() : null,
         sarvam_agent_id: agentRow?.sarvam_app_id ?? null,
         finished_at: terminal ? nowIso() : null,
         ...(kind === "failed" || kind === "retry"
@@ -284,7 +293,7 @@ export async function runProvisioning(
   } catch (err) {
     // An unexpected error ends this attempt (retried with backoff, bounded), never a stuck "running".
     const message = (err as Error).message ?? String(err);
-    const retry = attempt < maxAttempts;
+    const retry = streak < maxAttempts;
     await finish(retry ? "retry" : "failed", {
       code: retry ? "INTERNAL_ERROR" : "RETRIES_EXHAUSTED",
       retryable: true,
@@ -301,7 +310,7 @@ export async function runProvisioning(
     state: result.state,
     step: currentKey,
     failure: pipeline.failure,
-    attempts: attempt,
+    attempts: streak,
     maxAttempts,
   });
   const failingChecks = (pipeline.verification?.checks ?? []).filter((c) => !c.ok).map((c) => c.id);
@@ -348,4 +357,100 @@ export async function runProvisioning(
   if (saveError) throw saveError;
 
   return { runId, claimed: true, status, result };
+}
+
+export interface SweepResult {
+  due: number;
+  stuck: number;
+  agentRegistered: number;
+  processed: number;
+  errors: number;
+}
+
+/**
+ * The scheduled tick's provisioning sweep (job kind `sweep.provisioning_retry`,
+ * every minute from the Worker cron). Resumes, through runProvisioning's own
+ * claim and backoff checks:
+ *   1. jobs whose automatic retry is due (pending + next_attempt_at <= now);
+ *   2. jobs stuck "running" past the stale window (a crashed attempt);
+ *   3. jobs waiting for the agent whose agent has since been registered, so an
+ *      admin's manual registration continues the job without another click.
+ * Bounded per tick (maxRuns, budgetMs); the rest wait for the next minute.
+ */
+export async function sweepProvisioningRetries(
+  admin: Admin,
+  options: {
+    now?: Date;
+    maxRuns?: number;
+    budgetMs?: number;
+    run?: (admin: Admin, input: RunProvisioningInput) => Promise<RunProvisioningResult>;
+  } = {},
+): Promise<SweepResult> {
+  const now = options.now ?? new Date();
+  const run = options.run ?? ((a, i) => runProvisioning(a, i));
+  const [due, stuck, waiting] = await Promise.all([
+    admin
+      .from("provisioning_runs")
+      .select("organization_id, trigger")
+      .eq("status", "pending")
+      .lte("next_attempt_at", now.toISOString())
+      .order("next_attempt_at", { ascending: true })
+      .limit(10),
+    admin
+      .from("provisioning_runs")
+      .select("organization_id, trigger")
+      .eq("status", "running")
+      .lt("updated_at", new Date(now.getTime() - STALE_RUNNING_MS).toISOString())
+      .limit(10),
+    admin
+      .from("provisioning_runs")
+      .select("organization_id, trigger")
+      .eq("status", "waiting")
+      // Only a customer's own activation click authorizes going live automatically.
+      .eq("trigger", "customer_activate")
+      .in("current_step", ["waiting_for_agent", "waiting_for_voice_language"])
+      .limit(25),
+  ]);
+  for (const r of [due, stuck, waiting]) if (r.error) throw r.error;
+
+  let registered: typeof waiting.data = [];
+  const waitingOrgs = (waiting.data ?? []).map((w) => w.organization_id);
+  if (waitingOrgs.length) {
+    const { data, error } = await admin
+      .from("agent_configs")
+      .select("organization_id")
+      .in("organization_id", waitingOrgs)
+      .not("sarvam_app_id", "is", null);
+    if (error) throw error;
+    const ok = new Set((data ?? []).map((d) => d.organization_id));
+    registered = (waiting.data ?? []).filter((w) => ok.has(w.organization_id));
+  }
+
+  const seen = new Set<string>();
+  const queue = [...(due.data ?? []), ...(stuck.data ?? []), ...(registered ?? [])].filter(
+    (r) => !seen.has(r.organization_id) && seen.add(r.organization_id),
+  );
+  const deadline = Date.now() + (options.budgetMs ?? 15_000);
+  let processed = 0;
+  let errors = 0;
+  for (const r of queue.slice(0, options.maxRuns ?? 3)) {
+    if (Date.now() > deadline) break;
+    try {
+      const out = await run(admin, {
+        organizationId: r.organization_id,
+        trigger: r.trigger as ProvisioningTrigger,
+      });
+      if (out.claimed) processed++;
+    } catch (err) {
+      errors++;
+      console.error("provisioning_sweep:run_failed", (err as Error).message);
+    }
+  }
+  return {
+    due: due.data?.length ?? 0,
+    stuck: stuck.data?.length ?? 0,
+    agentRegistered: registered?.length ?? 0,
+    processed,
+    errors,
+  };
 }
