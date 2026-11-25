@@ -9,7 +9,8 @@ import {
   clickAiToolDefinitions,
   sarvamSafePrompt,
 } from "./sarvam-agent-tools-spec.ts";
-import { reportedAgent } from "./tool-auth-checkpoint.server.ts";
+import { reportedAgent, toolsCreatedReport } from "./tool-auth-checkpoint.server.ts";
+import { buildToolAuthCheckpoint } from "./tool-auth-checkpoint-view.ts";
 
 /**
  * Operator bridge: the supported way to automate Sarvam agent authoring.
@@ -170,7 +171,7 @@ async function agentOf(admin: Admin, organizationId: string) {
   return data;
 }
 
-export async function listWorkOrders(admin: Admin) {
+export async function listWorkOrders(admin: Admin, now: Date = new Date()) {
   const { data, error } = await admin
     .from("provisioning_runs")
     .select(
@@ -190,13 +191,33 @@ export async function listWorkOrders(admin: Admin) {
       .select("name")
       .eq("id", r.organization_id)
       .maybeSingle();
+    const agentName = customerAgentName(r.organization_id, agent.id);
+    // The checkpoint view only exists once the operator reported the agent and its six tools.
+    const report =
+      r.current_step === "waiting_for_tool_authentication"
+        ? await toolsCreatedReport(admin, r.organization_id)
+        : null;
+    const checkpoint = report
+      ? buildToolAuthCheckpoint({
+          jobId: r.id,
+          customerId: r.organization_id,
+          customer: org?.name ?? "(unknown)",
+          agentId: report.appId,
+          credentialName: `clickai-${agentName}`,
+          master: report.master,
+          waitingSince: report.reportedAt ?? r.created_at,
+          now,
+          toolsReported: report.tools,
+        })
+      : null;
     out.push({
+      checkpoint,
       workOrderId: r.id,
       customerId: r.organization_id,
       customer: org?.name ?? "(unknown)",
       /** Set when an operator reported it cannot continue (for example Sarvam sign-in required). */
       blocked: r.failure_code === "WAITING_FOR_OPERATOR",
-      agentName: customerAgentName(r.organization_id, agent.id),
+      agentName,
       /** The agent the operator reported (tools created), once credentials are pending. */
       agentId: r.current_step === "waiting_for_tool_authentication" ? r.sarvam_agent_id : null,
       stage:

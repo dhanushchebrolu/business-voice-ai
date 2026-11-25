@@ -15,6 +15,101 @@ import { Button } from "@/components/ui/button";
 
 const when = (v: string) => new Date(v).toLocaleString();
 
+type Checkpoint = NonNullable<
+  Awaited<ReturnType<typeof getOperatorBridgeStatus>>["workOrders"][number]["checkpoint"]
+>;
+
+/** A job paused until a person selects each tool's credential in the Sarvam console. */
+function ToolAuthCheckpointCard({
+  checkpoint: c,
+  onCopy,
+}: {
+  checkpoint: Checkpoint;
+  onCopy: (text: string) => void;
+}) {
+  return (
+    <div
+      className="mt-2 w-full space-y-2 rounded-md border border-border bg-muted/40 p-3"
+      data-testid="tool-auth-checkpoint"
+    >
+      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
+        <dt className="text-muted-foreground">Customer</dt>
+        <dd>
+          {c.customer} <code>{c.customerId}</code>
+        </dd>
+        <dt className="text-muted-foreground">Provisioning job</dt>
+        <dd>
+          <code>{c.jobId}</code>
+        </dd>
+        <dt className="text-muted-foreground">Sarvam agent ID</dt>
+        <dd>
+          <code>{c.agentId}</code> (no verified console link format; search this ID)
+        </dd>
+        <dt className="text-muted-foreground">Cloned from</dt>
+        <dd>
+          {c.master ? (
+            <>
+              master <code>{c.master.agentId}</code>, committed version {c.master.version}
+            </>
+          ) : (
+            "not recorded"
+          )}
+        </dd>
+        <dt className="text-muted-foreground">Credential to select</dt>
+        <dd>
+          <code>{c.credentialName}</code> (name only, this customer's)
+        </dd>
+        <dt className="text-muted-foreground">Status</dt>
+        <dd>
+          Waiting for tool credentials for {c.waitingLabel} (since {when(c.waitingSince)}).{" "}
+          {c.resumeNote}
+        </dd>
+      </dl>
+      {c.attention === "needs_intervention" ? (
+        <p className="text-destructive" role="alert">
+          {c.attentionNote}
+        </p>
+      ) : null}
+      <table className="w-full text-left">
+        <thead className="text-muted-foreground">
+          <tr>
+            <th className="pr-2">#</th>
+            <th className="pr-2">Tool</th>
+            <th className="pr-2">When it runs</th>
+            <th className="pr-2">Expected authentication</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {c.tools.map((t) => (
+            <tr key={t.name}>
+              <td className="pr-2">{t.order}</td>
+              <td className="pr-2">
+                <code>{t.name}</code>
+              </td>
+              <td className="pr-2">{t.timing}</td>
+              <td className="pr-2">{t.expectedAuth}</td>
+              <td>
+                {t.status === "missing"
+                  ? "not reported created"
+                  : "created, credential not yet confirmed"}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <ol className="list-decimal space-y-0.5 pl-5">
+        {c.instructions.map((line) => (
+          <li key={line}>{line}</li>
+        ))}
+      </ol>
+      <Button size="sm" variant="outline" onClick={() => onCopy(c.copyText)}>
+        <Copy className="mr-1 size-3.5" /> Copy operator checklist
+      </Button>
+    </div>
+  );
+}
+
 /**
  * Operator bridge: lets an admin's own Sarvam-signed-in MCP client build the
  * customers' agents from ClickAI work orders. ClickAI stores no Sarvam token.
@@ -41,6 +136,9 @@ export function OperatorBridgePanel() {
       () => toast.error("Could not copy"),
     );
 
+  const awaiting = (data?.workOrders ?? []).filter((w) => w.checkpoint);
+  const stale = awaiting.filter((w) => w.checkpoint!.attention === "needs_intervention").length;
+
   return (
     <SectionCard
       title="Agent builder (operator bridge)"
@@ -59,6 +157,12 @@ export function OperatorBridgePanel() {
             <StatusPill tone={data!.workOrders.length ? "ready" : "idle"}>
               {data!.workOrders.length} agent(s) waiting to be built
             </StatusPill>
+            {awaiting.length ? (
+              <StatusPill tone={stale ? "error" : "ready"}>
+                {awaiting.length} awaiting tool credentials
+                {stale ? `, ${stale} over 24 h` : ""}
+              </StatusPill>
+            ) : null}
             <StatusPill tone={data!.tokens.length ? "live" : "idle"}>
               {data!.tokens.length} active bridge token(s)
             </StatusPill>
@@ -92,6 +196,9 @@ export function OperatorBridgePanel() {
                           : "waiting for agent creation"}
                   </StatusPill>
                   <code className="text-muted-foreground">{w.agentId ?? w.agentName}</code>
+                  {w.checkpoint ? (
+                    <ToolAuthCheckpointCard checkpoint={w.checkpoint} onCopy={copy} />
+                  ) : null}
                 </li>
               ))}
             </ul>

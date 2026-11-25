@@ -1,0 +1,385 @@
+import { test, describe } from "node:test";
+import assert from "node:assert/strict";
+import { runProvisioningPipeline } from "./provisioning-pipeline.server.ts";
+import { runProvisioning } from "./provisioning-runs.server.ts";
+import { handleBridgeRpc } from "./operator-bridge-mcp.server.ts";
+import { listWorkOrders, type WorkOrderDeps } from "./operator-bridge.server.ts";
+import { CLICKAI_TOOL_NAMES } from "./sarvam-agent-tools-spec.ts";
+import {
+  STALE_AFTER_MS,
+  buildToolAuthCheckpoint,
+  waitingLabel,
+} from "./tool-auth-checkpoint-view.ts";
+import { ORG, OTHER, snapshot, world, deps, num } from "./provisioning-test-world.test-helper.ts";
+
+/** The admin's view of the tool-authentication checkpoint, and that the checkpoint stays resumable. */
+
+type World = ReturnType<typeof world>;
+const SIX = [...CLICKAI_TOOL_NAMES];
+const REPORTED_AT = "2026-11-26T10:00:00.000Z";
+const NOW = new Date("2026-11-26T13:12:00.000Z");
+const USER = "00000000-0000-0000-0000-0000000000bb";
+const auth = { ok: true, tokenId: "tok", createdBy: USER, prefix: "cbr_test" } as const;
+const bearer = SIX.map((name) => ({ name, authType: "bearer" }));
+
+const pipeline = (db: World) => deps(db, { deployment: { appId: "Cust-agent-1", appVersion: 3 } });
+function bridge(db: World) {
+  const d: WorkOrderDeps = {
+    loadSnapshot: async () => snapshot(),
+    baseUrl: "https://clickai.example",
+    masterAgentAppId: "Master-agent",
+    masterAgentVersion: 2,
+    resume: async (org) =>
+      runProvisioning(
+        db.client,
+        { organizationId: org, trigger: "admin_retry", force: true },
+        (a, o, h) => runProvisioningPipeline(a, o, pipeline(db).d, h.onStep),
+        () => NOW,
+      ),
+  };
+  return d;
+}
+const call = async (db: World, d: WorkOrderDeps, name: string, args: Record<string, unknown>) => {
+  const out = await handleBridgeRpc(db.client, auth, d, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/call",
+    params: { name, arguments: args },
+  });
+  const r = (out as { result: { content: { text: string }[]; isError?: boolean } }).result;
+  return { body: JSON.parse(r.content[0]!.text), isError: Boolean(r.isError) };
+};
+const report = (id: string, over: Record<string, unknown> = {}) => ({
+  workOrderId: id,
+  agentId: "Cust-agent-1",
+  clonedFrom: { agentId: "Master-agent", version: 2 },
+  tools: SIX,
+  ...over,
+});
+const events = (db: World, name: string) =>
+  (db.tables["provisioning_run_events"] ?? []).filter((e) => e["event"] === name);
+
+/** A job parked at the checkpoint, the way the operator bridge leaves it. */
+async function parked() {
+  const db = world({ appId: null });
+  Object.assign(db.tables["agent_voice_language_settings"]![0]!, {
+    status: "draft",
+    applied_sarvam_app_id: null,
+    applied_sarvam_app_version: null,
+  });
+  db.tables["agent_configs"]![0]!["sarvam_app_version"] = null;
+  db.tables["sarvam_agent_integrations"] = db.tables["sarvam_agent_integrations"]!.filter(
+    (r) => r["role"] !== "inbound",
+  );
+  await runProvisioning(
+    db.client,
+    { organizationId: ORG, trigger: "customer_activate" },
+    (a, o, h) => runProvisioningPipeline(a, o, pipeline(db).d, h.onStep),
+    () => NOW,
+  );
+  const d = bridge(db);
+  const id = (await listWorkOrders(db.client, NOW))[0]!.workOrderId;
+  const credential = await call(db, d, "issue_agent_credential", { workOrderId: id });
+  // The database defaults new credentials to active; the in-memory stand-in has no defaults.
+  for (const r of db.tables["sarvam_agent_integrations"]!) r["status"] ??= "active";
+  const reported = await call(db, d, "report_tools_created", report(id));
+  assert.equal(reported.isError, false, JSON.stringify(reported.body));
+  for (const e of events(db, "agent_tools_created")) e["created_at"] = REPORTED_AT;
+  return { db, d, id, issued: JSON.stringify(credential.body) };
+}
+const checkpointOf = async (db: World, now = NOW) =>
+  (await listWorkOrders(db.client, now))[0]!.checkpoint!;
+
+describe("checkpoint view (pure)", () => {
+  const view = buildToolAuthCheckpoint({
+    jobId: "job-1",
+    customerId: "org-1",
+    customer: "Acme Clinic",
+    agentId: "Cust-agent-1",
+    credentialName: "clickai-acme",
+    master: { agentId: "Master-agent", version: 2 },
+    waitingSince: REPORTED_AT,
+    now: NOW,
+    toolsReported: SIX,
+  });
+
+  test("the six tools, in order, with timing and the expected authentication", () => {
+    assert.deepEqual(
+      view.tools.map((t) => t.name),
+      SIX,
+    );
+    assert.deepEqual(
+      view.tools.map((t) => t.order),
+      [1, 2, 3, 4, 5, 6],
+    );
+    assert.deepEqual(
+      view.tools.map((t) => t.timing),
+      [
+        "On call start",
+        "During the call",
+        "During the call",
+        "During the call",
+        "During the call",
+        "On call end",
+      ],
+    );
+    for (const t of view.tools) assert.match(t.expectedAuth, /^Bearer, credential "clickai-acme"$/);
+  });
+
+  test("never shows a tool as authenticated: only 'created, awaiting credential'", () => {
+    for (const t of view.tools) assert.equal(t.status, "created_awaiting_credential");
+    assert.doesNotMatch(JSON.stringify(view), /authenticated"|"confirmed"|"verified"/);
+  });
+
+  test("a tool the operator did not report is shown as missing, and confirmation is not ready", () => {
+    const partial = buildToolAuthCheckpoint({
+      ...{ jobId: "j", customerId: "o", customer: "A", agentId: "x", credentialName: "c" },
+      master: null,
+      waitingSince: REPORTED_AT,
+      now: NOW,
+      toolsReported: SIX.slice(0, 5),
+    });
+    assert.equal(partial.tools[5]!.status, "missing");
+    assert.equal(partial.readyForConfirmation, false);
+    assert.match(partial.resumeNote, /Not all six/);
+    assert.equal(view.readyForConfirmation, true);
+  });
+
+  test("wait duration, and a display-only flag after 24 hours (nothing times out)", () => {
+    assert.equal(view.waitingMs, 3 * 3_600_000 + 12 * 60_000);
+    assert.equal(view.waitingLabel, "3 h 12 min");
+    assert.equal(view.attention, "normal");
+    const late = buildToolAuthCheckpoint({
+      jobId: "j",
+      customerId: "o",
+      customer: "A",
+      agentId: "x",
+      credentialName: "c",
+      master: null,
+      waitingSince: REPORTED_AT,
+      now: new Date(Date.parse(REPORTED_AT) + STALE_AFTER_MS + 1),
+      toolsReported: SIX,
+    });
+    assert.equal(late.attention, "needs_intervention");
+    assert.match(late.attentionNote, /nothing times out or skips/);
+    assert.equal(late.status, "awaiting_credentials", "still waiting: no automatic progress");
+    assert.equal(waitingLabel(30_000), "less than a minute");
+    assert.equal(waitingLabel(90 * 60_000), "1 h 30 min");
+    assert.equal(waitingLabel(50 * 3_600_000), "2 d 2 h");
+  });
+
+  test("no console link is invented", () => {
+    assert.equal(view.agentLink, null);
+  });
+
+  test("instructions name this agent and this credential, and tell the operator to stop on a mismatch", () => {
+    const text = view.instructions.join("\n");
+    assert.match(text, /Cust-agent-1/);
+    assert.match(text, /named "clickai-acme"/);
+    assert.match(text, /Never the master agent or another customer's agent/);
+    assert.match(text, /stop: do not pick another/);
+    assert.match(text, /Commit the agent/);
+    assert.match(text, /committed version back/);
+    assert.equal(view.instructions.length, 7);
+  });
+
+  test("the copyable checklist: identity, agent, six tools, reminders; no secrets", () => {
+    const t = view.copyText;
+    for (const part of [
+      "Acme Clinic",
+      "org-1",
+      "job-1",
+      "Cust-agent-1",
+      "Master-agent v2",
+      "clickai-acme",
+    ])
+      assert.ok(t.includes(part), part);
+    for (const n of SIX) assert.ok(t.includes(n), n);
+    assert.equal((t.match(/\[ \]/g) ?? []).length, 6);
+    assert.match(t, /commit the agent/i);
+    assert.doesNotMatch(t, /cbr_|eyJ|Bearer [A-Za-z0-9]{16,}|secret_id/);
+  });
+});
+
+describe("the admin queue", () => {
+  test("shows the right customer, job, agent, master version and wait", async () => {
+    const { db, id } = await parked();
+    const [item] = await listWorkOrders(db.client, NOW);
+    assert.equal(item!.stage, "needs_tool_authentication");
+    const c = item!.checkpoint!;
+    assert.equal(c.jobId, id);
+    assert.equal(c.customerId, ORG);
+    assert.equal(c.customer, item!.customer);
+    assert.equal(c.agentId, "Cust-agent-1");
+    assert.deepEqual(c.master, { agentId: "Master-agent", version: 2 });
+    assert.equal(c.waitingSince, REPORTED_AT);
+    assert.equal(c.waitingLabel, "3 h 12 min");
+    assert.match(c.credentialName, /^clickai-/);
+    assert.deepEqual(
+      c.tools.map((t) => t.name),
+      SIX,
+    );
+    assert.equal(c.readyForConfirmation, true);
+  });
+
+  test("no checkpoint card before the operator has reported the tools", async () => {
+    const db = world({ appId: null });
+    Object.assign(db.tables["agent_voice_language_settings"]![0]!, {
+      status: "draft",
+      applied_sarvam_app_id: null,
+      applied_sarvam_app_version: null,
+    });
+    await runProvisioning(
+      db.client,
+      { organizationId: ORG, trigger: "customer_activate" },
+      (a, o, h) => runProvisioningPipeline(a, o, pipeline(db).d, h.onStep),
+      () => NOW,
+    );
+    const [item] = await listWorkOrders(db.client, NOW);
+    assert.equal(item!.checkpoint, null);
+  });
+
+  test("a stale wait is flagged for a person, and still cannot proceed", async () => {
+    const { db } = await parked();
+    const later = new Date(Date.parse(REPORTED_AT) + 30 * 3_600_000);
+    const c = await checkpointOf(db, later);
+    assert.equal(c.attention, "needs_intervention");
+    assert.equal(db.tables["provisioning_runs"]![0]!["status"], "waiting");
+    assert.equal(num(db, "num_new")["status"], "provisioning");
+  });
+
+  test("a refresh loses nothing: the same data comes back, and later too", async () => {
+    const { db } = await parked();
+    const first = await checkpointOf(db);
+    const second = await checkpointOf(db);
+    assert.deepEqual(second, first);
+    const nextDay = await checkpointOf(db, new Date(NOW.getTime() + 20 * 3_600_000));
+    assert.equal(nextDay.agentId, first.agentId);
+    assert.equal(nextDay.jobId, first.jobId);
+    assert.equal(nextDay.tools.length, 6);
+  });
+
+  test("never leaks the credential that was issued, or any token, in the queue data", async () => {
+    const { db, issued } = await parked();
+    const token = (JSON.parse(issued) as { token: string }).token;
+    assert.ok(token && token.length > 10, "the credential was issued");
+    const queue = JSON.stringify(await listWorkOrders(db.client, NOW));
+    assert.ok(!queue.includes(token), "credential value not in the queue");
+    assert.doesNotMatch(queue, /cbr_|"token"|secret_id|password/i);
+    assert.ok(!JSON.stringify(events(db, "agent_tools_created")).includes(token));
+  });
+
+  test("another customer's report never appears on this customer's card", async () => {
+    const { db } = await parked();
+    db.tables["provisioning_run_events"]!.push({
+      run_id: "other-run",
+      organization_id: OTHER,
+      step: "creating_agent",
+      event: "agent_tools_created",
+      created_at: "2026-11-26T12:59:00.000Z",
+      detail: {
+        appId: "Other-app",
+        clonedFrom: { agentId: "Master-agent", version: 2 },
+        tools: SIX,
+      },
+    });
+    const c = await checkpointOf(db);
+    assert.equal(c.agentId, "Cust-agent-1");
+    assert.equal(c.waitingSince, REPORTED_AT);
+  });
+});
+
+describe("confirmation and resume from the checkpoint", () => {
+  test("activation is blocked while waiting: nothing deployed or activated", async () => {
+    const { db } = await parked();
+    const dep = pipeline(db);
+    await runProvisioning(
+      db.client,
+      { organizationId: ORG, trigger: "admin_retry", force: true },
+      (a, o, h) => runProvisioningPipeline(a, o, dep.d, h.onStep),
+      () => NOW,
+    );
+    assert.equal(db.tables["provisioning_runs"]![0]!["status"], "waiting");
+    assert.equal(num(db, "num_new")["status"], "provisioning");
+    assert.equal(dep.calls.create, 0);
+  });
+
+  test("a confirmation for a different agent than the one reported is rejected", async () => {
+    const { db, d, id } = await parked();
+    const r = await call(db, d, "submit_agent_result", {
+      workOrderId: id,
+      agentId: "Cust-agent-2",
+      version: 3,
+      fingerprint: "x",
+      toolAuth: bearer,
+    });
+    assert.equal(r.isError, true);
+    assert.equal(db.tables["agent_configs"]![0]!["sarvam_app_id"], null);
+    assert.equal(
+      (await checkpointOf(db)).agentId,
+      "Cust-agent-1",
+      "still waiting on the right agent",
+    );
+  });
+
+  test("another customer's agent is rejected at the checkpoint", async () => {
+    const { db, d, id } = await parked();
+    const r = await call(db, d, "submit_agent_result", {
+      workOrderId: id,
+      agentId: "Other-app",
+      version: 3,
+      fingerprint: "x",
+      toolAuth: bearer,
+    });
+    assert.equal(r.isError, true);
+    assert.equal(db.tables["agent_configs"]![1]!["sarvam_app_id"], "Other-app");
+    assert.equal(db.tables["agent_configs"]![0]!["sarvam_app_id"], null);
+  });
+
+  test("a confirmation without credentials on every tool is rejected; the card stays", async () => {
+    const { db, d, id } = await parked();
+    const fp = (await (await import("./operator-bridge.server.ts")).getWorkOrder(db.client, id, d))
+      .fingerprint;
+    const r = await call(db, d, "submit_agent_result", {
+      workOrderId: id,
+      agentId: "Cust-agent-1",
+      version: 3,
+      fingerprint: fp,
+      toolAuth: SIX.map((name, i) => ({ name, authType: i === 5 ? "none" : "bearer" })),
+    });
+    assert.equal(r.body.error, "conflict");
+    assert.equal((await listWorkOrders(db.client, NOW)).length, 1);
+    assert.equal(num(db, "num_new")["status"], "provisioning");
+  });
+
+  test("confirming resumes the SAME job once: no new agent, tools or deployment; a repeat is safe", async () => {
+    const { db, d, id } = await parked();
+    const fp = (await (await import("./operator-bridge.server.ts")).getWorkOrder(db.client, id, d))
+      .fingerprint;
+    const dep = pipeline(db);
+    const args = {
+      workOrderId: id,
+      agentId: "Cust-agent-1",
+      version: 3,
+      fingerprint: fp,
+      toolAuth: bearer,
+    };
+    const done = await call(db, d, "submit_agent_result", args);
+    assert.deepEqual(done.body, { status: "registered", jobResumed: true });
+    assert.equal(db.tables["provisioning_runs"]!.length, 1, "same job");
+    assert.equal(db.tables["provisioning_runs"]![0]!["id"], id);
+    assert.equal(num(db, "num_new")["status"], "active");
+    assert.equal((await listWorkOrders(db.client, NOW)).length, 0, "leaves the queue");
+    assert.equal(events(db, "agent_tools_created").length, 1, "no second set of tools reported");
+    assert.equal(events(db, "tool_auth_confirmed").length, 1);
+    const again = await call(db, d, "submit_agent_result", args);
+    assert.equal(again.body.status, "already_registered");
+    assert.equal(
+      events(db, "tool_auth_confirmed").length,
+      1,
+      "duplicate confirmation changes nothing",
+    );
+    assert.equal(db.tables["provisioning_runs"]!.length, 1);
+    void dep;
+  });
+});

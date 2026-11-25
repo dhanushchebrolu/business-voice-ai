@@ -30,6 +30,8 @@ export interface ToolAuthStatus {
 interface EventDetail {
   appId?: unknown;
   version?: unknown;
+  clonedFrom?: unknown;
+  tools?: unknown;
 }
 
 async function events(admin: Admin, organizationId: string, names: string[]) {
@@ -74,4 +76,20 @@ export async function reportedAgent(
 ): Promise<{ appId: string } | null> {
   const [latest] = await events(admin, organizationId, ["agent_tools_created"]);
   return typeof latest?.detail.appId === "string" ? { appId: latest.detail.appId } : null;
+}
+
+/** The latest "tools created" report for display: agent, master reference, tools, when. */
+export async function toolsCreatedReport(admin: Admin, organizationId: string) {
+  const [latest] = await events(admin, organizationId, ["agent_tools_created"]);
+  if (!latest || typeof latest.detail.appId !== "string") return null;
+  const from = (latest.detail.clonedFrom ?? {}) as { agentId?: unknown; version?: unknown };
+  return {
+    appId: latest.detail.appId,
+    reportedAt: latest.createdAt,
+    master:
+      typeof from.agentId === "string" && typeof from.version === "number"
+        ? { agentId: from.agentId, version: from.version }
+        : null,
+    tools: Array.isArray(latest.detail.tools) ? latest.detail.tools.map(String) : [],
+  };
 }
