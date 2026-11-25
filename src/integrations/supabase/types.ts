@@ -2594,6 +2594,36 @@ export type Database = {
         };
         Relationships: [];
       };
+      provisioning_run_events: {
+        Row: {
+          created_at: string;
+          detail: Json | null;
+          event: string;
+          id: string;
+          organization_id: string;
+          run_id: string;
+          step: string | null;
+        };
+        Insert: {
+          created_at?: string;
+          detail?: Json | null;
+          event: string;
+          id?: string;
+          organization_id: string;
+          run_id: string;
+          step?: string | null;
+        };
+        Update: {
+          created_at?: string;
+          detail?: Json | null;
+          event?: string;
+          id?: string;
+          organization_id?: string;
+          run_id?: string;
+          step?: string | null;
+        };
+        Relationships: [];
+      };
       provisioning_runs: {
         Row: {
           agent_config_fingerprint: string | null;
@@ -2617,6 +2647,17 @@ export type Database = {
           trigger: string;
           updated_at: string;
           verification: Json | null;
+          step_states: Json;
+          current_job_step: string | null;
+          last_checkpoint: string | null;
+          failure_code: string | null;
+          retryable: boolean | null;
+          next_attempt_at: string | null;
+          max_attempts: number;
+          diagnostics: Json | null;
+          customer_message: string | null;
+          idempotency_key: string | null;
+          sarvam_agent_id: string | null;
         };
         Insert: {
           agent_config_fingerprint?: string | null;
@@ -2640,6 +2681,17 @@ export type Database = {
           trigger: string;
           updated_at?: string;
           verification?: Json | null;
+          step_states?: Json;
+          current_job_step?: string | null;
+          last_checkpoint?: string | null;
+          failure_code?: string | null;
+          retryable?: boolean | null;
+          next_attempt_at?: string | null;
+          max_attempts?: number;
+          diagnostics?: Json | null;
+          customer_message?: string | null;
+          idempotency_key?: string | null;
+          sarvam_agent_id?: string | null;
         };
         Update: {
           agent_config_fingerprint?: string | null;
@@ -2663,6 +2715,17 @@ export type Database = {
           trigger?: string;
           updated_at?: string;
           verification?: Json | null;
+          step_states?: Json;
+          current_job_step?: string | null;
+          last_checkpoint?: string | null;
+          failure_code?: string | null;
+          retryable?: boolean | null;
+          next_attempt_at?: string | null;
+          max_attempts?: number;
+          diagnostics?: Json | null;
+          customer_message?: string | null;
+          idempotency_key?: string | null;
+          sarvam_agent_id?: string | null;
         };
         Relationships: [];
       };

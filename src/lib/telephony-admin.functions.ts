@@ -465,6 +465,7 @@ export const retryProvisioning = createServerFn({ method: "POST" })
       organizationId: data.orgId,
       trigger: "admin_retry",
       createdBy: admin.userId,
+      force: true,
     });
     if (!run.claimed || !run.result)
       throw new Error("Provisioning is already running for this customer. Try again in a minute.");

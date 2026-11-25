@@ -3,7 +3,6 @@ import { createServerFn } from "@tanstack/react-start";
 import type { Database } from "@/integrations/supabase/types";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { assertFeatureUnlocked } from "@/lib/feature-gate.server";
-import { customerActivationStatus } from "@/lib/customer-activation-status";
 
 /**
  * Customer "Activate Number". Starts (or joins) the same provisioning run the
@@ -14,14 +13,14 @@ import { customerActivationStatus } from "@/lib/customer-activation-status";
  *   - eligibility is the existing feature_locked(org, "phone") rule, which
  *     already honours the payment-enforcement switch, overrides and
  *     lifecycle: no new payment rule is introduced here;
- *   - one active run per organization (database index) plus a short reuse
- *     window, so repeated clicks never start parallel work;
- *   - Sarvam agent authoring and number confirmation stay manual: until the
- *     ClickAI team has done them the run simply waits.
+ *   - one active run per organization AND per number (database indexes), a
+ *     busy job is never restarted, and a just-finished permanent failure is
+ *     not re-run, so repeated clicks never start parallel work;
+ *   - the returned view comes from the persisted job (voice-activation.server.ts),
+ *     so the dashboard shows real steps and survives a refresh;
+ *   - Sarvam has no agent-authoring API: until the ClickAI team has done that
+ *     step the job waits (and says so honestly).
  */
-
-/** A finished customer run this recent is returned instead of starting another. */
-export const ACTIVATION_REUSE_MS = 60_000;
 
 async function assertOwner(supabase: SupabaseClient<Database>, userId: string, orgId: string) {
   // RLS on organization_members returns only the caller's own memberships.
@@ -46,30 +45,8 @@ export const activateMyNumber = createServerFn({ method: "POST" })
     await assertFeatureUnlocked(data.orgId, "phone");
 
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { data: recent, error: recentError } = await supabaseAdmin
-      .from("provisioning_runs")
-      .select("current_step, finished_at")
-      .eq("organization_id", data.orgId)
-      .eq("trigger", "customer_activate")
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (recentError) throw recentError;
-    if (
-      recent?.finished_at &&
-      Date.now() - new Date(recent.finished_at).getTime() < ACTIVATION_REUSE_MS
-    )
-      return customerActivationStatus(recent.current_step);
-
-    const { runProvisioning } = await import("@/lib/provisioning-runs.server");
-    const run = await runProvisioning(supabaseAdmin, {
-      organizationId: data.orgId,
-      trigger: "customer_activate",
-      createdBy: context.userId,
-    });
-    if (!run.claimed || !run.result)
-      return { status: "in_progress" as const, message: "Activation is already in progress." };
-    return customerActivationStatus(run.result.state);
+    const { startVoiceActivation } = await import("@/lib/voice-activation.server");
+    return startVoiceActivation(supabaseAdmin, { orgId: data.orgId, userId: context.userId });
   });
 
 export const getMyActivationStatus = createServerFn({ method: "POST" })
@@ -81,16 +58,6 @@ export const getMyActivationStatus = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     await assertOwner(context.supabase, context.userId, data.orgId);
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { data: run, error } = await supabaseAdmin
-      .from("provisioning_runs")
-      .select("status, current_step")
-      .eq("organization_id", data.orgId)
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (error) throw error;
-    if (!run) return null;
-    if (run.status === "running" || run.status === "pending")
-      return { status: "in_progress" as const, message: "Activation is in progress." };
-    return customerActivationStatus(run.current_step);
+    const { loadActivationView } = await import("@/lib/voice-activation.server");
+    return loadActivationView(supabaseAdmin, data.orgId);
   });

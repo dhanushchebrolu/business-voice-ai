@@ -79,6 +79,7 @@ import { Route as ApiInternalVoiceAgentSessionEndRouteImport } from './routes/ap
 import { Route as ApiInternalVoiceAgentToolRouteImport } from './routes/api/internal/voice-agent/tool'
 import { Route as ApiPublicCronDispatchCampaignsRouteImport } from './routes/api/public/cron/dispatch-campaigns'
 import { Route as ApiPublicCronExpirePaymentsRouteImport } from './routes/api/public/cron/expire-payments'
+import { Route as ApiPublicCronProvisioningRetryRouteImport } from './routes/api/public/cron/provisioning-retry'
 import { Route as ApiPublicCronReconcileSipCallsRouteImport } from './routes/api/public/cron/reconcile-sip-calls'
 import { Route as ApiPublicCronSweepSipRoomsRouteImport } from './routes/api/public/cron/sweep-sip-rooms'
 import { Route as ApiPublicCronSyncGoogleCalendarsRouteImport } from './routes/api/public/cron/sync-google-calendars'
@@ -459,6 +460,12 @@ const ApiPublicCronExpirePaymentsRoute =
     path: '/api/public/cron/expire-payments',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicCronProvisioningRetryRoute =
+  ApiPublicCronProvisioningRetryRouteImport.update({
+    id: '/api/public/cron/provisioning-retry',
+    path: '/api/public/cron/provisioning-retry',
+    getParentRoute: () => rootRouteImport,
+  } as any)
 const ApiPublicCronReconcileSipCallsRoute =
   ApiPublicCronReconcileSipCallsRouteImport.update({
     id: '/api/public/cron/reconcile-sip-calls',
@@ -663,6 +670,7 @@ export interface FileRoutesByFullPath {
   '/api/internal/voice-agent/tool': typeof ApiInternalVoiceAgentToolRoute
   '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
   '/api/public/cron/expire-payments': typeof ApiPublicCronExpirePaymentsRoute
+  '/api/public/cron/provisioning-retry': typeof ApiPublicCronProvisioningRetryRoute
   '/api/public/cron/reconcile-sip-calls': typeof ApiPublicCronReconcileSipCallsRoute
   '/api/public/cron/sweep-sip-rooms': typeof ApiPublicCronSweepSipRoomsRoute
   '/api/public/cron/sync-google-calendars': typeof ApiPublicCronSyncGoogleCalendarsRoute
@@ -752,6 +760,7 @@ export interface FileRoutesByTo {
   '/api/internal/voice-agent/tool': typeof ApiInternalVoiceAgentToolRoute
   '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
   '/api/public/cron/expire-payments': typeof ApiPublicCronExpirePaymentsRoute
+  '/api/public/cron/provisioning-retry': typeof ApiPublicCronProvisioningRetryRoute
   '/api/public/cron/reconcile-sip-calls': typeof ApiPublicCronReconcileSipCallsRoute
   '/api/public/cron/sweep-sip-rooms': typeof ApiPublicCronSweepSipRoomsRoute
   '/api/public/cron/sync-google-calendars': typeof ApiPublicCronSyncGoogleCalendarsRoute
@@ -847,6 +856,7 @@ export interface FileRoutesById {
   '/api/internal/voice-agent/tool': typeof ApiInternalVoiceAgentToolRoute
   '/api/public/cron/dispatch-campaigns': typeof ApiPublicCronDispatchCampaignsRoute
   '/api/public/cron/expire-payments': typeof ApiPublicCronExpirePaymentsRoute
+  '/api/public/cron/provisioning-retry': typeof ApiPublicCronProvisioningRetryRoute
   '/api/public/cron/reconcile-sip-calls': typeof ApiPublicCronReconcileSipCallsRoute
   '/api/public/cron/sweep-sip-rooms': typeof ApiPublicCronSweepSipRoomsRoute
   '/api/public/cron/sync-google-calendars': typeof ApiPublicCronSyncGoogleCalendarsRoute
@@ -943,6 +953,7 @@ export interface FileRouteTypes {
     | '/api/internal/voice-agent/tool'
     | '/api/public/cron/dispatch-campaigns'
     | '/api/public/cron/expire-payments'
+    | '/api/public/cron/provisioning-retry'
     | '/api/public/cron/reconcile-sip-calls'
     | '/api/public/cron/sweep-sip-rooms'
     | '/api/public/cron/sync-google-calendars'
@@ -1032,6 +1043,7 @@ export interface FileRouteTypes {
     | '/api/internal/voice-agent/tool'
     | '/api/public/cron/dispatch-campaigns'
     | '/api/public/cron/expire-payments'
+    | '/api/public/cron/provisioning-retry'
     | '/api/public/cron/reconcile-sip-calls'
     | '/api/public/cron/sweep-sip-rooms'
     | '/api/public/cron/sync-google-calendars'
@@ -1126,6 +1138,7 @@ export interface FileRouteTypes {
     | '/api/internal/voice-agent/tool'
     | '/api/public/cron/dispatch-campaigns'
     | '/api/public/cron/expire-payments'
+    | '/api/public/cron/provisioning-retry'
     | '/api/public/cron/reconcile-sip-calls'
     | '/api/public/cron/sweep-sip-rooms'
     | '/api/public/cron/sync-google-calendars'
@@ -1179,6 +1192,7 @@ export interface RootRouteChildren {
   ApiInternalVoiceAgentToolRoute: typeof ApiInternalVoiceAgentToolRoute
   ApiPublicCronDispatchCampaignsRoute: typeof ApiPublicCronDispatchCampaignsRoute
   ApiPublicCronExpirePaymentsRoute: typeof ApiPublicCronExpirePaymentsRoute
+  ApiPublicCronProvisioningRetryRoute: typeof ApiPublicCronProvisioningRetryRoute
   ApiPublicCronReconcileSipCallsRoute: typeof ApiPublicCronReconcileSipCallsRoute
   ApiPublicCronSweepSipRoomsRoute: typeof ApiPublicCronSweepSipRoomsRoute
   ApiPublicCronSyncGoogleCalendarsRoute: typeof ApiPublicCronSyncGoogleCalendarsRoute
@@ -1694,6 +1708,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiPublicCronExpirePaymentsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/cron/provisioning-retry': {
+      id: '/api/public/cron/provisioning-retry'
+      path: '/api/public/cron/provisioning-retry'
+      fullPath: '/api/public/cron/provisioning-retry'
+      preLoaderRoute: typeof ApiPublicCronProvisioningRetryRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/cron/reconcile-sip-calls': {
       id: '/api/public/cron/reconcile-sip-calls'
       path: '/api/public/cron/reconcile-sip-calls'
@@ -2020,6 +2041,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiInternalVoiceAgentToolRoute: ApiInternalVoiceAgentToolRoute,
   ApiPublicCronDispatchCampaignsRoute: ApiPublicCronDispatchCampaignsRoute,
   ApiPublicCronExpirePaymentsRoute: ApiPublicCronExpirePaymentsRoute,
+  ApiPublicCronProvisioningRetryRoute: ApiPublicCronProvisioningRetryRoute,
   ApiPublicCronReconcileSipCallsRoute: ApiPublicCronReconcileSipCallsRoute,
   ApiPublicCronSweepSipRoomsRoute: ApiPublicCronSweepSipRoomsRoute,
   ApiPublicCronSyncGoogleCalendarsRoute: ApiPublicCronSyncGoogleCalendarsRoute,

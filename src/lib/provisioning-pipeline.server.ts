@@ -5,6 +5,8 @@ import type { ProvisionOrganizationResult } from "./provisioning-orchestrator.se
 import type { ProvisioningState } from "./provisioning-state.ts";
 import { normalizeCustomerPhone } from "./phone-number.ts";
 import { buildUniversalAgentConfig, type UniversalAgentConfig } from "./universal-agent-config.ts";
+import type { FailureCode, JobStepKey } from "./voice-provisioning-job.ts";
+import type { EnsureAgentContext, EnsureAgentOutcome } from "./sarvam-agent-provisioner.server.ts";
 
 /**
  * Provisioning pipeline: one dedicated Sarvam agent per customer, copied
@@ -93,6 +95,12 @@ export interface PipelineDeps {
   /** The outbound master template's Sarvam app id; never a customer's outbound agent. */
   outboundMasterAgentAppId?: string | null;
   now: () => Date;
+  /**
+   * Creates/configures/verifies/registers the customer's own Sarvam agent when
+   * the provider supports it. Absent or "unsupported": the pipeline waits for
+   * an admin to register the agent by hand (Sarvam has no documented create API).
+   */
+  ensureAgent?: (admin: Admin, ctx: EnsureAgentContext) => Promise<EnsureAgentOutcome>;
 }
 
 export interface VerificationCheck {
@@ -122,6 +130,8 @@ export interface VerificationReport {
 
 export interface PipelineResult extends ProvisionOrganizationResult {
   step: number;
+  /** An explicit failure classification from the step itself (overrides state-based defaults). */
+  failure?: { code: FailureCode; retryable: boolean };
   generatedConfig: UniversalAgentConfig | null;
   deploymentVerifiedAt: string | null;
   verification: VerificationReport | null;
@@ -233,6 +243,11 @@ export async function defaultPipelineDeps(): Promise<PipelineDeps> {
     masterAgentAppId: process.env["SARVAM_MASTER_AGENT_APP_ID"]?.trim() || null,
     outboundMasterAgentAppId: process.env["SARVAM_OUTBOUND_MASTER_AGENT_APP_ID"]?.trim() || null,
     now: () => new Date(),
+    ensureAgent: async (a, ctx) => {
+      const { ensureCustomerAgent, defaultAgentProvisioner } =
+        await import("./sarvam-agent-provisioner.server.ts");
+      return ensureCustomerAgent(a, ctx, defaultAgentProvisioner());
+    },
   };
 }
 
@@ -240,7 +255,12 @@ export async function runProvisioningPipeline(
   admin: Admin,
   organizationId: string,
   depsIn?: PipelineDeps,
+  /** Reports the step the run is on (persisted by provisioning-runs.server.ts for real progress). */
+  onStep?: (key: JobStepKey) => Promise<void> | void,
 ): Promise<PipelineResult> {
+  const step = async (key: JobStepKey) => {
+    await onStep?.(key);
+  };
   const deps = depsIn ?? (await defaultPipelineDeps());
   let generatedConfig: UniversalAgentConfig | null = null;
   let phoneNumberId: string | null = null;
@@ -253,6 +273,7 @@ export async function runProvisioningPipeline(
     state: ProvisioningState,
     note: string,
     verifiedAt: string | null = null,
+    failure?: { code: FailureCode; retryable: boolean },
   ): PipelineResult => ({
     organizationId,
     phoneNumberId,
@@ -265,8 +286,10 @@ export async function runProvisioningPipeline(
     generatedConfig,
     deploymentVerifiedAt: verifiedAt,
     verification,
+    ...(failure ? { failure } : {}),
   });
 
+  await step("validating");
   // 1. Onboarding.
   const { data: org, error: orgError } = await admin
     .from("organizations")
@@ -303,6 +326,12 @@ export async function runProvisioningPipeline(
     );
 
   const snapshot = await deps.loadSnapshot(admin, agent.business_id);
+  if (!snapshot.business.business_type?.trim())
+    return done(
+      1,
+      "waiting_for_onboarding",
+      "the business category is missing; choose it in your business profile.",
+    );
 
   const { data: voiceLanguage, error: vlError } = await admin
     .from("agent_voice_language_settings")
@@ -360,7 +389,10 @@ export async function runProvisioningPipeline(
     );
   phoneNumberId = number.id;
   if (number.status === "suspended")
-    return done(2, "failed", `number ${number.e164} is suspended; resolve that first.`);
+    return done(2, "failed", `number ${number.e164} is suspended; resolve that first.`, null, {
+      code: "NUMBER_UNUSABLE",
+      retryable: false,
+    });
 
   const { data: connection, error: connError } = await admin
     .from("telephony_connections")
@@ -386,6 +418,8 @@ export async function runProvisioningPipeline(
         2,
         "failed",
         `number ${number.e164} already has deployment ${number.provider_deployment_id} but is linked to a different connection or agent; fix it by hand.`,
+        null,
+        { code: "NUMBER_UNUSABLE", retryable: false },
       );
     const { error } = await admin
       .from("phone_numbers")
@@ -406,6 +440,7 @@ export async function runProvisioningPipeline(
     );
 
   // 4. Integration credential.
+  await step("preparing");
   const { data: credential, error: credError } = await admin
     .from("sarvam_agent_integrations")
     .select("id, expires_at")
@@ -423,13 +458,40 @@ export async function runProvisioningPipeline(
       "issue this customer's integration credential (Sarvam agent data integration panel), then put it in the customer's Sarvam agent secret.",
     );
 
-  // 5 + 6. Manual Sarvam agent, registered as agent id + version.
-  if (!agent.sarvam_app_id || !agent.sarvam_app_version)
-    return done(
-      5,
-      "waiting_for_agent",
-      "copy the universal master agent in Sarvam, apply this customer's generated configuration and credential, commit it, then register its agent id and version.",
-    );
+  // 5 + 6. The customer's own Sarvam agent, registered as agent id + version:
+  // created through the provider when it supports that, else by an admin.
+  await step("creating_agent");
+  if (!agent.sarvam_app_id || !agent.sarvam_app_version) {
+    const ensured: EnsureAgentOutcome = deps.ensureAgent
+      ? await deps.ensureAgent(admin, {
+          organizationId,
+          agentConfigId: agent.id,
+          config: generatedConfig,
+          masterAgentAppId: deps.masterAgentAppId,
+          outboundMasterAgentAppId: deps.outboundMasterAgentAppId ?? null,
+          onStep: step,
+        })
+      : { kind: "unsupported" };
+    if (ensured.kind === "unsupported")
+      return done(
+        5,
+        "waiting_for_agent",
+        "copy the universal master agent in Sarvam, apply this customer's generated configuration and credential, commit it, then register its agent id and version (Sarvam has no documented agent-creation API; needs live verification if one is added).",
+      );
+    if (ensured.kind !== "ready")
+      return done(5, "failed", ensured.message, null, {
+        code: ensured.code,
+        retryable: ensured.kind === "retry",
+      });
+    agent.sarvam_app_id = ensured.appId;
+    agent.sarvam_app_version = ensured.version;
+    if (voiceLanguage) {
+      voiceLanguage.status = "applied";
+      voiceLanguage.applied_sarvam_app_id = ensured.appId;
+      voiceLanguage.applied_sarvam_app_version = ensured.version;
+    }
+  }
+  await step("verifying_agent");
   if (deps.masterAgentAppId && agent.sarvam_app_id === deps.masterAgentAppId)
     return done(
       6,
@@ -449,6 +511,7 @@ export async function runProvisioningPipeline(
     );
 
   // 7. Deployment (create or adopt; never a duplicate).
+  await step("creating_deployment");
   deploymentId = number.provider_deployment_id ?? null;
   if (!deploymentId) {
     try {
@@ -526,6 +589,7 @@ export async function runProvisioningPipeline(
   // until step 10. Calls can still ring through in the seconds before the
   // pause; only the admission gate keeps business data away from them.
   let stateChangedByUs = false;
+  await step("verifying_deployment");
   let read = await readDeployment(8);
   if (isResult(read)) return read;
   let deployment = read;
@@ -574,6 +638,7 @@ export async function runProvisioningPipeline(
   }
 
   // 9 (read ClickAI's side now so both checks are recorded together).
+  await step("connecting_number");
   const { data: mapped, error: mappedError } = await admin
     .from("phone_numbers")
     .select("provider_deployment_id, organization_id")
@@ -641,9 +706,16 @@ export async function runProvisioningPipeline(
   const firstChecks = checksFor(deployment, numberLive);
   verification = report(deployment, firstChecks);
   if (firstChecks.some((c) => !c.ok)) {
+    // The exact failing step: a deployment check or the number mapping.
+    const deploymentCheck = failStep(firstChecks) === 8;
+    await step(deploymentCheck ? "verifying_deployment" : "verifying_number");
     await clearVerified(firstChecks);
-    return done(failStep(firstChecks), "verification_failed", failNote(firstChecks));
+    return done(failStep(firstChecks), "verification_failed", failNote(firstChecks), null, {
+      code: deploymentCheck ? "DEPLOYMENT_VERIFY_FAILED" : "NUMBER_MAPPING_FAILED",
+      retryable: true,
+    });
   }
+  await step("verifying_number");
 
   // Persist what was verified while the ClickAI number stays inactive.
   const verifiedAt = deps.now().toISOString();
@@ -668,6 +740,7 @@ export async function runProvisioningPipeline(
 
   // 10. Resume in Sarvam, read it back, and only then mark ClickAI's number
   // ACTIVE. Any failure leaves the ClickAI number inactive and re-pauses.
+  await step("activating");
   const repause = async () => {
     if (!stateChangedByUs) return;
     try {

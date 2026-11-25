@@ -25,7 +25,7 @@ export const INTEGRATION_SAFE_COLUMNS =
   "id, role, status, token_prefix, expires_at, last_used_at, rotated_at, created_at, disabled_at, disabled_reason";
 
 const RUN_COLUMNS =
-  "id, organization_id, trigger, status, current_step, attempts, last_error, last_error_at, note, phone_number_id, sarvam_deployment_id, agent_config_fingerprint, deployment_verified_at, verification, started_at, finished_at, created_at, updated_at";
+  "id, organization_id, trigger, status, current_step, attempts, last_error, last_error_at, note, phone_number_id, sarvam_deployment_id, agent_config_fingerprint, deployment_verified_at, verification, started_at, finished_at, created_at, updated_at, current_job_step, step_states, last_checkpoint, failure_code, retryable, next_attempt_at, max_attempts, diagnostics, customer_message, idempotency_key, sarvam_agent_id";
 
 export interface QueueRow {
   runId: string;
@@ -37,6 +37,10 @@ export interface QueueRow {
   currentStep: string | null;
   attempts: number;
   lastError: string | null;
+  /** Machine failure code and whether another try can help (false = permanent until fixed). */
+  failureCode: string | null;
+  retryable: boolean | null;
+  jobStep: string | null;
   updatedAt: string;
   createdAt: string;
 }
@@ -54,7 +58,7 @@ export const listProvisioningQueue = createServerFn({ method: "POST" })
     const { data: runs, error } = await supabaseAdmin
       .from("provisioning_runs")
       .select(
-        "id, organization_id, status, current_step, attempts, last_error, created_at, updated_at",
+        "id, organization_id, status, current_step, attempts, last_error, created_at, updated_at, next_attempt_at, failure_code, retryable, current_job_step",
       )
       .order("created_at", { ascending: false })
       .limit(500);
@@ -92,6 +96,9 @@ export const listProvisioningQueue = createServerFn({ method: "POST" })
       currentStep: r.current_step,
       attempts: r.attempts,
       lastError: r.last_error,
+      failureCode: r.failure_code,
+      retryable: r.retryable,
+      jobStep: r.current_job_step,
       updatedAt: r.updated_at,
       createdAt: r.created_at,
     }));
@@ -159,6 +166,18 @@ async function loadDetail(orgId: string) {
       .limit(30),
   ]);
   for (const r of [agentRes, numbersRes, connRes, runsRes, auditRes]) if (r.error) throw r.error;
+  // Event trail of the latest job (sanitized when written; never a raw provider payload).
+  const latestRunId = runsRes.data?.[0]?.id ?? null;
+  const { data: jobEvents, error: eventsError } = latestRunId
+    ? await supabaseAdmin
+        .from("provisioning_run_events")
+        .select("id, step, event, detail, created_at")
+        .eq("run_id", latestRunId)
+        .eq("organization_id", orgId)
+        .order("created_at", { ascending: true })
+        .limit(100)
+    : { data: [], error: null };
+  if (eventsError) throw eventsError;
   const agent = agentRes.data;
 
   const activeCredential = (role: "inbound" | "outbound") =>
@@ -299,6 +318,7 @@ async function loadDetail(orgId: string) {
     outboundConfig,
     templates,
     runs,
+    jobEvents: jobEvents ?? [],
     audit: auditRes.data ?? [],
     webhookRecovery: await (
       await import("@/lib/sarvam-webhook-rotation.server")

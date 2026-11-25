@@ -43,7 +43,7 @@ describe("ownership and organization isolation", () => {
     const h = handler("activateMyNumber");
     const owner = h.indexOf("assertOwner(");
     const gate = h.indexOf('assertFeatureUnlocked(data.orgId, "phone")');
-    const run = h.indexOf("runProvisioning(");
+    const run = h.indexOf("startVoiceActivation(");
     assert.ok(owner > -1 && gate > owner && run > gate);
   });
 });
@@ -56,13 +56,9 @@ describe("eligibility and duplicates", () => {
   });
 
   test("starts the shared provisioning run as customer_activate, so the one-active-run index applies", () => {
-    const h = handler("activateMyNumber");
-    assert.match(h, /trigger: "customer_activate"/);
-    assert.match(h, /if \(!run\.claimed \|\| !run\.result\)/);
-  });
-
-  test("a run that just finished is reused instead of starting another", () => {
-    assert.match(handler("activateMyNumber"), /ACTIVATION_REUSE_MS/);
+    const svc = readFileSync(join(here, "voice-activation.server.ts"), "utf8");
+    assert.match(svc, /trigger: "customer_activate"/);
+    assert.match(svc, /ACTIVATION_REUSE_MS/);
   });
 });
 

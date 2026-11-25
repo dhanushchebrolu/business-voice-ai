@@ -35,6 +35,7 @@ import { SarvamIntegrationPanel } from "@/components/admin/SarvamIntegrationPane
 import { OutboundAgentPanel } from "@/components/admin/OutboundAgentPanel";
 import { VoiceLanguagePanel } from "@/components/admin/VoiceLanguagePanel";
 import { ReasonDialog } from "@/components/admin/ReasonDialog";
+import { JOB_STEPS, type StepStates } from "@/lib/voice-provisioning-job";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
@@ -571,6 +572,96 @@ function ProvisioningDetail() {
         )}
       </SectionCard>
 
+      {latest ? (
+        <SectionCard
+          title="Voice AI activation job"
+          description="Step-by-step state of the latest automated activation job, with retry eligibility. Diagnostics are sanitized: no tokens, secrets or raw provider payloads."
+        >
+          <div className="flex flex-wrap items-center gap-2 text-xs" data-testid="job-summary">
+            <StatusPill tone={queueStatusTone(queueStatus(latest))}>
+              {queueStatus(latest)}
+            </StatusPill>
+            {latest.failure_code ? <code>{latest.failure_code}</code> : null}
+            {latest.status === "failed" || latest.status === "pending" ? (
+              <StatusPill tone={latest.retryable ? "ready" : "error"}>
+                {latest.retryable ? "retryable" : "permanent until fixed"}
+              </StatusPill>
+            ) : null}
+            <span>
+              attempt {latest.attempts}/{latest.max_attempts}
+            </span>
+            {latest.next_attempt_at && latest.status === "pending" ? (
+              <span>next try {when(latest.next_attempt_at)}</span>
+            ) : null}
+            {latest.last_checkpoint ? <span>checkpoint: {latest.last_checkpoint}</span> : null}
+          </div>
+          <ol className="mt-3 space-y-1 text-xs" data-testid="job-steps">
+            {JOB_STEPS.map((st) => {
+              const rec = (latest.step_states as StepStates | null)?.[st.key];
+              return (
+                <li key={st.key} className="flex flex-wrap items-center gap-2">
+                  <StatusPill
+                    tone={
+                      rec?.status === "done"
+                        ? "live"
+                        : rec?.status === "failed"
+                          ? "error"
+                          : rec?.status
+                            ? "ready"
+                            : "idle"
+                    }
+                  >
+                    {rec?.status ?? "pending"}
+                  </StatusPill>
+                  <span>{st.label}</span>
+                  {rec && rec.attempts > 1 ? (
+                    <span className="text-muted-foreground">{rec.attempts} tries</span>
+                  ) : null}
+                  {rec?.code ? <code>{rec.code}</code> : null}
+                  {latest.current_job_step === st.key && latest.status !== "succeeded" ? (
+                    <span className="text-muted-foreground">← current</span>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ol>
+          <dl className="mt-3 grid gap-x-4 gap-y-1 text-xs sm:grid-cols-2">
+            <div>
+              <dt className="inline text-muted-foreground">Sarvam agent: </dt>
+              <dd className="inline font-mono">{latest.sarvam_agent_id ?? "—"}</dd>
+            </div>
+            <div>
+              <dt className="inline text-muted-foreground">Deployment: </dt>
+              <dd className="inline font-mono">{latest.sarvam_deployment_id ?? "—"}</dd>
+            </div>
+            <div>
+              <dt className="inline text-muted-foreground">Idempotency key: </dt>
+              <dd className="inline font-mono">{latest.idempotency_key ?? "—"}</dd>
+            </div>
+            <div>
+              <dt className="inline text-muted-foreground">Customer sees: </dt>
+              <dd className="inline">{latest.customer_message ?? "—"}</dd>
+            </div>
+          </dl>
+          {latest.diagnostics ? (
+            <pre className="mt-3 max-h-40 overflow-auto rounded-md bg-muted p-2 text-[11px]">
+              {JSON.stringify(latest.diagnostics, null, 2)}
+            </pre>
+          ) : null}
+          {data.jobEvents.length ? (
+            <ul className="mt-3 divide-y divide-border text-xs" data-testid="job-events">
+              {data.jobEvents.map((ev) => (
+                <li key={ev.id} className="flex flex-wrap gap-2 py-1">
+                  <span className="text-muted-foreground">{when(ev.created_at)}</span>
+                  <span>{ev.event}</span>
+                  {ev.step ? <code>{ev.step}</code> : null}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </SectionCard>
+      ) : null}
+
       <SectionCard
         title="Job history"
         description="Latest 20 runs. Retrying resumes the active run; it never creates a second deployment or assigns another number."
@@ -585,6 +676,7 @@ function ProvisioningDetail() {
                   <StatusPill tone={queueStatusTone(queueStatus(r))}>{queueStatus(r)}</StatusPill>
                   <span>{r.trigger}</span>
                   <span>step {r.current_step ?? "—"}</span>
+                  {r.failure_code ? <code>{r.failure_code}</code> : null}
                   <span>{r.attempts} attempt(s)</span>
                   <span className="text-muted-foreground">
                     {when(r.created_at)} → {when(r.finished_at ?? r.updated_at)}

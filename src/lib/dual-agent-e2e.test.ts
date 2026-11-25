@@ -192,7 +192,7 @@ function sarvamMock(db: World) {
 }
 
 const run = (db: World, s: ReturnType<typeof sarvamMock>, trigger: ProvisioningTrigger) =>
-  runProvisioning(db.client, { organizationId: ORG, trigger }, (a, org) =>
+  runProvisioning(db.client, { organizationId: ORG, trigger, force: true }, (a, org) =>
     runProvisioningPipeline(a, org, s.deps),
   );
 
@@ -385,7 +385,7 @@ describe("dual-agent provisioning end to end (mocked Sarvam)", () => {
     // An unexpected error mid-pipeline fails the run; the retry claims it again.
     s.fail.loadSnapshot = 1;
     await step("threw: simulated database outage");
-    assert.equal(db.tables["provisioning_runs"]![0]!["status"], "failed");
+    assert.equal(db.tables["provisioning_runs"]![0]!["status"], "pending");
     await step("waiting_for_number");
 
     ops.assignNumber(db);

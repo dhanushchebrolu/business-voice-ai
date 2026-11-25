@@ -15,6 +15,7 @@ import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
 import { requestPhoneNumber } from "@/lib/telephony-customer.functions";
 import { activateMyNumber, getMyActivationStatus } from "@/lib/customer-activation.functions";
+import { ActivationProgress } from "@/components/app/ActivationProgress";
 
 /** Has this org already asked for a number? RLS-scoped (org members read own customer_events) — the same source of truth requestPhoneNumber itself checks, so a page refresh never loses the "request submitted" state. */
 const numberRequestQuery = (orgId: string | undefined) =>
@@ -76,6 +77,8 @@ function NumbersPage() {
     queryKey: ["my-activation", orgId],
     enabled: Boolean(orgId),
     queryFn: () => fetchActivation({ data: { orgId: orgId! } }).catch(() => null),
+    // Real progress: poll while the backend job is running or retrying.
+    refetchInterval: (q) => (activating || q.state.data?.busy ? 3000 : false),
   });
 
   const onActivate = async () => {
@@ -83,7 +86,7 @@ function NumbersPage() {
     setActivating(true);
     try {
       const result = await activate({ data: { orgId } });
-      if (result.status === "live") toast.success(result.message);
+      if (result.phase === "completed") toast.success(result.message);
       else toast.message(result.message);
       await refetchActivation();
       await queryClient.invalidateQueries({ queryKey: ["numbers", orgId] });
@@ -211,18 +214,30 @@ function NumbersPage() {
                         Assigned to your workspace, not live yet. It starts answering only after
                         your AI receptionist and its connection are set up and verified.
                       </p>
-                      {activation ? (
-                        <p className="mt-2 text-xs" role="status">
-                          {activation.message}
-                        </p>
+                      {activation && activation.phase !== "queued" ? (
+                        <>
+                          <p className="mt-2 text-xs" role="status">
+                            {activation.message}
+                          </p>
+                          <ActivationProgress view={activation} />
+                        </>
                       ) : null}
                       <Button
                         size="sm"
                         className="mt-3"
-                        disabled={activating || activation?.status === "in_progress"}
+                        disabled={
+                          activating ||
+                          Boolean(activation?.busy) ||
+                          activation?.phase === "completed" ||
+                          (activation?.phase === "failed" && !activation.canRetry)
+                        }
                         onClick={onActivate}
                       >
-                        {activating ? "Activating…" : "Activate number"}
+                        {activating || activation?.busy
+                          ? "Activating…"
+                          : activation?.phase === "failed" || activation?.phase === "waiting"
+                            ? "Try again"
+                            : "Activate number"}
                       </Button>
                     </div>
                   ) : (

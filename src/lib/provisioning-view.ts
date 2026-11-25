@@ -7,7 +7,18 @@
  */
 
 export type QueueStatus =
-  "pending" | "running" | "waiting" | "blocked" | "failed" | "succeeded" | "cancelled";
+  | "pending"
+  | "running"
+  | "retrying"
+  | "stuck"
+  | "waiting"
+  | "blocked"
+  | "failed"
+  | "succeeded"
+  | "cancelled";
+
+/** A "running" job untouched for this long is a crashed attempt (provisioning-runs STALE_RUNNING_MS). */
+export const STUCK_AFTER_MS = 10 * 60 * 1000;
 
 /** Waiting on the customer or on data/assignment, not on the ClickAI team's Sarvam step. */
 export const BLOCKED_STEPS = [
@@ -19,13 +30,31 @@ export const BLOCKED_STEPS = [
 export const QUEUE_FILTERS: QueueStatus[] = [
   "pending",
   "running",
+  "retrying",
+  "stuck",
   "waiting",
   "blocked",
   "failed",
   "succeeded",
 ];
 
-export function queueStatus(run: { status: string; current_step: string | null }): QueueStatus {
+export function queueStatus(
+  run: {
+    status: string;
+    current_step: string | null;
+    attempts?: number;
+    next_attempt_at?: string | null;
+    updated_at?: string;
+  },
+  now: number = Date.now(),
+): QueueStatus {
+  if (run.status === "pending" && (run.attempts ?? 0) > 0 && run.next_attempt_at) return "retrying";
+  if (
+    run.status === "running" &&
+    run.updated_at &&
+    now - new Date(run.updated_at).getTime() > STUCK_AFTER_MS
+  )
+    return "stuck";
   if (
     run.status === "waiting" &&
     (BLOCKED_STEPS as readonly string[]).includes(run.current_step ?? "")
@@ -38,8 +67,8 @@ export function queueStatus(run: { status: string; current_step: string | null }
 
 export function queueStatusTone(s: QueueStatus): "live" | "ready" | "error" | "idle" {
   if (s === "succeeded") return "live";
-  if (s === "failed" || s === "blocked") return "error";
-  if (s === "waiting" || s === "running") return "ready";
+  if (s === "failed" || s === "blocked" || s === "stuck") return "error";
+  if (s === "waiting" || s === "running" || s === "retrying") return "ready";
   return "idle";
 }
 
