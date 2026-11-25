@@ -19,6 +19,10 @@ type Checkpoint = NonNullable<
   Awaited<ReturnType<typeof getOperatorBridgeStatus>>["workOrders"][number]["checkpoint"]
 >;
 
+/** Never "authenticated": ClickAI cannot read Sarvam's tool credentials. */
+const toolStatusText = (status: "created_awaiting_credential" | "missing") =>
+  status === "missing" ? "not reported created" : "created, credential not yet confirmed";
+
 /** A job paused until a person selects each tool's credential in the Sarvam console. */
 function ToolAuthCheckpointCard({
   checkpoint: c,
@@ -32,7 +36,7 @@ function ToolAuthCheckpointCard({
       className="mt-2 w-full space-y-2 rounded-md border border-border bg-muted/40 p-3"
       data-testid="tool-auth-checkpoint"
     >
-      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5">
+      <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-0.5 break-words">
         <dt className="text-muted-foreground">Customer</dt>
         <dd>
           {c.customer} <code>{c.customerId}</code>
@@ -70,7 +74,19 @@ function ToolAuthCheckpointCard({
           {c.attentionNote}
         </p>
       ) : null}
-      <table className="w-full text-left">
+      {/* Narrow screens: one stacked entry per tool (a five-column table does not fit). */}
+      <ol className="space-y-1.5 md:hidden" aria-label="The six tools, in order">
+        {c.tools.map((t) => (
+          <li key={t.name} className="rounded border border-border p-2">
+            <div className="break-all">
+              {t.order}. <code>{t.name}</code>
+            </div>
+            <div className="text-muted-foreground">{t.timing}</div>
+            <div>{toolStatusText(t.status)}</div>
+          </li>
+        ))}
+      </ol>
+      <table className="hidden w-full text-left md:table">
         <thead className="text-muted-foreground">
           <tr>
             <th className="pr-2">#</th>
@@ -89,11 +105,7 @@ function ToolAuthCheckpointCard({
               </td>
               <td className="pr-2">{t.timing}</td>
               <td className="pr-2">{t.expectedAuth}</td>
-              <td>
-                {t.status === "missing"
-                  ? "not reported created"
-                  : "created, credential not yet confirmed"}
-              </td>
+              <td>{toolStatusText(t.status)}</td>
             </tr>
           ))}
         </tbody>
