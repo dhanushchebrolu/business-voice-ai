@@ -73,7 +73,27 @@ const MAX_CONTACTS_PER_CAMPAIGN_PER_TICK = 20;
  * The most outbound calls (single and campaign) one customer may have open at
  * once while a campaign dials; checked atomically by admit_campaign_outbound_call.
  */
-export const CAMPAIGN_MAX_IN_FLIGHT = 3;
+/**
+ * Fallback when the shared slot limit cannot be read: Sarvam's default of 4
+ * simultaneous calls on the account (outbound_concurrency(), migration
+ * 20261201090000, is the real, shared limit and is enforced where the call is written).
+ */
+export const CAMPAIGN_MAX_IN_FLIGHT = 4;
+
+/** The shared call-slot limit (platform_settings 'outbound.max_concurrent_calls'), or the Sarvam default. */
+export async function readSlotLimit(supabaseAdmin: SupabaseClient<Database>): Promise<number> {
+  try {
+    const rpc = supabaseAdmin.rpc.bind(supabaseAdmin) as unknown as (
+      fn: string,
+    ) => PromiseLike<{ data: { slot_limit?: number }[] | null; error: unknown }>;
+    const { data, error } = await rpc("outbound_concurrency");
+    const limit = data?.[0]?.slot_limit;
+    if (!error && typeof limit === "number" && Number.isInteger(limit) && limit >= 1) return limit;
+  } catch {
+    /* fall back to the default */
+  }
+  return CAMPAIGN_MAX_IN_FLIGHT;
+}
 
 /** admit_campaign_outbound_call's answer. */
 export type CampaignAdmission =
@@ -128,6 +148,8 @@ export interface DispatchDeps {
   ) => Promise<Record<string, unknown>>;
   finalize: (callId: string) => Promise<unknown>;
   now: () => number;
+  /** The shared call-slot limit; read from the database when absent. */
+  slotLimit?: () => Promise<number>;
 }
 
 export interface DispatchOptions {
@@ -315,9 +337,18 @@ async function dispatchOneCampaign(
     .order("created_at")
     .limit(MAX_CONTACTS_PER_CAMPAIGN_PER_TICK);
 
+  // One customer may use every shared slot; the database keeps the total within the limit.
+  const maxInFlight = await (deps.slotLimit ?? (() => readSlotLimit(supabaseAdmin)))();
   let dialed = 0;
   let skipped = 0;
   let emergencyStop = false;
+  // Provider requests overlap (each holds its slot from admission on), so a free
+  // slot count of N means N calls start together. The first request of a run is
+  // awaited alone: a rejected key or empty account then stops the run before any
+  // other request is sent. `stopRun` carries that stop to the loop.
+  const dialTasks: Promise<void>[] = [];
+  let probed = false;
+  let stopRun = false;
 
   // Read fresh for every contact, so a pause or cancel stops the batch at the next claim.
   const stillRunning = async () => {
@@ -331,6 +362,7 @@ async function dispatchOneCampaign(
   };
 
   for (const cc of due ?? []) {
+    if (stopRun) break;
     if (deps.now() >= deadline || outboundCallingDisabled() || !(await stillRunning())) break;
     const { data: contact, error: contactError } = await supabaseAdmin
       .from("contacts")
@@ -509,7 +541,7 @@ async function dispatchOneCampaign(
         callId,
         destination,
         retryAttempt: attempts - 1,
-        maxInFlight: CAMPAIGN_MAX_IN_FLIGHT,
+        maxInFlight,
         contextReviewedAt: campaign.context_reviewed_at!,
         sentObjective: outboundVars["campaign_objective"] ?? "",
         sentInstructions: outboundVars["campaign_instructions"] ?? "",
@@ -597,63 +629,79 @@ async function dispatchOneCampaign(
       break;
     }
 
-    try {
-      const result = await adapter.createInstantOutbound({
-        appId: target.appId,
-        appVersion: target.appVersion,
-        connectionId: connection.provider_connection_id,
-        fromE164: admission.caller_number,
-        toE164: destination,
-        agentVariables,
-        appOverrides: { initialBotMessage: openingLine },
-        webhookUrl,
-        metadata: {
-          organizationId: campaign.organization_id,
-          campaignId: campaign.id,
-          campaignContactId: cc.id,
-          // The webhook route resolves its clientReference fallback by call_logs id.
-          callId: call.id,
-        },
-      });
-      await persistStartResult(supabaseAdmin, call.id, result);
-      dialed++;
-    } catch (err) {
-      // The Sarvam account itself refused (bad key, out of credits, no access):
-      // every other contact would fail the same way and burn its attempts, so
-      // this one is given back untouched, the campaign pauses for the
-      // customer, and the run ends.
-      if (
-        err instanceof TelephonyAdapterError &&
-        !err.outcomeUnknown &&
-        ACCOUNT_REJECTION_STATUSES.has(err.status)
-      ) {
-        await stopBeforeDial(err.message);
-        await supabaseAdmin
-          .from("campaigns")
-          .update({ status: "paused", paused_at: new Date().toISOString() })
-          .eq("id", campaign.id)
-          .eq("status", "running");
-        skipped++;
-        break;
+    const callerNumber = admission.caller_number;
+    const connectionId = connection.provider_connection_id;
+    const dial = async () => {
+      try {
+        const result = await adapter.createInstantOutbound({
+          appId: target.appId,
+          appVersion: target.appVersion,
+          connectionId,
+          fromE164: callerNumber,
+          toE164: destination,
+          agentVariables,
+          appOverrides: { initialBotMessage: openingLine },
+          webhookUrl,
+          metadata: {
+            organizationId: campaign.organization_id,
+            campaignId: campaign.id,
+            campaignContactId: cc.id,
+            // The webhook route resolves its clientReference fallback by call_logs id.
+            callId: call.id,
+          },
+        });
+        await persistStartResult(supabaseAdmin, call.id, result);
+        dialed++;
+      } catch (err) {
+        // The Sarvam account itself refused (bad key, out of credits, no access):
+        // every other contact would fail the same way and burn its attempts, so
+        // this one is given back untouched, the campaign pauses for the
+        // customer, and the run ends.
+        if (
+          err instanceof TelephonyAdapterError &&
+          !err.outcomeUnknown &&
+          ACCOUNT_REJECTION_STATUSES.has(err.status)
+        ) {
+          await stopBeforeDial(err.message);
+          await supabaseAdmin
+            .from("campaigns")
+            .update({ status: "paused", paused_at: new Date().toISOString() })
+            .eq("id", campaign.id)
+            .eq("status", "running");
+          skipped++;
+          stopRun = true;
+          return;
+        }
+        // Race-safe: only a call still `initiated` is changed, and the contact
+        // only follows when that change happened. Ambiguous errors hold both in
+        // outcome_unknown (no retry); definite rejections fail and may retry.
+        const recorded = await recordCampaignStartFailure(
+          supabaseAdmin,
+          { callId: call.id, campaignContactId: cc.id },
+          err,
+          // The campaign's "failed" outcome (which may schedule a retry) is applied
+          // by finalization, exactly once, guarded by current_call_id.
+          async () => {
+            await deps.finalize(call.id);
+          },
+        );
+        if (recorded === "outcome_unknown") {
+          console.error("campaign_dispatch:outcome_unknown", call.id, (err as Error).message);
+        }
       }
-      // Race-safe: only a call still `initiated` is changed, and the contact
-      // only follows when that change happened. Ambiguous errors hold both in
-      // outcome_unknown (no retry); definite rejections fail and may retry.
-      const recorded = await recordCampaignStartFailure(
-        supabaseAdmin,
-        { callId: call.id, campaignContactId: cc.id },
-        err,
-        // The campaign's "failed" outcome (which may schedule a retry) is applied
-        // by finalization, exactly once, guarded by current_call_id.
-        async () => {
-          await deps.finalize(call.id);
-        },
-      );
-      if (recorded === "outcome_unknown") {
-        console.error("campaign_dispatch:outcome_unknown", call.id, (err as Error).message);
-      }
+    };
+    const pending = dial();
+    if (!probed) {
+      probed = true;
+      await pending;
+    } else {
+      dialTasks.push(pending);
     }
   }
+
+  for (const result of await Promise.allSettled(dialTasks))
+    if (result.status === "rejected")
+      console.error("campaign_dispatch:dial_task_failed", campaign.id, String(result.reason));
 
   const completed = await maybeCompleteCampaign(campaign.id, supabaseAdmin);
   return { dialed, skipped, completed, emergencyStop };
@@ -777,7 +825,12 @@ export async function admitCampaignCall(
     _sent_objective: request.sentObjective,
     _sent_instructions: request.sentInstructions,
   });
-  if (error) throw new Error(error.message);
+  if (error) {
+    // The database refused the call row: every shared Sarvam slot is taken (nothing was reserved).
+    if (/PROVIDER_CONCURRENCY_LIMIT/.test(error.message))
+      return { result: "refused", reason: "provider_concurrency_limit" };
+    throw new Error(error.message);
+  }
   const answer = (data ?? {}) as Record<string, unknown>;
   if (answer["result"] === "admitted" && typeof answer["call_id"] === "string")
     return answer as unknown as CampaignAdmission;

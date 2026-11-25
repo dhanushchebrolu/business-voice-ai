@@ -730,13 +730,13 @@ describe("campaign dispatch — the hard maximum call length", () => {
     }
   };
 
-  test("every call goes through admission with the 3-call in-flight limit and its own call id", async () => {
+  test("every call goes through admission with the shared slot limit (4 by default) and its own call id", async () => {
     const t = setup(2);
     await dispatchDueCampaigns({ deps: t.deps });
     assert.equal(t.requests.length, 2);
     assert.equal(t.admission.requests.length, 2);
     for (const req of t.admission.requests) {
-      assert.equal(req.maxInFlight, 3);
+      assert.equal(req.maxInFlight, 4);
       assert.equal(req.retryAttempt, 0);
       const cc = t.table("campaign_contacts").find((c) => c["id"] === req.campaignContactId)!;
       assert.equal(cc["current_call_id"], req.callId, "admitted for exactly the claimed call");
@@ -1400,5 +1400,159 @@ describe("campaign dispatch — a running campaign pauses only for a real reason
     assert.equal(t.dialed.length, 0);
     assert.equal(campaign(t)["status"], "running");
     assert.ok(t.table("campaign_contacts").every((c) => c["status"] === "pending"));
+  });
+});
+
+describe("campaign dispatch — shared call slots (migration 20261201090000)", () => {
+  const LIMIT = 4;
+  /**
+   * What trg_call_logs_outbound_concurrency enforces: a call is refused when the
+   * unfinished Sarvam calls of EVERY customer (rows here, plus `occupied` calls
+   * that belong to other campaigns, single calls or live inbound calls) fill the limit.
+   */
+  function withSharedSlots(t: ReturnType<typeof setup>, occupied = 0) {
+    // The statuses outbound_concurrency() counts.
+    const UNFINISHED = ["initiated", "ringing", "answered", "in_progress", "outcome_unknown"];
+    const inUse = () =>
+      occupied +
+      t.table("call_logs").filter((c) => UNFINISHED.includes(String(c["status"]))).length;
+    const base = t.deps.admitCampaignCall;
+    t.deps.slotLimit = async () => LIMIT;
+    t.deps.admitCampaignCall = async (req) =>
+      inUse() >= LIMIT ? { result: "refused", reason: "provider_concurrency_limit" } : base(req);
+    return { inUse };
+  }
+  const started = (t: ReturnType<typeof setup>) =>
+    t.table("call_logs").filter((c) => c["status"] === "initiated").length;
+
+  for (const [occupied, expected] of [
+    [0, 4],
+    [1, 3],
+    [2, 2],
+    [3, 1],
+    [4, 0],
+  ] as const) {
+    test(`${occupied} calls already active: ${expected} start, the rest wait untouched`, async () => {
+      const t = setup(6);
+      withSharedSlots(t, occupied);
+      await dispatchDueCampaigns({ deps: t.deps });
+      assert.equal(started(t), expected);
+      assert.equal(t.dialed.length, expected);
+      const waiting = t.table("campaign_contacts").filter((c) => c["status"] === "pending");
+      assert.equal(waiting.length, 6 - expected);
+      assert.ok(
+        waiting.every((c) => c["attempts"] === 0),
+        "a refused contact keeps its attempt",
+      );
+      assert.equal(
+        t.table("campaigns")[0]!["status"],
+        "running",
+        "waiting for a slot never pauses",
+      );
+    });
+  }
+
+  test("calls of other customers and campaigns hold slots too: the limit is shared, never per campaign", async () => {
+    const t = setup(6);
+    withSharedSlots(t, 3); // three calls of other campaigns
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(started(t), 1, "this campaign gets only the one slot that is left");
+  });
+
+  test("the calls of one run are requested together, not one after another", async () => {
+    const t = setup(5);
+    withSharedSlots(t);
+    let active = 0;
+    let peak = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    t.onDial.fn = async (n) => {
+      active++;
+      peak = Math.max(peak, active);
+      // The first request is answered at once (it is sent alone, to catch a bad key early);
+      // the others are held to show they are in flight at the same time.
+      if (n === 1) active--;
+      else {
+        if (n === 4) release();
+        await gate;
+        active--;
+      }
+    };
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 4);
+    assert.ok(peak >= 3, `requests overlapped (peak ${peak})`);
+  });
+
+  test("overlapping ticks never dial a contact twice and never exceed the limit", async () => {
+    const t = setup(8);
+    withSharedSlots(t);
+    await Promise.all([
+      dispatchDueCampaigns({ deps: t.deps }),
+      dispatchDueCampaigns({ deps: t.deps }),
+      dispatchDueCampaigns({ deps: t.deps }),
+    ]);
+    assert.ok(t.dialed.length <= LIMIT, `dialled ${t.dialed.length}`);
+    assert.equal(new Set(t.dialed).size, t.dialed.length, "no number dialled twice");
+    assert.ok(started(t) <= LIMIT);
+  });
+
+  test("a start that fails for good frees its slot at once, so the next contact takes it", async () => {
+    const t = setup(4);
+    withSharedSlots(t, 3); // one slot free
+    t.onDial.fn = (n) => {
+      t.failDial.err =
+        n === 1 ? new TelephonyAdapterError("Sarvam rejected the request.", 400, false) : undefined;
+    };
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 2, "the failed start gave its slot to the next contact");
+    assert.equal(t.table("call_logs")[0]!["status"], "failed");
+  });
+
+  test("a start whose outcome is unknown keeps its slot (the call may be live) and is never redialled", async () => {
+    const t = setup(3);
+    withSharedSlots(t, 3);
+    t.onDial.fn = () => {
+      t.failDial.err = new TelephonyAdapterError("Sarvam did not respond in time.", 503, true);
+    };
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 1);
+    assert.equal(t.table("call_logs")[0]!["status"], "outcome_unknown");
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 1, "no retry of an ambiguous start");
+  });
+
+  test("a finished call frees its slot for the next tick", async () => {
+    const t = setup(6);
+    const slots = withSharedSlots(t);
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(slots.inUse(), 4);
+    for (const call of t.table("call_logs").slice(0, 2)) call["status"] = "completed";
+    for (const cc of t
+      .table("campaign_contacts")
+      .filter((c) => c["status"] === "calling")
+      .slice(0, 2))
+      cc["status"] = "completed";
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(slots.inUse(), 4, "two more calls took the two freed slots");
+    assert.equal(t.dialed.length, 6);
+  });
+
+  test("the emergency stop dials nothing even with every slot free", async () => {
+    const t = setup(4);
+    withSharedSlots(t);
+    (t.db.tables["platform_settings"] ??= []).push({
+      key: "outbound.calling_paused",
+      value: { enabled: true },
+    });
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.equal(t.dialed.length, 0);
+  });
+
+  test("the per-customer cap follows the shared limit (read from the database, default 4)", async () => {
+    const t = setup(2);
+    withSharedSlots(t);
+    t.deps.slotLimit = async () => 6;
+    await dispatchDueCampaigns({ deps: t.deps });
+    assert.ok(t.admission.requests.every((r) => r.maxInFlight === 6));
   });
 });

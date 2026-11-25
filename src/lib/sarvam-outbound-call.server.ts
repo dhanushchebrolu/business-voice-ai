@@ -60,6 +60,8 @@ export const TOO_MANY_IN_FLIGHT_MESSAGE = `You already have ${SINGLE_CALL_LIMITS
 export const HOURLY_LIMIT_MESSAGE = `You have reached the limit of ${SINGLE_CALL_LIMITS.perHour} outbound calls an hour. Try again later.`;
 export const DAILY_LIMIT_MESSAGE = `You have reached the limit of ${SINGLE_CALL_LIMITS.perDay} outbound calls a day. Try again tomorrow.`;
 export const DESTINATION_LIMIT_MESSAGE = `This number has already been called ${SINGLE_CALL_LIMITS.perDestinationDay} times in the last 24 hours. Try again tomorrow.`;
+export const PROVIDER_BUSY_MESSAGE =
+  "All call lines are busy right now. Nothing was charged. Try again in a few minutes.";
 export const INSUFFICIENT_BALANCE_MESSAGE =
   "Insufficient wallet balance to place this call. Your balance must cover the longest this call can run, plus any calls still in progress.";
 export const MAX_CALL_LENGTH_NOT_SET_MESSAGE =
@@ -94,6 +96,8 @@ export function admissionRefusalMessage(reason: unknown): string {
       return MAX_CALL_LENGTH_NOT_SET_MESSAGE;
     case "outbound_paused":
       return OUTBOUND_EMERGENCY_STOP_MESSAGE;
+    case "provider_concurrency_limit":
+      return PROVIDER_BUSY_MESSAGE;
     case "outside_calling_hours":
       return CALLING_HOURS_MESSAGE;
     default:
@@ -454,7 +458,12 @@ export async function sendSarvamInstantOutboundCall(
     _max_per_day: SINGLE_CALL_LIMITS.perDay,
     _max_per_destination_day: SINGLE_CALL_LIMITS.perDestinationDay,
   });
-  if (admissionError) throw admissionError;
+  if (admissionError) {
+    // The database refused the call row: every shared Sarvam slot is taken (nothing was reserved).
+    if (/PROVIDER_CONCURRENCY_LIMIT/.test(admissionError.message))
+      throw new Error(PROVIDER_BUSY_MESSAGE);
+    throw admissionError;
+  }
   const admitted = (admission ?? {}) as {
     result?: string;
     reason?: string;

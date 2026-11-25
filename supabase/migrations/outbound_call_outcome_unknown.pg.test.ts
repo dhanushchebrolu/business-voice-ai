@@ -143,7 +143,18 @@ before(() => {
       return;
     }
   }
-  if (!seeded) setupFailure = `migration ${FIX} not found`;
+  if (!seeded) {
+    setupFailure = `migration ${FIX} not found`;
+    return;
+  }
+  // These tests keep many calls open at once to exercise the number reservation and the
+  // statuses. The shared Sarvam slot limit (shared_outbound_concurrency.pg.test.ts) is
+  // set out of the way so it doesn't refuse their fixtures.
+  const slots = sql(
+    `INSERT INTO public.platform_settings (key, value) VALUES ('outbound.max_concurrent_calls', '{"limit": 50}'::jsonb)
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;`,
+  );
+  if (slots.status !== 0) setupFailure = `slot limit setup failed: ${slots.stderr}`;
 });
 
 after(() => {
