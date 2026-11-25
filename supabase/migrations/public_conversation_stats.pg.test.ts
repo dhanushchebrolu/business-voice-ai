@@ -57,6 +57,8 @@ let setupFailure: string | null = null;
 let unregister: (() => void) | null = null;
 const ORG_A = randomUUID();
 const ORG_B = randomUUID();
+const INTEGRATION_A = randomUUID();
+const INTEGRATION_B = randomUUID();
 
 function pgTest(name: string, fn: () => void) {
   test(name, (t: TestContext) => {
@@ -107,7 +109,38 @@ function call(o: {
   );
   return id;
 }
-const clear = () => rows(`DELETE FROM public.call_logs;`);
+const clear = () => rows(`DELETE FROM public.call_logs; DELETE FROM public.sarvam_agent_events;`);
+
+/** A request from Sarvam's agent to the agent API (by default the `context` request made when a call starts). */
+function agentEvent(o: {
+  interaction: string | null;
+  agoSec: number;
+  kind?: string;
+  status?: string;
+  integration?: string;
+}) {
+  const integration = o.integration ?? INTEGRATION_A;
+  rows(
+    `INSERT INTO public.sarvam_agent_events (integration_id, organization_id, kind, status, interaction_id, created_at)
+     VALUES ('${integration}', (SELECT organization_id FROM public.sarvam_agent_integrations WHERE id = '${integration}'),
+             '${o.kind ?? "context"}', '${o.status ?? "ok"}', ${o.interaction ? `'${o.interaction}'` : "NULL"}, now() - interval '${o.agoSec} seconds');`,
+  );
+}
+
+/** The call_logs row Sarvam's result webhook leaves: inbound keyed by interaction id, outbound by attempt id. */
+function finishedSarvamCall(o: {
+  interaction: string;
+  duration: number;
+  status?: string;
+  outbound?: boolean;
+}) {
+  const metadata = o.outbound ? JSON.stringify({ interaction_id: o.interaction }) : "{}";
+  rows(
+    `INSERT INTO public.call_logs (id, organization_id, provider, provider_call_id, provider_metadata, direction, status, started_at, ended_at, duration_seconds)
+     VALUES ('${randomUUID()}', '${ORG_A}', 'sarvam', '${o.outbound ? `att_${o.interaction}` : o.interaction}',
+             '${metadata}'::jsonb, '${o.outbound ? "outbound" : "inbound"}', '${o.status ?? "completed"}', now(), now(), ${o.duration});`,
+  );
+}
 
 before(() => {
   const result = bootstrapCluster();
@@ -133,7 +166,25 @@ before(() => {
   const seed = execSql(
     `INSERT INTO public.organizations (id, name, owner_id) VALUES ('${ORG_A}', 'Clinic A', '${randomUUID()}'), ('${ORG_B}', 'Clinic B', '${randomUUID()}');`,
   );
-  if (seed.status !== 0) setupFailure = `seed failed: ${seed.stderr}`;
+  if (seed.status !== 0) {
+    setupFailure = `seed failed: ${seed.stderr}`;
+    return;
+  }
+  const integrations = [
+    [ORG_A, INTEGRATION_A],
+    [ORG_B, INTEGRATION_B],
+  ]
+    .map(([org, integration]) => {
+      const biz = randomUUID();
+      const token = randomUUID().replace(/-/g, "").repeat(2);
+      return `INSERT INTO public.businesses (id, organization_id, name, timezone) VALUES ('${biz}', '${org}', 'Clinic', 'Asia/Kolkata');
+        INSERT INTO public.agent_configs (organization_id, business_id) VALUES ('${org}', '${biz}') ON CONFLICT (business_id) DO NOTHING;
+        INSERT INTO public.sarvam_agent_integrations (id, organization_id, agent_config_id, token_hash, token_prefix)
+          SELECT '${integration}', '${org}', id, '${token}', 'cai_sv_' FROM public.agent_configs WHERE business_id = '${biz}';`;
+    })
+    .join("\n");
+  const seeded = execSql(integrations);
+  if (seeded.status !== 0) setupFailure = `integration seed failed: ${seeded.stderr}`;
 });
 
 after(() => {
@@ -223,6 +274,124 @@ describe("public_conversation_stats", () => {
     );
     assert.equal(ok.status, 0, ok.stderr);
   });
+
+  pgTest(
+    "Sarvam: a connected interaction (its context request arrived) counts live from then",
+    () => {
+      clear();
+      agentEvent({ interaction: "20261125/a-1", agoSec: 100 });
+      const [completed, active, elapsed] = stats();
+      assert.equal(completed, 0);
+      assert.equal(active, 1);
+      assert.ok(elapsed >= 100 && elapsed <= 103, `elapsed ${elapsed}`);
+    },
+  );
+
+  pgTest("Sarvam: repeated context requests for one interaction count once, from the first", () => {
+    clear();
+    agentEvent({ interaction: "20261125/a-2", agoSec: 90 });
+    agentEvent({ interaction: "20261125/a-2", agoSec: 60 });
+    agentEvent({ interaction: "20261125/a-2", agoSec: 5 });
+    const [, active, elapsed] = stats();
+    assert.equal(active, 1);
+    assert.ok(elapsed >= 90 && elapsed <= 93, `elapsed ${elapsed}`);
+  });
+
+  pgTest("Sarvam: overlapping interactions of different organizations each count", () => {
+    clear();
+    agentEvent({ interaction: "20261125/a-3", agoSec: 40, integration: INTEGRATION_A });
+    agentEvent({ interaction: "20261125/b-3", agoSec: 20, integration: INTEGRATION_B });
+    const [, active, elapsed] = stats();
+    assert.equal(active, 2);
+    assert.ok(elapsed >= 60 && elapsed <= 63, `elapsed ${elapsed}`);
+  });
+
+  pgTest("Sarvam: requests that don't prove a connected call are ignored", () => {
+    clear();
+    agentEvent({ interaction: null, agoSec: 10 }); // the admin "Test integration" request
+    agentEvent({ interaction: "20261125/a-4", agoSec: 10, status: "rejected" });
+    agentEvent({ interaction: "20261125/a-5", agoSec: 10, status: "error" });
+    agentEvent({ interaction: "20261125/a-6", agoSec: 10, kind: "get_business_info" });
+    agentEvent({ interaction: "20261125/a-7", agoSec: 10, kind: "book_appointment" });
+    assert.deepEqual(stats(), [0, 0, 0]);
+  });
+
+  pgTest(
+    "Sarvam: an interaction whose end signal never arrived stops counting after 30 minutes",
+    () => {
+      clear();
+      agentEvent({ interaction: "20261125/a-8", agoSec: 31 * 60 });
+      assert.deepEqual(stats(), [0, 0, 0]);
+    },
+  );
+
+  pgTest("Sarvam: the agent's end-of-call outcome stops the live count", () => {
+    clear();
+    agentEvent({ interaction: "20261125/a-9", agoSec: 120 });
+    assert.equal(stats()[1], 1);
+    agentEvent({ interaction: "20261125/a-9", agoSec: 0, kind: "call_outcome" });
+    assert.deepEqual(stats(), [0, 0, 0]);
+  });
+
+  pgTest(
+    "Sarvam inbound: the result webhook moves the call from live to its final duration, once",
+    () => {
+      clear();
+      agentEvent({ interaction: "20261125/a-10", agoSec: 100 });
+      assert.equal(stats()[1], 1);
+      finishedSarvamCall({ interaction: "20261125/a-10", duration: 97 });
+      assert.deepEqual(stats(), [97, 0, 0]);
+    },
+  );
+
+  pgTest("Sarvam outbound: a delayed result leaves the call live, then replaces it", () => {
+    clear();
+    agentEvent({ interaction: "20261125/a-11", agoSec: 50 });
+    rows(
+      `INSERT INTO public.call_logs (id, organization_id, provider, provider_call_id, direction, status, started_at)
+       VALUES ('${randomUUID()}', '${ORG_A}', 'sarvam', 'att_20261125/a-11', 'outbound', 'initiated', now());`,
+    );
+    assert.equal(stats()[1], 1);
+    rows(
+      `UPDATE public.call_logs SET status = 'completed', ended_at = now(), duration_seconds = 56,
+              provider_metadata = '{"interaction_id":"20261125/a-11"}'::jsonb
+        WHERE provider_call_id = 'att_20261125/a-11';`,
+    );
+    assert.deepEqual(stats(), [56, 0, 0]);
+  });
+
+  pgTest("Sarvam: the same result delivered twice leaves one row and one total", () => {
+    clear();
+    agentEvent({ interaction: "20261125/a-12", agoSec: 30 });
+    finishedSarvamCall({ interaction: "20261125/a-12", duration: 40, outbound: true });
+    assert.throws(
+      () => finishedSarvamCall({ interaction: "20261125/a-12", duration: 40, outbound: true }),
+      /duplicate key|unique/i,
+    );
+    assert.deepEqual(stats(), [40, 0, 0]);
+  });
+
+  pgTest("Sarvam: a call that ended as failed adds nothing live or final", () => {
+    clear();
+    agentEvent({ interaction: "20261125/a-13", agoSec: 20 });
+    finishedSarvamCall({ interaction: "20261125/a-13", duration: 0, status: "failed" });
+    assert.deepEqual(stats(), [0, 0, 0]);
+  });
+
+  pgTest(
+    "a call answered in call_logs and seen by the Sarvam agent is one live call, not two",
+    () => {
+      clear();
+      agentEvent({ interaction: "20261125/a-14", agoSec: 60 });
+      rows(
+        `INSERT INTO public.call_logs (id, organization_id, provider, provider_call_id, direction, status, started_at, answered_at)
+       VALUES ('${randomUUID()}', '${ORG_A}', 'sarvam', '20261125/a-14', 'inbound', 'in_progress', now(), now() - interval '60 seconds');`,
+      );
+      const [, active, elapsed] = stats();
+      assert.equal(active, 1);
+      assert.ok(elapsed >= 60 && elapsed <= 63, `elapsed ${elapsed}`);
+    },
+  );
 
   pgTest("re-applying the migration is harmless", () => {
     const again = execSql!(`BEGIN;\n${readFileSync(join(migrationsDir, THIS), "utf8")}\nCOMMIT;`);
