@@ -91,7 +91,17 @@ export interface EnsureAgentContext {
 export type EnsureAgentOutcome =
   | { kind: "unsupported" }
   | { kind: "ready"; appId: string; version: number; createdNow: boolean }
+  /** The provider refused our authorization (expired or not permitted): a person must act; the job waits. */
+  | { kind: "unauthorized"; code: FailureCode; message: string }
   | { kind: "retry" | "failed"; code: FailureCode; message: string };
+
+/** 401 = the credential expired or was revoked; 403 = it is valid but not allowed to author agents. */
+export const authFailureCode = (e: ProviderError): FailureCode | null =>
+  e.status === 401
+    ? "PROVIDER_AUTH_EXPIRED"
+    : e.status === 403
+      ? "PROVIDER_PERMISSION_DENIED"
+      : null;
 
 const isTransient = (e: ProviderError) =>
   e.outcomeUnknown === true ||
@@ -114,6 +124,8 @@ export async function ensureCustomerAgent(
   const name = customerAgentName(ctx.organizationId, ctx.agentConfigId);
   const fail = (e: unknown, code: FailureCode, what: string): EnsureAgentOutcome => {
     const err = e as ProviderError;
+    const auth = authFailureCode(err);
+    if (auth) return { kind: "unauthorized", code: auth, message: `${what}: ${err.message}` };
     return {
       kind: isTransient(err) ? "retry" : "failed",
       code,

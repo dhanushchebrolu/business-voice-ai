@@ -781,3 +781,75 @@ describe("scheduled sweep and retry bound", () => {
     assert.equal(runRow(db)["failure_code"], "DEPLOYMENT_VERIFY_FAILED");
   });
 });
+
+describe("provider authorization problems (mocked machine credential)", () => {
+  const authCase = async (status: number) => {
+    const db = noAgentWorld();
+    const api = agentApi({
+      findAgentByName: async () => {
+        throw err("auth", { status, outcomeUnknown: false });
+      },
+    });
+    const r = await run0(db, withAgent(db, api.p).d);
+    return { db, r, api };
+  };
+
+  test("an expired credential (401) parks the job for a person; nothing is created; the number stays inactive", async () => {
+    const { db, r, api } = await authCase(401);
+    assert.equal(r.status, "waiting");
+    assert.equal(runRow(db)["failure_code"], "PROVIDER_AUTH_EXPIRED");
+    assert.equal(runRow(db)["next_attempt_at"], null, "never retried blindly");
+    assert.equal(api.calls.create, 0);
+    notActive(db);
+    const view = await loadActivationView(db.client, ORG);
+    assert.equal(view.phase, "waiting");
+    assert.doesNotMatch(view.message, /token|credential|Sarvam/i);
+  });
+
+  test("a permission failure (403) is reported as such", async () => {
+    const { db } = await authCase(403);
+    assert.equal(runRow(db)["failure_code"], "PROVIDER_PERMISSION_DENIED");
+    assert.equal(runRow(db)["status"], "waiting");
+  });
+
+  test("authorization expiring mid-way (after create, during configure) never creates a second agent on resume", async () => {
+    const db = noAgentWorld();
+    let configureFails = true;
+    const api = agentApi({
+      configureAgent: async () => {
+        if (configureFails) throw err("expired", { status: 401 });
+        return { version: 2 };
+      },
+    });
+    const { d } = withAgent(db, api.p);
+    assert.equal((await run0(db, d)).status, "waiting");
+    assert.equal(runRow(db)["failure_code"], "PROVIDER_AUTH_EXPIRED");
+    assert.equal(api.calls.create, 1);
+    configureFails = false; // the credential was renewed
+    const second = await run0(db, d, { force: true });
+    assert.equal(second.status, "succeeded", String(runRow(db)["note"]));
+    assert.equal(api.calls.create, 1, "the agent from the first attempt was found, not recreated");
+    assert.equal(num(db, "num_new")["status"], "active");
+  });
+
+  test("throttling (429) and provider outages are retried with backoff, not parked", async () => {
+    for (const status of [429, 503]) {
+      const db = noAgentWorld();
+      const api = agentApi({
+        createAgent: async () => {
+          throw err("busy", { status, outcomeUnknown: false });
+        },
+      });
+      const r = await run0(db, withAgent(db, api.p).d);
+      assert.equal(r.status, "pending", String(status));
+      assert.ok(runRow(db)["next_attempt_at"]);
+    }
+  });
+
+  test("tenant isolation: one customer's agent name never resolves to another's", () => {
+    assert.notEqual(
+      customerAgentName("aaaaaaaa-1", "11111111-1"),
+      customerAgentName("bbbbbbbb-1", "11111111-1"),
+    );
+  });
+});

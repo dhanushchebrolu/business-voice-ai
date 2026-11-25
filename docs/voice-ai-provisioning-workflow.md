@@ -114,7 +114,7 @@ Rehearsed (wrong-identity refusal, execute, refuse twice, verify, rollback) on a
 
 ## Operator bridge: Sarvam agent authoring (2026-11-26 investigation)
 
-**Findings (official docs only).** Agent create/clone/configure/commit exists only in the Voice
+**Findings (official docs only; full evidence and the exact request to Sarvam: `sarvam-unattended-agent-authoring-request.md`).** Agent create/clone/configure/commit exists only in the Voice
 Agents MCP server ([mcp](https://docs.sarvam.ai/voice-agents/mcp),
 [genie](https://docs.sarvam.ai/voice-agents/build/genie),
 [api intro](https://docs.sarvam.ai/voice-agents/api/introduction)): tools `configure_agent`

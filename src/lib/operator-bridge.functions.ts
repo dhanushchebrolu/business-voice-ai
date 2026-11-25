@@ -14,6 +14,7 @@ export const getOperatorBridgeStatus = createServerFn({ method: "POST" })
     await assertPlatformAdmin(context.supabase, context.userId, "agents.write");
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const { listWorkOrders } = await import("@/lib/operator-bridge.server");
+    const { AUTHORING_STATUS } = await import("@/lib/sarvam-agent-authoring-status");
     const now = new Date().toISOString();
     const [{ data: tokens, error }, workOrders] = await Promise.all([
       supabaseAdmin
@@ -32,6 +33,7 @@ export const getOperatorBridgeStatus = createServerFn({ method: "POST" })
         : null,
       tokens: tokens ?? [],
       workOrders,
+      authoring: AUTHORING_STATUS,
     };
   });
 

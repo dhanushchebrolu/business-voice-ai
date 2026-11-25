@@ -87,6 +87,8 @@ export type FailureCode =
   | "NUMBER_UNUSABLE"
   | "PROVIDER_SETUP_PENDING"
   | "PROVIDER_CAPABILITY_UNVERIFIED"
+  | "PROVIDER_AUTH_EXPIRED"
+  | "PROVIDER_PERMISSION_DENIED"
   | "AGENT_CREATE_FAILED"
   | "AGENT_CREATE_AMBIGUOUS"
   | "AGENT_CONFIG_FAILED"
@@ -182,7 +184,13 @@ export const CUSTOMER_RETRYING = "We hit a temporary problem and are trying agai
 export function classifyOutcome(i: OutcomeInput): JobOutcome {
   if (i.state === "active") return { kind: "succeeded" };
   const waiting = WAITING[i.state];
-  if (waiting) return { kind: "waiting", code: waiting.code, customerMessage: waiting.message };
+  // A waiting step may carry its own code (e.g. the provider credential expired).
+  if (waiting)
+    return {
+      kind: "waiting",
+      code: i.failure?.code ?? waiting.code,
+      customerMessage: waiting.message,
+    };
 
   let failure: { code: FailureCode; retryable: boolean };
   if (i.failure) failure = i.failure;

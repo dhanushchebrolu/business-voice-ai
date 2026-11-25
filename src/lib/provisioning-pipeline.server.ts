@@ -478,6 +478,13 @@ export async function runProvisioningPipeline(
         "waiting_for_agent",
         "the agent has to be built in Sarvam by a signed-in operator (Sarvam has no unattended agent API): connect an MCP client to the ClickAI operator bridge on the Provisioning page and let it process this work order, or copy the master agent by hand and register its agent id and version. The job continues by itself once the agent is registered.",
       );
+    // Provider authorization is the one thing ClickAI cannot fix itself: wait for a person
+    // (the operator bridge still works), recording exactly why.
+    if (ensured.kind === "unauthorized")
+      return done(5, "waiting_for_agent", ensured.message, null, {
+        code: ensured.code,
+        retryable: false,
+      });
     if (ensured.kind !== "ready")
       return done(5, "failed", ensured.message, null, {
         code: ensured.code,

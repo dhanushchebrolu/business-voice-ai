@@ -67,6 +67,9 @@ export function OperatorBridgePanel() {
               </span>
             ) : null}
           </div>
+          <p className="text-xs text-muted-foreground" data-testid="authoring-status">
+            Unattended agent creation: <strong>not available yet</strong>. {data!.authoring.blocker}
+          </p>
           {data!.tokens.length ? (
             <ul className="text-xs text-muted-foreground">
               {data!.tokens.map((t) => (
