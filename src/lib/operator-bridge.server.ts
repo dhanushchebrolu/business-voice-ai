@@ -1,7 +1,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import type { AgentSnapshot } from "./agent-instructions.ts";
-import { MASTER_AGENT_TOOLS, buildUniversalAgentConfig } from "./universal-agent-config.ts";
+import {
+  MASTER_AGENT_TOOLS,
+  buildOutboundAgentConfig,
+  buildUniversalAgentConfig,
+} from "./universal-agent-config.ts";
 import { customerAgentName, registerProvisionedAgent } from "./sarvam-agent-provisioner.server.ts";
 import { CLOSED_LIFECYCLES, maskPhone, sanitizeDiagnostic } from "./voice-provisioning-job.ts";
 import {
@@ -9,10 +13,11 @@ import {
   agentRef,
   clickAiToolDefinitions,
   sarvamSafePrompt,
+  templateToolDefinitions,
 } from "./sarvam-agent-tools-spec.ts";
 import { reportedAgent, toolsCreatedReport } from "./tool-auth-checkpoint.server.ts";
 import { capabilitiesFor } from "./platform-admin.server.ts";
-import type { AgentRole } from "./agent-roles.ts";
+import { AGENT_ROLES, isAgentRole, registeredAgent, type AgentRole } from "./agent-roles.ts";
 import { buildToolAuthCheckpoint } from "./tool-auth-checkpoint-view.ts";
 
 /**
@@ -29,7 +34,7 @@ import { buildToolAuthCheckpoint } from "./tool-auth-checkpoint-view.ts";
  * (deployment, number routing, verification, activation: documented REST APIs).
  *
  * Bridge tokens are short-lived (default 1 h, <= 4 h), revocable, hash-only,
- * platform-admin issued and scoped to ONE customer, ONE job and the inbound agent.
+ * platform-admin issued and scoped to ONE customer, ONE job and ONE agent role.
  * Every request re-checks the issuer's rights and that the job is still open; the
  * token is used up by the one registration it can make.
  * The bridge never issues or returns a customer's integration credential, because
@@ -41,12 +46,29 @@ type Admin = SupabaseClient<Database>;
 export const BRIDGE_TOKEN_PREFIX = "cbr_";
 export const BRIDGE_DEFAULT_HOURS = 1;
 export const BRIDGE_MAX_HOURS = 4;
-/** Job states in which an operator has agent work to do. */
-export const WORK_ORDER_STATES = [
-  "waiting_for_integration_credential",
-  "waiting_for_agent",
-  "waiting_for_tool_authentication",
-];
+/** Job states in which an operator has agent work to do, per agent role. */
+export const WORK_ORDER_STATES_BY_ROLE: Record<AgentRole, string[]> = {
+  inbound: [
+    "waiting_for_integration_credential",
+    "waiting_for_agent",
+    "waiting_for_tool_authentication",
+  ],
+  outbound: [
+    "waiting_for_outbound_credential",
+    "waiting_for_outbound_agent",
+    "waiting_for_outbound_tool_authentication",
+  ],
+};
+export const WORK_ORDER_STATES = AGENT_ROLES.flatMap((r) => WORK_ORDER_STATES_BY_ROLE[r]);
+/** Which agent a job state is waiting on; null for states with no operator work. */
+export const workOrderRole = (step: string | null | undefined): AgentRole | null =>
+  AGENT_ROLES.find((r) => WORK_ORDER_STATES_BY_ROLE[r].includes(step ?? "")) ?? null;
+const stageOf = (step: string | null) =>
+  step?.endsWith("_credential")
+    ? ("needs_credential" as const)
+    : step?.endsWith("tool_authentication")
+      ? ("needs_tool_authentication" as const)
+      : ("needs_agent" as const);
 
 async function sha256Hex(value: string): Promise<string> {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
@@ -64,9 +86,8 @@ async function customerClosed(admin: Admin, organizationId: string): Promise<boo
 }
 
 /**
- * A token for ONE open work order: that customer, that job, the inbound agent. Issuing a new
- * one revokes the job's previous token. (Outbound agents are registered in the admin screen;
- * the bridge has no outbound operation, so it issues no outbound token.)
+ * A token for ONE open work order: that customer, that job, and the one agent role the job is
+ * waiting on. Issuing a new one revokes the job's previous token for that role.
  */
 export async function issueBridgeToken(
   admin: Admin,
@@ -79,11 +100,11 @@ export async function issueBridgeToken(
   runId: string;
   role: AgentRole;
 }> {
-  const role = input.role ?? "inbound";
-  if (role !== "inbound")
-    throw new BridgeError("invalid", "The operator bridge only builds inbound agents.");
   const run = await openRun(admin, input.runId);
   if (!run) throw new BridgeError("not_found", "No open work order with that id.");
+  const role = input.role ?? run.role;
+  if (role !== run.role)
+    throw new BridgeError("invalid", `That work order is for the ${run.role} agent.`);
   if (await customerClosed(admin, run.organization_id))
     throw new BridgeError("conflict", "That customer is suspended or cancelled.");
   const hours = Math.min(Math.max(input.hours ?? BRIDGE_DEFAULT_HOURS, 1), BRIDGE_MAX_HOURS);
@@ -169,7 +190,7 @@ export async function authenticateBridge(
     return { ok: false, reason: "revoked" };
   };
   const { organization_id: organizationId, run_id: runId, agent_role: role } = data;
-  if (!organizationId || !runId || role !== "inbound") return revoke();
+  if (!organizationId || !runId || !isAgentRole(role)) return revoke();
   // A token is only as good as its issuer's rights NOW.
   const { data: issuer, error: issuerError } = await admin
     .from("platform_admins")
@@ -178,7 +199,7 @@ export async function authenticateBridge(
     .maybeSingle();
   if (issuerError) throw issuerError;
   if (!issuer?.is_active || !capabilitiesFor(issuer.role).includes("agents.write")) return revoke();
-  // The token ends with its job: finished, failed, gone, or past the inbound agent.
+  // The token ends with its job (finished, failed, gone) or when the job moves to the other role.
   const { data: run, error: runError } = await admin
     .from("provisioning_runs")
     .select("organization_id, status, current_step")
@@ -189,7 +210,7 @@ export async function authenticateBridge(
     !run ||
     run.organization_id !== organizationId ||
     !["pending", "running", "waiting"].includes(run.status) ||
-    (run.current_step ?? "").startsWith("waiting_for_outbound")
+    (workOrderRole(run.current_step) ?? role) !== role
   )
     return revoke();
   // Cancelled or suspended customers: the job may not have noticed yet; the token ends now.
@@ -211,8 +232,16 @@ export async function authenticateBridge(
 
 /** Everything outside the token's job is answered exactly like a job that does not exist. */
 export function assertScope(auth: Extract<BridgeAuth, { ok: true }>, runId: string) {
-  if (runId !== auth.runId || auth.role !== "inbound")
+  if (runId !== auth.runId) throw new BridgeError("not_found", "No open work order with that id.");
+}
+
+/** The token's own open job, still waiting on the token's own role. */
+async function scopedRun(admin: Admin, auth: Extract<BridgeAuth, { ok: true }>, runId: string) {
+  assertScope(auth, runId);
+  const run = await openRun(admin, runId);
+  if (!run || run.role !== auth.role)
     throw new BridgeError("not_found", "No open work order with that id.");
+  return run;
 }
 
 /** Single use: one registration per token, decided by the database row. */
@@ -233,6 +262,8 @@ export interface WorkOrderDeps {
   /** Public base URL Sarvam's HTTP tools call (TELEPHONY_WEBHOOK_BASE_URL). */
   baseUrl: string | null;
   masterAgentAppId: string | null;
+  /** The outbound template agent, if one exists; never a customer's agent. */
+  outboundMasterAgentAppId?: string | null;
   /** The COMMITTED master version customers are cloned from. */
   masterAgentVersion: number;
   /** Continues the customer's provisioning job after an agent is registered. */
@@ -241,17 +272,17 @@ export interface WorkOrderDeps {
 }
 
 export async function defaultWorkOrderDeps(): Promise<WorkOrderDeps> {
-  const [{ loadSnapshot }, { masterAgentAppId, masterAgentVersion }, { runProvisioning }] =
-    await Promise.all([
-      import("./agent-service.server.ts"),
-      import("./sarvam-agent-registration.server.ts"),
-      import("./provisioning-runs.server.ts"),
-    ]);
+  const [{ loadSnapshot }, registration, { runProvisioning }] = await Promise.all([
+    import("./agent-service.server.ts"),
+    import("./sarvam-agent-registration.server.ts"),
+    import("./provisioning-runs.server.ts"),
+  ]);
   return {
     loadSnapshot,
     baseUrl: process.env["TELEPHONY_WEBHOOK_BASE_URL"]?.replace(/\/+$/, "") || null,
-    masterAgentAppId: masterAgentAppId(),
-    masterAgentVersion: masterAgentVersion(),
+    masterAgentAppId: registration.masterAgentAppId(),
+    outboundMasterAgentAppId: registration.outboundMasterAgentAppId(),
+    masterAgentVersion: registration.masterAgentVersion(),
     resume: async (organizationId, actor) => {
       const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
       return runProvisioning(supabaseAdmin, {
@@ -269,6 +300,7 @@ interface OpenRun {
   organization_id: string;
   current_step: string | null;
   phone_number_id: string | null;
+  role: AgentRole;
 }
 
 async function openRun(admin: Admin, runId: string): Promise<OpenRun | null> {
@@ -279,13 +311,16 @@ async function openRun(admin: Admin, runId: string): Promise<OpenRun | null> {
     .eq("status", "waiting")
     .maybeSingle();
   if (error) throw error;
-  return data && WORK_ORDER_STATES.includes(data.current_step ?? "") ? data : null;
+  const role = workOrderRole(data?.current_step);
+  return data && role ? { ...data, role } : null;
 }
 
 async function agentOf(admin: Admin, organizationId: string) {
   const { data, error } = await admin
     .from("agent_configs")
-    .select("id, organization_id, business_id, sarvam_app_id, sarvam_app_version")
+    .select(
+      "id, organization_id, business_id, sarvam_app_id, sarvam_app_version, sarvam_outbound_app_id, sarvam_outbound_app_version",
+    )
     .eq("organization_id", organizationId)
     .maybeSingle();
   if (error) throw error;
@@ -312,24 +347,28 @@ export async function listWorkOrders(admin: Admin, now: Date = new Date(), onlyR
       .select("name")
       .eq("id", r.organization_id)
       .maybeSingle();
-    const agentName = customerAgentName(r.organization_id, agent.id);
-    // The checkpoint view only exists once the operator reported the agent and its six tools.
-    const report =
-      r.current_step === "waiting_for_tool_authentication"
-        ? await toolsCreatedReport(admin, r.organization_id, r.id)
-        : null;
+    const role = workOrderRole(r.current_step)!;
+    const agentName = customerAgentName(r.organization_id, agent.id, role);
+    const awaitingAuth = stageOf(r.current_step) === "needs_tool_authentication";
+    // What the operator reported for this job and role, if anything yet.
+    const report = awaitingAuth
+      ? await toolsCreatedReport(admin, r.organization_id, r.id, role)
+      : null;
     // An agent registered by hand has no "tools created" report: the checkpoint still applies,
     // so show it for the registered agent with no tool reported yet.
-    const checkpointAgentId = report?.appId ?? r.sarvam_agent_id;
+    const checkpointAgentId =
+      report?.appId ??
+      (role === "inbound" ? r.sarvam_agent_id : (registeredAgent(agent, role)?.appId ?? null));
     const checkpoint =
-      r.current_step === "waiting_for_tool_authentication" && checkpointAgentId
+      awaitingAuth && checkpointAgentId
         ? buildToolAuthCheckpoint({
+            role,
             jobId: r.id,
             customerId: r.organization_id,
             customer: org?.name ?? "(unknown)",
             agentId: checkpointAgentId,
             credentialName: `clickai-${agentName}`,
-            agentRef: agentRef("inbound", agent.id),
+            agentRef: agentRef(role, agent.id),
             master: report?.master ?? null,
             waitingSince: report?.reportedAt ?? r.created_at,
             now,
@@ -339,19 +378,15 @@ export async function listWorkOrders(admin: Admin, now: Date = new Date(), onlyR
     out.push({
       checkpoint,
       workOrderId: r.id,
+      agentRole: role,
       customerId: r.organization_id,
       customer: org?.name ?? "(unknown)",
       /** Set when an operator reported it cannot continue (for example Sarvam sign-in required). */
       blocked: r.failure_code === "WAITING_FOR_OPERATOR",
       agentName,
       /** The agent the operator reported (tools created), once credentials are pending. */
-      agentId: r.current_step === "waiting_for_tool_authentication" ? r.sarvam_agent_id : null,
-      stage:
-        r.current_step === "waiting_for_integration_credential"
-          ? "needs_credential"
-          : r.current_step === "waiting_for_tool_authentication"
-            ? "needs_tool_authentication"
-            : "needs_agent",
+      agentId: awaitingAuth ? checkpointAgentId : null,
+      stage: stageOf(r.current_step),
       queuedAt: r.created_at,
     });
   }
@@ -360,7 +395,8 @@ export async function listWorkOrders(admin: Admin, now: Date = new Date(), onlyR
 
 export async function getWorkOrder(admin: Admin, runId: string, deps: WorkOrderDeps) {
   const run = await openRun(admin, runId);
-  if (!run) throw new BridgeError("not_found", "No open work order with that id.");
+  if (!run || run.role !== "inbound")
+    throw new BridgeError("not_found", "No open work order with that id.");
   const agent = await agentOf(admin, run.organization_id);
   if (!agent?.business_id)
     throw new BridgeError("not_ready", "The customer has no agent record yet.");
@@ -434,7 +470,7 @@ export async function getWorkOrder(admin: Admin, runId: string, deps: WorkOrderD
     description: d.description,
     // All six are created on every customer agent (clones carry no tools); the ones this
     // customer's capabilities do not use are then switched off.
-    enabled: d.enabledBy === "always" || config.tools.enable.includes(d.name),
+    enabled: d.enabledBy === "always" || (config.tools.enable as string[]).includes(d.name),
     connectorConfig: d.connectorConfig,
   }));
   const masterReady = Boolean(deps.masterAgentAppId);
@@ -530,6 +566,106 @@ export async function getWorkOrder(admin: Admin, runId: string, deps: WorkOrderD
   };
 }
 
+/** What the outbound agent is generated from: its own configuration, never the inbound one. */
+async function outboundBuild(admin: Admin, runId: string, deps: WorkOrderDeps) {
+  const run = await openRun(admin, runId);
+  if (!run || run.role !== "outbound")
+    throw new BridgeError("not_found", "No open work order with that id.");
+  const agent = await agentOf(admin, run.organization_id);
+  if (!agent?.business_id)
+    throw new BridgeError("not_ready", "The customer has no agent record yet.");
+  if (!deps.baseUrl)
+    throw new BridgeError("not_configured", "TELEPHONY_WEBHOOK_BASE_URL is not set.");
+  const snapshot = await deps.loadSnapshot(admin, agent.business_id);
+  const { data: voice, error } = await admin
+    .from("agent_voice_language_settings")
+    .select(
+      "organization_id, default_language, allowed_languages, auto_language_switch, sarvam_voice_internal_id",
+    )
+    .eq("agent_config_id", agent.id)
+    .eq("organization_id", run.organization_id)
+    .maybeSingle();
+  if (error) throw error;
+  const config = buildOutboundAgentConfig(snapshot, voice ?? null);
+  if (config.blockers.length || config.voiceLanguageProblem)
+    throw new BridgeError(
+      "not_ready",
+      [...config.blockers, config.voiceLanguageProblem].filter(Boolean).join(" "),
+    );
+  const { sarvamToolConfiguration } = await import("./sarvam-agent-api.server.ts");
+  const { HEALTHCARE_BUSINESS_TYPES } = await import("./sarvam-agent-prompt.ts");
+  const template = sarvamToolConfiguration(deps.baseUrl, "outbound", {
+    healthcare: HEALTHCARE_BUSINESS_TYPES.includes(snapshot.business.business_type),
+    tools: config.tools.enable,
+  });
+  const ref = agentRef("outbound", agent.id);
+  const tools = templateToolDefinitions(template.tools, ref);
+  return { run, agent, config, template, tools, ref };
+}
+
+/**
+ * The outbound agent's work order. The agent is created new (never cloned from the inbound
+ * agent or its master) with only the outbound tools the customer's capabilities allow.
+ */
+export async function getOutboundWorkOrder(admin: Admin, runId: string, deps: WorkOrderDeps) {
+  const { run, agent, config, template, tools, ref } = await outboundBuild(admin, runId, deps);
+  const agentName = customerAgentName(run.organization_id, agent.id, "outbound");
+  const credentialSecretName = `clickai-${agentName}`;
+  const [{ data: org }, { data: cred, error }] = await Promise.all([
+    admin.from("organizations").select("name").eq("id", run.organization_id).maybeSingle(),
+    admin
+      .from("sarvam_agent_integrations")
+      .select("id")
+      .eq("agent_config_id", agent.id)
+      .eq("role", "outbound")
+      .eq("status", "active")
+      .maybeSingle(),
+  ]);
+  if (error) throw error;
+  const reported = await reportedAgent(admin, run.organization_id, run.id, "outbound");
+  return {
+    workOrderId: run.id,
+    status: "WAITING_FOR_AGENT_CREATION" as const,
+    stage: stageOf(run.current_step),
+    jobId: run.id,
+    customerId: run.organization_id,
+    customer: org?.name ?? "(unknown)",
+    scope: { customerId: run.organization_id, jobId: run.id, agentRole: "outbound" as const },
+    agentName,
+    agentRef: ref,
+    create: {
+      configureAgent: { name: agentName, config: config.voiceLanguage?.sarvamConfig ?? null },
+      prompt: sarvamSafePrompt(template.systemPrompt).text,
+    },
+    tools,
+    forbiddenTools: [...config.tools.forbidden],
+    inputVariables: template.inputVariables,
+    outputVariables: template.outputVariables,
+    callHandling: config.callHandling,
+    credentialSecretName,
+    credentialIssued: Boolean(cred),
+    reportedAgentId: reported?.appId ?? null,
+    fingerprint: config.fingerprint,
+    limitations: [
+      "ClickAI cannot read the agent back from Sarvam: tools, settings and credentials are as the operator reports them.",
+      "Confirming the tool credentials does not enable calling: an admin still confirms this version after a supervised call.",
+    ],
+    instructions: [
+      "0. Check Sarvam sign-in by listing agents. If that fails with an authorization error, call report_blocker (reason sarvam_auth_required) and STOP.",
+      `1. If an agent named "${agentName}" already exists, reuse it. Never use, copy or clone this customer's inbound agent or the inbound master.`,
+      "2. Create it new: configure_agent with create.configureAgent, then prompt_append with create.prompt. Declare every inputVariables and outputVariables entry.",
+      "3. Never ask for, read, repeat or type a credential value, and do not call configure_secret. If credentialIssued is false, ask the person to generate the OUTBOUND credential in the ClickAI admin screen (Provisioning, this customer) and paste it straight into the Sarvam console as a secret named credentialSecretName.",
+      `4. Create exactly these ${tools.length} tools with their toolType and connectorConfig, including the fixed body field agent_ref, and enable only them. Do not add an auth key. The tools in forbiddenTools must not exist or be enabled.`,
+      "5. Apply callHandling: maximum call length, voicemail detection and message, and NO call transfer. Read the draft back and confirm all of the above.",
+      "6. Call report_tools_created with the agent ID and the tool names.",
+      "7. A person selects the OUTBOUND credential on every tool in the Sarvam console, BEFORE committing.",
+      "8. Read the draft back, commit once, then read the COMMITTED version back and confirm every tool still shows bearer auth.",
+      `9. Call submit_agent_result with workOrderId, agentId, the committed version, fingerprint "${config.fingerprint}" and toolAuth (name, authType, agentRef for every tool).`,
+      "Do not place calls or create campaigns.",
+    ],
+  };
+}
+
 export class BridgeError extends Error {
   code: "not_found" | "not_ready" | "not_configured" | "conflict" | "invalid";
   constructor(code: BridgeError["code"], message: string) {
@@ -560,18 +696,34 @@ async function bridgeAudit(
  * again is a no-op; a different agent for an already-registered customer is refused.
  */
 const APP_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{2,80}$/;
-const SIX = new Set<string>(CLICKAI_TOOL_NAMES);
+
 /** A pasted token matches the agent-id shape: refuse it before it is stored or echoed. */
 const isAgentId = (v: string) => APP_ID_PATTERN.test(v) && !/^(cai_sv_|cbr_)/i.test(v);
 
-function requireSixToolNames(names: unknown, what: string): string[] {
+function requireToolNames(names: unknown, expected: readonly string[], what: string): string[] {
   const list = Array.isArray(names) ? names.map((n) => String(n)) : [];
-  if (list.length !== SIX.size || !list.every((n) => SIX.has(n)) || new Set(list).size !== SIX.size)
+  const want = new Set(expected);
+  if (
+    list.length !== want.size ||
+    !list.every((n) => want.has(n)) ||
+    new Set(list).size !== want.size
+  )
     throw new BridgeError(
       "invalid",
-      `${what} must list exactly the six ClickAI tools: ${CLICKAI_TOOL_NAMES.join(", ")}.`,
+      `${what} must list exactly these ${want.size} ClickAI tools: ${expected.join(", ")}.`,
     );
   return list;
+}
+
+/** The tools an agent of this role must have for this customer. */
+async function expectedTools(
+  admin: Admin,
+  role: AgentRole,
+  runId: string,
+  deps: WorkOrderDeps,
+): Promise<readonly string[]> {
+  if (role === "inbound") return CLICKAI_TOOL_NAMES;
+  return (await outboundBuild(admin, runId, deps)).tools.map((t) => t.name);
 }
 
 /**
@@ -585,32 +737,47 @@ export async function reportToolsCreated(
   input: {
     workOrderId: string;
     appId: string;
-    clonedFrom: { agentId: string; version: number };
+    /** Inbound only: the committed master it was cloned from. */
+    clonedFrom?: { agentId: string; version: number } | undefined;
     tools: unknown;
   },
   auth: Extract<BridgeAuth, { ok: true }>,
   deps: WorkOrderDeps,
 ) {
-  assertScope(auth, input.workOrderId);
   if (!isAgentId(input.appId ?? ""))
     throw new BridgeError("invalid", "That does not look like a Sarvam agent id.");
-  const run = await openRun(admin, input.workOrderId);
-  if (!run) throw new BridgeError("not_found", "No open work order with that id.");
+  const run = await scopedRun(admin, auth, input.workOrderId);
+  const role = run.role;
   const agent = await agentOf(admin, run.organization_id);
   if (!agent?.business_id)
     throw new BridgeError("not_ready", "The customer has no agent record yet.");
-  if (input.appId === deps.masterAgentAppId)
+  if (input.appId === deps.masterAgentAppId || input.appId === deps.outboundMasterAgentAppId)
     throw new BridgeError("conflict", "That is the master template, not a customer agent.");
   if (
-    !deps.masterAgentAppId ||
-    input.clonedFrom?.agentId !== deps.masterAgentAppId ||
-    input.clonedFrom?.version !== deps.masterAgentVersion
+    role === "inbound" &&
+    (!deps.masterAgentAppId ||
+      input.clonedFrom?.agentId !== deps.masterAgentAppId ||
+      input.clonedFrom?.version !== deps.masterAgentVersion)
   )
     throw new BridgeError(
       "conflict",
       `The agent must be cloned from the committed master ${deps.masterAgentAppId} version ${deps.masterAgentVersion}.`,
     );
-  const tools = requireSixToolNames(input.tools, "tools");
+  if (
+    role === "outbound" &&
+    (input.appId === agent.sarvam_app_id ||
+      (input.clonedFrom?.agentId &&
+        [deps.masterAgentAppId, agent.sarvam_app_id].includes(input.clonedFrom.agentId)))
+  )
+    throw new BridgeError(
+      "conflict",
+      "The outbound agent must be its own agent: never the inbound agent, nor a copy of it or of the inbound master.",
+    );
+  const tools = requireToolNames(
+    input.tools,
+    await expectedTools(admin, role, run.id, deps),
+    "tools",
+  );
   // Another customer's agent can never be reported here.
   const { data: owner, error: ownerError } = await admin
     .from("agent_configs")
@@ -621,30 +788,48 @@ export async function reportToolsCreated(
   if (ownerError) throw ownerError;
   if ((owner ?? []).length)
     throw new BridgeError("conflict", "That Sarvam agent already belongs to another customer.");
-  // Nor one another customer's job has reported, nor anyone's outbound agent.
-  const [reportedElsewhere, outbound] = await Promise.all([
+  // Nor one another customer's job has reported (either role), nor an agent of the other role.
+  const otherRoleColumn = role === "inbound" ? "sarvam_outbound_app_id" : "sarvam_app_id";
+  const [reportedByRun, reportedByEvent, otherRole, otherOwner] = await Promise.all([
     admin
       .from("provisioning_runs")
       .select("id")
       .eq("sarvam_agent_id", input.appId)
       .neq("organization_id", run.organization_id)
       .limit(1),
-    admin.from("agent_configs").select("id").eq("sarvam_outbound_app_id", input.appId).limit(1),
+    admin
+      .from("provisioning_run_events")
+      .select("run_id")
+      .eq("event", "agent_tools_created")
+      .eq("detail->>appId", input.appId)
+      .neq("organization_id", run.organization_id)
+      .limit(1),
+    admin.from("agent_configs").select("id").eq(otherRoleColumn, input.appId).limit(1),
+    admin
+      .from("agent_configs")
+      .select("id")
+      .eq("sarvam_outbound_app_id", input.appId)
+      .neq("organization_id", run.organization_id)
+      .limit(1),
   ]);
-  for (const r of [reportedElsewhere, outbound]) if (r.error) throw r.error;
-  if (reportedElsewhere.data?.length)
+  for (const r of [reportedByRun, reportedByEvent, otherRole, otherOwner])
+    if (r.error) throw r.error;
+  if (reportedByRun.data?.length || reportedByEvent.data?.length)
     throw new BridgeError("conflict", "That Sarvam agent already belongs to another customer.");
-  if (outbound.data?.length)
+  if (otherRole.data?.length)
     throw new BridgeError(
       "conflict",
-      "That Sarvam agent is registered as an outbound agent. The inbound agent must be a different one.",
+      `That Sarvam agent is registered as an ${role === "inbound" ? "outbound" : "inbound"} agent. The ${role} agent must be a different one.`,
     );
-  if (agent.sarvam_app_id && agent.sarvam_app_id !== input.appId)
+  if (otherOwner.data?.length)
+    throw new BridgeError("conflict", "That Sarvam agent already belongs to another customer.");
+  const registered = registeredAgent(agent, role);
+  if (registered && registered.appId !== input.appId)
     throw new BridgeError(
       "conflict",
       "This customer already has a different agent registered. Replace it in the ClickAI admin screen.",
     );
-  const previous = await reportedAgent(admin, run.organization_id, run.id);
+  const previous = await reportedAgent(admin, run.organization_id, run.id, role);
   if (previous && previous.appId !== input.appId)
     throw new BridgeError(
       "conflict",
@@ -652,16 +837,20 @@ export async function reportToolsCreated(
     );
   if (previous) return { status: "already_reported" as const, agentId: previous.appId };
   await bridgeAudit(admin, auth, run, "agent_tools_created", {
+    role,
     appId: input.appId,
-    clonedFrom: input.clonedFrom,
+    ...(input.clonedFrom ? { clonedFrom: input.clonedFrom } : {}),
     tools,
   });
-  const { error } = await admin
-    .from("provisioning_runs")
-    .update({ sarvam_agent_id: input.appId })
-    .eq("id", run.id)
-    .eq("organization_id", run.organization_id);
-  if (error) throw error;
+  // The job's sarvam_agent_id column is the inbound agent's.
+  if (role === "inbound") {
+    const { error } = await admin
+      .from("provisioning_runs")
+      .update({ sarvam_agent_id: input.appId })
+      .eq("id", run.id)
+      .eq("organization_id", run.organization_id);
+    if (error) throw error;
+  }
   const resumed = await deps.resume(run.organization_id, auth.createdBy).then(
     () => true,
     (e) => {
@@ -673,9 +862,9 @@ export async function reportToolsCreated(
 }
 
 /**
- * The operator reports the COMMITTED agent version. It is registered only when the tools were
- * reported first (so the checkpoint cannot be skipped) and the committed version's read-back
- * shows credentials on all six tools. Idempotent: the same id and version again is a no-op.
+ * The operator reports the COMMITTED agent version of the token's role. It is registered only
+ * when the tools were reported first (so the checkpoint cannot be skipped) and the committed
+ * version's read-back shows credentials on every tool. Idempotent for the same id and version.
  */
 export async function submitAgentResult(
   admin: Admin,
@@ -703,37 +892,43 @@ export async function submitAgentResult(
       .eq("id", input.workOrderId)
       .maybeSingle();
     const agent = done ? await agentOf(admin, done.organization_id) : null;
-    if (agent?.sarvam_app_id === input.appId && agent.sarvam_app_version === input.version)
+    const current = agent ? registeredAgent(agent, auth.role) : null;
+    if (current?.appId === input.appId && current.version === input.version)
       return { status: "already_registered" as const };
     throw new BridgeError("not_found", "No open work order with that id.");
   }
+  if (run.role !== auth.role)
+    throw new BridgeError("not_found", "No open work order with that id.");
+  const role = run.role;
   const agent = await agentOf(admin, run.organization_id);
   if (!agent?.business_id)
     throw new BridgeError("not_ready", "The customer has no agent record yet.");
-  if (agent.sarvam_app_id && agent.sarvam_app_id !== input.appId)
+  const registered = registeredAgent(agent, role);
+  if (registered && registered.appId !== input.appId)
     throw new BridgeError(
       "conflict",
       "This customer already has a different agent registered. Replace it in the ClickAI admin screen.",
     );
   // A stale submission never replaces a newer registered version.
-  if (agent.sarvam_app_version && input.version < agent.sarvam_app_version)
+  if (registered && input.version < registered.version)
     throw new BridgeError(
       "conflict",
-      `Version ${agent.sarvam_app_version} of this agent is already registered; version ${input.version} is older. Submit the current committed version.`,
+      `Version ${registered.version} of this agent is already registered; version ${input.version} is older. Submit the current committed version.`,
     );
   // The tools must have been reported for THIS agent first: the checkpoint cannot be skipped.
-  const reported = await reportedAgent(admin, run.organization_id, run.id);
+  const reported = await reportedAgent(admin, run.organization_id, run.id, role);
   if (reported?.appId !== input.appId)
     throw new BridgeError(
       "conflict",
-      "Report the agent's six tools first (report_tools_created) for this agent, then select the credentials in the Sarvam console, commit, and submit.",
+      "Report the agent's tools first (report_tools_created) for this agent, then select the credentials in the Sarvam console, commit, and submit.",
     );
-  // Evidence from the committed version's read-back: a credential on every one of the six tools.
+  // Evidence from the committed version's read-back: a credential on every one of its tools.
   const evidence = Array.isArray(input.toolAuth)
     ? (input.toolAuth as { name?: unknown; authType?: unknown; agentRef?: unknown }[])
     : [];
-  requireSixToolNames(
+  requireToolNames(
     evidence.map((e) => e?.name),
+    await expectedTools(admin, role, run.id, deps),
     "toolAuth",
   );
   const missing = evidence.filter(
@@ -746,7 +941,7 @@ export async function submitAgentResult(
     );
   // Every tool must carry this customer's reference, or a wrongly selected credential would
   // not be caught when the agent calls ClickAI.
-  const expectedRef = agentRef("inbound", agent.id);
+  const expectedRef = agentRef(role, agent.id);
   const wrongRef = evidence.filter((e) => e.agentRef !== expectedRef);
   if (wrongRef.length)
     throw new BridgeError(
@@ -755,7 +950,10 @@ export async function submitAgentResult(
     );
   // The reported fingerprint must match what ClickAI generates NOW, so an agent built from an
   // out-of-date work order (settings changed since) is rejected, not registered.
-  const current = await getWorkOrder(admin, run.id, deps);
+  const current =
+    role === "inbound"
+      ? await getWorkOrder(admin, run.id, deps)
+      : await getOutboundWorkOrder(admin, run.id, deps);
   if (input.fingerprint !== current.fingerprint)
     throw new BridgeError(
       "conflict",
@@ -764,21 +962,27 @@ export async function submitAgentResult(
   await consumeToken(admin, auth.tokenId, deps.now?.() ?? new Date());
   try {
     await registerProvisionedAgent(admin, {
+      role,
       organizationId: run.organization_id,
       agentConfigId: agent.id,
       appId: input.appId,
       version: input.version,
       masterAgentAppId: deps.masterAgentAppId,
+      outboundMasterAgentAppId: deps.outboundMasterAgentAppId ?? null,
+      registeredBy: auth.createdBy,
+      now: deps.now?.() ?? new Date(),
     });
   } catch (e) {
     throw new BridgeError("conflict", sanitizeDiagnostic((e as Error).message));
   }
   await bridgeAudit(admin, auth, run, "tool_auth_confirmed", {
+    role,
     appId: input.appId,
     version: input.version,
     tools: evidence.map((e) => ({ name: String(e.name), authType: String(e.authType) })),
   });
   await bridgeAudit(admin, auth, run, "agent_submitted", {
+    role,
     appId: input.appId,
     version: input.version,
     fingerprint: input.fingerprint,
@@ -804,9 +1008,7 @@ export async function reportBlocker(
   input: { workOrderId: string; reason: string; message?: string | undefined },
   auth: Extract<BridgeAuth, { ok: true }>,
 ) {
-  assertScope(auth, input.workOrderId);
-  const run = await openRun(admin, input.workOrderId);
-  if (!run) throw new BridgeError("not_found", "No open work order with that id.");
+  const run = await scopedRun(admin, auth, input.workOrderId);
   const reason = input.reason === "sarvam_auth_required" ? "sarvam_auth_required" : "other";
   const message =
     reason === "sarvam_auth_required"

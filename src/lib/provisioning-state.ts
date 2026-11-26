@@ -28,7 +28,8 @@ export type ProvisioningState =
   | "waiting_for_outbound_credential"
   | "waiting_for_outbound_agent"
   // The agent and its tools exist; the tool credentials still have to be selected in Sarvam.
-  | "waiting_for_tool_authentication";
+  | "waiting_for_tool_authentication"
+  | "waiting_for_outbound_tool_authentication";
 
 export interface ComputeProvisioningStateInput {
   /** Platform-wide: do SARVAM_INBOUND_VOICE_API_KEY/SARVAM_OUTBOUND_VOICE_API_KEY/SARVAM_ORG_ID/SARVAM_WORKSPACE_ID all resolve? (validateSarvamEnv().allPresent) */

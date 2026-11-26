@@ -51,6 +51,8 @@ export function world(
     outbound?: false | "no_agent" | "inbound_agent";
     /** false: the registered agent has NO tool-authentication confirmation on record. */
     toolAuth?: false;
+    /** false: the registered OUTBOUND agent has no confirmation either. */
+    outboundToolAuth?: false;
   } = {},
 ) {
   const outboundAppId =
@@ -174,8 +176,12 @@ export function world(
   // says otherwise (toolAuth: false) or confirms it itself (confirmToolAuth).
   const registered = over.appId === undefined ? "Customer-app-1" : over.appId;
   if (registered && over.toolAuth !== false) confirmToolAuth(db, registered, 1);
+  if (outboundAppId && over.outboundToolAuth !== false)
+    confirmToolAuth(db, outboundAppId, 1, ORG, "outbound");
   return db;
 }
+
+let confirmations = 0;
 
 /** A person's confirmation for this agent version (what submit_agent_result records). */
 export function confirmToolAuth(
@@ -183,14 +189,17 @@ export function confirmToolAuth(
   appId: string,
   version: number,
   organizationId: string = ORG,
+  role: "inbound" | "outbound" = "inbound",
 ) {
   (db.tables["provisioning_run_events"] ??= []).push({
     run_id: "confirmed-in-test",
     organization_id: organizationId,
     step: "creating_agent",
     event: "tool_auth_confirmed",
-    created_at: "2026-11-13T10:00:00Z",
+    // Each confirmation is later than the one before, as the database would stamp it.
+    created_at: new Date(Date.parse("2026-11-13T10:00:00Z") + ++confirmations * 1000).toISOString(),
     detail: {
+      role,
       appId,
       version,
       tools: [

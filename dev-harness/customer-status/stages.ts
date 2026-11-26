@@ -46,8 +46,17 @@ export const STAGES = [
     number: { status: "active", connection: true, inbound: true },
   },
   {
+    id: "outbound_registered",
+    label: "Outbound agent registered, not yet confirmed for calling",
+    lifecycle: "provisioning",
+    inbound: true,
+    outbound: true,
+    outboundConfirmed: false,
+    number: { status: "active", connection: true, inbound: true },
+  },
+  {
     id: "ready",
-    label: "Outbound agent registered: ready",
+    label: "Outbound agent confirmed: ready",
     lifecycle: "provisioning",
     inbound: true,
     outbound: true,

@@ -1,4 +1,5 @@
 import { CLICKAI_TOOL_NAMES, clickAiToolDefinitions } from "./sarvam-agent-tools-spec.ts";
+import { OUTBOUND_AGENT_TOOLS, type AgentRole } from "./agent-roles.ts";
 
 /**
  * What the admin sees while a job waits at the tool-authentication checkpoint. Pure: built
@@ -31,8 +32,7 @@ export interface ToolAuthCheckpoint {
   master: { agentId: string; version: number } | null;
   /** Name to look for in the console. A label only; ClickAI does not know it exists there. */
   credentialName: string;
-  /** The operator bridge builds inbound agents only. */
-  agentRole: "inbound";
+  agentRole: AgentRole;
   /** Fixed body value every tool must send; ClickAI refuses a credential of another agent. */
   agentRef: string;
   waitingSince: string;
@@ -41,7 +41,7 @@ export interface ToolAuthCheckpoint {
   /** Display only. Nothing times out or proceeds on its own. */
   attention: "normal" | "needs_intervention";
   attentionNote: string;
-  /** True once the operator reported all six tools, so confirmation can be accepted. */
+  /** True once the operator reported the tools, so confirmation can be accepted. */
   readyForConfirmation: boolean;
   resumeNote: string;
   /** No verified Sarvam console link format exists, so none is offered. */
@@ -52,6 +52,8 @@ export interface ToolAuthCheckpoint {
 }
 
 export interface CheckpointInput {
+  /** Default inbound. */
+  role?: AgentRole;
   jobId: string;
   customerId: string;
   customer: string;
@@ -81,31 +83,43 @@ export function waitingLabel(ms: number): string {
 }
 
 export function buildToolAuthCheckpoint(input: CheckpointInput): ToolAuthCheckpoint {
+  const role = input.role ?? "inbound";
   const definitions = clickAiToolDefinitions("https://placeholder.invalid");
+  // Outbound tools depend on the customer's capabilities: the report (checked against the
+  // work order when it was accepted) names them. Without one, the template's full set.
+  const names: readonly string[] =
+    role === "inbound"
+      ? CLICKAI_TOOL_NAMES
+      : input.toolsReported.length
+        ? OUTBOUND_AGENT_TOOLS.filter((t) => input.toolsReported.includes(t))
+        : OUTBOUND_AGENT_TOOLS;
+  const lifecycleOf = (name: string) =>
+    (definitions.find((d) => d.name === name)?.connectorConfig as { lifecycle?: string })
+      ?.lifecycle ?? "run";
   const expectedAuth = `Bearer, credential "${input.credentialName}"`;
   const reported = new Set(input.toolsReported);
-  const tools: CheckpointTool[] = CLICKAI_TOOL_NAMES.map((name, i) => ({
+  const tools: CheckpointTool[] = names.map((name, i) => ({
     order: i + 1,
     name,
-    timing:
-      TIMING[
-        (definitions.find((d) => d.name === name)!.connectorConfig as { lifecycle: string })
-          .lifecycle
-      ]!,
+    timing: TIMING[lifecycleOf(name)]!,
     expectedAuth,
     status: reported.has(name) ? "created_awaiting_credential" : "missing",
   }));
   const waitingMs = Math.max(0, input.now.getTime() - new Date(input.waitingSince).getTime());
   const stale = waitingMs > STALE_AFTER_MS;
   const ready = tools.every((t) => t.status === "created_awaiting_credential");
+  const count = role === "inbound" ? "six" : String(tools.length);
+  const outbound = role === "outbound";
   const instructions = [
-    `Sarvam console: open the agent with ID ${input.agentId} (compare the whole ID). Never the master agent or another customer's agent.`,
-    "Open the DRAFT, then each of the six tools below, in order.",
+    `Sarvam console: open the agent with ID ${input.agentId} (compare the whole ID). Never the master agent or another customer's agent.${outbound ? " This is the OUTBOUND agent: not the customer's inbound agent." : ""}`,
+    `Open the DRAFT, then each of the ${count} tools below, in order.`,
     `On each tool set Authentication to Bearer and select the credential named "${input.credentialName}". If that exact name is not listed, stop: do not pick another.`,
-    `Reopen all six tools and check each shows Bearer with that same credential and the fixed body field agent_ref = ${input.agentRef}.`,
+    `Reopen all ${count} tools and check each shows Bearer with that same credential and the fixed body field agent_ref = ${input.agentRef}.`,
     "Commit the agent and note the committed version number.",
-    "Read the committed version back: all six tools must still show the credential. Then confirm it in your operator client (submit_agent_result with the agent ID, that version and, per tool, the credential type and agent_ref).",
-    "ClickAI keeps this job paused until that confirmation is accepted. Nothing is deployed, mapped or activated before it.",
+    `Read the committed version back: all ${count} tools must still show the credential. Then confirm it in your operator client (submit_agent_result with the agent ID, that version and, per tool, the credential type and agent_ref).`,
+    outbound
+      ? "ClickAI keeps this job paused until that confirmation is accepted. Nothing can be dialled before it, and calling still needs an admin's confirmation after a supervised call."
+      : "ClickAI keeps this job paused until that confirmation is accepted. Nothing is deployed, mapped or activated before it.",
   ];
   const checklist = tools
     .map((t) => `[ ] ${t.order}. ${t.name} | ${t.timing} | Bearer "${input.credentialName}"`)
@@ -116,14 +130,14 @@ export function buildToolAuthCheckpoint(input: CheckpointInput): ToolAuthCheckpo
     `Provisioning job: ${input.jobId}`,
     `Sarvam agent ID: ${input.agentId}`,
     `Cloned from master ${input.master ? `${input.master.agentId} v${input.master.version}` : "(not recorded)"}`,
-    `Agent role: inbound`,
+    `Agent role: ${role}`,
     `Credential to select (name only): ${input.credentialName}`,
     `Fixed body field on every tool: agent_ref = ${input.agentRef}`,
     "",
-    "Six tools (select this customer's credential on each):",
+    `${outbound ? count : "Six"} tools (select this customer's ${role} credential on each):`,
     checklist,
     "",
-    "Then: commit the agent, read the committed version back, confirm all six show the credential, and submit the confirmation.",
+    `Then: commit the agent, read the committed version back, confirm all ${count} show the credential, and submit the confirmation.`,
     "Never paste a credential value into a tool, a chat or this checklist.",
   ].join("\n");
   return {
@@ -134,7 +148,7 @@ export function buildToolAuthCheckpoint(input: CheckpointInput): ToolAuthCheckpo
     agentId: input.agentId,
     master: input.master,
     credentialName: input.credentialName,
-    agentRole: "inbound",
+    agentRole: role,
     agentRef: input.agentRef,
     waitingSince: input.waitingSince,
     waitingMs,
@@ -145,8 +159,8 @@ export function buildToolAuthCheckpoint(input: CheckpointInput): ToolAuthCheckpo
       : "",
     readyForConfirmation: ready,
     resumeNote: ready
-      ? "Resumes this same job automatically when the committed version is confirmed with credentials on all six tools."
-      : "Not all six tools are reported as created; the operator must report them before confirming.",
+      ? `Resumes this same job automatically when the committed version is confirmed with credentials on all ${count} tools.`
+      : `Not all ${count} tools are reported as created; the operator must report them before confirming.`,
     agentLink: null,
     tools,
     instructions,

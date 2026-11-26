@@ -2,6 +2,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { memorySupabase } from "./payments/memory-supabase.test-helper.ts";
 import { confirmToolAuth } from "./provisioning-test-world.test-helper.ts";
+import { outboundConfirmed } from "./agent-roles.ts";
 import { runProvisioningPipeline, type PipelineDeps } from "./provisioning-pipeline.server.ts";
 import { runProvisioning, type ProvisioningTrigger } from "./provisioning-runs.server.ts";
 import {
@@ -214,7 +215,7 @@ function customerView(db: World) {
   const steps = customerSetupSteps({
     agentExists: true,
     inboundAgentReady: input.agentSarvamMapped,
-    outboundAgentReady: Boolean(agent["sarvam_outbound_app_id"]),
+    outboundAgentReady: outboundConfirmed(agent),
     hasNumber: input.hasNumber,
     numberActive: input.numberActive,
     inboundEnabled: input.inboundEnabled,
@@ -346,7 +347,10 @@ describe("dual-agent provisioning end to end (mocked Sarvam)", () => {
     ops.issueCredential(db, "outbound");
     await record("outbound credential");
     await ops.registerOutbound(db);
-    const done = await record("outbound agent registered");
+    const unconfirmed = await record("outbound agent registered");
+    assert.equal(unconfirmed.result?.state, "waiting_for_outbound_tool_authentication");
+    confirmToolAuth(db, "E2E-out-1", 1, ORG, "outbound");
+    const done = await record("outbound credentials confirmed");
     assert.equal(done.result?.state, "active", done.result?.note);
     assert.equal(done.status, "succeeded");
     // Running again after success starts a new run that only re-reads.
@@ -362,10 +366,11 @@ describe("dual-agent provisioning end to end (mocked Sarvam)", () => {
         "number confirmed: waiting_for_integration_credential | Setup needs admin attention / Creating your inbound AI agent",
         "inbound credential: waiting_for_agent | Setup needs admin attention / Creating your inbound AI agent",
         "inbound agent registered: waiting_for_tool_authentication | Final checks before go-live / Verifying and connecting your phone line",
-        "tool credentials confirmed: waiting_for_outbound_credential | Inbound calling active / Creating your outbound AI agent",
-        "outbound credential: waiting_for_outbound_agent | Inbound calling active / Creating your outbound AI agent",
-        "outbound agent registered: active | Inbound calling active / all done",
-        "re-run after success: active | Inbound calling active / all done",
+        "tool credentials confirmed: waiting_for_outbound_credential | Inbound calling active / Preparing your outbound AI agent",
+        "outbound credential: waiting_for_outbound_agent | Inbound calling active / Preparing your outbound AI agent",
+        "outbound agent registered: waiting_for_outbound_tool_authentication | Inbound calling active / Preparing your outbound AI agent",
+        "outbound credentials confirmed: active | Inbound calling active / Preparing your outbound AI agent",
+        "re-run after success: active | Inbound calling active / Preparing your outbound AI agent",
       ],
     );
     assert.equal(s.counts.creates, 1, "exactly one deployment ever created");
@@ -432,6 +437,8 @@ describe("dual-agent provisioning end to end (mocked Sarvam)", () => {
     await step("waiting_for_outbound_agent");
     await ops.registerOutbound(db);
     await ops.registerOutbound(db); // repeated: no-op
+    await step("waiting_for_outbound_tool_authentication");
+    confirmToolAuth(db, "E2E-out-1", 1, ORG, "outbound");
     await step("active");
     await step("active");
 

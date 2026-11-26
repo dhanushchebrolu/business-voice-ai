@@ -114,7 +114,8 @@ const SERVICE_NAME_DESCRIPTION =
 export type ToolEnabledBy = "always" | "booking" | "callback";
 
 export interface ToolDefinition {
-  name: ClickAiToolName;
+  /** One of the six inbound tools, or a tool of the outbound template. */
+  name: string;
   /** configure_app_tool.tool_type */
   toolType: ToolType;
   lifecycle: "on_start" | "run" | "on_end";
@@ -298,6 +299,70 @@ export function clickAiToolDefinitions(baseUrl: string, ref?: string): ToolDefin
         ...(t.connectorConfig["body"] as unknown[]),
         { name: "agent_ref", type: "static", value: ref },
       ],
+    },
+  }));
+}
+
+/** What a template tool spec carries (sarvamToolConfiguration in sarvam-agent-api.server.ts). */
+export interface TemplateToolSpec {
+  name: string;
+  lifecycle: "on_start" | "run" | "on_end";
+  url: string;
+  body: Record<string, string>;
+  purpose: string;
+  saveIntoVariables?: string[];
+  responseTemplate?: string;
+}
+
+const SYSTEM_VARIABLES: Record<string, string> = {
+  "@Interaction ID": "interaction_id",
+  "@User Identifier": "user_identifier",
+};
+const TOOL_TYPE = {
+  on_start: "webhook_on_start",
+  run: "webhook",
+  on_end: "webhook_on_end",
+} as const;
+/** Tools that change something wait longer, like the inbound booking tool. */
+const SLOW_TOOLS = ["book_appointment", "reschedule_appointment", "cancel_appointment"];
+
+/**
+ * Connector configs for exactly the tools of one agent template, in template order, each with
+ * the agent's fixed agent_ref. "@x" is a system or agent variable, "true (constant)…" a fixed
+ * value, anything else a value the model fills, described by that text.
+ */
+export function templateToolDefinitions(
+  specs: readonly TemplateToolSpec[],
+  ref: string,
+): ToolDefinition[] {
+  return specs.map((t) => ({
+    name: t.name,
+    toolType: TOOL_TYPE[t.lifecycle],
+    lifecycle: t.lifecycle,
+    enabledBy: "always" as const,
+    description: t.purpose,
+    connectorConfig: {
+      url: t.url,
+      method: "POST",
+      lifecycle: t.lifecycle,
+      body: [
+        ...Object.entries(t.body).map(([name, value]) =>
+          value in SYSTEM_VARIABLES
+            ? { name, type: "system_variable", value: { variable_name: SYSTEM_VARIABLES[value] } }
+            : value.startsWith("@")
+              ? AGENT_VAR(name, value.slice(1))
+              : value.startsWith("true (constant)")
+                ? { ...REQUIRE_SERVICE, name }
+                : LLM(name, value, !value.includes("(optional)") && name !== "service_name"),
+        ),
+        { name: "agent_ref", type: "static", value: ref },
+      ],
+      timeout_seconds: SLOW_TOOLS.includes(t.name) ? 20 : 10,
+      ...(t.lifecycle === "run"
+        ? { on_failure: "I couldn't do that just now, so nothing was changed." }
+        : {}),
+      ...(t.responseTemplate ? { resp_template: t.responseTemplate } : {}),
+      ...(t.saveIntoVariables ? { save_to_variables: save(t.saveIntoVariables) } : {}),
     },
   }));
 }

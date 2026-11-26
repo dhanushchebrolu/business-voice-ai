@@ -96,7 +96,7 @@ export interface CustomerSetupInput {
   agentExists: boolean;
   /** agent_configs.sarvam_app_id && sarvam_app_version. */
   inboundAgentReady: boolean;
-  /** agent_configs.sarvam_outbound_app_id && sarvam_outbound_app_version. */
+  /** The registered outbound agent is confirmed for calling (outboundConfirmed). */
   outboundAgentReady: boolean;
   hasNumber: boolean;
   numberActive: boolean;
@@ -128,7 +128,7 @@ export function customerSetupSteps(i: CustomerSetupInput): CustomerSetupStep[] {
     ["Assigning your phone number", i.hasNumber],
     ["Creating your inbound AI agent", i.inboundAgentReady],
     ["Verifying and connecting your phone line", i.numberActive && i.inboundEnabled],
-    ["Creating your outbound AI agent", i.outboundAgentReady],
+    ["Preparing your outbound AI agent", i.outboundAgentReady],
   ];
   const allDone = steps.every(([, done]) => done);
   steps.push(["Ready", allDone]);
@@ -139,4 +139,40 @@ export function customerSetupSteps(i: CustomerSetupInput): CustomerSetupStep[] {
     current = true;
     return { label, status: i.needsAttention ? ("attention" as const) : ("in_progress" as const) };
   });
+}
+
+export interface AgentCallStatus {
+  direction: "inbound" | "outbound";
+  title: string;
+  label: string;
+  tone: "live" | "ready" | "idle";
+}
+
+/**
+ * Each direction on its own, in customer words. Nothing reads "live" unless that direction
+ * can actually be used: inbound needs the active number, outbound the confirmed agent.
+ */
+export function agentCallStatus(i: {
+  inboundLive: boolean;
+  outboundRegistered: boolean;
+  outboundConfirmed: boolean;
+}): AgentCallStatus[] {
+  return [
+    {
+      direction: "inbound",
+      title: "Incoming calls",
+      ...(i.inboundLive
+        ? { label: "Live", tone: "live" as const }
+        : { label: "Not live yet", tone: "idle" as const }),
+    },
+    {
+      direction: "outbound",
+      title: "Outgoing calls",
+      ...(i.outboundConfirmed
+        ? { label: "Ready", tone: "live" as const }
+        : i.outboundRegistered
+          ? { label: "Awaiting final checks", tone: "ready" as const }
+          : { label: "Not set up yet", tone: "idle" as const }),
+    },
+  ];
 }

@@ -63,7 +63,7 @@ function ToolAuthCheckpointCard({
         <dd>{c.agentRole}</dd>
         <dt className="text-muted-foreground">Tool agent_ref</dt>
         <dd>
-          <code>{c.agentRef}</code> (fixed value on all six tools)
+          <code>{c.agentRef}</code> (fixed value on every tool)
         </dd>
         <dt className="text-muted-foreground">Credential to select</dt>
         <dd>
@@ -81,7 +81,7 @@ function ToolAuthCheckpointCard({
         </p>
       ) : null}
       {/* Narrow screens: one stacked entry per tool (a five-column table does not fit). */}
-      <ol className="space-y-1.5 md:hidden" aria-label="The six tools, in order">
+      <ol className="space-y-1.5 md:hidden" aria-label="The tools, in order">
         {c.tools.map((t) => (
           <li key={t.name} className="rounded border border-border p-2">
             <div className="break-all">
@@ -143,13 +143,18 @@ export function OperatorBridgePanel() {
     refetchInterval: 30_000,
   });
   /** The one work order a new token will be limited to. */
-  const [issueFor, setIssueFor] = useState<{ runId: string; customer: string } | null>(null);
+  const [issueFor, setIssueFor] = useState<{
+    runId: string;
+    customer: string;
+    role: "inbound" | "outbound";
+  } | null>(null);
   const [revokeOpen, setRevokeOpen] = useState(false);
   const [shown, setShown] = useState<{
     token: string;
     expiresAt: string;
     customer: string;
     runId: string;
+    role: "inbound" | "outbound";
   } | null>(null);
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["operator-bridge"] });
   const command = (token: string) =>
@@ -210,6 +215,7 @@ export function OperatorBridgePanel() {
                   >
                     {w.customer}
                   </Link>
+                  <StatusPill tone="idle">{w.agentRole} agent</StatusPill>
                   <StatusPill tone={w.blocked ? "error" : "ready"}>
                     {w.blocked
                       ? "waiting for operator: Sarvam sign-in needed"
@@ -223,7 +229,13 @@ export function OperatorBridgePanel() {
                   <Button
                     size="sm"
                     variant="outline"
-                    onClick={() => setIssueFor({ runId: w.workOrderId, customer: w.customer })}
+                    onClick={() =>
+                      setIssueFor({
+                        runId: w.workOrderId,
+                        customer: w.customer,
+                        role: w.agentRole,
+                      })
+                    }
                   >
                     Create bridge token (1 h)
                   </Button>
@@ -249,7 +261,7 @@ export function OperatorBridgePanel() {
             <div className="space-y-2 rounded-md border border-border bg-muted p-3" role="status">
               <p className="text-xs">
                 Works only for <strong>{shown.customer}</strong>, job <code>{shown.runId}</code>,
-                inbound agent. It stops working after that agent is submitted.
+                {shown.role} agent. It stops working after that agent is submitted.
               </p>
               <p className="text-xs font-medium">
                 Shown once. Expires {when(shown.expiresAt)}. Sign in to Sarvam in the same client (
@@ -275,16 +287,17 @@ export function OperatorBridgePanel() {
         open={issueFor !== null}
         onOpenChange={(open) => !open && setIssueFor(null)}
         title={`Create a bridge token for ${issueFor?.customer ?? ""}?`}
-        description={`For ${issueFor?.customer ?? ""} only: job ${issueFor?.runId ?? ""}, inbound agent. Your MCP client can read that work order and register that one agent, for 1 hour. Check the customer before confirming. A new token replaces the previous one for this job.`}
+        description={`For ${issueFor?.customer ?? ""} only: job ${issueFor?.runId ?? ""}, ${issueFor?.role ?? ""} agent. Your MCP client can read that work order and register that one agent, for 1 hour. Check the customer before confirming. A new token replaces the previous one for this job.`}
         confirmLabel="Create token"
         onConfirm={async (reason) => {
           const target = issueFor!;
-          const out = await issue({ data: { runId: target.runId, reason } });
+          const out = await issue({ data: { runId: target.runId, role: target.role, reason } });
           setShown({
             token: out.token,
             expiresAt: out.expiresAt,
             customer: target.customer,
             runId: out.runId,
+            role: target.role,
           });
           await refresh();
         }}

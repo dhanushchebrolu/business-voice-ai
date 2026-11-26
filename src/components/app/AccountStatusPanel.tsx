@@ -10,6 +10,7 @@ import {
   ACCOUNT_STATUS_LABEL,
   workspaceQuery,
   numbersQuery,
+  outboundConfirmed,
   provisioningStatusLabel,
   customerSetupSteps,
   type AccountStatus,
@@ -65,7 +66,9 @@ export function AccountStatusPanel({ showChannels = true }: { showChannels?: boo
           connectionLinked: Boolean(candidateNumber?.connection_id),
           agentSarvamMapped: Boolean(ws?.agent?.sarvam_app_id && ws?.agent?.sarvam_app_version),
           inboundEnabled: Boolean(candidateNumber?.inbound_enabled),
-          outboundEnabled: Boolean(candidateNumber?.outbound_enabled),
+          outboundEnabled: Boolean(
+            candidateNumber?.outbound_enabled && outboundConfirmed(ws?.agent ?? {}),
+          ),
         })
       : ACCOUNT_STATUS_LABEL[status];
   // Both of the customer's agents and the phone line, in plain words (no ids or errors).
@@ -74,9 +77,7 @@ export function AccountStatusPanel({ showChannels = true }: { showChannels?: boo
       ? customerSetupSteps({
           agentExists: Boolean(ws?.agent),
           inboundAgentReady: Boolean(ws?.agent?.sarvam_app_id && ws?.agent?.sarvam_app_version),
-          outboundAgentReady: Boolean(
-            ws?.agent?.sarvam_outbound_app_id && ws?.agent?.sarvam_outbound_app_version,
-          ),
+          outboundAgentReady: outboundConfirmed(ws?.agent ?? {}),
           hasNumber: Boolean(candidateNumber),
           numberActive: candidateNumber?.status === "active",
           inboundEnabled: Boolean(candidateNumber?.inbound_enabled),

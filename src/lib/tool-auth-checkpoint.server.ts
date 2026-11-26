@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
+import type { AgentRole } from "./agent-roles.ts";
 
 /**
  * The tool-authentication checkpoint. Sarvam's MCP refuses to set a tool's
@@ -36,7 +37,12 @@ interface EventDetail {
   version?: unknown;
   clonedFrom?: unknown;
   tools?: unknown;
+  /** Absent on events written before the outbound agent had a checkpoint: inbound. */
+  role?: unknown;
 }
+
+const ofRole = (role: AgentRole) => (r: { detail: EventDetail }) =>
+  (r.detail.role ?? "inbound") === role;
 
 async function events(admin: Admin, organizationId: string, names: string[], runId?: string) {
   let query = admin
@@ -56,12 +62,11 @@ async function events(admin: Admin, organizationId: string, names: string[], run
 
 export async function toolAuthStatus(
   admin: Admin,
-  input: { organizationId: string; appId: string; version: number },
+  input: { organizationId: string; appId: string; version: number; role?: AgentRole },
 ): Promise<ToolAuthStatus> {
-  const rows = await events(admin, input.organizationId, [
-    "agent_tools_created",
-    "tool_auth_confirmed",
-  ]);
+  const rows = (
+    await events(admin, input.organizationId, ["agent_tools_created", "tool_auth_confirmed"])
+  ).filter(ofRole(input.role ?? "inbound"));
   return {
     required: rows.some((r) => r.event === "agent_tools_created" && r.detail.appId === input.appId),
     confirmed: rows.some(
@@ -95,16 +100,26 @@ export async function reportedAgent(
   admin: Admin,
   organizationId: string,
   runId?: string,
+  role: AgentRole = "inbound",
 ): Promise<{ appId: string } | null> {
   const run = runId ?? (await activeRunId(admin, organizationId));
   if (!run) return null;
-  const [latest] = await events(admin, organizationId, ["agent_tools_created"], run);
+  const [latest] = (await events(admin, organizationId, ["agent_tools_created"], run)).filter(
+    ofRole(role),
+  );
   return typeof latest?.detail.appId === "string" ? { appId: latest.detail.appId } : null;
 }
 
 /** The latest "tools created" report for display: agent, master reference, tools, when. */
-export async function toolsCreatedReport(admin: Admin, organizationId: string, runId: string) {
-  const [latest] = await events(admin, organizationId, ["agent_tools_created"], runId);
+export async function toolsCreatedReport(
+  admin: Admin,
+  organizationId: string,
+  runId: string,
+  role: AgentRole = "inbound",
+) {
+  const [latest] = (await events(admin, organizationId, ["agent_tools_created"], runId)).filter(
+    ofRole(role),
+  );
   if (!latest || typeof latest.detail.appId !== "string") return null;
   const from = (latest.detail.clonedFrom ?? {}) as { agentId?: unknown; version?: unknown };
   return {

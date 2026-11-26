@@ -684,6 +684,10 @@ describe("dual-agent provisioning: the outbound agent (steps 11-12)", () => {
       sarvam_outbound_app_id: "Customer-out-1",
       sarvam_outbound_app_version: 2,
     });
+    // Registered, but its tool credentials are not confirmed yet: the run still waits.
+    const gated = await runProvisioningPipeline(db.client, ORG, d);
+    assert.equal(gated.state, "waiting_for_outbound_tool_authentication", gated.note);
+    confirmToolAuth(db, "Customer-out-1", 2, ORG, "outbound");
     const second = await runProvisioningPipeline(db.client, ORG, d);
     assert.equal(second.state, "active", second.note);
     assert.equal(second.step, 12);

@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
-import type { UniversalAgentConfig } from "./universal-agent-config.ts";
+import type { AgentRole } from "./agent-roles.ts";
+import type { OutboundAgentConfig, UniversalAgentConfig } from "./universal-agent-config.ts";
 import type { FailureCode, JobStepKey } from "./voice-provisioning-job.ts";
 
 /**
@@ -19,6 +20,9 @@ import type { FailureCode, JobStepKey } from "./voice-provisioning-job.ts";
  */
 
 type Admin = SupabaseClient<Database>;
+
+/** Each role has its own generated configuration; one is never derived from the other. */
+export type AgentConfigToApply = UniversalAgentConfig | OutboundAgentConfig;
 
 export interface ProviderError extends Error {
   /** HTTP status when the provider answered. */
@@ -39,20 +43,25 @@ export interface AgentProvisioner {
   /** Finds this customer's agent by its deterministic name (never creates). */
   findAgentByName(name: string): Promise<FoundAgent | null>;
   /** Creates the agent from the master template. The name is the idempotency key. */
-  createAgent(input: { name: string; templateAppId: string | null }): Promise<{ appId: string }>;
+  createAgent(input: {
+    name: string;
+    role: AgentRole;
+    /** The role's own master template; the outbound agent is never made from the inbound one. */
+    templateAppId: string | null;
+  }): Promise<{ appId: string }>;
   /**
    * Applies instructions, tools, capabilities, voice and language and commits a version.
    * Must be a no-op returning the existing version when it already carries `config.fingerprint`.
    */
   configureAgent(input: {
     appId: string;
-    config: UniversalAgentConfig;
+    config: AgentConfigToApply;
   }): Promise<{ version: number }>;
   /** Reads the agent back and compares it with the generated config. */
   verifyAgent(input: {
     appId: string;
     version: number;
-    config: UniversalAgentConfig;
+    config: AgentConfigToApply;
   }): Promise<{ ok: boolean; detail: string }>;
 }
 
@@ -73,15 +82,21 @@ export function defaultAgentProvisioner(): AgentProvisioner {
   return unsupportedAgentProvisioner;
 }
 
-/** Deterministic, per-customer: the same customer always resolves to the same agent name. */
-export function customerAgentName(organizationId: string, agentConfigId: string): string {
-  return `clickai-${organizationId.slice(0, 8)}-${agentConfigId.slice(0, 8)}`;
+/** Deterministic, per customer and role: the same agent always resolves to the same name. */
+export function customerAgentName(
+  organizationId: string,
+  agentConfigId: string,
+  role: AgentRole = "inbound",
+): string {
+  const base = `clickai-${organizationId.slice(0, 8)}-${agentConfigId.slice(0, 8)}`;
+  return role === "inbound" ? base : `${base}-out`;
 }
 
 export interface EnsureAgentContext {
+  role: AgentRole;
   organizationId: string;
   agentConfigId: string;
-  config: UniversalAgentConfig;
+  config: AgentConfigToApply;
   masterAgentAppId: string | null;
   outboundMasterAgentAppId: string | null;
   /** Called as the work moves between agent steps (real progress). */
@@ -121,7 +136,7 @@ export async function ensureCustomerAgent(
   provisioner: AgentProvisioner,
 ): Promise<EnsureAgentOutcome> {
   if (!provisioner.supported) return { kind: "unsupported" };
-  const name = customerAgentName(ctx.organizationId, ctx.agentConfigId);
+  const name = customerAgentName(ctx.organizationId, ctx.agentConfigId, ctx.role);
   const fail = (e: unknown, code: FailureCode, what: string): EnsureAgentOutcome => {
     const err = e as ProviderError;
     const auth = authFailureCode(err);
@@ -145,7 +160,8 @@ export async function ensureCustomerAgent(
     try {
       const created = await provisioner.createAgent({
         name,
-        templateAppId: ctx.masterAgentAppId,
+        role: ctx.role,
+        templateAppId: ctx.role === "inbound" ? ctx.masterAgentAppId : ctx.outboundMasterAgentAppId,
       });
       found = { appId: created.appId, version: null };
       createdNow = true;
@@ -199,11 +215,13 @@ export async function ensureCustomerAgent(
 
   try {
     await registerProvisionedAgent(admin, {
+      role: ctx.role,
       organizationId: ctx.organizationId,
       agentConfigId: ctx.agentConfigId,
       appId,
       version,
       masterAgentAppId: ctx.masterAgentAppId,
+      outboundMasterAgentAppId: ctx.outboundMasterAgentAppId,
     });
   } catch (e) {
     return {
@@ -230,9 +248,27 @@ export async function registerProvisionedAgent(
     appId: string;
     version: number;
     masterAgentAppId: string | null;
+    role?: AgentRole;
+    outboundMasterAgentAppId?: string | null;
+    registeredBy?: string | null;
+    now?: Date;
   },
 ): Promise<void> {
-  const { applySarvamAgentMapping } = await import("./sarvam-agent-registration.server.ts");
+  const { applySarvamAgentMapping, applySarvamOutboundAgentMapping } =
+    await import("./sarvam-agent-registration.server.ts");
+  if (input.role === "outbound") {
+    // Registers only: dialling still needs the separate confirmation after a supervised call.
+    await applySarvamOutboundAgentMapping(admin, {
+      agentConfigId: input.agentConfigId,
+      organizationId: input.organizationId,
+      sarvamAppId: input.appId,
+      sarvamAppVersion: input.version,
+      masterAgentAppIds: [input.masterAgentAppId, input.outboundMasterAgentAppId ?? null],
+      registeredBy: input.registeredBy ?? null,
+      now: input.now ?? new Date(),
+    });
+    return;
+  }
   await applySarvamAgentMapping(admin, {
     agentConfigId: input.agentConfigId,
     organizationId: input.organizationId,

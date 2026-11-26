@@ -1,10 +1,15 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
+import type { AgentRole } from "./agent-roles.ts";
 import type { AgentSnapshot } from "./agent-instructions.ts";
 import type { ProvisionOrganizationResult } from "./provisioning-orchestrator.server.ts";
 import type { ProvisioningState } from "./provisioning-state.ts";
 import { normalizeCustomerPhone } from "./phone-number.ts";
-import { buildUniversalAgentConfig, type UniversalAgentConfig } from "./universal-agent-config.ts";
+import {
+  buildOutboundAgentConfig,
+  buildUniversalAgentConfig,
+  type UniversalAgentConfig,
+} from "./universal-agent-config.ts";
 import { CLOSED_LIFECYCLES, type FailureCode, type JobStepKey } from "./voice-provisioning-job.ts";
 import { DEFAULT_MASTER_AGENT_APP_ID } from "./sarvam-agent-tools-spec.ts";
 import type { EnsureAgentContext, EnsureAgentOutcome } from "./sarvam-agent-provisioner.server.ts";
@@ -97,11 +102,16 @@ export interface PipelineDeps {
   outboundMasterAgentAppId?: string | null;
   now: () => Date;
   /** The agent an operator reported (tools created, credentials pending), before any version is registered. */
-  reportedAgent?: (admin: Admin, organizationId: string) => Promise<{ appId: string } | null>;
+  reportedAgent?: (
+    admin: Admin,
+    organizationId: string,
+    runId?: string,
+    role?: AgentRole,
+  ) => Promise<{ appId: string } | null>;
   /** Tool-authentication checkpoint lookup (defaults to the job event trail). */
   toolAuthStatus?: (
     admin: Admin,
-    input: { organizationId: string; appId: string; version: number },
+    input: { organizationId: string; appId: string; version: number; role?: AgentRole },
   ) => Promise<{ required: boolean; confirmed: boolean }>;
   /**
    * Creates/configures/verifies/registers the customer's own Sarvam agent when
@@ -322,7 +332,7 @@ export async function runProvisioningPipeline(
   const { data: agent, error: agentError } = await admin
     .from("agent_configs")
     .select(
-      "id, organization_id, business_id, sarvam_app_id, sarvam_app_version, sarvam_outbound_app_id, sarvam_outbound_app_version",
+      "id, organization_id, business_id, sarvam_app_id, sarvam_app_version, sarvam_outbound_app_id, sarvam_outbound_app_version, sarvam_outbound_ready_app_id, sarvam_outbound_ready_version",
     )
     .eq("organization_id", organizationId)
     .maybeSingle();
@@ -473,6 +483,7 @@ export async function runProvisioningPipeline(
   if (!agent.sarvam_app_id || !agent.sarvam_app_version) {
     const ensured: EnsureAgentOutcome = deps.ensureAgent
       ? await deps.ensureAgent(admin, {
+          role: "inbound",
           organizationId,
           agentConfigId: agent.id,
           config: generatedConfig,
@@ -886,15 +897,45 @@ export async function runProvisioningPipeline(
         `${inboundNote} Next: issue the outbound agent's credential (role outbound) and put it in the outbound agent's Sarvam secret.`,
         at,
       );
-    const outAppId = agent!.sarvam_outbound_app_id;
-    const outVersion = agent!.sarvam_outbound_app_version;
-    if (!outAppId || !outVersion)
+    let outAppId = agent!.sarvam_outbound_app_id;
+    let outVersion = agent!.sarvam_outbound_app_version;
+    const authLookup = async () =>
+      deps.toolAuthStatus ?? (await import("./tool-auth-checkpoint.server.ts")).toolAuthStatus;
+    if (!outAppId || !outVersion) {
+      // A provider that can author agents creates the outbound one too; today none can.
+      const ensured: EnsureAgentOutcome = deps.ensureAgent
+        ? await deps.ensureAgent(admin, {
+            role: "outbound",
+            organizationId,
+            agentConfigId: agent!.id,
+            config: buildOutboundAgentConfig(snapshot, voiceLanguage ?? null),
+            masterAgentAppId: deps.masterAgentAppId,
+            outboundMasterAgentAppId: deps.outboundMasterAgentAppId ?? null,
+          })
+        : { kind: "unsupported" };
+      if (ensured.kind === "ready") {
+        outAppId = ensured.appId;
+        outVersion = ensured.version;
+      }
+    }
+    if (!outAppId || !outVersion) {
+      const lookup =
+        deps.reportedAgent ?? (await import("./tool-auth-checkpoint.server.ts")).reportedAgent;
+      const reported = await lookup(admin, organizationId, undefined, "outbound");
+      if (reported)
+        return done(
+          12,
+          "waiting_for_outbound_tool_authentication",
+          `${inboundNote} Outbound agent ${reported.appId} exists in Sarvam: select the outbound credential on each of its tools, commit, then confirm it with submit_agent_result.`,
+          at,
+        );
       return done(
         12,
         "waiting_for_outbound_agent",
-        `${inboundNote} Next: create the customer's outbound agent in Sarvam from the outbound template, commit it, and register its agent id and version.`,
+        `${inboundNote} Next: create the customer's outbound agent in Sarvam from the outbound work order (operator bridge, outbound role) or the outbound template, commit it, and register its agent id and version.`,
         at,
       );
+    }
     if (
       outAppId === agent!.sarvam_app_id ||
       [deps.masterAgentAppId, deps.outboundMasterAgentAppId].some((m) => m && m === outAppId)
@@ -903,6 +944,30 @@ export async function runProvisioningPipeline(
         12,
         "failed",
         `${inboundNote} The registered outbound agent ${outAppId} is the inbound agent or a master template; register the customer's own outbound agent.`,
+        at,
+      );
+    // The outbound agent's tools need confirmed credentials too. One already confirmed for
+    // calling (before this checkpoint existed) is left as it is.
+    const ready =
+      agent!.sarvam_outbound_ready_app_id === outAppId &&
+      agent!.sarvam_outbound_ready_version === outVersion;
+    if (
+      !ready &&
+      !(
+        await (
+          await authLookup()
+        )(admin, {
+          organizationId,
+          appId: outAppId,
+          version: outVersion,
+          role: "outbound",
+        })
+      ).confirmed
+    )
+      return done(
+        12,
+        "waiting_for_outbound_tool_authentication",
+        `${inboundNote} Outbound agent ${outAppId} v${outVersion} has no confirmed tool credentials: select the outbound credential on each of its tools, commit, then confirm that version with submit_agent_result.`,
         at,
       );
     return done(

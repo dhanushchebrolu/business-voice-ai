@@ -126,8 +126,24 @@ describe("outbound call variables", () => {
 });
 
 describe("marking a version outbound-ready", () => {
-  const setup = (agents: Record<string, unknown>[]) =>
-    memorySupabase({ tables: { agent_configs: agents } });
+  /** Each registered outbound agent version has its tool credentials confirmed, unless told otherwise. */
+  const setup = (agents: Record<string, unknown>[], confirmed = true) =>
+    memorySupabase({
+      tables: {
+        agent_configs: agents,
+        provisioning_run_events: agents
+          .filter((a) => confirmed && a["sarvam_outbound_app_id"])
+          .map((a) => ({
+            organization_id: a["organization_id"],
+            event: "tool_auth_confirmed",
+            detail: {
+              role: "outbound",
+              appId: a["sarvam_outbound_app_id"],
+              version: a["sarvam_outbound_app_version"],
+            },
+          })),
+      },
+    });
 
   const withOutbound = (over: Record<string, unknown> = {}) => ({
     id: "a1",
@@ -137,6 +153,46 @@ describe("marking a version outbound-ready", () => {
     sarvam_outbound_app_id: "app_1-out",
     sarvam_outbound_app_version: 3,
     ...over,
+  });
+
+  test("a version whose tool credentials are not confirmed cannot be made ready", async () => {
+    const db = setup([withOutbound()], false);
+    const confirm = () =>
+      setOutboundReady(db.client, { organizationId: "org_a", ready: true, maxCallSeconds: 300 });
+    const refused = await confirm();
+    assert.equal(refused.ok, false);
+    assert.match((refused as { reason: string }).reason, /not confirmed for this version/);
+    assert.equal(db.tables["agent_configs"]![0]!["sarvam_outbound_ready_app_id"] ?? null, null);
+    // An INBOUND confirmation, another version or another customer's does not count.
+    for (const [org, detail] of [
+      ["org_a", { appId: "app_1-out", version: 3 }],
+      ["org_a", { role: "outbound", appId: "app_1-out", version: 2 }],
+      ["org_b", { role: "outbound", appId: "app_1-out", version: 3 }],
+    ] as const)
+      (db.tables["provisioning_run_events"] ??= []).push({
+        organization_id: org,
+        event: "tool_auth_confirmed",
+        detail,
+      });
+    assert.equal((await confirm()).ok, false);
+  });
+
+  test("an agent already confirmed for calling can be re-confirmed (existing customers)", async () => {
+    const db = setup(
+      [
+        withOutbound({
+          sarvam_outbound_ready_app_id: "app_1-out",
+          sarvam_outbound_ready_version: 3,
+        }),
+      ],
+      false,
+    );
+    const r = await setOutboundReady(db.client, {
+      organizationId: "org_a",
+      ready: true,
+      maxCallSeconds: 240,
+    });
+    assert.equal(r.ok, true);
   });
 
   test("records exactly the registered outbound agent and version; clearing removes both", async () => {

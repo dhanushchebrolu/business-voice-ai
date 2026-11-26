@@ -318,6 +318,8 @@ export interface OutboundChecklistInput {
   appVersion: number | null;
   readyAppId: string | null;
   readyVersion: number | null;
+  /** The registered outbound version's tool credentials are confirmed (the checkpoint). */
+  toolAuthConfirmed?: boolean;
   /** Inbound and outbound master template ids (never a customer's agent). */
   masterAgentAppIds: (string | null)[];
   /** Missing onboarding data (the outbound configuration cannot be generated yet). */
@@ -364,7 +366,9 @@ export function outboundChecklist(o: OutboundChecklistInput): ChecklistItem[] {
       detail: confirmed
         ? "ClickAI may dial this outbound agent version."
         : registered
-          ? "Not confirmed: ClickAI dials nothing for this customer. Confirm only after a supervised call."
+          ? o.toolAuthConfirmed === false
+            ? "Tool credentials not confirmed for this version (operator bridge, outbound agent). Confirm them first; ClickAI dials nothing."
+            : "Not confirmed: ClickAI dials nothing for this customer. Confirm only after a supervised call."
           : "Register the outbound agent first.",
     },
   ];

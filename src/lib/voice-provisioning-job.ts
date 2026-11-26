@@ -188,6 +188,7 @@ const WAITING: Record<string, { code: FailureCode | null; message: string }> = {
   // Inbound is live; the outbound agent is an internal follow-up.
   waiting_for_outbound_credential: { code: null, message: "Your number is live." },
   waiting_for_outbound_agent: { code: null, message: "Your number is live." },
+  waiting_for_outbound_tool_authentication: { code: null, message: "Your number is live." },
 };
 
 const FAILED_DEFAULT: Partial<Record<JobStepKey, { code: FailureCode; retryable: boolean }>> = {

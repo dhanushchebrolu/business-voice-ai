@@ -5,7 +5,14 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { PhoneCall, Check, Hourglass } from "lucide-react";
 import { useAuth } from "@/hooks/useAuth";
-import { workspaceQuery, numbersQuery, provisioningStatusLabel } from "@/lib/workspace";
+import {
+  workspaceQuery,
+  numbersQuery,
+  provisioningStatusLabel,
+  agentCallStatus,
+  outboundConfirmed,
+  registeredAgent,
+} from "@/lib/workspace";
 import { pricingQuery, formatMoney } from "@/lib/pricing";
 import { useCheckout } from "@/hooks/useCheckout";
 import { PageHeader, SectionCard, StatusPill, LoadingState } from "@/components/app/primitives";
@@ -142,7 +149,14 @@ function NumbersPage() {
     connectionLinked: Boolean(candidateNumber?.connection_id),
     agentSarvamMapped: Boolean(ws?.agent?.sarvam_app_id && ws?.agent?.sarvam_app_version),
     inboundEnabled: Boolean(candidateNumber?.inbound_enabled),
-    outboundEnabled: Boolean(candidateNumber?.outbound_enabled),
+    outboundEnabled: Boolean(
+      candidateNumber?.outbound_enabled && outboundConfirmed(ws?.agent ?? {}),
+    ),
+  });
+  const directions = agentCallStatus({
+    inboundLive: Boolean(candidateNumber?.status === "active" && candidateNumber?.inbound_enabled),
+    outboundRegistered: Boolean(registeredAgent(ws?.agent ?? {}, "outbound")),
+    outboundConfirmed: outboundConfirmed(ws?.agent ?? {}),
   });
 
   return (
@@ -152,6 +166,22 @@ function NumbersPage() {
         description="One monthly service that gives your business a phone number answered by your AI receptionist."
         actions={<StatusPill tone={provisioningStatus.tone}>{provisioningStatus.label}</StatusPill>}
       />
+
+      {!isLoading && !phoneLocked ? (
+        <dl className="grid gap-3 sm:grid-cols-2" data-testid="call-directions">
+          {directions.map((d) => (
+            <div
+              key={d.direction}
+              className="flex items-center justify-between gap-3 rounded-md border border-border p-3"
+            >
+              <dt className="text-sm font-medium">{d.title}</dt>
+              <dd>
+                <StatusPill tone={d.tone}>{d.label}</StatusPill>
+              </dd>
+            </div>
+          ))}
+        </dl>
+      ) : null}
 
       {isLoading ? (
         <LoadingState label="Loading your service" />

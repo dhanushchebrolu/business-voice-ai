@@ -5,6 +5,7 @@ import {
   outboundCallingDisabled,
 } from "./outbound-eligibility.server.ts";
 import { OUTBOUND_MAX_CALL_SECONDS_CAP, OUTBOUND_TEXT_LIMITS } from "./agent-roles.ts";
+import { toolAuthStatus } from "./tool-auth-checkpoint.server.ts";
 
 /**
  * Every customer has two Sarvam agents (agent-roles.ts): the inbound agent
@@ -224,7 +225,7 @@ export async function setOutboundReady(
   const { data: agents, error } = await admin
     .from("agent_configs")
     .select(
-      "id, organization_id, sarvam_app_id, sarvam_outbound_app_id, sarvam_outbound_app_version",
+      "id, organization_id, sarvam_app_id, sarvam_outbound_app_id, sarvam_outbound_app_version, sarvam_outbound_ready_app_id, sarvam_outbound_ready_version",
     )
     .eq("organization_id", input.organizationId);
   if (error) throw error;
@@ -238,6 +239,27 @@ export async function setOutboundReady(
     };
   if (input.ready && agent.sarvam_outbound_app_id === agent.sarvam_app_id)
     return { ok: false, reason: "The outbound agent must not be the inbound agent." };
+  // Re-confirming the already confirmed version stays possible; a new one needs the checkpoint.
+  if (
+    input.ready &&
+    !(
+      agent.sarvam_outbound_ready_app_id === agent.sarvam_outbound_app_id &&
+      agent.sarvam_outbound_ready_version === agent.sarvam_outbound_app_version
+    ) &&
+    !(
+      await toolAuthStatus(admin, {
+        organizationId: input.organizationId,
+        appId: agent.sarvam_outbound_app_id!,
+        version: agent.sarvam_outbound_app_version!,
+        role: "outbound",
+      })
+    ).confirmed
+  )
+    return {
+      ok: false,
+      reason:
+        "The outbound agent's tool credentials are not confirmed for this version. Confirm them first (operator bridge, outbound role: report_tools_created, then submit_agent_result).",
+    };
 
   let query = admin
     .from("agent_configs")

@@ -4,7 +4,7 @@ import { assertPlatformAdmin, writeAudit } from "@/lib/platform-admin.server";
 
 /**
  * Platform-admin control of the operator bridge (operator-bridge.server.ts):
- * create a short-lived token (one customer, one job, inbound agent) for one's own MCP
+ * create a short-lived token (one customer, one job, one agent role) for one's own MCP
  * client, see what is waiting, revoke. The raw token is returned once and never stored.
  */
 
@@ -39,8 +39,10 @@ export const getOperatorBridgeStatus = createServerFn({ method: "POST" })
 
 export const issueOperatorBridgeToken = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((input: { runId: string; reason: string }) => {
+  .inputValidator((input: { runId: string; role: "inbound" | "outbound"; reason: string }) => {
     if (!input?.runId) throw new Error("runId is required");
+    // The role the admin saw: refused if the job has moved to the other agent since.
+    if (input.role !== "inbound" && input.role !== "outbound") throw new Error("role is required");
     if (!input.reason?.trim()) throw new Error("A reason is required");
     return input;
   })
@@ -51,6 +53,7 @@ export const issueOperatorBridgeToken = createServerFn({ method: "POST" })
     const issued = await issueBridgeToken(supabaseAdmin, {
       createdBy: context.userId,
       runId: data.runId,
+      role: data.role,
     });
     await writeAudit(admin, {
       action: "OPERATOR_BRIDGE_TOKEN_ISSUED",

@@ -92,3 +92,41 @@ export const ROLE_LABEL: Record<AgentRole, string> = {
   inbound: "Inbound agent",
   outbound: "Outbound agent",
 };
+
+/**
+ * The customer's registered agent of one role, read from agent_configs. The inbound agent is
+ * sarvam_app_id; the outbound agent is sarvam_outbound_app_id. The database keeps them apart.
+ */
+export function registeredAgent(
+  row: {
+    sarvam_app_id?: string | null;
+    sarvam_app_version?: number | null;
+    sarvam_outbound_app_id?: string | null;
+    sarvam_outbound_app_version?: number | null;
+  },
+  role: AgentRole,
+): { appId: string; version: number } | null {
+  const [appId, version] =
+    role === "inbound"
+      ? [row.sarvam_app_id, row.sarvam_app_version]
+      : [row.sarvam_outbound_app_id, row.sarvam_outbound_app_version];
+  return appId && version ? { appId, version } : null;
+}
+
+/**
+ * Outbound calling is confirmed only for exactly the registered outbound agent and version
+ * (an admin's confirmation after a supervised call). A registered agent alone is not ready.
+ */
+export function outboundConfirmed(row: {
+  sarvam_outbound_app_id?: string | null;
+  sarvam_outbound_app_version?: number | null;
+  sarvam_outbound_ready_app_id?: string | null;
+  sarvam_outbound_ready_version?: number | null;
+}): boolean {
+  const agent = registeredAgent(row, "outbound");
+  return Boolean(
+    agent &&
+    row.sarvam_outbound_ready_app_id === agent.appId &&
+    row.sarvam_outbound_ready_version === agent.version,
+  );
+}

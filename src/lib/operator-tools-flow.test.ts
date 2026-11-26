@@ -108,7 +108,9 @@ const reportArgs = (id: string, over: Record<string, unknown> = {}) => ({
 });
 const runRow = (db: World) => db.tables["provisioning_runs"]![0]!;
 const events = (db: World, name?: string) =>
-  (db.tables["provisioning_run_events"] ?? []).filter((e) => !name || e["event"] === name);
+  (db.tables["provisioning_run_events"] ?? [])
+    .filter((e) => e["run_id"] !== "confirmed-in-test")
+    .filter((e) => !name || e["event"] === name);
 
 async function openOrder(caps?: Record<string, boolean>) {
   const db = waitingWorld();

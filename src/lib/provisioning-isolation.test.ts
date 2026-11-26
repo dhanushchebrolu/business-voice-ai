@@ -45,8 +45,11 @@ const run = (db: World, d = pipelineDeps(db)) =>
     () => NOW,
   );
 const jobs = (db: World) => db.tables["provisioning_runs"]!;
+/** The events this test's own actions wrote (not the world's seeded confirmations). */
 const events = (db: World, name: string) =>
-  (db.tables["provisioning_run_events"] ?? []).filter((e) => e["event"] === name);
+  (db.tables["provisioning_run_events"] ?? []).filter(
+    (e) => e["event"] === name && e["run_id"] !== "confirmed-in-test",
+  );
 
 /** ORG's job waiting for its agent, and a second customer's job waiting too. */
 async function twoJobs() {
@@ -193,7 +196,7 @@ describe("a token is limited to one customer and one job", () => {
     assert.equal(back.body.error, "not_found");
   });
 
-  test("a token can only be issued for an open work order, and only for the inbound agent", async () => {
+  test("a token can only be issued for an open work order, and only for the role it waits on", async () => {
     const { db, jobId } = await twoJobs();
     await assert.rejects(
       issueBridgeToken(db.client, { createdBy: ADMIN, runId: "no-such-job", now: NOW }),
@@ -201,7 +204,7 @@ describe("a token is limited to one customer and one job", () => {
     );
     await assert.rejects(
       issueBridgeToken(db.client, { createdBy: ADMIN, runId: jobId, role: "outbound", now: NOW }),
-      /only builds inbound agents/,
+      /is for the inbound agent/,
     );
     Object.assign(jobs(db)[0]!, { status: "succeeded" });
     await assert.rejects(

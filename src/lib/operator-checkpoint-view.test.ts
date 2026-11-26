@@ -68,7 +68,9 @@ const report = (id: string, over: Record<string, unknown> = {}) => ({
   ...over,
 });
 const events = (db: World, name: string) =>
-  (db.tables["provisioning_run_events"] ?? []).filter((e) => e["event"] === name);
+  (db.tables["provisioning_run_events"] ?? [])
+    .filter((e) => e["run_id"] !== "confirmed-in-test")
+    .filter((e) => e["event"] === name);
 
 /** A job parked at the checkpoint, the way the operator bridge leaves it. */
 async function parked() {

@@ -289,6 +289,20 @@ async function loadDetail(orgId: string) {
     appVersion: agent?.sarvam_outbound_app_version ?? null,
     readyAppId: agent?.sarvam_outbound_ready_app_id ?? null,
     readyVersion: agent?.sarvam_outbound_ready_version ?? null,
+    ...(agent?.sarvam_outbound_app_id && agent.sarvam_outbound_app_version
+      ? {
+          toolAuthConfirmed: (
+            await (
+              await import("@/lib/tool-auth-checkpoint.server")
+            ).toolAuthStatus(supabaseAdmin, {
+              organizationId: orgId,
+              appId: agent.sarvam_outbound_app_id,
+              version: agent.sarvam_outbound_app_version,
+              role: "outbound",
+            })
+          ).confirmed,
+        }
+      : {}),
     masterAgentAppIds: [masterAgentAppId(), outboundMasterAgentAppId()],
     blockers: outboundConfig
       ? outboundConfig.blockers

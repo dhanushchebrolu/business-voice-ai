@@ -3,6 +3,7 @@ import type { Database } from "@/integrations/supabase/types";
 import {
   BridgeError,
   assertScope,
+  getOutboundWorkOrder,
   getWorkOrder,
   listWorkOrders,
   reportBlocker,
@@ -59,7 +60,7 @@ export const BRIDGE_TOOLS = [
   {
     name: "report_tools_created",
     description:
-      "Report that the customer's agent was cloned from the COMMITTED master version and all six ClickAI tools were created on it (no credentials; the MCP cannot set them). ClickAI shows the job as waiting for tool authentication with this agent id. Call it BEFORE the credentials are selected in the Sarvam console and before committing. Safe to repeat for the same agent.",
+      "Report that the customer's agent exists with exactly the work order's tools (inbound: cloned from the COMMITTED master version, pass clonedFrom; outbound: created new, never from the inbound agent) with no credentials; the MCP cannot set them. ClickAI shows the job as waiting for tool authentication with this agent id. Call it BEFORE the credentials are selected in the Sarvam console and before committing. Safe to repeat for the same agent.",
     inputSchema: {
       type: "object",
       properties: {
@@ -71,16 +72,16 @@ export const BRIDGE_TOOLS = [
           required: ["agentId", "version"],
           additionalProperties: false,
         },
-        tools: { type: "array", items: { type: "string" }, minItems: 6, maxItems: 6 },
+        tools: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 12 },
       },
-      required: ["workOrderId", "agentId", "clonedFrom", "tools"],
+      required: ["workOrderId", "agentId", "tools"],
       additionalProperties: false,
     },
   },
   {
     name: "submit_agent_result",
     description:
-      "Report the COMMITTED Sarvam agent (id + version) after report_tools_created, after the credentials were selected on the draft in the Sarvam console and the committed version was read back showing a credential on all six tools. ClickAI registers it and continues provisioning (deployment, number routing, verification, activation). Safe to repeat.",
+      "Report the COMMITTED Sarvam agent (id + version) after report_tools_created, after the credentials were selected on the draft in the Sarvam console and the committed version was read back showing a credential on every tool. ClickAI registers it and continues provisioning (deployment, number routing, verification, activation). Safe to repeat.",
     inputSchema: {
       type: "object",
       properties: {
@@ -105,8 +106,8 @@ export const BRIDGE_TOOLS = [
             required: ["name", "authType", "agentRef"],
             additionalProperties: false,
           },
-          minItems: 6,
-          maxItems: 6,
+          minItems: 1,
+          maxItems: 12,
         },
       },
       required: ["workOrderId", "agentId", "version", "fingerprint", "toolAuth"],
@@ -168,14 +169,28 @@ export async function handleBridgeRpc(
       try {
         // A token sees and touches its own job only.
         if (name === "list_agent_work_orders")
-          return ok(req.id, text(await listWorkOrders(admin, deps.now?.(), auth.runId)));
+          return ok(
+            req.id,
+            text(
+              (await listWorkOrders(admin, deps.now?.(), auth.runId)).filter(
+                (w) => w.agentRole === auth.role,
+              ),
+            ),
+          );
         if (!BRIDGE_TOOLS.some((t) => t.name === name))
           return rpcError(req.id, -32602, "Unknown tool");
         if (!id)
           return ok(req.id, text({ error: "invalid", message: "workOrderId is required" }, true));
         assertScope(auth, id);
         if (name === "get_agent_work_order")
-          return ok(req.id, text(await getWorkOrder(admin, id, deps)));
+          return ok(
+            req.id,
+            text(
+              auth.role === "inbound"
+                ? await getWorkOrder(admin, id, deps)
+                : await getOutboundWorkOrder(admin, id, deps),
+            ),
+          );
         if (name === "report_blocker")
           return ok(
             req.id,
@@ -192,7 +207,7 @@ export async function handleBridgeRpc(
             ),
           );
         if (name === "report_tools_created") {
-          const from = (args["clonedFrom"] ?? {}) as { agentId?: unknown; version?: unknown };
+          const from = args["clonedFrom"] as { agentId?: unknown; version?: unknown } | undefined;
           return ok(
             req.id,
             text(
@@ -201,10 +216,9 @@ export async function handleBridgeRpc(
                 {
                   workOrderId: id,
                   appId: String(args["agentId"] ?? ""),
-                  clonedFrom: {
-                    agentId: String(from.agentId ?? ""),
-                    version: Number(from.version),
-                  },
+                  clonedFrom: from
+                    ? { agentId: String(from.agentId ?? ""), version: Number(from.version) }
+                    : undefined,
                   tools: args["tools"],
                 },
                 auth,

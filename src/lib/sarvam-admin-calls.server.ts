@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { registeredAgent } from "./agent-roles.ts";
 import type { Database } from "@/integrations/supabase/types";
 import { checkTelephonyAccess, type walletCanAffordOutbound } from "./telephony-guard.server.ts";
 import { isOutboundReady } from "./sarvam-outbound-mode.server.ts";
@@ -162,11 +163,15 @@ export async function loadCallDetail(supabaseAdmin: SupabaseClient<Database>, ca
   const { data: agent } = number?.agent_config_id
     ? await supabaseAdmin
         .from("agent_configs")
-        .select("id, agent_name, sarvam_app_id, sarvam_app_version")
+        .select(
+          "id, agent_name, sarvam_app_id, sarvam_app_version, sarvam_outbound_app_id, sarvam_outbound_app_version",
+        )
         .eq("id", number.agent_config_id)
         .eq("organization_id", call.organization_id)
         .maybeSingle()
     : { data: null };
+
+  const callRole = call.direction === "outbound" ? ("outbound" as const) : ("inbound" as const);
 
   const { data: contactRow } = call.campaign_contact_id
     ? await supabaseAdmin
@@ -200,12 +205,16 @@ export async function loadCallDetail(supabaseAdmin: SupabaseClient<Database>, ca
     fromNumber: call.caller_number,
     destinationNumber: call.destination_number,
     phoneNumber: number?.e164 ?? null,
-    /** The number's agent now — call_logs does not record which agent answered. */
+    /**
+     * The number's agent now for this call's direction (call_logs does not record which agent
+     * handled it). An outbound call never shows the inbound agent.
+     */
     agent: agent
       ? {
           name: agent.agent_name,
-          sarvamAppId: agent.sarvam_app_id,
-          sarvamAppVersion: agent.sarvam_app_version,
+          role: callRole,
+          sarvamAppId: registeredAgent(agent, callRole)?.appId ?? null,
+          sarvamAppVersion: registeredAgent(agent, callRole)?.version ?? null,
         }
       : null,
     startedAt: call.started_at,

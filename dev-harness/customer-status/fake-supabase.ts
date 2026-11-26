@@ -36,6 +36,10 @@ function tables(): Record<string, Row[]> {
         sarvam_app_version: s.inbound ? 1 : null,
         sarvam_outbound_app_id: s.outbound ? "Demo-out-1" : null,
         sarvam_outbound_app_version: s.outbound ? 1 : null,
+        // Confirmed for calling unless the stage says the checks are still pending.
+        sarvam_outbound_ready_app_id:
+          s.outbound && !("outboundConfirmed" in s) ? "Demo-out-1" : null,
+        sarvam_outbound_ready_version: s.outbound && !("outboundConfirmed" in s) ? 1 : null,
       },
     ],
     phone_numbers: s.number

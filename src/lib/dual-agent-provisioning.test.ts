@@ -415,7 +415,7 @@ describe("customer setup steps (no internal details)", () => {
         "Assigning your phone number",
         "Creating your inbound AI agent",
         "Verifying and connecting your phone line",
-        "Creating your outbound AI agent",
+        "Preparing your outbound AI agent",
         "Ready",
       ],
     );

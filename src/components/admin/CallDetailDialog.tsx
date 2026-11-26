@@ -115,7 +115,7 @@ export function CallDetailDialog({
               </Row>
               <Row label="Voice agent (number's current agent)">
                 {data.agent
-                  ? `${data.agent.name} · Sarvam app ${data.agent.sarvamAppId ?? "not mapped"} v${data.agent.sarvamAppVersion ?? "—"}`
+                  ? `${data.agent.name} · ${data.agent.role} agent · Sarvam app ${data.agent.sarvamAppId ?? "not mapped"} v${data.agent.sarvamAppVersion ?? "—"}`
                   : "—"}
               </Row>
               <Row label="Interaction ID">

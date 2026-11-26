@@ -673,7 +673,27 @@ describe("call detail for monitoring", () => {
       { role: "agent", text: "Hello" },
       { role: "user", text: "Hi" },
     ]);
-    assert.equal(d.agent?.sarvamAppId, "app_a");
+    // This is an outbound call: the outbound agent, never the inbound one.
+    assert.deepEqual(
+      [d.agent?.role, d.agent?.sarvamAppId, d.agent?.sarvamAppVersion],
+      ["outbound", "app_a-out", 1],
+    );
+  });
+
+  test("an inbound call shows the inbound agent; a missing outbound agent is not replaced", async () => {
+    seedCall({ direction: "inbound" });
+    const inbound = await loadCallDetail(client(), "call_1");
+    assert.deepEqual([inbound.agent?.role, inbound.agent?.sarvamAppId], ["inbound", "app_a"]);
+    for (const c of db.tables["call_logs"]!) c["direction"] = "outbound";
+    Object.assign(
+      db.tables["agent_configs"]!.find((a) => a["id"] === "agent_a")!,
+      {
+        sarvam_outbound_app_id: null,
+        sarvam_outbound_app_version: null,
+      },
+    );
+    const outbound = await loadCallDetail(client(), "call_1");
+    assert.deepEqual([outbound.agent?.role, outbound.agent?.sarvamAppId], ["outbound", null]);
   });
 
   test("failed / unanswered calls show their reason, zero charge, and no transcript", async () => {
