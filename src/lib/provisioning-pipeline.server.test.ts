@@ -6,7 +6,15 @@ import {
   type PipelineDeps,
 } from "./provisioning-pipeline.server.ts";
 import { runProvisioning } from "./provisioning-runs.server.ts";
-import { ORG, OTHER, snapshot, world, deps, num } from "./provisioning-test-world.test-helper.ts";
+import {
+  ORG,
+  OTHER,
+  snapshot,
+  world,
+  deps,
+  num,
+  confirmToolAuth,
+} from "./provisioning-test-world.test-helper.ts";
 
 describe("provisioning pipeline — the ten steps", () => {
   test("happy path: deploys, verifies both sides, activates inbound only, advances lifecycle", async () => {
@@ -227,6 +235,15 @@ describe("retries", () => {
     );
     assert.equal(first.status, "waiting");
     db.tables["agent_configs"]![0]!["sarvam_app_id"] = "Customer-app-1";
+    // A hand-registered agent still has to pass the tool-authentication checkpoint.
+    const gated = await runProvisioning(
+      db.client,
+      { organizationId: ORG, trigger: "admin_retry" },
+      (a, o) => runProvisioningPipeline(a, o, d),
+    );
+    assert.equal(gated.result?.state, "waiting_for_tool_authentication");
+    assert.equal(num(db, "num_new")["status"], "provisioning");
+    confirmToolAuth(db, "Customer-app-1", 1);
     const second = await runProvisioning(
       db.client,
       { organizationId: ORG, trigger: "admin_retry" },
@@ -235,7 +252,7 @@ describe("retries", () => {
     assert.equal(second.runId, first.runId);
     assert.equal(second.status, "succeeded");
     const run = db.tables["provisioning_runs"]![0]!;
-    assert.equal(run["attempts"], 2);
+    assert.equal(run["attempts"], 3);
     assert.ok(run["agent_config_fingerprint"]);
     assert.ok(run["deployment_verified_at"]);
     assert.equal(run["sarvam_deployment_id"], "dep-new");
@@ -501,6 +518,8 @@ describe("Phase 5: safe activation order and provider failures (mocked Sarvam)",
     db.tables["agent_configs"]![0]!["sarvam_app_id"] = "Customer-app-1";
     assert.equal((await go()).result?.state, "waiting_for_voice_language");
     Object.assign(db.tables["agent_voice_language_settings"]![0]!, { status: "applied" });
+    assert.equal((await go()).result?.state, "waiting_for_tool_authentication");
+    confirmToolAuth(db, "Customer-app-1", 1);
     const last = await go();
     assert.equal(last.status, "succeeded");
     assert.equal(last.result?.state, "active");

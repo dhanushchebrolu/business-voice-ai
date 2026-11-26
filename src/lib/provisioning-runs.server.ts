@@ -144,6 +144,49 @@ async function addEvent(
 const lastDoneStep = (states: StepStates): string | null =>
   [...JOB_STEP_KEYS].reverse().find((k) => states[k]?.status === "done") ?? null;
 
+/**
+ * What a waiting job is waiting ON, per customer: when the agent, the voice settings and the
+ * tool-authentication confirmation last changed (database timestamps only, so no clock skew).
+ * A run records the marker it saw BEFORE working, so a change made while it was running still
+ * counts as news afterwards.
+ */
+async function changeMarks(admin: Admin, organizationIds: string[]) {
+  const [agents, voices, confirms] = await Promise.all([
+    admin
+      .from("agent_configs")
+      .select("organization_id, sarvam_app_id, updated_at")
+      .in("organization_id", organizationIds),
+    admin
+      .from("agent_voice_language_settings")
+      .select("organization_id, updated_at")
+      .in("organization_id", organizationIds),
+    admin
+      .from("provisioning_run_events")
+      .select("organization_id, created_at")
+      .eq("event", "tool_auth_confirmed")
+      .in("organization_id", organizationIds)
+      .order("created_at", { ascending: false })
+      // shortcut: one page; past 1000 confirmations among waiting customers, markers could disagree.
+      .limit(1000),
+  ]);
+  for (const r of [agents, voices, confirms]) if (r.error) throw r.error;
+  return new Map(
+    organizationIds.map((org) => {
+      const of = <T extends { organization_id: string }>(rows: T[] | null) =>
+        (rows ?? []).filter((r) => r.organization_id === org);
+      const agentRows = of(agents.data);
+      const mark = [
+        agentRows.map((r) => r.updated_at),
+        of(voices.data).map((r) => r.updated_at),
+        of(confirms.data).map((r) => r.created_at),
+      ]
+        .map((times) => times.sort().at(-1) ?? "")
+        .join("|");
+      return [org, { mark, registered: agentRows.some((r) => r.sarvam_app_id) }] as const;
+    }),
+  );
+}
+
 export async function runProvisioning(
   admin: Admin,
   input: RunProvisioningInput,
@@ -205,6 +248,7 @@ export async function runProvisioning(
   const run = { id: runId, organizationId: input.organizationId };
   let states = (current.step_states ?? {}) as StepStates;
   let currentKey: JobStepKey = "validating";
+  let seenChange: string | undefined;
   await addEvent(admin, run, attempt === 1 ? "started" : "resumed", null, {
     attempt,
     trigger: input.trigger,
@@ -218,7 +262,8 @@ export async function runProvisioning(
     const { error } = await admin
       .from("provisioning_runs")
       .update({ current_job_step: key, step_states: states as unknown as Json })
-      .eq("id", runId);
+      .eq("id", runId)
+      .eq("attempts", attempt);
     if (error) throw error;
     await addEvent(admin, run, "step_started", key, { attempt });
   };
@@ -268,6 +313,7 @@ export async function runProvisioning(
           retryStreak: kind === "retry" ? streak : 0,
           step: currentKey,
           note: sanitizeDiagnostic(f.note),
+          seenChange,
           ...f.extra,
         } as unknown as Json,
         next_attempt_at:
@@ -279,7 +325,9 @@ export async function runProvisioning(
           ? { last_error: sanitizeDiagnostic(f.note), last_error_at: nowIso() }
           : {}),
       })
-      .eq("id", runId);
+      .eq("id", runId)
+      // A superseded attempt (reclaimed as stale) never overwrites the newer one.
+      .eq("attempts", attempt);
     if (error) throw error;
     await addEvent(admin, run, kind === "retry" ? "retry_scheduled" : kind, currentKey, {
       attempt,
@@ -290,6 +338,7 @@ export async function runProvisioning(
 
   let result: ProvisionOrganizationResult;
   try {
+    seenChange = (await changeMarks(admin, [input.organizationId])).get(input.organizationId)?.mark;
     result = await orchestrate(admin, input.organizationId, { onStep });
   } catch (err) {
     // An unexpected error ends this attempt (retried with backoff, bounded), never a stuck "running".
@@ -354,7 +403,8 @@ export async function runProvisioning(
         : {}),
       ...(pipeline.verification ? { verification: pipeline.verification as unknown as Json } : {}),
     })
-    .eq("id", runId);
+    .eq("id", runId)
+    .eq("attempts", attempt);
   if (saveError) throw saveError;
 
   return { runId, claimed: true, status, result };
@@ -374,8 +424,11 @@ export interface SweepResult {
  * claim and backoff checks:
  *   1. jobs whose automatic retry is due (pending + next_attempt_at <= now);
  *   2. jobs stuck "running" past the stale window (a crashed attempt);
- *   3. jobs waiting for the agent whose agent has since been registered, so an
- *      admin's manual registration continues the job without another click.
+ *   3. jobs waiting on an agent, voice settings or tool authentication that CHANGED since
+ *      the job last ran (an agent registered or its settings saved after the job's last
+ *      attempt), so a registration whose own resume failed still continues the job. A job
+ *      that has already re-run on the current state is left alone: re-running it every
+ *      minute would change nothing and only grow the event trail.
  * Bounded per tick (maxRuns, budgetMs); the rest wait for the next minute.
  */
 export async function sweepProvisioningRetries(
@@ -405,7 +458,7 @@ export async function sweepProvisioningRetries(
       .limit(10),
     admin
       .from("provisioning_runs")
-      .select("organization_id, trigger")
+      .select("organization_id, trigger, diagnostics")
       .eq("status", "waiting")
       // Only a customer's own activation click authorizes going live automatically.
       .eq("trigger", "customer_activate")
@@ -414,21 +467,23 @@ export async function sweepProvisioningRetries(
         "waiting_for_voice_language",
         "waiting_for_tool_authentication",
       ])
-      .limit(25),
+      // Wide on purpose: most waiting jobs are unchanged and filtered out below, so a small
+      // window could starve the one that changed. shortcut: 200 waiting jobs (the ids also go
+      // into the follow-up queries' URLs); page beyond that.
+      .limit(200),
   ]);
   for (const r of [due, stuck, waiting]) if (r.error) throw r.error;
 
   let registered: typeof waiting.data = [];
   const waitingOrgs = (waiting.data ?? []).map((w) => w.organization_id);
   if (waitingOrgs.length) {
-    const { data, error } = await admin
-      .from("agent_configs")
-      .select("organization_id")
-      .in("organization_id", waitingOrgs)
-      .not("sarvam_app_id", "is", null);
-    if (error) throw error;
-    const ok = new Set((data ?? []).map((d) => d.organization_id));
-    registered = (waiting.data ?? []).filter((w) => ok.has(w.organization_id));
+    const marks = await changeMarks(admin, waitingOrgs);
+    registered = (waiting.data ?? []).filter((w) => {
+      const now = marks.get(w.organization_id);
+      const seenAt = (w.diagnostics as { seenChange?: string } | null)?.seenChange;
+      // Only a change since the job's last attempt is news; otherwise it would wait again.
+      return Boolean(now?.registered) && now!.mark !== seenAt;
+    });
   }
 
   const seen = new Set<string>();

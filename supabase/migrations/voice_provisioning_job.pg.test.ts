@@ -233,6 +233,36 @@ SELECT count(*) FROM public.operator_bridge_tokens;`);
     }
   });
 
+  // The provisioning sweep resumes a waiting job only when these timestamps move.
+  test("the database bumps updated_at on agent, voice settings and job changes", (t) => {
+    if (!ready(t)) return;
+    const agent = randomUUID();
+    const seed = execSql!(`
+      INSERT INTO public.businesses (id, organization_id, name) VALUES ('${agent}', '${ORG_B}', 'B Dental');
+      INSERT INTO public.agent_configs (id, organization_id, business_id)
+        VALUES ('${agent}', '${ORG_B}', '${agent}');
+      INSERT INTO public.agent_voice_language_settings
+        (organization_id, agent_config_id, default_language, allowed_languages, sarvam_voice_internal_id, sarvam_voice_name)
+        VALUES ('${ORG_B}', '${agent}', 'English', ARRAY['English','Hindi']::text[], 'voice-1', 'Voice');
+    `);
+    assert.equal(seed.status, 0, seed.stderr);
+    for (const [table, key, change] of [
+      ["agent_configs", `id = '${agent}'`, "sarvam_app_version = 2, sarvam_app_id = 'App-ts-1'"],
+      [
+        "agent_voice_language_settings",
+        `agent_config_id = '${agent}'`,
+        "auto_language_switch = false",
+      ],
+      ["provisioning_runs", `id = '${OLD_RUN}'`, "attempts = attempts + 1"],
+    ] as const) {
+      const at = () => rows(`SELECT updated_at::text FROM public.${table} WHERE ${key};`)[0]!;
+      const before = at();
+      // A writer cannot freeze it either: the trigger overrides what the update sends.
+      rows(`UPDATE public.${table} SET ${change}, updated_at = '2000-01-01' WHERE ${key};`);
+      assert.ok(at() > before, `${table}: ${before} -> ${at()}`);
+    }
+  });
+
   test("the rollback refuses while events exist, then removes only what the migration added", (t) => {
     if (!ready(t)) return;
     const sql = readFileSync(ROLLBACK, "utf8");

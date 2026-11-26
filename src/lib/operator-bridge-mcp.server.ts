@@ -3,7 +3,6 @@ import type { Database } from "@/integrations/supabase/types";
 import {
   BridgeError,
   getWorkOrder,
-  issueCredentialForRun,
   listWorkOrders,
   reportBlocker,
   reportToolsCreated,
@@ -14,7 +13,8 @@ import {
 
 /**
  * Minimal MCP server (Streamable HTTP, JSON responses only, stateless) for the
- * operator bridge. Four tools; see operator-bridge.server.ts for the model.
+ * operator bridge; see operator-bridge.server.ts for the model. No tool ever returns a
+ * credential: everything returned here enters the operator's AI model context.
  * Only what the MCP spec needs for tools is implemented: initialize, ping,
  * tools/list, tools/call.
  */
@@ -33,17 +33,6 @@ export const BRIDGE_TOOLS = [
     name: "get_agent_work_order",
     description:
       "Everything needed to build one customer's Sarvam agent: exact name, template agent id, prompt, HTTP tools, voice, languages, a fingerprint, and the steps to follow.",
-    inputSchema: {
-      type: "object",
-      properties: { workOrderId: { type: "string" } },
-      required: ["workOrderId"],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: "issue_agent_credential",
-    description:
-      "Issue the customer agent's ClickAI integration token ONCE (use it as the secret Bearer value of the agent's HTTP tools; never repeat it in chat). Refuses if one was already issued.",
     inputSchema: {
       type: "object",
       properties: { workOrderId: { type: "string" } },
@@ -215,8 +204,6 @@ export async function handleBridgeRpc(
             ),
           );
         }
-        if (name === "issue_agent_credential")
-          return ok(req.id, text(await issueCredentialForRun(admin, id, auth)));
         return ok(
           req.id,
           text(

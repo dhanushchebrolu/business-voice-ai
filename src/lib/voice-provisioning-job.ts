@@ -110,7 +110,7 @@ export const FAILURE_HINTS: Partial<Record<FailureCode, string>> = {
   AWAITING_AGENT_CREATION:
     "Waiting for the operator: process this work order with Claude Code (Provisioning page → Agent builder).",
   TOOL_AUTH_PENDING:
-    "The agent and its six tools exist in Sarvam. Select the ClickAI credential on each tool in the Sarvam console, then confirm with confirm_tool_authentication.",
+    "The agent exists in Sarvam. Select the ClickAI credential on each of its six tools in the Sarvam console, commit, then confirm the committed version with submit_agent_result (agent ID, version and each tool's credential type).",
   WAITING_FOR_OPERATOR:
     "The operator reported it cannot continue (usually Sarvam sign-in expired). Sign in to the Sarvam MCP and process the work order again.",
   PROVIDER_AUTH_EXPIRED: "The provider rejected our authorization. Sign in again, then retry.",
@@ -248,6 +248,7 @@ export function sanitizeDiagnostic(text: string | null | undefined, max = 400): 
   if (!text) return "";
   return text
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+    .replace(/\b(cai_sv_|cbr_)[A-Za-z0-9_-]+/gi, "$1[redacted]")
     .replace(
       /(token|key|secret|password|authorization)(["']?\s*[:=]\s*["']?)[^\s"',&]+/gi,
       "$1$2[redacted]",

@@ -124,6 +124,7 @@ const call = async (db: World, d: WorkOrderDeps, name: string, args: Record<stri
 describe("bridge tokens", () => {
   test("only a hash is stored; the token authenticates until it expires", async () => {
     const db = world();
+    db.tables["platform_admins"] = [{ user_id: USER, role: "super_admin", is_active: true }];
     const t = await issueBridgeToken(db.client, { createdBy: USER, hours: 8, now: NOW });
     const row = db.tables["operator_bridge_tokens"]![0]!;
     assert.notEqual(row["token_hash"], t.token);
@@ -179,7 +180,6 @@ describe("MCP protocol", () => {
     const list = (await rpc("tools/list")) as { result: { tools: { name: string }[] } };
     assert.deepEqual(list.result.tools.map((t) => t.name).sort(), [
       "get_agent_work_order",
-      "issue_agent_credential",
       "list_agent_work_orders",
       "report_blocker",
       "report_tools_created",
@@ -379,30 +379,6 @@ describe("submitting the built agent", () => {
       },
     });
     assert.deepEqual(started, [ORG]);
-  });
-});
-
-describe("credential issuance", () => {
-  test("issued once; a second call never rotates the credential in use", async () => {
-    const db = waitingWorld({ credential: false });
-    await first(db);
-    const d = bridgeDeps(db);
-    const id = (await listWorkOrders(db.client))[0]!.workOrderId;
-    assert.equal((await listWorkOrders(db.client))[0]!.stage, "needs_credential");
-    const issued = await call(db, d, "issue_agent_credential", { workOrderId: id });
-    assert.equal(issued.isError, false, JSON.stringify(issued.body));
-    assert.match(issued.body.token, /^[A-Za-z0-9_-]{20,}/);
-    // The database defaults new credentials to status "active"; the in-memory stand-in has no defaults.
-    for (const r of db.tables["sarvam_agent_integrations"]!) r["status"] ??= "active";
-    const stored = JSON.stringify(db.tables["sarvam_agent_integrations"]);
-    assert.doesNotMatch(stored, new RegExp(issued.body.token), "only the hash is stored");
-    const again = await call(db, d, "issue_agent_credential", { workOrderId: id });
-    assert.equal(again.isError, true);
-    assert.equal(again.body.error, "conflict");
-    assert.doesNotMatch(
-      JSON.stringify(db.tables["provisioning_run_events"] ?? []),
-      new RegExp(issued.body.token),
-    );
   });
 });
 

@@ -36,10 +36,10 @@ describe("provisioningStatusLabel", () => {
     });
   });
 
-  test("has a number, connection linked, agent mapped, but not active/inbound yet -> Activating inbound calling", () => {
+  test("has a number, connection linked, agent mapped, but not active/inbound yet -> Final checks before go-live", () => {
     assert.deepEqual(
       provisioningStatusLabel(base({ numberActive: false, inboundEnabled: false })),
-      { label: "Activating inbound calling", tone: "ready" },
+      { label: "Final checks before go-live", tone: "ready" },
     );
   });
 
@@ -83,7 +83,7 @@ describe("provisioningStatusLabel", () => {
     const FIXED_LABELS = new Set([
       "Setting up your phone agent",
       "Waiting for phone number",
-      "Activating inbound calling",
+      "Final checks before go-live",
       "Inbound calling active",
       "Active",
       "Setup needs admin attention",

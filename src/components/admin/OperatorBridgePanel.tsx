@@ -202,7 +202,7 @@ export function OperatorBridgePanel() {
                     {w.blocked
                       ? "waiting for operator: Sarvam sign-in needed"
                       : w.stage === "needs_credential"
-                        ? "waiting for agent credential"
+                        ? "generate the integration credential on the customer's page"
                         : w.stage === "needs_tool_authentication"
                           ? "tools created: select credentials in the Sarvam console"
                           : "waiting for agent creation"}

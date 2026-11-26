@@ -492,7 +492,7 @@ export async function runProvisioningPipeline(
         return done(
           6,
           "waiting_for_tool_authentication",
-          `agent ${reported.appId} and its six tools exist in Sarvam; credentials are not confirmed. Select the ClickAI credential on each tool in the Sarvam console, commit the agent, then submit it.`,
+          `agent ${reported.appId} and its six tools exist in Sarvam; credentials are not confirmed. Select the ClickAI credential on each tool in the Sarvam console, commit the agent, then confirm it with submit_agent_result.`,
           null,
           { code: "TOOL_AUTH_PENDING", retryable: false },
         );
@@ -543,11 +543,11 @@ export async function runProvisioningPipeline(
       `the saved voice and languages are not recorded as applied to Sarvam agent ${agent.sarvam_app_id} version ${agent.sarvam_app_version}. Apply them in Sarvam, commit, and register that agent and version.`,
     );
 
-  // 6b. Tool authentication checkpoint. An agent built through the operator bridge has
-  // its six tools created without credentials (Sarvam's MCP cannot set them); the number
-  // is not deployed or activated until the operator confirms they were selected in the
-  // Sarvam console, for THIS agent id and version. A live number is only re-verified, and
-  // hand-registered agents (every live customer today) are never gated.
+  // 6b. Tool authentication checkpoint, MANDATORY for every number that is not live yet,
+  // however the agent was registered (operator bridge or the admin screen). Sarvam's MCP
+  // cannot set tool credentials, so the number is not deployed or activated until a person's
+  // confirmation (submit_agent_result) is on record for THIS agent id and version. A number
+  // that is already live is only re-verified, never gated.
   await step("authorizing_tools");
   if (!(number.status === "active" && number.inbound_enabled)) {
     const lookup =
@@ -557,11 +557,11 @@ export async function runProvisioningPipeline(
       appId: agent.sarvam_app_id!,
       version: agent.sarvam_app_version!,
     });
-    if (gate.required && !gate.confirmed)
+    if (!gate.confirmed)
       return done(
         6,
         "waiting_for_tool_authentication",
-        `agent ${agent.sarvam_app_id} version ${agent.sarvam_app_version} has its six tools but no credentials yet: select the ClickAI credential on each tool in the Sarvam console, then confirm with confirm_tool_authentication.`,
+        `agent ${agent.sarvam_app_id} version ${agent.sarvam_app_version} has no confirmed tool credentials yet: select the ClickAI credential on each of the six tools in the Sarvam console, commit, then confirm the committed version with submit_agent_result (agent ID, version and each tool's credential type).`,
         null,
         { code: "TOOL_AUTH_PENDING", retryable: false },
       );

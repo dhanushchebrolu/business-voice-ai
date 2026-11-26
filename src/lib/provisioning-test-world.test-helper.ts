@@ -49,6 +49,8 @@ export function world(
     numberStatus?: string;
     deploymentId?: string | null;
     outbound?: false | "no_agent" | "inbound_agent";
+    /** false: the registered agent has NO tool-authentication confirmation on record. */
+    toolAuth?: false;
   } = {},
 ) {
   const outboundAppId =
@@ -57,7 +59,7 @@ export function world(
       : over.outbound === "inbound_agent"
         ? "Customer-app-1"
         : "Customer-out-1";
-  return memorySupabase({
+  const db = memorySupabase({
     uniques: [
       {
         table: "provisioning_runs",
@@ -165,6 +167,40 @@ export function world(
           applied_sarvam_app_version: 1,
         },
       ],
+    },
+  });
+  // The tool-authentication checkpoint is mandatory for every number that is not live: a
+  // customer whose agent is registered is modelled as having completed it, unless the test
+  // says otherwise (toolAuth: false) or confirms it itself (confirmToolAuth).
+  const registered = over.appId === undefined ? "Customer-app-1" : over.appId;
+  if (registered && over.toolAuth !== false) confirmToolAuth(db, registered, 1);
+  return db;
+}
+
+/** A person's confirmation for this agent version (what submit_agent_result records). */
+export function confirmToolAuth(
+  db: { tables: Record<string, Record<string, unknown>[]> },
+  appId: string,
+  version: number,
+  organizationId: string = ORG,
+) {
+  (db.tables["provisioning_run_events"] ??= []).push({
+    run_id: "confirmed-in-test",
+    organization_id: organizationId,
+    step: "creating_agent",
+    event: "tool_auth_confirmed",
+    created_at: "2026-11-13T10:00:00Z",
+    detail: {
+      appId,
+      version,
+      tools: [
+        "clickai_business_context",
+        "get_business_info",
+        "check_availability",
+        "book_appointment",
+        "request_callback",
+        "record_call_outcome",
+      ].map((name) => ({ name, authType: "bearer" })),
     },
   });
 }

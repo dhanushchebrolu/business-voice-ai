@@ -414,7 +414,7 @@ describe("customer setup steps (no internal details)", () => {
         "Business information received",
         "Assigning your phone number",
         "Creating your inbound AI agent",
-        "Connecting your phone line",
+        "Verifying and connecting your phone line",
         "Creating your outbound AI agent",
         "Ready",
       ],
@@ -450,7 +450,7 @@ describe("customer setup steps (no internal details)", () => {
     // Found in the browser harness: the outbound agent was shown as the
     // current step while the pipeline was still connecting the phone line.
     const verifying = customerSetupSteps({ ...base, inboundAgentReady: true, hasNumber: true });
-    assert.equal(verifying[3]!.label, "Connecting your phone line");
+    assert.equal(verifying[3]!.label, "Verifying and connecting your phone line");
     assert.equal(verifying[3]!.status, "in_progress");
     assert.equal(verifying[4]!.status, "pending");
     const failed = customerSetupSteps({

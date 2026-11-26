@@ -575,7 +575,14 @@ describe("isolation and live protection", () => {
       });
     await sweep();
     assert.deepEqual(started, [], "waiting on the credentials: nothing to resume");
-    db.tables["agent_configs"]![0]!["sarvam_app_id"] = "Cust-agent-1";
+    // (The database stamps updated_at; the in-memory stand-in does not.)
+    db.tables["provisioning_runs"]![0]!["updated_at"] = new Date(
+      NOW.getTime() - 3_600_000,
+    ).toISOString();
+    Object.assign(db.tables["agent_configs"]![0]!, {
+      sarvam_app_id: "Cust-agent-1",
+      updated_at: NOW.toISOString(),
+    });
     await sweep();
     assert.deepEqual(started, [ORG]);
   });

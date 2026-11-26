@@ -7,7 +7,7 @@
  * six plain-English labels — never a raw Sarvam identifier, error string,
  * or internal field name. The six labels this function returns are exactly
  * the ones specified for the client dashboard: "Setting up your phone
- * agent", "Waiting for phone number", "Activating inbound calling",
+ * agent", "Waiting for phone number", "Final checks before go-live",
  * "Inbound calling active", "Active", "Setup needs admin attention".
  *
  * Meant to be shown only while account_status is "setup_in_progress"
@@ -73,10 +73,9 @@ export function provisioningStatusLabel(input: ProvisioningStatusInput): Provisi
     if (!connectionLinked || !agentSarvamMapped) {
       return { label: "Setup needs admin attention", tone: "error" };
     }
-    // Everything needed is in place — deployment creation and activation
-    // happen automatically from here (either the next payment/retry
-    // event, or already in flight).
-    return { label: "Activating inbound calling", tone: "ready" };
+    // Mapped is not live: the mandatory tool-authentication confirmation, deployment and
+    // verification may all still be pending, so the label must not say calling is starting.
+    return { label: "Final checks before go-live", tone: "ready" };
   }
 
   // No number yet. Distinguish the very first moment after payment
@@ -128,7 +127,7 @@ export function customerSetupSteps(i: CustomerSetupInput): CustomerSetupStep[] {
     ["Business information received", i.agentExists],
     ["Assigning your phone number", i.hasNumber],
     ["Creating your inbound AI agent", i.inboundAgentReady],
-    ["Connecting your phone line", i.numberActive && i.inboundEnabled],
+    ["Verifying and connecting your phone line", i.numberActive && i.inboundEnabled],
     ["Creating your outbound AI agent", i.outboundAgentReady],
   ];
   const allDone = steps.every(([, done]) => done);

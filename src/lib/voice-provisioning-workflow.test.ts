@@ -10,7 +10,15 @@ import {
   type ProviderError,
 } from "./sarvam-agent-provisioner.server.ts";
 import { MAX_AUTOMATIC_ATTEMPTS } from "./voice-provisioning-job.ts";
-import { ORG, OTHER, snapshot, world, deps, num } from "./provisioning-test-world.test-helper.ts";
+import {
+  ORG,
+  OTHER,
+  snapshot,
+  world,
+  deps,
+  num,
+  confirmToolAuth,
+} from "./provisioning-test-world.test-helper.ts";
 
 /**
  * The automated Voice AI provisioning job end to end, against an in-memory
@@ -32,6 +40,18 @@ const run0 = (db: World, d: PipelineDeps, over: { force?: boolean; now?: () => D
 const runRow = (db: World, i = 0) => db.tables["provisioning_runs"]![i]!;
 const events = (db: World) =>
   (db.tables["provisioning_run_events"] ?? []).map((e) => `${e["event"]}:${e["step"] ?? ""}`);
+/**
+ * A registered agent is not enough: the tool-authentication checkpoint must be confirmed for
+ * that agent id and version before anything is deployed or activated. This models the person's
+ * confirmation (submit_agent_result) and resumes the same job.
+ */
+async function confirmAndResume(db: World, d: PipelineDeps) {
+  const agent = db.tables["agent_configs"]![0]!;
+  assert.equal(runRow(db)["current_step"], "waiting_for_tool_authentication");
+  notActive(db);
+  confirmToolAuth(db, String(agent["sarvam_app_id"]), Number(agent["sarvam_app_version"]));
+  return run0(db, d, { force: true });
+}
 const notActive = (db: World) =>
   assert.notEqual(num(db, "num_new")["status"], "active", "the number must stay inactive");
 
@@ -230,7 +250,9 @@ describe("agent creation (mocked provider API)", () => {
     const db = noAgentWorld();
     const api = agentApi();
     const { d } = withAgent(db, api.p);
-    const r = await run0(db, d);
+    const first = await run0(db, d);
+    assert.equal(first.status, "waiting", "registered, but the checkpoint is not confirmed");
+    const r = await confirmAndResume(db, d);
     assert.equal(r.status, "succeeded", String(runRow(db)["note"]));
     assert.deepEqual([api.calls.create, api.calls.configure, api.calls.verify], [1, 1, 1]);
     const agent = db.tables["agent_configs"]![0]!;
@@ -280,7 +302,9 @@ describe("agent creation (mocked provider API)", () => {
       api.setCreated("Cust-agent-1"); // the provider did create it; the answer was lost
       throw err("timeout", { outcomeUnknown: true });
     };
-    const r = await run0(db, withAgent(db, api.p).d);
+    const { d } = withAgent(db, api.p);
+    assert.equal((await run0(db, d)).status, "waiting");
+    const r = await confirmAndResume(db, d);
     assert.equal(r.status, "succeeded", String(runRow(db)["note"]));
     assert.equal(api.calls.create, 1);
     assert.equal(db.tables["agent_configs"]![0]!["sarvam_app_id"], "Cust-agent-1");
@@ -310,7 +334,8 @@ describe("agent creation (mocked provider API)", () => {
     };
     const { d } = withAgent(db, api.p);
     assert.equal((await run0(db, d)).status, "pending");
-    const second = await run0(db, d, { force: true });
+    assert.equal((await run0(db, d, { force: true })).status, "waiting");
+    const second = await confirmAndResume(db, d);
     assert.equal(second.status, "succeeded", String(runRow(db)["note"]));
     assert.equal(api.calls.create, 1, "exactly one agent was ever created");
   });
@@ -743,9 +768,12 @@ describe("scheduled sweep and retry bound", () => {
     await run0(db, deps(db).d);
     assert.equal(runRow(db)["status"], "waiting");
     assert.equal((await sweep(db)).started.length, 0, "still no agent");
+    // (The database stamps updated_at; the in-memory stand-in does not.)
+    runRow(db)["updated_at"] = new Date(NOW.getTime() - 3600_000).toISOString();
     Object.assign(db.tables["agent_configs"]![0]!, {
       sarvam_app_id: "Hand-made-1",
       sarvam_app_version: 1,
+      updated_at: NOW.toISOString(),
     });
     assert.deepEqual((await sweep(db)).started, [`${ORG}:customer_activate`]);
   });
@@ -754,9 +782,11 @@ describe("scheduled sweep and retry bound", () => {
     const db = noAgentWorld();
     await run0(db, deps(db).d);
     runRow(db)["trigger"] = "setup_fee";
+    runRow(db)["updated_at"] = new Date(NOW.getTime() - 3600_000).toISOString();
     Object.assign(db.tables["agent_configs"]![0]!, {
       sarvam_app_id: "Hand-made-1",
       sarvam_app_version: 1,
+      updated_at: NOW.toISOString(),
     });
     assert.equal((await sweep(db)).started.length, 0);
   });
@@ -777,6 +807,7 @@ describe("scheduled sweep and retry bound", () => {
       applied_sarvam_app_id: "Customer-app-1",
       applied_sarvam_app_version: 1,
     });
+    confirmToolAuth(db, "Customer-app-1", 1); // the checkpoint is confirmed for this agent version
     await run0(db, deps(db, { deployment: { appVersion: 9 } }).d, { force: true });
     assert.equal(runRow(db)["status"], "pending");
     assert.equal(runRow(db)["failure_code"], "DEPLOYMENT_VERIFY_FAILED");
@@ -827,7 +858,8 @@ describe("provider authorization problems (mocked machine credential)", () => {
     assert.equal(runRow(db)["failure_code"], "PROVIDER_AUTH_EXPIRED");
     assert.equal(api.calls.create, 1);
     configureFails = false; // the credential was renewed
-    const second = await run0(db, d, { force: true });
+    assert.equal((await run0(db, d, { force: true })).status, "waiting");
+    const second = await confirmAndResume(db, d);
     assert.equal(second.status, "succeeded", String(runRow(db)["note"]));
     assert.equal(api.calls.create, 1, "the agent from the first attempt was found, not recreated");
     assert.equal(num(db, "num_new")["status"], "active");

@@ -1,6 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { memorySupabase } from "./payments/memory-supabase.test-helper.ts";
+import { confirmToolAuth } from "./provisioning-test-world.test-helper.ts";
 import { runProvisioningPipeline, type PipelineDeps } from "./provisioning-pipeline.server.ts";
 import { runProvisioning, type ProvisioningTrigger } from "./provisioning-runs.server.ts";
 import {
@@ -334,7 +335,12 @@ describe("dual-agent provisioning end to end (mocked Sarvam)", () => {
     ops.issueCredential(db, "inbound");
     await record("inbound credential");
     await ops.registerInbound(db);
-    const live = await record("inbound agent registered");
+    // Registering the agent is not enough: the tool-authentication checkpoint comes first.
+    const gated = await record("inbound agent registered");
+    assert.equal(gated.result?.state, "waiting_for_tool_authentication", gated.result?.note);
+    assert.equal(db.tables["phone_numbers"]![0]!["status"], "provisioning", "not live yet");
+    confirmToolAuth(db, "E2E-in-1", 1, ORG);
+    const live = await record("tool credentials confirmed");
     assert.equal(live.result?.state, "waiting_for_outbound_credential", live.result?.note);
     assert.equal(db.tables["phone_numbers"]![0]!["status"], "active");
     ops.issueCredential(db, "outbound");
@@ -355,7 +361,8 @@ describe("dual-agent provisioning end to end (mocked Sarvam)", () => {
         "number assigned: waiting_for_number_confirmation | Setup needs admin attention / Creating your inbound AI agent",
         "number confirmed: waiting_for_integration_credential | Setup needs admin attention / Creating your inbound AI agent",
         "inbound credential: waiting_for_agent | Setup needs admin attention / Creating your inbound AI agent",
-        "inbound agent registered: waiting_for_outbound_credential | Inbound calling active / Creating your outbound AI agent",
+        "inbound agent registered: waiting_for_tool_authentication | Final checks before go-live / Verifying and connecting your phone line",
+        "tool credentials confirmed: waiting_for_outbound_credential | Inbound calling active / Creating your outbound AI agent",
         "outbound credential: waiting_for_outbound_agent | Inbound calling active / Creating your outbound AI agent",
         "outbound agent registered: active | Inbound calling active / all done",
         "re-run after success: active | Inbound calling active / all done",
@@ -394,6 +401,11 @@ describe("dual-agent provisioning end to end (mocked Sarvam)", () => {
     ops.issueCredential(db, "inbound"); // issued twice: still one active credential
     await ops.registerInbound(db);
     await ops.registerInbound(db); // registered twice: same mapping, no error
+    // The checkpoint is mandatory even for a hand-registered agent.
+    await step("waiting_for_tool_authentication");
+    assert.equal(db.tables["phone_numbers"]![0]!["status"], "provisioning");
+    assert.equal(s.counts.creates, 0, "nothing deployed before the checkpoint");
+    confirmToolAuth(db, "E2E-in-1", 1, ORG);
 
     // The create reaches Sarvam but times out: a retryable failure...
     s.fail.createTimeout = 1;
