@@ -2596,6 +2596,9 @@ export type Database = {
       };
       operator_bridge_tokens: {
         Row: {
+          agent_role: string | null;
+          organization_id: string | null;
+          run_id: string | null;
           created_at: string;
           created_by: string;
           expires_at: string;
@@ -2606,6 +2609,9 @@ export type Database = {
           token_prefix: string;
         };
         Insert: {
+          agent_role?: string | null;
+          organization_id?: string | null;
+          run_id?: string | null;
           created_at?: string;
           created_by: string;
           expires_at: string;
@@ -2616,6 +2622,9 @@ export type Database = {
           token_prefix: string;
         };
         Update: {
+          agent_role?: string | null;
+          organization_id?: string | null;
+          run_id?: string | null;
           created_at?: string;
           created_by?: string;
           expires_at?: string;

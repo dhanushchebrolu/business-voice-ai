@@ -11,7 +11,16 @@ import {
   buildToolAuthCheckpoint,
   waitingLabel,
 } from "./tool-auth-checkpoint-view.ts";
-import { ORG, OTHER, snapshot, world, deps, num } from "./provisioning-test-world.test-helper.ts";
+import {
+  ORG,
+  OTHER,
+  snapshot,
+  world,
+  deps,
+  num,
+  operatorAuth,
+  toolEvidence,
+} from "./provisioning-test-world.test-helper.ts";
 
 /** The admin's view of the tool-authentication checkpoint, and that the checkpoint stays resumable. */
 
@@ -20,8 +29,7 @@ const SIX = [...CLICKAI_TOOL_NAMES];
 const REPORTED_AT = "2026-11-26T10:00:00.000Z";
 const NOW = new Date("2026-11-26T13:12:00.000Z");
 const USER = "00000000-0000-0000-0000-0000000000bb";
-const auth = { ok: true, tokenId: "tok", createdBy: USER, prefix: "cbr_test" } as const;
-const bearer = SIX.map((name) => ({ name, authType: "bearer" }));
+const bearer = toolEvidence();
 
 const pipeline = (db: World) => deps(db, { deployment: { appId: "Cust-agent-1", appVersion: 3 } });
 function bridge(db: World) {
@@ -40,8 +48,10 @@ function bridge(db: World) {
   };
   return d;
 }
+const jobOf = (args: Record<string, unknown>) =>
+  typeof args["workOrderId"] === "string" ? args["workOrderId"] : undefined;
 const call = async (db: World, d: WorkOrderDeps, name: string, args: Record<string, unknown>) => {
-  const out = await handleBridgeRpc(db.client, auth, d, {
+  const out = await handleBridgeRpc(db.client, operatorAuth(db, jobOf(args)), d, {
     jsonrpc: "2.0",
     id: 1,
     method: "tools/call",
@@ -104,6 +114,7 @@ describe("checkpoint view (pure)", () => {
     customer: "Acme Clinic",
     agentId: "Cust-agent-1",
     credentialName: "clickai-acme",
+    agentRef: "inbound:agent_x",
     master: { agentId: "Master-agent", version: 2 },
     waitingSince: REPORTED_AT,
     now: NOW,
@@ -140,7 +151,14 @@ describe("checkpoint view (pure)", () => {
 
   test("a tool the operator did not report is shown as missing, and confirmation is not ready", () => {
     const partial = buildToolAuthCheckpoint({
-      ...{ jobId: "j", customerId: "o", customer: "A", agentId: "x", credentialName: "c" },
+      ...{
+        jobId: "j",
+        customerId: "o",
+        customer: "A",
+        agentId: "x",
+        credentialName: "c",
+        agentRef: "inbound:agent_x",
+      },
       master: null,
       waitingSince: REPORTED_AT,
       now: NOW,
@@ -162,6 +180,7 @@ describe("checkpoint view (pure)", () => {
       customer: "A",
       agentId: "x",
       credentialName: "c",
+      agentRef: "inbound:agent_x",
       master: null,
       waitingSince: REPORTED_AT,
       now: new Date(Date.parse(REPORTED_AT) + STALE_AFTER_MS + 1),
@@ -352,7 +371,7 @@ describe("confirmation and resume from the checkpoint", () => {
       agentId: "Cust-agent-1",
       version: 3,
       fingerprint: fp,
-      toolAuth: SIX.map((name, i) => ({ name, authType: i === 5 ? "none" : "bearer" })),
+      toolAuth: toolEvidence().map((e, i) => ({ ...e, authType: i === 5 ? "none" : "bearer" })),
     });
     assert.equal(r.body.error, "conflict");
     assert.equal((await listWorkOrders(db.client, NOW)).length, 1);

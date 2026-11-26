@@ -44,6 +44,7 @@ export function memorySupabase(opts: {
     let returning = false;
     let mode: "many" | "single" | "maybeSingle" | "count" = "many";
     let limit = Number.POSITIVE_INFINITY;
+    let offset = 0;
     const ordering: { col: string; ascending: boolean }[] = [];
 
     const rows = () => (tables[table] ??= []);
@@ -97,7 +98,7 @@ export function memorySupabase(opts: {
             }
             return 0;
           });
-        result = op === "select" ? matched.slice(0, limit) : matched;
+        result = op === "select" ? matched.slice(offset, offset + limit) : matched;
       }
       if (mode === "count") return { data: null, count: result.length, error: null };
       if (op !== "select" && !returning) return { data: null, error: null };
@@ -118,6 +119,12 @@ export function memorySupabase(opts: {
       },
       limit(n: number) {
         limit = n;
+        return b;
+      },
+      /** PostgREST `range`: rows from..to inclusive, after filtering and ordering. */
+      range(from: number, to: number) {
+        offset = from;
+        limit = to - from + 1;
         return b;
       },
       /** PostgREST `or`: comma-separated `column.op.value`, ops is/not.is/eq/lte/gte. */

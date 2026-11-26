@@ -129,7 +129,7 @@ server secret, scraping the dashboard or guessing endpoints are all out of bound
 
 **What is implemented instead: a secure operator bridge** (`operator-bridge*.server.ts`,
 `/api/public/operator/mcp`, admin panel on `/admin/provisioning`). ClickAI exposes its own small MCP
-server. A platform admin creates a bridge token (≤ 12 h, revocable, hash-only, audited) and adds it to
+server. A platform admin creates a bridge token for one work order (see "Bridge token scope" below) and adds it to
 their own MCP client next to the Sarvam MCP server, which they sign in to themselves. The client then:
 
 1. `list_agent_work_orders`: customers whose job waits at the agent step (clicked Activate, onboarding
@@ -146,9 +146,7 @@ their own MCP client next to the Sarvam MCP server, which they sign in to themse
    sweep is the backstop). The job then does everything documented REST allows: create/adopt deployment
    with the already-assigned number, pause, verify, resume, read back, activate.
 
-Properties: no Sarvam token ever reaches ClickAI; a bridge token grants only the bridge operations,
-for every waiting customer, and stops working (revoked) as soon as its issuer is removed, deactivated
-or loses `agents.write`;
+Properties: no Sarvam token ever reaches ClickAI;
 every call is idempotent (name lookup, same id+version no-op, one deployment per number); the event
 trail records each bridge action (token prefix only); expired/revoked tokens get a clear 401 and the
 operator mints a new one; Sarvam's own 24 h sign-in is the operator's daily routine. Migration
@@ -156,10 +154,10 @@ operator mints a new one; Sarvam's own 24 h sign-in is the operator's daily rout
 scripts were rebuilt. Nothing here is verified against live Sarvam: the operator's client does the
 Sarvam-side work and the exact `configure_agent` field mapping comes from `sarvam://schemas/agent-config`.
 
-**Operator runbook.** 1) `/admin/provisioning` → "Create bridge token" → copy the command into your MCP
-client. 2) Sign in to `sarvam-voice-agents` (`/mcp` → Authenticate; repeat daily). 3) Ask: "Process the
-pending ClickAI agent work orders." 4) Review the agents it builds (Sarvam prompts approval for every
-write). 5) Revoke the token when done.
+**Operator runbook.** 1) `/admin/provisioning` → "Create bridge token" **on that customer's work order**
+→ check the customer, job and role shown → copy the command into your MCP client. 2) Sign in to `sarvam-voice-agents` (`/mcp` → Authenticate; repeat daily). 3) Ask: "Process the
+ClickAI agent work order." 4) Review the agents it builds (Sarvam prompts approval for every
+write). 5) The token is used up by the submission; revoke it if you abandon the job.
 
 ## Final workflow: Claude-assisted agent step (2026-11-27)
 
@@ -173,7 +171,7 @@ authoring step is operator-assisted through the existing bridge; the rest is aut
 3. The job stops at **`WAITING_FOR_AGENT_CREATION`** (`failure_code AWAITING_AGENT_CREATION`; customer sees
    "our team is setting up your voice agent"). It appears under **Provisioning → Agent builder**.
 4. Operator, in Claude Code with both MCP servers connected (`sarvam-voice-agents` signed in, and
-   `clickai-operator` with a bridge token): "Process the pending ClickAI agent work orders."
+   `clickai-operator` with that work order's bridge token): "Process the ClickAI agent work order."
 5. Claude: `list_agent_work_orders` → `get_agent_work_order` (customer, category, ids, masked number,
    template + Booking/Enquiry profile, voice/languages, capabilities, summary counts, checklist, ready
    prompt/tools/variables, fingerprint, steps) → checks Sarvam sign-in → reads the playbook/schema →
@@ -231,3 +229,28 @@ activation.
   attempt cannot overwrite the newer attempt's record.
 - **Reliability:** reports and submits are idempotent; a second different agent for the same customer
   is refused; partial tool creation (not six) is refused and can be completed and re-reported.
+
+## Bridge token scope, tool binding and sweep fairness
+
+**Bridge token scope** (migration `20261204090000`, **apply before deploying this code**; rollback in
+`docs/production-rollback-20261204090000-operator-bridge-token-scope.sql`):
+
+- One customer, one provisioning job, the inbound agent. Any other work order id answers "not found".
+- 1 hour by default, 4 at most. A new token for the job revokes the previous one.
+- Re-checked on every request: the issuer is still an active admin with `agents.write`, and the job is
+  still open (not succeeded, failed, deleted, or past the inbound agent). Otherwise revoked for good.
+- The one registration it can make uses it up. Before that, reads and the (idempotent) report can be
+  repeated by whoever holds it: it is a bearer token.
+- The bridge builds inbound agents only; no outbound token can be issued.
+
+**Tool binding.** Every tool in the work order sends a fixed body field `agent_ref`
+(`inbound:<agent config id>`). Submission requires it, read back, on all six tools. At call time the
+agent API refuses a request whose `agent_ref` is not the one of the credential presented
+(`credential_mismatch`, nothing served). This catches another customer's or role's credential selected
+on a tool, **when the call happens**. ClickAI still cannot see which credential Sarvam holds: it cannot
+detect the mistake before the first call, and the check depends on the tool really sending the field
+(operator read-back). Agents built earlier send no `agent_ref` and behave as before.
+
+**Recovery sweep.** All candidates are read page by page (no fixed window). Each minute the start point
+rotates and due retries, crashed runs and changed waiting jobs take turns; only claimed runs use up the
+tick's three slots, with a bound on failures per tick.

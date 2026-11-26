@@ -2,6 +2,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import {
   BridgeError,
+  assertScope,
   getWorkOrder,
   listWorkOrders,
   reportBlocker,
@@ -96,8 +97,12 @@ export const BRIDGE_TOOLS = [
             properties: {
               name: { type: "string" },
               authType: { type: "string", enum: ["bearer", "api_key", "basic", "none"] },
+              agentRef: {
+                type: "string",
+                description: "The tool's fixed agent_ref body value, as read back.",
+              },
             },
-            required: ["name", "authType"],
+            required: ["name", "authType", "agentRef"],
             additionalProperties: false,
           },
           minItems: 6,
@@ -125,7 +130,8 @@ export const AUTH_FAILURE_MESSAGE: Record<string, string> = {
   missing: "Missing bridge token.",
   invalid: "Invalid bridge token.",
   expired: "The bridge token has expired. Ask a ClickAI admin to create a new one and reconnect.",
-  revoked: "The bridge token was revoked. Ask a ClickAI admin to create a new one.",
+  revoked:
+    "The bridge token was used, revoked or its job has ended. Ask a ClickAI admin to create a new one if work remains.",
 };
 
 /** Returns null for notifications (HTTP 202, no body). */
@@ -160,11 +166,14 @@ export async function handleBridgeRpc(
       const args = (req.params?.["arguments"] ?? {}) as Json;
       const id = typeof args["workOrderId"] === "string" ? args["workOrderId"] : "";
       try {
-        if (name === "list_agent_work_orders") return ok(req.id, text(await listWorkOrders(admin)));
+        // A token sees and touches its own job only.
+        if (name === "list_agent_work_orders")
+          return ok(req.id, text(await listWorkOrders(admin, deps.now?.(), auth.runId)));
         if (!BRIDGE_TOOLS.some((t) => t.name === name))
           return rpcError(req.id, -32602, "Unknown tool");
         if (!id)
           return ok(req.id, text({ error: "invalid", message: "workOrderId is required" }, true));
+        assertScope(auth, id);
         if (name === "get_agent_work_order")
           return ok(req.id, text(await getWorkOrder(admin, id, deps)));
         if (name === "report_blocker")

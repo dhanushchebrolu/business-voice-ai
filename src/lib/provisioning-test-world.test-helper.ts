@@ -275,3 +275,39 @@ export function deps(
 
 export const num = (db: ReturnType<typeof world>, id: string) =>
   db.tables["phone_numbers"]!.find((n) => n["id"] === id)!;
+
+/** The fixed value ORG's inbound tools carry (its agent config id). */
+export const AGENT_REF = "inbound:agent_new";
+
+/** The committed version's per-tool read-back the operator submits. */
+export const toolEvidence = (authType = "bearer", ref: string = AGENT_REF) =>
+  [
+    "clickai_business_context",
+    "get_business_info",
+    "check_availability",
+    "book_appointment",
+    "request_callback",
+    "record_call_outcome",
+  ].map((name) => ({ name, authType, agentRef: ref }));
+
+let issuedTokens = 0;
+/**
+ * An authenticated operator holding a fresh, unused token for ORG's job (by default the
+ * first one), as authenticateBridge would return it. The row exists so it can be used up.
+ */
+export function operatorAuth(
+  db: { tables: Record<string, Record<string, unknown>[]> },
+  runId: string = String(db.tables["provisioning_runs"]?.[0]?.["id"] ?? "no-job"),
+) {
+  const tokenId = `test_token_${++issuedTokens}`;
+  (db.tables["operator_bridge_tokens"] ??= []).push({ id: tokenId, revoked_at: null });
+  return {
+    ok: true as const,
+    tokenId,
+    createdBy: "00000000-0000-0000-0000-0000000000bb",
+    prefix: "cbr_test",
+    organizationId: ORG,
+    runId,
+    role: "inbound" as const,
+  };
+}

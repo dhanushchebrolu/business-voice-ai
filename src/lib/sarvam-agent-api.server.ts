@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { agentRef } from "./sarvam-agent-tools-spec.ts";
 import type { Database, Json } from "@/integrations/supabase/types";
 import {
   buildSarvamClientContext,
@@ -1188,6 +1189,20 @@ export async function handleSarvamAgentRequest(
   const body = await readBody(request);
   if (!body) return json({ error: "invalid_body" }, 400);
   const interactionId = str(body, "interaction_id", 200);
+
+  // Wrong-credential guard. Tools built from a ClickAI work order send a fixed agent_ref;
+  // if the credential selected on the tool belongs to another agent, nothing is served.
+  // Agents built before this send no agent_ref and behave as before.
+  if (
+    body["agent_ref"] !== undefined &&
+    body["agent_ref"] !== agentRef(auth.role, auth.agentConfigId)
+  ) {
+    console.error("sarvam_agent:credential_mismatch", { tool: tool ?? "context" });
+    await audit(deps, auth, tool ?? "context", "rejected", interactionId, {
+      error_code: "AGENT_REF_MISMATCH",
+    });
+    return json({ error: "credential_mismatch", guidance: SAFE_GUIDANCE }, 403);
+  }
 
   await deps.supabaseAdmin
     .from("sarvam_agent_integrations")

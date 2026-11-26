@@ -24,7 +24,16 @@ import { masterAgentAppId, masterAgentVersion } from "./sarvam-agent-registratio
 import { buildSarvamAgentPrompt } from "./sarvam-agent-prompt.ts";
 import { MASTER_AGENT_TOOLS } from "./universal-agent-config.ts";
 import { customerJobView, JOB_STEP_KEYS } from "./voice-provisioning-job.ts";
-import { ORG, OTHER, snapshot, world, deps, num } from "./provisioning-test-world.test-helper.ts";
+import {
+  ORG,
+  OTHER,
+  snapshot,
+  world,
+  deps,
+  num,
+  operatorAuth,
+  toolEvidence,
+} from "./provisioning-test-world.test-helper.ts";
 
 /**
  * Cloning the committed master, recreating the six tools (clones carry none), and the
@@ -36,8 +45,7 @@ const NOW = new Date("2026-11-26T10:00:00Z");
 const USER = "00000000-0000-0000-0000-0000000000bb";
 const here = dirname(fileURLToPath(import.meta.url));
 const SIX = [...CLICKAI_TOOL_NAMES];
-const bearer = SIX.map((name) => ({ name, authType: "bearer" }));
-const auth = { ok: true, tokenId: "tok", createdBy: USER, prefix: "cbr_test" } as const;
+const bearer = toolEvidence();
 
 function waitingWorld(caps?: Record<string, boolean>) {
   const db = world({ appId: null });
@@ -79,8 +87,10 @@ function bridge(db: World, over: Partial<WorkOrderDeps> = {}, caps?: Record<stri
   };
   return d;
 }
+const jobOf = (args: Record<string, unknown>) =>
+  typeof args["workOrderId"] === "string" ? args["workOrderId"] : undefined;
 const call = async (db: World, d: WorkOrderDeps, name: string, args: Record<string, unknown>) => {
-  const out = await handleBridgeRpc(db.client, auth, d, {
+  const out = await handleBridgeRpc(db.client, operatorAuth(db, jobOf(args)), d, {
     jsonrpc: "2.0",
     id: 1,
     method: "tools/call",
@@ -362,7 +372,7 @@ describe("the tool-authentication checkpoint", () => {
   test("a committed version without credentials on every tool is refused, naming the tools", async () => {
     const { db, d, id, order } = await openOrder();
     await call(db, d, "report_tools_created", reportArgs(id));
-    const partial = SIX.map((name, i) => ({ name, authType: i < 3 ? "bearer" : "none" }));
+    const partial = toolEvidence().map((e, i) => ({ ...e, authType: i < 3 ? "bearer" : "none" }));
     const r = await call(db, d, "submit_agent_result", {
       workOrderId: id,
       agentId: "Cust-agent-1",

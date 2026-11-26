@@ -4,8 +4,8 @@ import { assertPlatformAdmin, writeAudit } from "@/lib/platform-admin.server";
 
 /**
  * Platform-admin control of the operator bridge (operator-bridge.server.ts):
- * create a short-lived token for one's own MCP client, see what is waiting,
- * revoke. The raw token is returned once and never stored.
+ * create a short-lived token (one customer, one job, inbound agent) for one's own MCP
+ * client, see what is waiting, revoke. The raw token is returned once and never stored.
  */
 
 export const getOperatorBridgeStatus = createServerFn({ method: "POST" })
@@ -19,7 +19,7 @@ export const getOperatorBridgeStatus = createServerFn({ method: "POST" })
     const [{ data: tokens, error }, workOrders] = await Promise.all([
       supabaseAdmin
         .from("operator_bridge_tokens")
-        .select("id, token_prefix, expires_at, last_used_at, created_at")
+        .select("id, token_prefix, expires_at, last_used_at, created_at, run_id, agent_role")
         .is("revoked_at", null)
         .gt("expires_at", now)
         .order("created_at", { ascending: false })
@@ -39,8 +39,9 @@ export const getOperatorBridgeStatus = createServerFn({ method: "POST" })
 
 export const issueOperatorBridgeToken = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .inputValidator((input: { hours?: number; reason: string }) => {
-    if (!input?.reason?.trim()) throw new Error("A reason is required");
+  .inputValidator((input: { runId: string; reason: string }) => {
+    if (!input?.runId) throw new Error("runId is required");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
     return input;
   })
   .handler(async ({ data, context }) => {
@@ -49,12 +50,18 @@ export const issueOperatorBridgeToken = createServerFn({ method: "POST" })
     const { issueBridgeToken } = await import("@/lib/operator-bridge.server");
     const issued = await issueBridgeToken(supabaseAdmin, {
       createdBy: context.userId,
-      ...(data.hours ? { hours: data.hours } : {}),
+      runId: data.runId,
     });
     await writeAudit(admin, {
       action: "OPERATOR_BRIDGE_TOKEN_ISSUED",
       entityType: "operator_bridge_token",
-      newValue: { token_prefix: issued.prefix, expires_at: issued.expiresAt },
+      organizationId: issued.organizationId,
+      newValue: {
+        token_prefix: issued.prefix,
+        expires_at: issued.expiresAt,
+        run_id: issued.runId,
+        agent_role: issued.role,
+      },
       reason: data.reason,
     });
     // The only time the raw token leaves the server.

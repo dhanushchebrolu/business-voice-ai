@@ -2059,3 +2059,53 @@ describe("outbound agents can look at, move and cancel the dialled person's own 
     assert.equal(r.body.appointments, undefined);
   });
 });
+
+describe("a wrongly selected credential is refused (fixed agent_ref on every tool)", () => {
+  // The tool is on ABC's agent (it sends ABC's reference); Smile's credential was picked.
+  const abc = `inbound:agent-${ORG_ABC}`;
+  const smile = `inbound:agent-${ORG_SMILE}`;
+  const body = (agent_ref: unknown) => ({
+    agent_ref,
+    interaction_id: "20261111/x",
+    caller_number: "+919000000001",
+    date: "2026-11-12",
+    time: "10:00",
+    reason: "call back",
+  });
+  const paths = [
+    "context",
+    "tools/get_business_info",
+    "tools/check_availability",
+    "tools/book_appointment",
+    "tools/request_callback",
+    "tools/record_call_outcome",
+  ];
+
+  test("no data is served and nothing runs, on any of the six endpoints", async () => {
+    for (const path of paths) {
+      const r = await call(path, tokens[ORG_SMILE]!, body(abc));
+      assert.equal(r.status, 403, path);
+      assert.equal(r.body["error"], "credential_mismatch", path);
+      assert.doesNotMatch(JSON.stringify(r.body), /Smile|ABC|₹|Meera/, path);
+    }
+    assert.equal(toolCalls.length, 0);
+    assert.equal(db.tables["leads"]?.length ?? 0, 0);
+  });
+
+  test("another role's reference or a non-text value is refused too", async () => {
+    for (const ref of [`outbound:agent-${ORG_SMILE}`, "", 7, null, [smile]])
+      assert.equal(
+        (await call("context", tokens[ORG_SMILE]!, body(ref))).status,
+        403,
+        JSON.stringify(ref),
+      );
+  });
+
+  test("the matching reference works, and agents built before the field existed still do", async () => {
+    for (const b of [body(smile), { interaction_id: "20261111/y" }]) {
+      const r = await call("context", tokens[ORG_SMILE]!, b);
+      assert.equal(r.status, 200);
+      assert.equal(r.body["business_name"], "Smile Dental");
+    }
+  });
+});

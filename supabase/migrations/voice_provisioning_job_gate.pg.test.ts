@@ -25,7 +25,7 @@ const ROLLBACK = join(
   "production-rollback-20261203090000-voice-provisioning-job.sql",
 );
 const EARLIER = readdirSync(migrationsDir)
-  .filter((f) => /^\d{14}_.*\.sql$/.test(f) && f !== NEW)
+  .filter((f) => /^\d{14}_.*\.sql$/.test(f) && f < NEW)
   .sort();
 
 const SUPABASE_STANDIN = `

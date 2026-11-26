@@ -16,6 +16,8 @@ import {
   deps,
   num,
   confirmToolAuth,
+  operatorAuth,
+  toolEvidence,
 } from "./provisioning-test-world.test-helper.ts";
 
 /**
@@ -28,8 +30,7 @@ type World = ReturnType<typeof world>;
 const NOW = new Date("2026-11-27T10:00:00Z");
 const SIX = [...CLICKAI_TOOL_NAMES];
 const USER = "00000000-0000-0000-0000-0000000000bb";
-const auth = { ok: true, tokenId: "tok", createdBy: USER, prefix: "cbr_test" } as const;
-const bearer = SIX.map((name) => ({ name, authType: "bearer" }));
+const bearer = toolEvidence();
 const iso = (ms: number) => new Date(ms).toISOString();
 
 /** A customer with a number, credential and voice settings, but no agent registered yet. */
@@ -76,8 +77,10 @@ function bridge(db: World) {
   };
   return d;
 }
+const jobOf = (args: Record<string, unknown>) =>
+  typeof args["workOrderId"] === "string" ? args["workOrderId"] : undefined;
 const call = async (db: World, name: string, args: Record<string, unknown>) => {
-  const out = await handleBridgeRpc(db.client, auth, bridge(db), {
+  const out = await handleBridgeRpc(db.client, operatorAuth(db, jobOf(args)), bridge(db), {
     jsonrpc: "2.0",
     id: 1,
     method: "tools/call",

@@ -23,6 +23,8 @@ import {
   deps,
   num,
   confirmToolAuth,
+  operatorAuth,
+  toolEvidence,
 } from "./provisioning-test-world.test-helper.ts";
 
 /**
@@ -35,7 +37,6 @@ type World = ReturnType<typeof world>;
 const NOW = new Date("2026-11-27T10:00:00Z");
 const USER = "00000000-0000-0000-0000-0000000000bb";
 const SIX = [...CLICKAI_TOOL_NAMES];
-const auth = { ok: true, tokenId: "tok", createdBy: USER, prefix: "cbr_test" } as const;
 const iso = (ms: number) => new Date(ms).toISOString();
 
 function newCustomer() {
@@ -75,7 +76,12 @@ function bridge(db: World): WorkOrderDeps {
   };
 }
 const rpc = (db: World, method: string, params?: object) =>
-  handleBridgeRpc(db.client, auth, bridge(db), { jsonrpc: "2.0", id: 1, method, params });
+  handleBridgeRpc(
+    db.client,
+    operatorAuth(db, (params as { arguments?: { workOrderId?: string } })?.arguments?.workOrderId),
+    bridge(db),
+    { jsonrpc: "2.0", id: 1, method, params },
+  );
 const call = async (db: World, name: string, args: Record<string, unknown>) =>
   JSON.stringify(await rpc(db, "tools/call", { name, arguments: args }));
 /** The credential as a person generates it in the admin screen. */
@@ -141,7 +147,7 @@ describe("no credential ever reaches the operator's AI client", () => {
         agentId: "Cust-agent-1",
         version: 3,
         fingerprint,
-        toolAuth: SIX.map((name) => ({ name, authType: "bearer" })),
+        toolAuth: toolEvidence(),
       }),
     );
     assert.match(responses.at(-1)!, /registered/);
@@ -197,7 +203,13 @@ describe("a bridge token only lives as long as its issuer's rights", () => {
   async function issued(role = "super_admin") {
     const db = world();
     db.tables["platform_admins"] = [{ user_id: USER, role, is_active: true }];
-    const t = await issueBridgeToken(db.client, { createdBy: USER, now: NOW });
+    db.tables["provisioning_runs"] = ["job-1", "job-2"].map((id) => ({
+      id,
+      organization_id: ORG,
+      status: "waiting",
+      current_step: "waiting_for_agent",
+    }));
+    const t = await issueBridgeToken(db.client, { createdBy: USER, runId: "job-1", now: NOW });
     const check = () => authenticateBridge(db.client, `Bearer ${t.token}`, NOW);
     return { db, check, admin: () => db.tables["platform_admins"]![0]! };
   }
@@ -226,7 +238,7 @@ describe("a bridge token only lives as long as its issuer's rights", () => {
     const { db, check } = await issued();
     const other = "00000000-0000-0000-0000-0000000000cc";
     db.tables["platform_admins"]!.push({ user_id: other, role: "admin", is_active: true });
-    const t2 = await issueBridgeToken(db.client, { createdBy: other, now: NOW });
+    const t2 = await issueBridgeToken(db.client, { createdBy: other, runId: "job-2", now: NOW });
     db.tables["platform_admins"] = db.tables["platform_admins"]!.filter(
       (r) => r["user_id"] !== USER,
     );

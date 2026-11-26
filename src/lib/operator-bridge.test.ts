@@ -13,7 +13,16 @@ import {
 } from "./operator-bridge.server.ts";
 import { AUTH_FAILURE_MESSAGE, handleBridgeRpc } from "./operator-bridge-mcp.server.ts";
 import { CLICKAI_TOOL_NAMES } from "./sarvam-agent-tools-spec.ts";
-import { ORG, OTHER, snapshot, world, deps, num } from "./provisioning-test-world.test-helper.ts";
+import {
+  ORG,
+  OTHER,
+  snapshot,
+  world,
+  deps,
+  num,
+  operatorAuth,
+  toolEvidence,
+} from "./provisioning-test-world.test-helper.ts";
 
 /**
  * The operator bridge against an in-memory database and a MOCKED operator
@@ -79,13 +88,9 @@ function bridgeDeps(
   };
 }
 
-const auth = (db: World): Extract<BridgeAuth, { ok: true }> => {
-  void db;
-  return { ok: true, tokenId: "tok_1", createdBy: USER, prefix: "cbr_abcd" };
-};
-
 const SIX = [...CLICKAI_TOOL_NAMES];
-const bearerFor = (names: readonly string[]) => names.map((name) => ({ name, authType: "bearer" }));
+const bearerFor = (names: readonly string[]) =>
+  toolEvidence().filter((e) => names.includes(e.name));
 
 const rawCall = async (
   db: World,
@@ -93,7 +98,8 @@ const rawCall = async (
   name: string,
   args: Record<string, unknown>,
 ) => {
-  const out = await handleBridgeRpc(db.client, auth(db), d, {
+  const job = typeof args["workOrderId"] === "string" ? args["workOrderId"] : undefined;
+  const out = await handleBridgeRpc(db.client, operatorAuth(db, job), d, {
     jsonrpc: "2.0",
     id: 1,
     method: "tools/call",
@@ -122,29 +128,39 @@ const call = async (db: World, d: WorkOrderDeps, name: string, args: Record<stri
 };
 
 describe("bridge tokens", () => {
-  test("only a hash is stored; the token authenticates until it expires", async () => {
-    const db = world();
+  /** An open work order, and an admin who may build agents. */
+  async function openJob() {
+    const db = waitingWorld();
     db.tables["platform_admins"] = [{ user_id: USER, role: "super_admin", is_active: true }];
-    const t = await issueBridgeToken(db.client, { createdBy: USER, hours: 8, now: NOW });
+    await first(db);
+    const runId = String(db.tables["provisioning_runs"]![0]!["id"]);
+    return { db, runId };
+  }
+
+  test("only a hash is stored; the token authenticates until it expires", async () => {
+    const { db, runId } = await openJob();
+    const t = await issueBridgeToken(db.client, { createdBy: USER, runId, now: NOW });
     const row = db.tables["operator_bridge_tokens"]![0]!;
     assert.notEqual(row["token_hash"], t.token);
     assert.doesNotMatch(JSON.stringify(row), new RegExp(t.token));
     const ok = await authenticateBridge(db.client, `Bearer ${t.token}`, NOW);
     assert.equal(ok.ok, true);
-    const later = new Date(NOW.getTime() + 9 * 3_600_000);
+    const later = new Date(NOW.getTime() + 2 * 3_600_000);
     const expired = await authenticateBridge(db.client, `Bearer ${t.token}`, later);
     assert.deepEqual(expired, { ok: false, reason: "expired" });
     assert.match(AUTH_FAILURE_MESSAGE["expired"]!, /create a new one/);
   });
 
-  test("lifetime is capped at 12 hours", async () => {
-    const db = world();
-    const t = await issueBridgeToken(db.client, { createdBy: USER, hours: 500, now: NOW });
-    assert.equal(new Date(t.expiresAt).getTime() - NOW.getTime(), 12 * 3_600_000);
+  test("one hour by default, never more than four", async () => {
+    const { db, runId } = await openJob();
+    const usual = await issueBridgeToken(db.client, { createdBy: USER, runId, now: NOW });
+    assert.equal(new Date(usual.expiresAt).getTime() - NOW.getTime(), 3_600_000);
+    const t = await issueBridgeToken(db.client, { createdBy: USER, runId, hours: 500, now: NOW });
+    assert.equal(new Date(t.expiresAt).getTime() - NOW.getTime(), 4 * 3_600_000);
   });
 
   test("missing, malformed, unknown and revoked tokens are refused", async () => {
-    const db = world();
+    const { db, runId } = await openJob();
     assert.deepEqual(await authenticateBridge(db.client, null, NOW), {
       ok: false,
       reason: "missing",
@@ -157,7 +173,7 @@ describe("bridge tokens", () => {
       ok: false,
       reason: "invalid",
     });
-    const t = await issueBridgeToken(db.client, { createdBy: USER, now: NOW });
+    const t = await issueBridgeToken(db.client, { createdBy: USER, runId, now: NOW });
     assert.equal(await revokeBridgeTokens(db.client, NOW), 1);
     assert.deepEqual(await authenticateBridge(db.client, `Bearer ${t.token}`, NOW), {
       ok: false,
@@ -171,7 +187,7 @@ describe("MCP protocol", () => {
     const db = world();
     const d = bridgeDeps(db);
     const rpc = (method: string, params?: object) =>
-      handleBridgeRpc(db.client, auth(db), d, { jsonrpc: "2.0", id: 7, method, params });
+      handleBridgeRpc(db.client, operatorAuth(db), d, { jsonrpc: "2.0", id: 7, method, params });
     const init = (await rpc("initialize", { protocolVersion: "2025-06-18" })) as {
       result: { protocolVersion: string; capabilities: object };
     };
@@ -189,8 +205,11 @@ describe("MCP protocol", () => {
     assert.equal(await rpc("notifications/initialized"), null);
     assert.equal(((await rpc("nope")) as { error: { code: number } }).error.code, -32601);
     assert.equal(
-      ((await handleBridgeRpc(db.client, auth(db), d, { id: 1 })) as { error: { code: number } })
-        .error.code,
+      (
+        (await handleBridgeRpc(db.client, operatorAuth(db), d, { id: 1 })) as {
+          error: { code: number };
+        }
+      ).error.code,
       -32600,
     );
   });

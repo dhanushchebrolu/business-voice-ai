@@ -144,6 +144,23 @@ async function addEvent(
 const lastDoneStep = (states: StepStates): string | null =>
   [...JOB_STEP_KEYS].reverse().find((k) => states[k]?.status === "done") ?? null;
 
+/** Below PostgREST's default row cap, so a short page really is the last one. */
+const PAGE = 500;
+const ORG_CHUNK = 200;
+
+/** Every row of a query, page by page (the query must have a stable order). */
+async function allRows<T>(
+  page: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: unknown }>,
+): Promise<T[]> {
+  const rows: T[] = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await page(from, from + PAGE - 1);
+    if (error) throw error;
+    rows.push(...(data ?? []));
+    if ((data?.length ?? 0) < PAGE) return rows;
+  }
+}
+
 /**
  * What a waiting job is waiting ON, per customer: when the agent, the voice settings and the
  * tool-authentication confirmation last changed (database timestamps only, so no clock skew).
@@ -151,34 +168,53 @@ const lastDoneStep = (states: StepStates): string | null =>
  * counts as news afterwards.
  */
 async function changeMarks(admin: Admin, organizationIds: string[]) {
-  const [agents, voices, confirms] = await Promise.all([
-    admin
-      .from("agent_configs")
-      .select("organization_id, sarvam_app_id, updated_at")
-      .in("organization_id", organizationIds),
-    admin
-      .from("agent_voice_language_settings")
-      .select("organization_id, updated_at")
-      .in("organization_id", organizationIds),
-    admin
-      .from("provisioning_run_events")
-      .select("organization_id, created_at")
-      .eq("event", "tool_auth_confirmed")
-      .in("organization_id", organizationIds)
-      .order("created_at", { ascending: false })
-      // shortcut: one page; past 1000 confirmations among waiting customers, markers could disagree.
-      .limit(1000),
-  ]);
-  for (const r of [agents, voices, confirms]) if (r.error) throw r.error;
+  const agents: { organization_id: string; sarvam_app_id: string | null; updated_at: string }[] =
+    [];
+  const voices: { organization_id: string; updated_at: string }[] = [];
+  const confirms: { organization_id: string; created_at: string }[] = [];
+  // In chunks: the ids travel in the query's URL.
+  for (let i = 0; i < organizationIds.length; i += ORG_CHUNK) {
+    const ids = organizationIds.slice(i, i + ORG_CHUNK);
+    const [a, v, c] = await Promise.all([
+      allRows((from, to) =>
+        admin
+          .from("agent_configs")
+          .select("organization_id, sarvam_app_id, updated_at")
+          .in("organization_id", ids)
+          .order("id")
+          .range(from, to),
+      ),
+      allRows((from, to) =>
+        admin
+          .from("agent_voice_language_settings")
+          .select("organization_id, updated_at")
+          .in("organization_id", ids)
+          .order("id")
+          .range(from, to),
+      ),
+      allRows((from, to) =>
+        admin
+          .from("provisioning_run_events")
+          .select("organization_id, created_at")
+          .eq("event", "tool_auth_confirmed")
+          .in("organization_id", ids)
+          .order("id")
+          .range(from, to),
+      ),
+    ]);
+    agents.push(...a);
+    voices.push(...v);
+    confirms.push(...c);
+  }
   return new Map(
     organizationIds.map((org) => {
-      const of = <T extends { organization_id: string }>(rows: T[] | null) =>
-        (rows ?? []).filter((r) => r.organization_id === org);
-      const agentRows = of(agents.data);
+      const of = <T extends { organization_id: string }>(rows: T[]) =>
+        rows.filter((r) => r.organization_id === org);
+      const agentRows = of(agents);
       const mark = [
         agentRows.map((r) => r.updated_at),
-        of(voices.data).map((r) => r.updated_at),
-        of(confirms.data).map((r) => r.created_at),
+        of(voices).map((r) => r.updated_at),
+        of(confirms).map((r) => r.created_at),
       ]
         .map((times) => times.sort().at(-1) ?? "")
         .join("|");
@@ -429,7 +465,7 @@ export interface SweepResult {
  *      attempt), so a registration whose own resume failed still continues the job. A job
  *      that has already re-run on the current state is left alone: re-running it every
  *      minute would change nothing and only grow the event trail.
- * Bounded per tick (maxRuns, budgetMs); the rest wait for the next minute.
+ * Bounded per tick (maxRuns claimed runs, budgetMs); the rest take their turn in later ticks.
  */
 export async function sweepProvisioningRetries(
   admin: Admin,
@@ -442,43 +478,52 @@ export async function sweepProvisioningRetries(
 ): Promise<SweepResult> {
   const now = options.now ?? new Date();
   const run = options.run ?? ((a, i) => runProvisioning(a, i));
+  // Every candidate is read (no fixed window that a job could stay outside of).
+  // shortcut: a full scan each minute; with thousands of waiting jobs, mark changed jobs instead.
   const [due, stuck, waiting] = await Promise.all([
-    admin
-      .from("provisioning_runs")
-      .select("organization_id, trigger")
-      .eq("status", "pending")
-      .lte("next_attempt_at", now.toISOString())
-      .order("next_attempt_at", { ascending: true })
-      .limit(10),
-    admin
-      .from("provisioning_runs")
-      .select("organization_id, trigger")
-      .eq("status", "running")
-      .lt("updated_at", new Date(now.getTime() - STALE_RUNNING_MS).toISOString())
-      .limit(10),
-    admin
-      .from("provisioning_runs")
-      .select("organization_id, trigger, diagnostics")
-      .eq("status", "waiting")
-      // Only a customer's own activation click authorizes going live automatically.
-      .eq("trigger", "customer_activate")
-      .in("current_step", [
-        "waiting_for_agent",
-        "waiting_for_voice_language",
-        "waiting_for_tool_authentication",
-      ])
-      // Wide on purpose: most waiting jobs are unchanged and filtered out below, so a small
-      // window could starve the one that changed. shortcut: 200 waiting jobs (the ids also go
-      // into the follow-up queries' URLs); page beyond that.
-      .limit(200),
+    allRows((from, to) =>
+      admin
+        .from("provisioning_runs")
+        .select("organization_id, trigger")
+        .eq("status", "pending")
+        .lte("next_attempt_at", now.toISOString())
+        .order("next_attempt_at", { ascending: true })
+        .order("id")
+        .range(from, to),
+    ),
+    allRows((from, to) =>
+      admin
+        .from("provisioning_runs")
+        .select("organization_id, trigger")
+        .eq("status", "running")
+        .lt("updated_at", new Date(now.getTime() - STALE_RUNNING_MS).toISOString())
+        .order("id")
+        .range(from, to),
+    ),
+    allRows((from, to) =>
+      admin
+        .from("provisioning_runs")
+        .select("organization_id, trigger, diagnostics")
+        .eq("status", "waiting")
+        // Only a customer's own activation click authorizes going live automatically.
+        .eq("trigger", "customer_activate")
+        .in("current_step", [
+          "waiting_for_agent",
+          "waiting_for_voice_language",
+          "waiting_for_tool_authentication",
+        ])
+        .order("id")
+        .range(from, to),
+    ),
   ]);
-  for (const r of [due, stuck, waiting]) if (r.error) throw r.error;
 
-  let registered: typeof waiting.data = [];
-  const waitingOrgs = (waiting.data ?? []).map((w) => w.organization_id);
-  if (waitingOrgs.length) {
-    const marks = await changeMarks(admin, waitingOrgs);
-    registered = (waiting.data ?? []).filter((w) => {
+  let registered: typeof waiting = [];
+  if (waiting.length) {
+    const marks = await changeMarks(
+      admin,
+      waiting.map((w) => w.organization_id),
+    );
+    registered = waiting.filter((w) => {
       const now = marks.get(w.organization_id);
       const seenAt = (w.diagnostics as { seenChange?: string } | null)?.seenChange;
       // Only a change since the job's last attempt is news; otherwise it would wait again.
@@ -486,15 +531,25 @@ export async function sweepProvisioningRetries(
     });
   }
 
+  // Fairness: each tick starts one place further along every list, and the lists take turns,
+  // so jobs that keep failing (or a flood of one kind) cannot hold the others back.
+  const tick = Math.floor(now.getTime() / 60_000);
+  const lists = [due, stuck, registered].map((list) => {
+    const at = list.length ? tick % list.length : 0;
+    return [...list.slice(at), ...list.slice(0, at)];
+  });
+  const turns = Array.from({ length: Math.max(0, ...lists.map((l) => l.length)) }, (_, i) =>
+    lists.flatMap((l) => l.slice(i, i + 1)),
+  ).flat();
   const seen = new Set<string>();
-  const queue = [...(due.data ?? []), ...(stuck.data ?? []), ...(registered ?? [])].filter(
-    (r) => !seen.has(r.organization_id) && seen.add(r.organization_id),
-  );
+  const queue = turns.filter((r) => !seen.has(r.organization_id) && seen.add(r.organization_id));
+  const maxRuns = options.maxRuns ?? 3;
   const deadline = Date.now() + (options.budgetMs ?? 15_000);
   let processed = 0;
   let errors = 0;
-  for (const r of queue.slice(0, options.maxRuns ?? 3)) {
-    if (Date.now() > deadline) break;
+  // Only claimed runs use up the tick's slots; a failing job does not block the next one.
+  for (const r of queue) {
+    if (processed >= maxRuns || errors >= maxRuns * 3 || Date.now() > deadline) break;
     try {
       const out = await run(admin, {
         organizationId: r.organization_id,
@@ -507,9 +562,9 @@ export async function sweepProvisioningRetries(
     }
   }
   return {
-    due: due.data?.length ?? 0,
-    stuck: stuck.data?.length ?? 0,
-    agentRegistered: registered?.length ?? 0,
+    due: due.length,
+    stuck: stuck.length,
+    agentRegistered: registered.length,
     processed,
     errors,
   };

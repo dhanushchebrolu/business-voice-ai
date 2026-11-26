@@ -124,9 +124,13 @@ export interface ToolDefinition {
   connectorConfig: Record<string, unknown>;
 }
 
-export function clickAiToolDefinitions(baseUrl: string): ToolDefinition[] {
+/** The fixed value every tool of one customer's agent sends, checked against its credential. */
+export const agentRef = (role: "inbound" | "outbound", agentConfigId: string) =>
+  `${role}:${agentConfigId}`;
+
+export function clickAiToolDefinitions(baseUrl: string, ref?: string): ToolDefinition[] {
   const root = `${baseUrl.replace(/\/+$/, "")}/api/public/sarvam/agent`;
-  return [
+  const tools: ToolDefinition[] = [
     {
       name: "clickai_business_context",
       toolType: "webhook_on_start",
@@ -285,6 +289,17 @@ export function clickAiToolDefinitions(baseUrl: string): ToolDefinition[] {
       },
     },
   ];
+  if (!ref) return tools;
+  return tools.map((t) => ({
+    ...t,
+    connectorConfig: {
+      ...t.connectorConfig,
+      body: [
+        ...(t.connectorConfig["body"] as unknown[]),
+        { name: "agent_ref", type: "static", value: ref },
+      ],
+    },
+  }));
 }
 
 /**

@@ -59,6 +59,12 @@ function ToolAuthCheckpointCard({
             "not recorded"
           )}
         </dd>
+        <dt className="text-muted-foreground">Agent role</dt>
+        <dd>{c.agentRole}</dd>
+        <dt className="text-muted-foreground">Tool agent_ref</dt>
+        <dd>
+          <code>{c.agentRef}</code> (fixed value on all six tools)
+        </dd>
         <dt className="text-muted-foreground">Credential to select</dt>
         <dd>
           <code>{c.credentialName}</code> (name only, this customer's)
@@ -136,9 +142,15 @@ export function OperatorBridgePanel() {
     queryFn: () => status(),
     refetchInterval: 30_000,
   });
-  const [issueOpen, setIssueOpen] = useState(false);
+  /** The one work order a new token will be limited to. */
+  const [issueFor, setIssueFor] = useState<{ runId: string; customer: string } | null>(null);
   const [revokeOpen, setRevokeOpen] = useState(false);
-  const [shown, setShown] = useState<{ token: string; expiresAt: string } | null>(null);
+  const [shown, setShown] = useState<{
+    token: string;
+    expiresAt: string;
+    customer: string;
+    runId: string;
+  } | null>(null);
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["operator-bridge"] });
   const command = (token: string) =>
     `claude mcp add --transport http clickai-operator ${data?.endpoint ?? "<ClickAI base URL>/api/public/operator/mcp"} --header "Authorization: Bearer ${token}"`;
@@ -154,7 +166,7 @@ export function OperatorBridgePanel() {
   return (
     <SectionCard
       title="Agent builder (operator bridge)"
-      description="Sarvam only allows agent authoring through a signed-in person, so ClickAI never holds a Sarvam token. Connect your own Sarvam-signed-in MCP client here and it builds waiting customers' agents; ClickAI then finishes deployment, number routing, verification and activation by itself."
+      description="Sarvam only allows agent authoring through a signed-in person, so ClickAI never holds a Sarvam token. Connect your own Sarvam-signed-in MCP client here and, with a token for one customer's job, it builds that agent; ClickAI then finishes deployment, number routing, verification and activation by itself."
     >
       {isLoading ? (
         <LoadingState label="Loading operator bridge" />
@@ -208,6 +220,13 @@ export function OperatorBridgePanel() {
                           : "waiting for agent creation"}
                   </StatusPill>
                   <code className="text-muted-foreground">{w.agentId ?? w.agentName}</code>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setIssueFor({ runId: w.workOrderId, customer: w.customer })}
+                  >
+                    Create bridge token (1 h)
+                  </Button>
                   {w.checkpoint ? (
                     <ToolAuthCheckpointCard checkpoint={w.checkpoint} onCopy={copy} />
                   ) : null}
@@ -219,7 +238,8 @@ export function OperatorBridgePanel() {
             <ul className="text-xs text-muted-foreground">
               {data!.tokens.map((t) => (
                 <li key={t.id}>
-                  <code>{t.token_prefix}…</code> expires {when(t.expires_at)}
+                  <code>{t.token_prefix}…</code> {t.agent_role} agent, job <code>{t.run_id}</code>,
+                  expires {when(t.expires_at)}
                   {t.last_used_at ? `, last used ${when(t.last_used_at)}` : ", unused"}
                 </li>
               ))}
@@ -227,10 +247,14 @@ export function OperatorBridgePanel() {
           ) : null}
           {shown ? (
             <div className="space-y-2 rounded-md border border-border bg-muted p-3" role="status">
+              <p className="text-xs">
+                Works only for <strong>{shown.customer}</strong>, job <code>{shown.runId}</code>,
+                inbound agent. It stops working after that agent is submitted.
+              </p>
               <p className="text-xs font-medium">
                 Shown once. Expires {when(shown.expiresAt)}. Sign in to Sarvam in the same client (
                 <code>/mcp</code> → sarvam-voice-agents → Authenticate; Sarvam signs you out after
-                24 h), then ask it: "Process the pending ClickAI agent work orders."
+                24 h), then ask it: "Process the ClickAI agent work order."
               </p>
               <pre className="overflow-auto text-[11px]">{command(shown.token)}</pre>
               <Button size="sm" variant="outline" onClick={() => copy(command(shown.token))}>
@@ -239,9 +263,6 @@ export function OperatorBridgePanel() {
             </div>
           ) : null}
           <div className="flex gap-2">
-            <Button size="sm" onClick={() => setIssueOpen(true)}>
-              Create bridge token (8 h)
-            </Button>
             {data!.tokens.length ? (
               <Button size="sm" variant="outline" onClick={() => setRevokeOpen(true)}>
                 Revoke all
@@ -251,14 +272,20 @@ export function OperatorBridgePanel() {
         </div>
       )}
       <ReasonDialog
-        open={issueOpen}
-        onOpenChange={setIssueOpen}
-        title="Create an operator bridge token?"
-        description="Gives your MCP client access to agent work orders for 8 hours. It can read the generated agent configuration for waiting customers and register the agents it builds. It cannot reach anything else."
+        open={issueFor !== null}
+        onOpenChange={(open) => !open && setIssueFor(null)}
+        title={`Create a bridge token for ${issueFor?.customer ?? ""}?`}
+        description={`For ${issueFor?.customer ?? ""} only: job ${issueFor?.runId ?? ""}, inbound agent. Your MCP client can read that work order and register that one agent, for 1 hour. Check the customer before confirming. A new token replaces the previous one for this job.`}
         confirmLabel="Create token"
         onConfirm={async (reason) => {
-          const out = await issue({ data: { hours: 8, reason } });
-          setShown({ token: out.token, expiresAt: out.expiresAt });
+          const target = issueFor!;
+          const out = await issue({ data: { runId: target.runId, reason } });
+          setShown({
+            token: out.token,
+            expiresAt: out.expiresAt,
+            customer: target.customer,
+            runId: out.runId,
+          });
           await refresh();
         }}
       />
