@@ -3,7 +3,7 @@ import type { Database } from "@/integrations/supabase/types";
 import type { AgentSnapshot } from "./agent-instructions.ts";
 import { MASTER_AGENT_TOOLS, buildUniversalAgentConfig } from "./universal-agent-config.ts";
 import { customerAgentName, registerProvisionedAgent } from "./sarvam-agent-provisioner.server.ts";
-import { maskPhone, sanitizeDiagnostic } from "./voice-provisioning-job.ts";
+import { CLOSED_LIFECYCLES, maskPhone, sanitizeDiagnostic } from "./voice-provisioning-job.ts";
 import {
   CLICKAI_TOOL_NAMES,
   agentRef,
@@ -53,6 +53,16 @@ async function sha256Hex(value: string): Promise<string> {
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+async function customerClosed(admin: Admin, organizationId: string): Promise<boolean> {
+  const { data, error } = await admin
+    .from("organizations")
+    .select("lifecycle_status")
+    .eq("id", organizationId)
+    .maybeSingle();
+  if (error) throw error;
+  return !data || CLOSED_LIFECYCLES.includes(data.lifecycle_status);
+}
+
 /**
  * A token for ONE open work order: that customer, that job, the inbound agent. Issuing a new
  * one revokes the job's previous token. (Outbound agents are registered in the admin screen;
@@ -74,6 +84,8 @@ export async function issueBridgeToken(
     throw new BridgeError("invalid", "The operator bridge only builds inbound agents.");
   const run = await openRun(admin, input.runId);
   if (!run) throw new BridgeError("not_found", "No open work order with that id.");
+  if (await customerClosed(admin, run.organization_id))
+    throw new BridgeError("conflict", "That customer is suspended or cancelled.");
   const hours = Math.min(Math.max(input.hours ?? BRIDGE_DEFAULT_HOURS, 1), BRIDGE_MAX_HOURS);
   const now = input.now ?? new Date();
   const bytes = crypto.getRandomValues(new Uint8Array(32));
@@ -180,6 +192,8 @@ export async function authenticateBridge(
     (run.current_step ?? "").startsWith("waiting_for_outbound")
   )
     return revoke();
+  // Cancelled or suspended customers: the job may not have noticed yet; the token ends now.
+  if (await customerClosed(admin, organizationId)) return revoke();
   await admin
     .from("operator_bridge_tokens")
     .update({ last_used_at: now.toISOString() })
@@ -700,6 +714,12 @@ export async function submitAgentResult(
     throw new BridgeError(
       "conflict",
       "This customer already has a different agent registered. Replace it in the ClickAI admin screen.",
+    );
+  // A stale submission never replaces a newer registered version.
+  if (agent.sarvam_app_version && input.version < agent.sarvam_app_version)
+    throw new BridgeError(
+      "conflict",
+      `Version ${agent.sarvam_app_version} of this agent is already registered; version ${input.version} is older. Submit the current committed version.`,
     );
   // The tools must have been reported for THIS agent first: the checkpoint cannot be skipped.
   const reported = await reportedAgent(admin, run.organization_id, run.id);

@@ -527,3 +527,65 @@ describe("concurrent attempts", () => {
     assert.equal(num(db, "num_new")["status"], "provisioning");
   });
 });
+
+describe("closed customers, older versions and superseded attempts", () => {
+  for (const lifecycle of ["suspended", "cancelled", "archived"])
+    test(`a ${lifecycle} customer gets no token, and loses the one it had for good`, async () => {
+      const { db, jobId } = await twoJobs();
+      const s = await session(db, jobId);
+      const org = db.tables["organizations"]![0]!;
+      const before = org["lifecycle_status"];
+      org["lifecycle_status"] = lifecycle;
+      assert.deepEqual(await s.check(), { ok: false, reason: "revoked" });
+      await assert.rejects(
+        issueBridgeToken(db.client, { createdBy: ADMIN, runId: jobId, now: NOW }),
+        /suspended or cancelled/,
+      );
+      org["lifecycle_status"] = before;
+      assert.deepEqual(await s.check(), { ok: false, reason: "revoked" }, "not revived");
+    });
+
+  test("an older version never replaces a newer registered one", async () => {
+    const { db, auth, check, submit } = await reported();
+    Object.assign(db.tables["agent_configs"]![0]!, {
+      sarvam_app_id: "Cust-agent-1",
+      sarvam_app_version: 4,
+    });
+    const r = await callAs(db, auth, "submit_agent_result", submit({ version: 3 }));
+    assert.match(r.body.message, /version 3 is older/);
+    assert.equal(db.tables["agent_configs"]![0]!["sarvam_app_version"], 4);
+    assert.equal(events(db, "tool_auth_confirmed").length, 0);
+    assert.equal((await check()).ok, true, "the token is not used up");
+  });
+
+  test("a superseded attempt stops at its next step: it never resumes or activates", async () => {
+    const { db } = await twoJobs();
+    Object.assign(db.tables["agent_configs"]![0]!, {
+      sarvam_app_id: "Cust-agent-1",
+      sarvam_app_version: 3,
+    });
+    Object.assign(db.tables["agent_voice_language_settings"]![0]!, {
+      status: "applied",
+      applied_sarvam_app_id: "Cust-agent-1",
+      applied_sarvam_app_version: 3,
+    });
+    confirmToolAuth(db, "Cust-agent-1", 3);
+    const dep = pipelineDeps(db);
+    const read = dep.d.getDeployment;
+    dep.d.getDeployment = async (id) => {
+      // While Sarvam is answering, another worker reclaims the job.
+      Object.assign(jobs(db)[0]!, {
+        attempts: Number(jobs(db)[0]!["attempts"]) + 1,
+        status: "running",
+        current_job_step: "newer",
+      });
+      return read(id);
+    };
+    const r = await run(db, dep);
+    assert.deepEqual([r.claimed, r.result], [false, null]);
+    assert.equal(num(db, "num_new")["status"], "provisioning");
+    assert.equal(num(db, "num_new")["verified_deployment_id"] ?? null, null);
+    assert.equal(dep.calls.resume, 0);
+    assert.equal(jobs(db)[0]!["current_job_step"], "newer", "the newer attempt's record is kept");
+  });
+});

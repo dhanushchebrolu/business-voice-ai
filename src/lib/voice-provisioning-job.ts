@@ -122,6 +122,9 @@ export const FAILURE_HINTS: Partial<Record<FailureCode, string>> = {
     "Automatic retries are used up. Check the diagnostics, then use Retry provisioning.",
 };
 
+/** Customers for whom nothing is provisioned (and no operator token works). */
+export const CLOSED_LIFECYCLES = ["suspended", "cancelled", "archived"];
+
 export const MAX_AUTOMATIC_ATTEMPTS = 5;
 const BACKOFF_BASE_MS = 30_000;
 const BACKOFF_CAP_MS = 15 * 60_000;

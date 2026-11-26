@@ -238,7 +238,10 @@ activation.
 - One customer, one provisioning job, the inbound agent. Any other work order id answers "not found".
 - 1 hour by default, 4 at most. A new token for the job revokes the previous one.
 - Re-checked on every request: the issuer is still an active admin with `agents.write`, and the job is
-  still open (not succeeded, failed, deleted, or past the inbound agent). Otherwise revoked for good.
+  still open (not succeeded, failed, deleted, or past the inbound agent), and the customer is not
+  suspended, cancelled or archived. Otherwise revoked for good (at the token's next use).
+- A submission of an older version than the one registered is refused. An attempt that a newer one has
+  taken over stops at its next step.
 - The one registration it can make uses it up. Before that, reads and the (idempotent) report can be
   repeated by whoever holds it: it is a bearer token.
 - The bridge builds inbound agents only; no outbound token can be issued.

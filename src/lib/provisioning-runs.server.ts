@@ -223,6 +223,8 @@ async function changeMarks(admin: Admin, organizationIds: string[]) {
   );
 }
 
+class Superseded extends Error {}
+
 export async function runProvisioning(
   admin: Admin,
   input: RunProvisioningInput,
@@ -295,12 +297,15 @@ export async function runProvisioning(
   const onStep = async (key: JobStepKey) => {
     currentKey = key;
     states = beginStep(states, key, nowIso());
-    const { error } = await admin
+    const { data: held, error } = await admin
       .from("provisioning_runs")
       .update({ current_job_step: key, step_states: states as unknown as Json })
       .eq("id", runId)
-      .eq("attempts", attempt);
+      .eq("attempts", attempt)
+      .select("id");
     if (error) throw error;
+    // A newer attempt reclaimed the job: stop here, before the next provider or database step.
+    if (!held?.length) throw new Superseded();
     await addEvent(admin, run, "step_started", key, { attempt });
   };
 
@@ -377,6 +382,8 @@ export async function runProvisioning(
     seenChange = (await changeMarks(admin, [input.organizationId])).get(input.organizationId)?.mark;
     result = await orchestrate(admin, input.organizationId, { onStep });
   } catch (err) {
+    if (err instanceof Superseded)
+      return { runId, claimed: false, status: "running", result: null };
     // An unexpected error ends this attempt (retried with backoff, bounded), never a stuck "running".
     const message = (err as Error).message ?? String(err);
     const retry = streak < maxAttempts;

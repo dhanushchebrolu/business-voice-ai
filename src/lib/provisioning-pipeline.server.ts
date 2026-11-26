@@ -5,7 +5,7 @@ import type { ProvisionOrganizationResult } from "./provisioning-orchestrator.se
 import type { ProvisioningState } from "./provisioning-state.ts";
 import { normalizeCustomerPhone } from "./phone-number.ts";
 import { buildUniversalAgentConfig, type UniversalAgentConfig } from "./universal-agent-config.ts";
-import type { FailureCode, JobStepKey } from "./voice-provisioning-job.ts";
+import { CLOSED_LIFECYCLES, type FailureCode, type JobStepKey } from "./voice-provisioning-job.ts";
 import { DEFAULT_MASTER_AGENT_APP_ID } from "./sarvam-agent-tools-spec.ts";
 import type { EnsureAgentContext, EnsureAgentOutcome } from "./sarvam-agent-provisioner.server.ts";
 
@@ -307,7 +307,7 @@ export async function runProvisioningPipeline(
     .maybeSingle();
   if (orgError) throw orgError;
   if (!org) return done(1, "failed", "organization not found.");
-  if (["suspended", "cancelled", "archived"].includes(org.lifecycle_status))
+  if (CLOSED_LIFECYCLES.includes(org.lifecycle_status))
     return done(1, "failed", `organization is ${org.lifecycle_status}; nothing provisioned.`);
   // Payment done, setup underway (forward only; ready/active stay the admin handover's call).
   if (org.lifecycle_status === "setup_paid") {
