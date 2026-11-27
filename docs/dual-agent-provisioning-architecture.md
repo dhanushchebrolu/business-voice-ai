@@ -50,7 +50,9 @@ Nothing is migrated, created, redeployed or remapped, and this change adds no mi
 - Live inbound agents: unchanged; never gated.
 - Outbound agent already confirmed for calling: unchanged; re-confirming that version stays possible.
 - Outbound agent registered but not confirmed: its tool credentials must now be confirmed before it
-  can be marked ready.
+  can be marked ready (bridge, or an admin's check on the provisioning page).
+- A confirmed version that is withdrawn or replaced can be enabled again while the outbound credential
+  is live (`voice-ai-provisioning-workflow.md`, "Recovery").
 - No outbound agent: outbound calls and campaigns refuse, as before. Add one when wanted: the job
   reaches `waiting_for_outbound_agent`, then follow the outbound work order.
 - Tools without `agent_ref` (everything built earlier) behave as before.

@@ -11,6 +11,7 @@ import {
 } from "@/lib/operator-bridge.functions";
 import { ErrorState, LoadingState, SectionCard, StatusPill } from "@/components/app/primitives";
 import { ReasonDialog } from "@/components/admin/ReasonDialog";
+import { ReleaseAgentButton } from "@/components/admin/AgentRecovery";
 import { Button } from "@/components/ui/button";
 
 const when = (v: string) => new Date(v).toLocaleString();
@@ -239,6 +240,17 @@ export function OperatorBridgePanel() {
                   >
                     Create bridge token (1 h)
                   </Button>
+                  {w.agentId ? (
+                    <ReleaseAgentButton
+                      orgId={w.customerId}
+                      customer={w.customer}
+                      appId={w.agentId}
+                      onDone={async () => {
+                        setShown(null);
+                        await refresh();
+                      }}
+                    />
+                  ) : null}
                   {w.checkpoint ? (
                     <ToolAuthCheckpointCard checkpoint={w.checkpoint} onCopy={copy} />
                   ) : null}

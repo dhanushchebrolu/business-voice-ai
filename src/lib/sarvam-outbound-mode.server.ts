@@ -5,6 +5,7 @@ import {
   outboundCallingDisabled,
 } from "./outbound-eligibility.server.ts";
 import { OUTBOUND_MAX_CALL_SECONDS_CAP, OUTBOUND_TEXT_LIMITS } from "./agent-roles.ts";
+import { preserveOutboundConfirmation, type Actor } from "./agent-recovery.server.ts";
 import { toolAuthStatus } from "./tool-auth-checkpoint.server.ts";
 
 /**
@@ -178,6 +179,8 @@ export type SetOutboundReadyResult =
       appId: string | null;
       appVersion: number | null;
       maxCallSeconds: number | null;
+      /** false: the earlier confirmation could not be kept, so re-enabling it needs a new one. */
+      evidencePreserved?: false;
     }
   | { ok: false; reason: string };
 
@@ -206,6 +209,8 @@ export async function setOutboundReady(
      * reservation (admit_single_outbound_call, call finalization).
      */
     maxCallSeconds?: number | undefined;
+    /** The admin making the change, recorded with any confirmation that is kept. */
+    actor?: Actor;
   },
 ): Promise<SetOutboundReadyResult> {
   if (input.ready) {
@@ -258,8 +263,35 @@ export async function setOutboundReady(
     return {
       ok: false,
       reason:
-        "The outbound agent's tool credentials are not confirmed for this version. Confirm them first (operator bridge, outbound role: report_tools_created, then submit_agent_result).",
+        "The outbound agent's tool credentials are not confirmed for this version. Confirm them first: on this customer's provisioning page (Confirm outbound tool credentials) or with the operator bridge (outbound role). A live outbound credential is required.",
     };
+
+  // Withdrawing or replacing a confirmation never loses it: that version can be enabled again.
+  // Withdrawing goes ahead even if this record cannot be written.
+  const was = {
+    appId: agent.sarvam_outbound_ready_app_id,
+    version: agent.sarvam_outbound_ready_version,
+  };
+  const replaced =
+    !input.ready ||
+    was.appId !== agent.sarvam_outbound_app_id ||
+    was.version !== agent.sarvam_outbound_app_version;
+  // Only a confirmation of the registered outbound agent: never an inbound or older mapping.
+  const kept =
+    replaced &&
+    was.appId &&
+    was.version &&
+    was.appId === agent.sarvam_outbound_app_id &&
+    was.appId !== agent.sarvam_app_id
+      ? await preserveOutboundConfirmation(admin, {
+          organizationId: input.organizationId,
+          agentConfigId: agent.id,
+          appId: was.appId,
+          version: was.version,
+          actor: input.actor,
+        })
+      : true;
+  const lost = kept ? {} : { evidencePreserved: false as const };
 
   let query = admin
     .from("agent_configs")
@@ -293,8 +325,9 @@ export async function setOutboundReady(
         appId: agent.sarvam_outbound_app_id,
         appVersion: agent.sarvam_outbound_app_version,
         maxCallSeconds: input.maxCallSeconds!,
+        ...lost,
       }
-    : { ok: true, ready: false, appId: null, appVersion: null, maxCallSeconds: null };
+    : { ok: true, ready: false, appId: null, appVersion: null, maxCallSeconds: null, ...lost };
 }
 
 /**

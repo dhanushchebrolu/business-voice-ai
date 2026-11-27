@@ -5,6 +5,10 @@ Branch `feature/automated-voice-provisioning` at `4b4e3548342a3805bb706c1df599b3
 production, Sarvam or Vobiz. **No production system was queried.** Statements about production state
 come from repository documents and the team's session notes, and are marked "per notes".
 
+> **Update, 2026-11-27:** H1 and H2 are fixed on this branch after the audit (see "Recovery" in
+> `voice-ai-provisioning-workflow.md`). Their entries below describe `4b4e354`. The fixes need no new
+> migration and have not been tried against real Sarvam. Sections 6 to 16 were not re-audited.
+
 ## 1. Executive verdict
 
 **READY WITH CONDITIONS** to deploy the code. **NOT READY** to onboard customers with it.
@@ -19,11 +23,8 @@ Conditions for deploying:
 1. Release with an explicit Worker deploy. Do not merge to `main` before migration `20261204090000` is
    applied (H3).
 2. Apply `20261204090000` first, with a history row and a lock timeout (H4).
-3. The read-only pre-checks in section 12 show that no existing customer depends on re-confirming or
-   changing an outbound agent (H2) and that no provisioning run will touch a live number (M3). Otherwise
-   fix H2 first.
-4. Do not onboard a real customer until H1 is fixed (or its workaround accepted) and both supervised
-   tests pass (H5).
+3. The read-only pre-checks in section 12 show that no provisioning run will touch a live number (M3).
+4. Do not onboard a real customer until both supervised tests pass (H5).
 
 ## 2. What was audited
 
@@ -62,7 +63,7 @@ No critical finding.
 
 ### High
 
-**H1. One wrong agent ID in `report_tools_created` dead-ends the job.**
+**H1 (fixed after this audit). One wrong agent ID in `report_tools_created` dead-ends the job.**
 Evidence: `src/lib/operator-bridge.server.ts:832` refuses any second, different agent for the same job;
 `submit_agent_result` accepts only the reported one; there is no admin action to discard a report.
 Probe: report `Typo-agent-1`, then the correct ID: refused. Register the correct agent by hand: the job
@@ -75,7 +76,7 @@ taking the live number down, or editing the database.
 Smallest fix: an audited admin action "discard reported agent" for a job with no registered version of
 that role, and count another customer's report only while that job is open or the agent is registered.
 
-**H2. The new outbound confirmation gate can lock an existing customer out of outbound calling.**
+**H2 (fixed after this audit). The new outbound confirmation gate can lock an existing customer out of outbound calling.**
 Evidence: `src/lib/sarvam-outbound-mode.server.ts:242`. Confirming a version needs a
 `tool_auth_confirmed` event, which only `submit_agent_result` writes. That needs a job parked in an
 outbound state, which the pipeline reaches only after every inbound step passes for that customer.
@@ -547,8 +548,8 @@ browser checks of the admin bridge panel and numbers page; a rehearsal of deploy
 ## 18. Decisions needed from the owner
 
 1. Release route: direct Worker deploy (recommended) or merge to `main`; and a hold on Lovable pushes.
-2. Fix H2 before deploying, or accept it after the pre-check.
-3. Fix H1 before onboarding (recommended), or accept the suspend-number workaround.
+2. H2: fixed after this audit. Review the admin-attested confirmation before relying on it.
+3. H1: fixed after this audit.
 4. Approve a gate package for `20261204090000`.
 5. Approve the test tenant, spare number and real calls for section 13.
 6. Outbound policy: keep no transfer and no callback; keep outbound booking.

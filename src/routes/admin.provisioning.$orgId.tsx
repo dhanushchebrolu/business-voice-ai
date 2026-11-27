@@ -35,6 +35,8 @@ import { SarvamIntegrationPanel } from "@/components/admin/SarvamIntegrationPane
 import { OutboundAgentPanel } from "@/components/admin/OutboundAgentPanel";
 import { VoiceLanguagePanel } from "@/components/admin/VoiceLanguagePanel";
 import { ReasonDialog } from "@/components/admin/ReasonDialog";
+import { ReleaseAgentButton } from "@/components/admin/AgentRecovery";
+import { agentRef } from "@/lib/sarvam-agent-tools-spec";
 import {
   FAILURE_HINTS,
   JOB_STEPS,
@@ -407,6 +409,7 @@ function ProvisioningDetail() {
         config={data.outboundConfig}
         template={data.templates?.outbound ?? null}
         registeredAt={data.agent?.sarvam_outbound_registered_at ?? null}
+        agentRef={data.agent ? agentRef("outbound", data.agent.id) : null}
         onChanged={() => refresh()}
       />
 
@@ -448,6 +451,9 @@ function ProvisioningDetail() {
           >
             Register Sarvam agent
           </Button>
+          {data.agent ? (
+            <ReleaseAgentButton orgId={orgId} customer={data.org.name} onDone={refresh} />
+          ) : null}
         </div>
         <div
           className="mt-3 flex flex-wrap items-center gap-2 text-sm"
@@ -784,7 +790,7 @@ function ProvisioningDetail() {
         }
         description={
           outboundDialog === "clear"
-            ? "ClickAI stops placing outbound calls (single calls and campaigns) for this customer until the outbound agent is confirmed again. Inbound calls are not affected."
+            ? "ClickAI stops placing outbound calls (single calls and campaigns) for this customer until the outbound agent is confirmed again. The version confirmed now can be confirmed again while the outbound credential is live. Inbound calls are not affected."
             : "Records the customer's registered OUTBOUND agent version as tested for outbound calls. Nothing changes in Sarvam. Registering another outbound agent or version later blocks outbound again until that one is confirmed."
         }
         extra={
@@ -814,7 +820,7 @@ function ProvisioningDetail() {
             !(Number.isInteger(minutes) && minutes >= 1 && minutes <= 5)
           )
             throw new Error("Enter the max call length from Sarvam, 1 to 5 whole minutes");
-          await setOutboundReady({
+          const r = await setOutboundReady({
             data: {
               orgId,
               ready: outboundDialog === "mark",
@@ -825,6 +831,10 @@ function ProvisioningDetail() {
           toast.success(
             outboundDialog === "clear" ? "Outbound withdrawn." : "Version confirmed for outbound.",
           );
+          if (r.evidencePreserved === false)
+            toast.warning(
+              "The earlier confirmation could not be saved. Enabling that version again needs its tool credentials confirmed.",
+            );
           await refresh();
         }}
       />

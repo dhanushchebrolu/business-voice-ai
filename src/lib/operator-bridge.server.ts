@@ -15,7 +15,11 @@ import {
   sarvamSafePrompt,
   templateToolDefinitions,
 } from "./sarvam-agent-tools-spec.ts";
-import { reportedAgent, toolsCreatedReport } from "./tool-auth-checkpoint.server.ts";
+import {
+  claimedByAnotherCustomer,
+  reportedAgent,
+  toolsCreatedReport,
+} from "./tool-auth-checkpoint.server.ts";
 import { capabilitiesFor } from "./platform-admin.server.ts";
 import { AGENT_ROLES, isAgentRole, registeredAgent, type AgentRole } from "./agent-roles.ts";
 import { buildToolAuthCheckpoint } from "./tool-auth-checkpoint-view.ts";
@@ -790,18 +794,11 @@ export async function reportToolsCreated(
     throw new BridgeError("conflict", "That Sarvam agent already belongs to another customer.");
   // Nor one another customer's job has reported (either role), nor an agent of the other role.
   const otherRoleColumn = role === "inbound" ? "sarvam_outbound_app_id" : "sarvam_app_id";
-  const [reportedByRun, reportedByEvent, otherRole, otherOwner] = await Promise.all([
+  const [reportedByRun, otherRole, otherOwner] = await Promise.all([
     admin
       .from("provisioning_runs")
       .select("id")
       .eq("sarvam_agent_id", input.appId)
-      .neq("organization_id", run.organization_id)
-      .limit(1),
-    admin
-      .from("provisioning_run_events")
-      .select("run_id")
-      .eq("event", "agent_tools_created")
-      .eq("detail->>appId", input.appId)
       .neq("organization_id", run.organization_id)
       .limit(1),
     admin.from("agent_configs").select("id").eq(otherRoleColumn, input.appId).limit(1),
@@ -812,10 +809,15 @@ export async function reportToolsCreated(
       .neq("organization_id", run.organization_id)
       .limit(1),
   ]);
-  for (const r of [reportedByRun, reportedByEvent, otherRole, otherOwner])
-    if (r.error) throw r.error;
-  if (reportedByRun.data?.length || reportedByEvent.data?.length)
-    throw new BridgeError("conflict", "That Sarvam agent already belongs to another customer.");
+  for (const r of [reportedByRun, otherRole, otherOwner]) if (r.error) throw r.error;
+  if (
+    reportedByRun.data?.length ||
+    (await claimedByAnotherCustomer(admin, input.appId, run.organization_id))
+  )
+    throw new BridgeError(
+      "conflict",
+      "That Sarvam agent already belongs to another customer. If it was reported there by mistake, a ClickAI admin can release it on that customer's provisioning page.",
+    );
   if (otherRole.data?.length)
     throw new BridgeError(
       "conflict",
@@ -833,9 +835,19 @@ export async function reportToolsCreated(
   if (previous && previous.appId !== input.appId)
     throw new BridgeError(
       "conflict",
-      `A different agent (${previous.appId}) was already reported for this customer. Reuse it instead of creating another.`,
+      `A different agent (${previous.appId}) was already reported for this customer. Reuse it instead of creating another. If that ID is wrong, a ClickAI admin releases it on the Provisioning page and creates a new token.`,
     );
   if (previous) return { status: "already_reported" as const, agentId: previous.appId };
+  // Releasing an ID ends the token: a request already in flight writes nothing.
+  const { data: stillLive, error: tokenError } = await admin
+    .from("operator_bridge_tokens")
+    .select("id")
+    .eq("id", auth.tokenId)
+    .is("revoked_at", null)
+    .maybeSingle();
+  if (tokenError) throw tokenError;
+  if (!stillLive)
+    throw new BridgeError("conflict", "This bridge token has ended. Create a new one.");
   await bridgeAudit(admin, auth, run, "agent_tools_created", {
     role,
     appId: input.appId,

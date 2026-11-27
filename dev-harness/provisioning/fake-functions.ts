@@ -1,6 +1,6 @@
 /**
  * Local browser harness only (never built into the app): in-memory stand-ins
- * for the three server functions OutboundAgentPanel calls, swapped in by
+ * for the server functions OutboundAgentPanel and AgentRecovery call, swapped in by
  * dev-harness/provisioning/vite.config.ts. They follow the real contracts and
  * refusal messages, so the REAL panel can be exercised with no database,
  * provider or secrets. Every call is recorded on window.__harness.
@@ -43,6 +43,30 @@ export async function disableSarvamIntegration({
 }) {
   harness.calls.push({ fn: "disable", data });
   return { ok: true as const };
+}
+
+export async function releaseSarvamAgentId({
+  data,
+}: {
+  data: { orgId: string; sarvamAppId: string; reason: string };
+}) {
+  harness.calls.push({ fn: "release", data });
+  await wait(150);
+  const refused = harness.refuse[data.sarvamAppId];
+  if (refused) throw new Error("That agent is registered for this customer.");
+  return { released: 1, tokensRevoked: 1, jobState: "waiting_for_outbound_agent" };
+}
+
+export async function confirmOutboundToolAuth({
+  data,
+}: {
+  data: { orgId: string; agentRef: string; everyToolChecked: boolean; reason: string };
+}) {
+  harness.calls.push({ fn: "confirmTools", data });
+  await wait(150);
+  if (data.agentRef !== "outbound:agent_demo")
+    throw new Error("Every tool must send agent_ref = outbound:agent_demo.");
+  return { confirmed: true as const, jobResumed: false };
 }
 
 export async function registerCustomerSarvamOutboundAgent({

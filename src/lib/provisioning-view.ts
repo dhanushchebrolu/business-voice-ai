@@ -367,7 +367,7 @@ export function outboundChecklist(o: OutboundChecklistInput): ChecklistItem[] {
         ? "ClickAI may dial this outbound agent version."
         : registered
           ? o.toolAuthConfirmed === false
-            ? "Tool credentials not confirmed for this version (operator bridge, outbound agent). Confirm them first; ClickAI dials nothing."
+            ? "Tool credentials not confirmed for this version. Confirm them below or with the operator bridge; ClickAI dials nothing."
             : "Not confirmed: ClickAI dials nothing for this customer. Confirm only after a supervised call."
           : "Register the outbound agent first.",
     },

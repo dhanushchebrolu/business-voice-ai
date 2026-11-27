@@ -695,6 +695,7 @@ export const setSarvamOutboundReady = createServerFn({ method: "POST" })
       ready: data.ready,
       maxCallSeconds:
         typeof data.maxCallMinutes === "number" ? Math.round(data.maxCallMinutes * 60) : undefined,
+      actor: { userId: admin.userId, email: admin.email },
     });
     if (!result.ok) throw new Error(result.reason);
     await writeAudit(admin, {
@@ -711,6 +712,83 @@ export const setSarvamOutboundReady = createServerFn({ method: "POST" })
       reason: data.reason,
     });
     return result;
+  });
+
+/**
+ * Releases a Sarvam agent id that was reported (or confirmed) for this customer by mistake, so
+ * the job can accept the correct one. Refused for a registered agent. Changes ClickAI records
+ * only: nothing is read from or written to Sarvam, and no number or deployment is touched.
+ */
+export const releaseSarvamAgentId = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { orgId: string; sarvamAppId: string; reason: string }) => {
+    if (!input?.orgId) throw new Error("orgId is required");
+    if (!input.sarvamAppId?.trim()) throw new Error("The Sarvam agent id is required");
+    if (!input.reason?.trim()) throw new Error("A reason is required");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "agents.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { releaseAgentId } = await import("@/lib/agent-recovery.server");
+    return releaseAgentId(supabaseAdmin, {
+      organizationId: data.orgId,
+      appId: data.sarvamAppId,
+      actor: { userId: admin.userId, email: admin.email },
+      reason: data.reason,
+    });
+  });
+
+/**
+ * An admin's own check, in Sarvam, that every tool of the registered outbound agent version
+ * carries the outbound credential and this customer's agent_ref. Needs no provisioning job.
+ * It never enables calling: "Confirm the outbound agent for outbound calls" stays separate.
+ */
+export const confirmOutboundToolAuth = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator(
+    (input: {
+      orgId: string;
+      sarvamAppId: string;
+      sarvamAppVersion: number;
+      agentRef: string;
+      everyToolChecked: boolean;
+      reason: string;
+    }) => {
+      if (!input?.orgId) throw new Error("orgId is required");
+      if (!input.sarvamAppId?.trim()) throw new Error("The Sarvam agent id is required");
+      if (!Number.isInteger(input.sarvamAppVersion) || input.sarvamAppVersion < 1)
+        throw new Error("The Sarvam agent version must be a positive whole number");
+      if (typeof input.agentRef !== "string") throw new Error("agentRef is required");
+      if (input.everyToolChecked !== true)
+        throw new Error("Confirm that you checked every tool on the committed version");
+      if (!input.reason?.trim()) throw new Error("A reason is required");
+      return input;
+    },
+  )
+  .handler(async ({ data, context }) => {
+    const admin = await assertPlatformAdmin(context.supabase, context.userId, "agents.write");
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { confirmOutboundToolCredentials } = await import("@/lib/agent-recovery.server");
+    const { masterAgentAppId, outboundMasterAgentAppId } =
+      await import("@/lib/sarvam-agent-registration.server");
+    const { runProvisioning } = await import("@/lib/provisioning-runs.server");
+    return confirmOutboundToolCredentials(supabaseAdmin, {
+      organizationId: data.orgId,
+      appId: data.sarvamAppId,
+      version: data.sarvamAppVersion,
+      agentRef: data.agentRef,
+      masterAgentAppIds: [masterAgentAppId(), outboundMasterAgentAppId()],
+      actor: { userId: admin.userId, email: admin.email },
+      reason: data.reason,
+      resume: () =>
+        runProvisioning(supabaseAdmin, {
+          organizationId: data.orgId,
+          trigger: "admin_retry",
+          createdBy: admin.userId,
+          force: true,
+        }),
+    });
   });
 
 /**

@@ -228,7 +228,45 @@ activation.
   while an attempt was running is not lost and an unchanged job is left alone. A superseded (reclaimed)
   attempt cannot overwrite the newer attempt's record.
 - **Reliability:** reports and submits are idempotent; a second different agent for the same customer
-  is refused; partial tool creation (not six) is refused and can be completed and re-reported.
+  is refused until an admin releases the first (see Recovery); partial tool creation (not six) is refused and can be completed and re-reported.
+
+## Recovery
+
+Both actions are on the customer's admin provisioning page, need `agents.write` and a reason, are
+written to `audit_logs` before they take effect, and change ClickAI records only: nothing is read from
+or written to Sarvam or Vobiz, and no number or deployment is touched. No migration is needed.
+
+### A wrong agent ID was reported or submitted
+
+1. If the wrong agent is **registered** (it was submitted), first register the correct one. A
+   registered agent is never released.
+2. **Release a wrong agent ID** (also "Wrong agent ID?" on the work order in the operator bridge).
+   Its reports and confirmations stop counting for this customer, it can be reported by whoever it
+   belongs to, and all of this customer's bridge tokens end. A job waiting on that report goes back
+   to waiting for an agent; it is the same job.
+3. Create a new bridge token and report the correct ID. Requests made with an old token are refused.
+
+A released ID is not banned: with a new token it can be reported again (if the release was the
+mistake). Refused while the job is running; try again.
+
+### Outbound agent: new version, withdrawal, re-enabling
+
+| Situation                                                    | What is needed before "Confirm the outbound agent for outbound calls"               |
+| ------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
+| The version confirmed now                                    | nothing new                                                                         |
+| A version that was confirmed earlier (withdrawn or replaced) | a live outbound credential                                                          |
+| A new or never-confirmed version                             | its tool credentials: **Confirm outbound tool credentials**, or the operator bridge |
+
+- Withdrawing or replacing a confirmed version records it first. If that record cannot be written, the
+  withdrawal still happens and the admin is told.
+- Versions withdrawn before this change count only if the audit log holds a "ready" entry made after
+  that agent version was registered as the outbound agent.
+- **Confirm outbound tool credentials** works without a provisioning job (older customers whose
+  inbound setup is incomplete). The admin reads the committed version in Sarvam and enters the
+  `agent_ref` seen on its tools; the registered ID and version must match and the outbound credential
+  must be live. ClickAI cannot check the tools itself. It never enables calling.
+- A job waiting on the outbound agent is continued; no other job is run.
+- Rotating the credential does not cancel a recorded confirmation: update the Sarvam secret at once.
 
 ## Bridge token scope, tool binding and sweep fairness
 

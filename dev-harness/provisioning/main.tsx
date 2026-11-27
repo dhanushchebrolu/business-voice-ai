@@ -14,6 +14,7 @@ import "@/styles.css";
 import { Toaster } from "@/components/ui/sonner";
 import { SectionCard, StatusPill } from "@/components/app/primitives";
 import { OutboundAgentPanel } from "@/components/admin/OutboundAgentPanel";
+import { ReleaseAgentButton } from "@/components/admin/AgentRecovery";
 import { outboundChecklist, type OutboundChecklistInput } from "@/lib/provisioning-view";
 import { sarvamToolConfiguration } from "@/lib/sarvam-agent-api.server";
 import { buildOutboundAgentConfig } from "@/lib/universal-agent-config";
@@ -56,6 +57,7 @@ function Page() {
     appVersion: registered ? 1 : null,
     readyAppId: null,
     readyVersion: null,
+    toolAuthConfirmed: false,
     masterAgentAppIds: [],
     blockers: [],
     voiceLanguageProblem: null,
@@ -87,8 +89,10 @@ function Page() {
         config={config}
         template={sarvamToolConfiguration("https://clickai.example", "outbound")}
         registeredAt={registered ? "2026-11-20T09:30:00Z" : null}
+        agentRef="outbound:agent_demo"
         onChanged={async () => undefined}
       />
+      <ReleaseAgentButton orgId="org_demo" customer="Demo Dental" onDone={async () => undefined} />
     </main>
   );
 }

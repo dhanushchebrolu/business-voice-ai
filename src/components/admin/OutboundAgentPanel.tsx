@@ -15,6 +15,7 @@ import {
 import type { SarvamToolConfiguration } from "@/lib/sarvam-agent-api.server";
 import type { OutboundAgentConfig } from "@/lib/universal-agent-config";
 import { ReasonDialog } from "@/components/admin/ReasonDialog";
+import { ConfirmOutboundToolsButton } from "@/components/admin/AgentRecovery";
 import { SectionCard, StatusPill } from "@/components/app/primitives";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -42,6 +43,8 @@ export interface OutboundAgentPanelProps {
   config: OutboundAgentConfig | null;
   template: SarvamToolConfiguration | null;
   registeredAt: string | null;
+  /** The fixed agent_ref value this customer's outbound tools send; null without an agent. */
+  agentRef: string | null;
   onChanged: () => Promise<unknown>;
 }
 
@@ -67,6 +70,13 @@ export function OutboundAgentPanel(p: OutboundAgentPanelProps) {
     p.gate.now,
   );
   const gate = outboundRegistrationGate(p.gate, appId);
+  // A version already confirmed for calling counts, with or without a newer record of it.
+  const toolsConfirmed = Boolean(
+    p.gate.toolAuthConfirmed ||
+    (p.gate.appId &&
+      p.gate.readyAppId === p.gate.appId &&
+      p.gate.readyVersion === p.gate.appVersion),
+  );
   const templateJson = p.template ? JSON.stringify(p.template, null, 2) : "";
   const systemPrompt = p.template?.systemPrompt ?? "";
   const replyTemplates = (p.template?.tools ?? []).filter((t) => t.responseTemplate);
@@ -248,6 +258,28 @@ export function OutboundAgentPanel(p: OutboundAgentPanelProps) {
               Register outbound agent
             </Button>
           </div>
+          {p.gate.appId && p.gate.appVersion && p.agentRef ? (
+            <div
+              className="mt-2 flex flex-wrap items-center gap-2"
+              data-testid="outbound-tool-auth"
+            >
+              <StatusPill tone={toolsConfirmed ? "live" : "idle"}>
+                {toolsConfirmed ? "Tool credentials confirmed" : "Tool credentials not confirmed"}
+              </StatusPill>
+              {toolsConfirmed ? null : (
+                <ConfirmOutboundToolsButton
+                  orgId={p.orgId}
+                  appId={p.gate.appId}
+                  version={p.gate.appVersion}
+                  agentRef={p.agentRef}
+                  onDone={p.onChanged}
+                />
+              )}
+              <span className="text-xs text-muted-foreground">
+                Every tool sends <code>agent_ref = {p.agentRef}</code>.
+              </span>
+            </div>
+          ) : null}
           <p className="mt-1 text-xs text-muted-foreground">
             Registering never switches outbound calling on. ClickAI dials only this agent, only in a
             version confirmed after a supervised call, and never the inbound agent.
