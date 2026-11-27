@@ -1,30 +1,14 @@
 /**
- * Shared CallSid -> call_logs correlation and authorization for Exotel's
- * media WebSocket, used by BOTH the local-dev fallback
- * (exotel-media-route.server.ts) and the production Durable Object
- * (call-session-durable-object.server.ts).
+ * Shared call-id -> call_logs correlation and authorization for a provider's media
+ * WebSocket (Vobiz), used by BOTH the local-development route
+ * (vobiz-media-route.server.ts) and the production Durable Object
+ * (vobiz-call-session-durable-object.server.ts).
  *
- * This module exists because those two files previously carried their own,
- * independently-maintained COPIES of this exact lookup/retry/authorization
- * logic — and a real production bug came from that duplication: a fix for
- * a status-check race (widening which call_logs.status values are accepted
- * before a call is considered "already ended") landed in
- * exotel-media-route.server.ts but was never applied to
- * call-session-durable-object.server.ts, the file Cloudflare's CALL_SESSION
- * Durable Object binding actually runs in production. One shared function
- * makes that class of drift impossible going forward.
- *
- * Live-log finding (the reason this module exists): a real Exotel test call
- * produced `exotel_media_route:*`-prefixed log lines in production, not
- * `call_session_do:*` — meaning the deployed Worker's `env.CALL_SESSION`
- * binding was not active for that request, and traffic fell back to the
- * ambient (non-Durable-Object) path. That is a deploy/binding-provisioning
- * question, not something this module can detect or fix — but it does mean
- * both code paths must behave identically, which is exactly what sharing
- * this function guarantees.
+ * One shared function because two independently maintained copies of this
+ * lookup/retry/authorization logic once drifted apart: a fix for a
+ * status-check race reached one path and not the one running in production.
  */
 
-import { verifyMediaSessionToken } from "./media-session-token.ts";
 import {
   checkTelephonyAccess,
   maskPhoneNumber,
@@ -67,19 +51,12 @@ export function maskCallSid(sid: string): string {
  * rejection path returns `{ ok: false, reason }` and the caller is
  * responsible for closing the socket, never proceeding.
  *
- * Provider-parameterized (not Exotel-only) so a second provider with the
- * same "the provider connects to us as a WS client" media shape — Vobiz's
- * `<Stream>` Voice XML element works identically to Exotel's Voicebot
- * Applet in this respect — reuses this exact logic rather than carrying its
- * own copy (the module doc above explains why a second copy is specifically
- * the class of bug this file exists to prevent).
- * `authorizeExotelMediaSession` below is an unchanged, behavior-identical
- * wrapper kept for Exotel's existing call sites/tests.
+ * `provider` scopes the lookup, so a provider call id never matches
+ * another provider's call.
  */
 export async function authorizeMediaSession(
   provider: string,
   callSid: string,
-  optionalToken: string | undefined,
 ): Promise<AuthorizedMediaSession | RejectedMediaSession> {
   const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   const logPrefix = `${provider}_media_session`;
@@ -94,8 +71,8 @@ export async function authorizeMediaSession(
     return data;
   }
 
-  // Widened from the original 5 attempts / 1s total: Exotel's status
-  // webhook (the thing that actually writes this row) can plausibly take
+  // Widened from the original 5 attempts / 1s total: the status webhook
+  // (the thing that actually writes this row) can plausibly take
   // longer than 1s to arrive under real network conditions, and rejecting
   // here means the caller hears nothing — a false rejection is much more
   // costly than a slightly longer wait for a call that was never going to
@@ -153,25 +130,6 @@ export async function authorizeMediaSession(
     return { ok: false, reason: `Call ${call.id} has no associated phone number` };
   }
 
-  // Optional second factor — only enforced when present, so its absence
-  // (an Exotel account not configured to pass it) never weakens the
-  // mandatory CallSid+DB check above, but its presence must be internally
-  // consistent if it *is* there — a token for a different call is rejected
-  // outright, not silently ignored.
-  if (optionalToken) {
-    const result = verifyMediaSessionToken(optionalToken);
-    if (
-      !result.ok ||
-      result.payload.callId !== call.id ||
-      result.payload.organizationId !== call.organization_id
-    ) {
-      return {
-        ok: false,
-        reason: `Media session token present but invalid or mismatched for call ${call.id}`,
-      };
-    }
-  }
-
   const { data: phoneNumber } = await supabaseAdmin
     .from("phone_numbers")
     .select("*")
@@ -202,18 +160,4 @@ export async function authorizeMediaSession(
     organizationId: call.organization_id,
     phoneNumberId: phoneNumber.id,
   };
-}
-
-/**
- * Exotel's original entry point — an unchanged, behavior-identical wrapper
- * around `authorizeMediaSession("exotel", ...)`. Kept so every existing
- * call site and regression test (exotel-media-route.server.ts,
- * call-session-durable-object.server.ts, and both files' tests asserting
- * this exact import/call shape) needs no change at all.
- */
-export async function authorizeExotelMediaSession(
-  callSid: string,
-  optionalToken: string | undefined,
-): Promise<AuthorizedMediaSession | RejectedMediaSession> {
-  return authorizeMediaSession("exotel", callSid, optionalToken);
 }

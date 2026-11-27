@@ -2,18 +2,15 @@ import "./lib/error-capture";
 
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
-import { handleExotelMediaUpgrade } from "./lib/telephony/exotel-media-route.server";
 import { handleVobizMediaUpgrade } from "./lib/telephony/vobiz-media-route.server";
 import {
-  CALL_SESSION_COORDINATOR_NAME,
   VOBIZ_CALL_SESSION_COORDINATOR_NAME,
   getCloudflareEnv,
   type CloudflareEnv,
 } from "./lib/telephony/cloudflare-env.server";
-import { EXOTEL_MEDIA_STREAM_PATH as MEDIA_STREAM_PATH } from "./lib/telephony/exotel-media-stream-path";
 import { VOBIZ_MEDIA_STREAM_PATH } from "./lib/telephony/vobiz-media-stream-path";
 
-// The CallSessionDurableObject class itself is exported to the Cloudflare
+// The Durable Object classes are exported to the Cloudflare
 // Worker entrypoint from ../exports.cloudflare.ts (Nitro's documented
 // mechanism for this — see that file's comment for why it can't be
 // re-exported from here: this file is bundled as a lazily-loaded SSR
@@ -65,50 +62,16 @@ function isH3SwallowedErrorBody(body: string): boolean {
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
     try {
-      // Phase D.1: Exotel's Voicebot Applet is the WebSocket *client* — it
-      // connects to us. TanStack Start's route convention has no WebSocket
-      // support (verified: neither @tanstack/react-start nor
-      // @tanstack/start-server-core reference "websocket" anywhere in their
-      // source), so this one path is intercepted here, at the raw
-      // Cloudflare Workers fetch handler, before TanStack Start's own
-      // request handling — see exotel-media-route.server.ts and
-      // PHASE_D1_EXOTEL_FINAL_REPORT.md §16 for why this is the correct
-      // and, on this deployment target, sufficient place to do it.
-      //
-      // Production audit finding E1: accepting and holding this WebSocket
-      // directly in this ambient fetch handler is not durable on Cloudflare
-      // Workers (no guarantee this isolate keeps running, or that a later,
-      // separate webhook request lands here to terminate it correctly) —
-      // see call-session-durable-object.server.ts. When the CALL_SESSION
-      // Durable Object binding is configured, forward the upgrade request
-      // to it unconditionally so it — not this ambient handler — accepts
-      // and durably owns the WebSocket for the life of the call. Fall back
-      // to the original in-process handling only when the binding isn't
-      // configured (local `vite dev`, where there is no cross-isolate risk
-      // in the first place, since it's a single process).
       const url = new URL(request.url);
-      if (
-        url.pathname === MEDIA_STREAM_PATH &&
-        (request.headers.get("upgrade") ?? "").toLowerCase() === "websocket"
-      ) {
-        const cfEnv = env as CloudflareEnv | null | undefined;
-        const namespace = cfEnv?.CALL_SESSION;
-        if (namespace) {
-          const stub = namespace.get(namespace.idFromName(CALL_SESSION_COORDINATOR_NAME));
-          return await stub.fetch(request);
-        }
-        const mediaUpgrade = await handleExotelMediaUpgrade(request);
-        if (mediaUpgrade) return mediaUpgrade;
-      }
 
-      // Vobiz's `<Stream>` Voice XML element is likewise a WS client
-      // connecting to us (see vobiz-provider.ts's module doc) — same
-      // interception reason, and same production-durability fix, as Exotel
-      // above: when the VOBIZ_CALL_SESSION Durable Object binding is
-      // configured, forward the upgrade to it unconditionally (see
-      // vobiz-call-session-durable-object.server.ts). Fall back to the
-      // original in-process handler only when the binding isn't configured
-      // (local `vite dev`, where there is no cross-isolate risk).
+      // Vobiz's `<Stream>` Voice XML element is a WebSocket *client* connecting
+      // to us (see vobiz-provider.ts's module doc). TanStack Start's route
+      // convention has no WebSocket support, so this path is intercepted here,
+      // at the raw Cloudflare Workers fetch handler. When the VOBIZ_CALL_SESSION
+      // Durable Object binding is configured, forward the upgrade to it
+      // unconditionally so it durably owns the socket for the life of the call
+      // (see vobiz-call-session-durable-object.server.ts); the in-process
+      // handler is only for local `vite dev`.
       if (
         url.pathname === VOBIZ_MEDIA_STREAM_PATH &&
         (request.headers.get("upgrade") ?? "").toLowerCase() === "websocket"

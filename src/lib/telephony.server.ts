@@ -10,7 +10,6 @@
 
 import { GenericTelephonyAdapter } from "./telephony/generic-provider.ts";
 import { MockTelephonyAdapter } from "./telephony/mock-provider.ts";
-import { ExotelTelephonyAdapter } from "./telephony/exotel-provider.ts";
 import { SarvamTelephonyAdapter } from "./telephony/sarvam-provider.server.ts";
 import { VobizTelephonyAdapter } from "./telephony/vobiz-provider.ts";
 import type { TelephonyProviderAdapter } from "./telephony/adapter.ts";
@@ -28,7 +27,7 @@ export const TELEPHONY_PROVIDERS: TelephonyProviderDef[] = [
   // api-subscription-key mechanism sarvam.server.ts already uses for
   // chat/STT/TTS covers this surface too, so this reuses SARVAM_API_KEY —
   // no second "account"/workspace credential is required or introduced (see
-  // the Exotel-to-Sarvam migration report). SARVAM_TELEPHONY_ACCOUNT, which
+  // the telephony migration report). SARVAM_TELEPHONY_ACCOUNT, which
   // this entry previously required, is removed: it was never wired to a
   // real, verified Sarvam credential (see sarvam-provider.server.ts's
   // module doc). supportsPurchase reflects that Sarvam rents/manages numbers
@@ -44,18 +43,6 @@ export const TELEPHONY_PROVIDERS: TelephonyProviderDef[] = [
     requiredSecrets: ["SARVAM_INBOUND_VOICE_API_KEY", "SARVAM_OUTBOUND_VOICE_API_KEY"],
     supportsPurchase: true,
   },
-  // Phase D.1: corrected from supportsPurchase:true — Exotel has no
-  // confirmed public self-service number-purchase API; numbers are
-  // acquired through the account/sales process, then attached (see
-  // exotel-provider.ts's provisionNumber). requiredSecrets corrected from
-  // 2 to 3 values — Exotel's REST auth is Account SID + API Key + API
-  // Token, not SID + a single token (see PHASE_D1_EXOTEL_FINAL_REPORT.md §5).
-  {
-    id: "exotel",
-    label: "Exotel",
-    requiredSecrets: ["EXOTEL_SID", "EXOTEL_API_KEY", "EXOTEL_TOKEN"],
-    supportsPurchase: false,
-  },
   {
     id: "twilio",
     label: "Twilio",
@@ -68,8 +55,7 @@ export const TELEPHONY_PROVIDERS: TelephonyProviderDef[] = [
     requiredSecrets: ["SMARTFLO_TOKEN"],
     supportsPurchase: false,
   },
-  // Development/testing provider (migration-in-progress alongside Exotel —
-  // see VobizTelephonyAdapter's module doc). Real auth shape is X-Auth-ID +
+  // Development/testing provider (see VobizTelephonyAdapter's module doc). Real auth shape is X-Auth-ID +
   // X-Auth-Token + a Klyro-generated webhook verify token, not a single
   // generic API key — corrected from the placeholder VOBIZ_API_KEY this
   // entry previously listed (which never had a real construction branch and
@@ -317,33 +303,11 @@ export function getTelephonyAdapter(providerId: string): TelephonyProviderAdapte
     });
   }
 
-  // Exotel's real credential/auth shape (SID + API key + API token, and a
-  // "verify token" comparison instead of HMAC — see exotel-provider.ts)
-  // doesn't fit GenericTelephonyAdapter's single-apiKey/HMAC assumption,
-  // so it gets its own dedicated construction branch rather than being
-  // forced through the generic path.
-  if (providerId === "exotel") {
-    const accountSid = process.env["EXOTEL_SID"];
-    const apiKey = process.env["EXOTEL_API_KEY"];
-    const apiToken = process.env["EXOTEL_TOKEN"];
-    const webhookVerifyToken = process.env["EXOTEL_WEBHOOK_SECRET"];
-    const subdomain = process.env["EXOTEL_SUBDOMAIN"] ?? "api.exotel.com";
-    if (!accountSid || !apiKey || !apiToken || !webhookVerifyToken) return null;
-    return new ExotelTelephonyAdapter({
-      accountSid,
-      apiKey,
-      apiToken,
-      subdomain,
-      webhookVerifyToken,
-    });
-  }
-
   // Vobiz's real auth (X-Auth-ID/X-Auth-Token headers) and webhook
   // authentication (a Klyro-generated verify_token query parameter, plus a
   // required-by-default Vobiz-signed check — see
   // VobizTelephonyAdapter.verifyWebhookSignature's doc) don't fit
-  // GenericTelephonyAdapter's single-apiKey/HMAC-over-body assumption, same
-  // reasoning as Exotel's dedicated branch above.
+  // GenericTelephonyAdapter's single-apiKey/HMAC-over-body assumption.
   if (providerId === "vobiz") {
     const authId = process.env["VOBIZ_AUTH_ID"];
     const authToken = process.env["VOBIZ_AUTH_TOKEN"];

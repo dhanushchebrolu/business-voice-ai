@@ -13,7 +13,7 @@ so a deploy never wipes dashboard-managed variables/secrets again.
 |---|---|---|
 | **Repo: `wrangler.json`** | Non-secret, deploy-shape config that must be identical on every deploy: Worker name, Durable Object bindings, migrations, `keep_vars`, and the *names* (never values) of required secrets. | `name`, `durable_objects`, `migrations`, `keep_vars`, `secrets.required` |
 | **Build-time public vars — set locally AND in Cloudflare Workers Builds, never committed** | `VITE_*`-prefixed variables, inlined into the client bundle at `vite build` time via `import.meta.env`. Public by design (shipped to every browser) and **not** secrets — but still not committed, since each environment (your machine, a Cloudflare preview, production) may point at a different Supabase project. | `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY` |
-| **Cloudflare Dashboard only** | Every runtime value the server reads via `process.env` at request time: the Supabase service-role key, provider API keys/webhook secrets, the admin bootstrap secret, etc. **Never committed, never put in `wrangler.json`'s `[vars]`, never printed.** | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `PLATFORM_ADMIN_BOOTSTRAP_SECRET`, `RAZORPAY_KEY_ID`/`RAZORPAY_KEY_SECRET`/`RAZORPAY_WEBHOOK_SECRET`, `SARVAM_API_KEY`/`SARVAM_ORG_ID`/`SARVAM_WORKSPACE_ID`/`SARVAM_WEBHOOK_SECRET`, `EXOTEL_SID`/`EXOTEL_API_KEY`/`EXOTEL_TOKEN`/`EXOTEL_SUBDOMAIN`/`EXOTEL_WEBHOOK_SECRET`, `MEDIA_SESSION_TOKEN_SECRET`, `TELEPHONY_WEBHOOK_BASE_URL` |
+| **Cloudflare Dashboard only** | Every runtime value the server reads via `process.env` at request time: the Supabase service-role key, provider API keys/webhook secrets, the admin bootstrap secret, etc. **Never committed, never put in `wrangler.json`'s `[vars]`, never printed.** | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `PLATFORM_ADMIN_BOOTSTRAP_SECRET`, `RAZORPAY_KEY_ID`/`RAZORPAY_KEY_SECRET`/`RAZORPAY_WEBHOOK_SECRET`, `SARVAM_API_KEY`/`SARVAM_ORG_ID`/`SARVAM_WORKSPACE_ID`/`SARVAM_WEBHOOK_SECRET`, `TELEPHONY_WEBHOOK_BASE_URL` |
 
 `wrangler.json` intentionally has **no `[vars]` block**. Runtime secrets/variables
 are managed exclusively through the Cloudflare dashboard (or `wrangler secret put`),
@@ -176,8 +176,8 @@ Deliberately **not** included:
   forever, which is the opposite of its intended lifecycle.
 - `SUPABASE_URL` — required for the app to boot, but it's a project URL, not
   a sensitive secret; it isn't configured as a Cloudflare "secret" binding.
-- Every provider-specific credential (`RAZORPAY_*`, `SARVAM_*`, `EXOTEL_*`,
-  `MEDIA_SESSION_TOKEN_SECRET`, etc.) — these gate individual telephony/
+- Every provider-specific credential (`RAZORPAY_*`, `SARVAM_*`, `VOBIZ_*`,
+  etc.) — these gate individual telephony/
   billing providers, not the app as a whole. Requiring all of them would
   block deploys in any environment that hasn't connected every provider.
 

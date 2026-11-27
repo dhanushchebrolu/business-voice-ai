@@ -107,8 +107,8 @@ const VOBIZ_SET = ["VOBIZ_AUTH_ID", "VOBIZ_AUTH_TOKEN", "VOBIZ_WEBHOOK_VERIFY_TO
 /**
  * Uploaded when set, and validated when set. None is read on the inbound
  * Vobiz path: TELEPHONY_WEBHOOK_BASE_URL and VOBIZ_PHONE_NUMBER serve
- * outbound calls, MEDIA_SESSION_TOKEN_SECRET only Exotel's media stream,
- * and Google Calendar is optional (bookings fall back to the database).
+ * outbound calls, and Google Calendar is optional (bookings fall back to
+ * the database).
  */
 const SERVER_OPTIONAL = [
   "ANTHROPIC_API_KEY",
@@ -127,7 +127,6 @@ const SERVER_OPTIONAL = [
   "VOBIZ_REQUIRE_SIGNATURE",
   "VOBIZ_PHONE_NUMBER",
   "TELEPHONY_WEBHOOK_BASE_URL",
-  "MEDIA_SESSION_TOKEN_SECRET",
   "GOOGLE_CALENDAR_CLIENT_ID",
   "GOOGLE_CALENDAR_CLIENT_SECRET",
   "GOOGLE_CALENDAR_REDIRECT_URI",
@@ -323,9 +322,6 @@ function stagingProblems(env) {
   }
   if (env.VOICE_LLM_PROVIDER && !["sarvam", "claude"].includes(env.VOICE_LLM_PROVIDER)) {
     problems.push('VOICE_LLM_PROVIDER must be "sarvam" or "claude"');
-  }
-  if (env.MEDIA_SESSION_TOKEN_SECRET && env.MEDIA_SESSION_TOKEN_SECRET.length < 32) {
-    problems.push("MEDIA_SESSION_TOKEN_SECRET is shorter than 32 characters");
   }
   if (
     env.GOOGLE_CALENDAR_CREDENTIAL_ENCRYPTION_KEY &&

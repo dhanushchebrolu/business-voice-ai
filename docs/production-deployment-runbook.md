@@ -25,7 +25,7 @@ While the hex-named binding exists (Appendix A2), never run `wrangler secret lis
 | B4  | Nothing has run against real Sarvam or Vobiz (H5).                                                                                                                                                                        | Supervised tests (steps 11 to 13) before any customer is onboarded; each needs approval, a spare number and real calls. |
 | B5  | Payment eligibility for **submitting** a setup is undecided: with enforcement off (today) submission does not require payment; with it on, a paid `setup_paid` customer cannot submit without an entitlement or override. | Owner decision. Does not block deploying; do not change enforcement during the release.                                 |
 | B6  | Campaign dispatch was switched **off** on 2026-11-27 12:31 UTC (Appendix A1). The pilot call list is still off, and Smile Dental's number is enabled for outbound.                                                        | Keep dispatch off until the release is verified; switching it on is a separate approval.                                |
-| B7  | A Worker binding is _named_ with a 48-character hex string. It was typed in during the Exotel setup and is most likely an Exotel credential (not proven).                                                                 | Check and revoke it in Exotel, then remove the binding before step 6 (Appendix A2).                                     |
+| B7  | A Worker binding is _named_ with a 48-character hex string, possibly a pasted credential. It is **unidentified**; no code uses it.                                                                                        | Identify, rotate and remove it before step 6 (Appendix A2).                                                             |
 
 ## 1. Verify branch and commit
 
@@ -390,24 +390,21 @@ Emergency stop for all outbound calls: `outbound-emergency-stop-runbook.md`.
 
 ### A2. Hex-named binding
 
-Evidence (Cloudflare version history, read 2026-11-27): on 2026-09-16 one Wrangler login ran a series
-of secret commands: **09:03:04 this binding** (version 85), 09:04:04 `EXOTEL_API_KEY`, 09:04:43
-`EXOTEL_SID`, 09:05:15 an existing secret rewritten, 09:05:32 `EXOTEL_TOKEN`, 09:06:52
-`EXOTEL_WEBHOOK_SECRET`. The login is the one that deploys today. The likeliest reading is an Exotel
-credential typed where the name belonged. It cannot be proven here: the value cannot be read, and no
-code, git commit or local setting contains the string. ClickAI has held no Exotel secret since
-2026-11-18.
+Facts (read 2026-11-27): added 2026-09-16 09:03:04 UTC (version 85) by the login that deploys today,
+at the start of a run of secret commands that went on to add the Exotel and Sarvam settings. Timing
+does not identify it. No code, git commit, local setting or database record contains or derives it; it
+is not either Exotel webhook secret seen in traffic or the Vobiz token. The Exotel account and other
+provider consoles have not been checked.
 
-1. In the Exotel console, compare the account's API key and API token with the binding name (seen in
-   the Cloudflare dashboard). Paste it nowhere else.
-2. Revoke or regenerate every Exotel API credential. Nothing in ClickAI uses one, so nothing breaks;
-   check first that no other system of yours does.
-3. If it matches none of them, keep looking (the audit log for that day needs dashboard access) and do
-   not rotate unrelated credentials.
+1. Identify the string privately: compare it in the provider consoles and password manager for
+   accounts in use on that date (Exotel's API key and token among them), or have someone with access
+   to the Cloudflare account read the audit log for 2026-09-16, 08:33 to 09:33 UTC. Paste it nowhere.
+2. If it cannot be identified, do not rotate unrelated credentials.
+3. Rotate or revoke the matching credential at its provider, update whatever uses it, and verify.
 4. Delete the binding in the dashboard (Settings → Variables and Secrets), not by command, which would
    put the name in shell history. Verify with the filtered list in step 3: one binding fewer.
 5. Never roll back to a version older than that deletion.
 6. Afterwards, delete local copies if wanted: `~/.wrangler/logs`, saved session transcripts and
-   scratch files and browser screenshots, the one PowerShell history line. Old Cloudflare versions keep the name, so revoking
-   is the real fix.
+   scratch files and browser screenshots, the one PowerShell history line. Old Cloudflare versions
+   keep the name, so revoking is the real fix.
 7. Record the outcome in `architecture/saas-scale-plan.md` section 5.

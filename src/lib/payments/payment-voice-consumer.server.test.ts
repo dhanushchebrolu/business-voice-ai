@@ -5,7 +5,7 @@ import type { PaymentDomainEventRow } from "./payment-events.server.ts";
 
 /**
  * globalThis.__env__ (Cloudflare's env binding, see cloudflare-env.server.ts)
- * is unset in this Node test environment, so getCallSessionStub() always
+ * is unset in this Node test environment, so getCallRuntimeStub() always
  * returns null here — exercising this consumer's local/dev/test fallback
  * branch (calling voice-runtime.server.ts's injectPaymentEvent directly)
  * rather than the Durable Object RPC branch. That is deliberate and
@@ -83,7 +83,7 @@ describe("handlePaymentEventForVoice", () => {
       {
         table: "call_logs",
         op: "select.maybeSingle",
-        result: { data: { provider: "exotel" }, error: null },
+        result: { data: { provider: "sarvam" }, error: null },
       },
       { table: "payment_requests", op: "select.maybeSingle", result: { data: null, error: null } },
     ]);
@@ -100,7 +100,7 @@ describe("handlePaymentEventForVoice", () => {
       {
         table: "call_logs",
         op: "select.maybeSingle",
-        result: { data: { provider: "exotel" }, error: null },
+        result: { data: { provider: "sarvam" }, error: null },
       },
       {
         table: "payment_requests",
@@ -130,7 +130,7 @@ describe("handlePaymentEventForVoice", () => {
       {
         table: "call_logs",
         op: "select.maybeSingle",
-        result: { data: { provider: "exotel" }, error: null },
+        result: { data: { provider: "sarvam" }, error: null },
       },
       {
         table: "payment_requests",
@@ -184,7 +184,7 @@ describe("handlePaymentEventForVoice", () => {
         {
           table: "call_logs",
           op: "select.maybeSingle",
-          result: { data: { provider: "exotel" }, error: null },
+          result: { data: { provider: "sarvam" }, error: null },
         },
         {
           table: "payment_requests",

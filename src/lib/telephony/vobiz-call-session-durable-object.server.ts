@@ -339,7 +339,7 @@ export class VobizCallSessionDurableObject {
     // deterministically rejecting otherwise fully legitimate, correctly
     // call_logs-authorized calls (production incident). The callId lookup
     // and entitlement gate below remain the mandatory, unweakened baseline.
-    const auth = await authorizeMediaSession("vobiz", callId, undefined);
+    const auth = await authorizeMediaSession("vobiz", callId);
     if (!auth.ok) return reject(auth.reason);
 
     if (!this.claim(callId))

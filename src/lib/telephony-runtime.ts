@@ -14,27 +14,25 @@
  * this call (`adapter.openMediaBridge`, see ./telephony/audio-bridge.ts) —
  * starts the real Sarvam-backed conversation via voice-runtime.server.ts.
  *
- * Exotel implements `openMediaBridge` (see ./telephony/exotel-provider.ts
- * and exotel-media-bridge.server.ts) — this stopped being true after the
- * Exotel media-stream work landed; a provider without that method (or one
- * whose `openMediaBridge` genuinely can't produce a bridge for this call,
- * e.g. no live connection arrived in time) still degrades to `handled:
- * false` here, never a fabricated success. Everything upstream of this
- * call (the entitlement gate, the call_logs row, the webhook's own control
- * flow) is unchanged from Phase D. This function itself never references
- * Exotel or any other provider by name — see voice-runtime.server.ts's own
- * module doc for the provider-neutrality boundary this preserves.
+ * Vobiz implements `openMediaBridge` (see ./telephony/vobiz-provider.ts); a
+ * provider without that method (or one whose `openMediaBridge` genuinely
+ * can't produce a bridge for this call, e.g. no live connection arrived in
+ * time) degrades to `handled: false` here, never a fabricated success.
+ * Sarvam runs its calls end to end and has no such method. This function
+ * never starts a session for a provider by name — see
+ * voice-runtime.server.ts's own module doc for the provider-neutrality
+ * boundary this preserves.
  */
 
 import { checkTelephonyAccess, maskPhoneNumber } from "./telephony-guard.server";
 import { getTelephonyAdapter } from "./telephony.server";
-import { getCallSessionStub, getVobizCallSessionStub } from "./telephony/cloudflare-env.server";
+import { getCallRuntimeStub } from "./telephony/cloudflare-env.server";
 import { maskCallSid } from "./telephony/media-session-authorization.server";
 import { endUnservableCall } from "./telephony/unservable-call.ts";
 import type {
-  StartRuntimeRpcInput,
-  AgentRuntimeRpcResult,
-} from "./telephony/call-session-durable-object.server";
+  VobizStartRuntimeRpcInput,
+  VobizAgentRuntimeRpcResult,
+} from "./telephony/vobiz-call-session-durable-object.server";
 
 export interface AgentRuntimeHandoffInput {
   callId: string;
@@ -236,7 +234,7 @@ export async function routeToAgentRuntime(
       agentVersion,
     });
 
-    const rpcInput: StartRuntimeRpcInput = {
+    const rpcInput: VobizStartRuntimeRpcInput = {
       callId: input.callId,
       organizationId: input.organizationId,
       businessId,
@@ -255,17 +253,13 @@ export async function routeToAgentRuntime(
       routingStartedAt,
     };
 
-    // Production path: the media bridge and the Sarvam voice runtime both
-    // live inside a per-provider Durable Object now (see E1 in the
-    // production audit — a plain Worker cannot durably hold either across
-    // the two independent requests involved: this webhook, and the
-    // provider's own WebSocket connect). Exotel and Vobiz each coordinate
-    // through their own dedicated Durable Object/binding (CALL_SESSION /
-    // VOBIZ_CALL_SESSION) so neither provider's in-flight calls ever share
-    // instance state with the other's. When neither binding is configured
-    // (local dev, tests), fall back to the exact pre-existing in-process
-    // behavior below — correct there because everything runs in one process.
-    const doStub = input.provider === "vobiz" ? getVobizCallSessionStub() : getCallSessionStub();
+    // Production path for Vobiz: the media bridge and the Sarvam voice runtime
+    // both live inside its Durable Object (see E1 in the production audit — a
+    // plain Worker cannot durably hold either across the two independent
+    // requests involved: this webhook, and the provider's own WebSocket
+    // connect). Without that binding (local dev, tests), and for every other
+    // provider, take the in-process path below.
+    const doStub = getCallRuntimeStub(input.provider);
     if (doStub) {
       const response = await doStub.fetch("https://call-session/internal/start-runtime", {
         method: "POST",
@@ -286,20 +280,16 @@ export async function routeToAgentRuntime(
         console.error("telephony:runtime_do_rpc_failed", input.callId, response.status);
         return { handled: false, note: "The voice runtime coordinator returned an error." };
       }
-      const result = (await response.json()) as AgentRuntimeRpcResult;
+      const result = (await response.json()) as VobizAgentRuntimeRpcResult;
       // Diagnostic requirements 2/5: `result.note` is always one of a small,
       // fixed set of hardcoded strings the Durable Object itself writes
-      // (see call-session-durable-object.server.ts's handleStartRuntime) —
-      // never request payload, a transcript, or any other user-supplied
-      // text — so, exactly like telephony-guard.server.ts's `gate.reason`
-      // elsewhere in this codebase, it is safe to log verbatim. This is
-      // the closest real signal to "was a live Exotel media session
-      // established" — the Durable Object's own handleStartRuntime only
-      // returns handled:true after it has actually found/waited for the
-      // Exotel WebSocket media bridge AND started the Sarvam runtime on
-      // it. There is no separate "generate a media WebSocket URL" step in
-      // this codebase — Exotel's Voicebot Applet URL is static, configured
-      // once in Exotel's own dashboard, never generated per-call.
+      // (see vobiz-call-session-durable-object.server.ts's start-runtime
+      // handler) — never request payload, a transcript, or any other
+      // user-supplied text — so, exactly like telephony-guard.server.ts's
+      // `gate.reason` elsewhere in this codebase, it is safe to log verbatim.
+      // This is the closest real signal to "was a live media session
+      // established": the Durable Object returns handled:true only after it
+      // has found the media bridge AND started the Sarvam runtime on it.
       console.info("telephony:runtime_stage", {
         callId: input.callId,
         provider_call_id: input.providerCallId ? maskCallSid(input.providerCallId) : null,
@@ -367,25 +357,19 @@ export async function routeToAgentRuntime(
  * Ends the voice runtime for a call, if one is running. Used by the
  * telephony webhook whenever a call reaches a terminal status.
  *
- * Routes through the same per-provider Durable Object as
- * routeToAgentRuntime when available (production) so termination always
- * reaches the correct session regardless of which Worker isolate this
- * webhook request landed on — the exact cross-isolate gap identified as E1
- * in the production audit (a session started by one request could
- * previously be silently unreachable from a later, separate request's
- * termination call). `provider` picks which Durable Object binding to use
- * (CALL_SESSION for Exotel, VOBIZ_CALL_SESSION for Vobiz) — every call site
- * already has the call's own `provider` column on hand (see
- * call_logs.provider). Falls back to calling voice-runtime.server.ts
- * directly when neither binding is configured (local dev, tests) — correct
- * there because everything runs in one process.
+ * A Vobiz call is ended through its Durable Object when bound (production),
+ * so termination reaches the session whichever Worker isolate this webhook
+ * landed on — the cross-isolate gap identified as E1 in the production audit.
+ * `provider` is the call's own `provider` column, which every call site has.
+ * Every other provider, and Vobiz without the binding (local dev, tests),
+ * calls voice-runtime.server.ts directly: a no-op for a call with no session.
  */
 export async function terminateAgentRuntime(
   callId: string,
   reason: string,
   provider: string,
 ): Promise<void> {
-  const doStub = provider === "vobiz" ? getVobizCallSessionStub() : getCallSessionStub();
+  const doStub = getCallRuntimeStub(provider);
   if (doStub) {
     try {
       const response = await doStub.fetch("https://call-session/internal/terminate-runtime", {

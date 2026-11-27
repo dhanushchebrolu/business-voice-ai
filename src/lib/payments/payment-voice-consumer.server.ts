@@ -11,12 +11,10 @@
  * state/timer mechanics. This file has no knowledge of RuntimeState.
  *
  * Reaches the live call the same way telephony-runtime.ts's own
- * routeToAgentRuntime/terminateAgentRuntime do: via the call's own
- * provider's Durable Object RPC surface (CallSessionDurableObject for
- * Exotel, VobizCallSessionDurableObject for Vobiz) when that provider's
- * binding is configured (production), falling back to calling
- * voice-runtime.server.ts directly when it isn't (local dev/tests,
- * everything in one process) — same fallback convention, not a new one.
+ * routeToAgentRuntime/terminateAgentRuntime do: a Vobiz call through
+ * VobizCallSessionDurableObject when it is bound (production); every other
+ * provider, and Vobiz without the binding (local dev/tests), by calling
+ * voice-runtime.server.ts directly.
  *
  * Ended-call fallback: if the booking never had a call_id, the DO/direct
  * call reports {handled:false} (no active session), or the DO itself is
@@ -78,8 +76,7 @@ export async function handlePaymentEventForVoice(
   if (bookingError) throw bookingError;
   if (!booking?.call_id) return; // no live call was ever associated with this booking
 
-  // Needed to pick the right provider's Durable Object below — payment
-  // events can arrive for either an Exotel or a Vobiz call.
+  // Needed below: only a Vobiz call's live session is in a Durable Object.
   const { data: callRow, error: callRowError } = await supabaseAdmin
     .from("call_logs")
     .select("provider")
@@ -103,9 +100,8 @@ export async function handlePaymentEventForVoice(
   );
   if (!message) return; // unrecognized event type — nothing to say
 
-  const { getCallSessionStub, getVobizCallSessionStub } =
-    await import("../telephony/cloudflare-env.server.ts");
-  const doStub = callRow?.provider === "vobiz" ? getVobizCallSessionStub() : getCallSessionStub();
+  const { getCallRuntimeStub } = await import("../telephony/cloudflare-env.server.ts");
+  const doStub = getCallRuntimeStub(callRow?.provider);
 
   if (doStub) {
     let response: Response;
@@ -131,9 +127,9 @@ export async function handlePaymentEventForVoice(
     return;
   }
 
-  // Local/dev/test fallback — same convention telephony-runtime.ts uses
-  // when CALL_SESSION isn't configured: call the in-process runtime
-  // directly, since everything runs in one process there.
+  // No Durable Object (any provider but Vobiz, or local dev and tests):
+  // call the in-process runtime, as telephony-runtime.ts does. It does
+  // nothing for a call without a session.
   const { injectPaymentEvent } = await import("../voice-runtime.server.ts");
   await injectPaymentEvent(booking.call_id, message);
 

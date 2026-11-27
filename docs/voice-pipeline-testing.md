@@ -1,7 +1,7 @@
 # Voice pipeline testing: tiers, commands, and runbooks
 
 This is the testing reference for the backend voice-agent call pipeline
-(`Exotel → telephony adapter → Klyro call session → Sarvam STT → LLM →
+(`Vobiz → telephony adapter → Klyro call session → Sarvam STT → LLM →
 Sarvam Bulbul TTS → audio out → transcript/call-log persistence`). It
 covers four tiers, from "always runs in CI, zero external dependencies" to
 "a real phone call against a deployed environment."
@@ -131,7 +131,7 @@ interface in `sarvam-realtime.server.ts` if a full loop test is needed.
 
 The most complete non-telephony live test: real Sarvam STT/TTS/LLM, driven
 through the actual `startRuntimeSession` orchestration, with only the
-*telephony* transport faked (no Exotel/real call needed).
+_telephony_ transport faked (no real call needed).
 
 ```bash
 SARVAM_API_KEY=<real key> node --experimental-strip-types -e '
@@ -167,45 +167,18 @@ this uses the real `defaultRuntimeDeps`, which will attempt the real
 `call_logs` write on termination and log-and-swallow a failure if Supabase
 isn't configured in this shell — expected in a local smoke test).
 
-## Tier 4 — Live telephony test (a real Exotel call)
+## Tier 4 — Live telephony test (a real Vobiz call)
 
-Cannot be automated from this repository or this session — it requires a
-deployed Cloudflare Worker with a real Exotel account pointed at it.
-
-### Prerequisites
-
-Set as real (not placeholder) values, on the deployed Worker:
-
-| Variable | Purpose |
-|---|---|
-| `EXOTEL_SID`, `EXOTEL_API_KEY`, `EXOTEL_TOKEN` | Exotel REST API auth |
-| `EXOTEL_WEBHOOK_SECRET` | Compared against the `verify_token` query param on inbound status webhooks |
-| `EXOTEL_SUBDOMAIN` | Defaults to `api.exotel.com` — override only for a region-specific subdomain |
-| `SARVAM_API_KEY` | Sarvam STT/LLM/TTS |
-| `TELEPHONY_WEBHOOK_BASE_URL` | Public base URL Exotel's status callback and this repo's own webhook route resolve against |
-| Wrangler `CALL_SESSION` Durable Object binding | Already declared in `wrangler.json`; deploy normally with `wrangler deploy` and it is provisioned automatically |
-
-### Exotel dashboard configuration (one-time, per Exotel account)
-
-1. In the Exotel dashboard's call-flow builder, point the number's
-   Voicebot Applet step at:
-   `wss://<your-worker-domain>/api/public/media-stream/exotel`
-2. Configure the status callback URL to:
-   `https://<your-worker-domain>/api/public/webhooks/telephony?provider=exotel&verify_token=<EXOTEL_WEBHOOK_SECRET value>`
-3. In Klyro's own admin UI, attach the Exotel number to an organization and
-   agent (`provider: "exotel"` on the `phone_numbers` row — see
-   `supabase/verification/reassign_test_number_to_exotel.sql` for the
-   reviewed SQL pattern used for the one test number already in this
-   codebase).
-4. Confirm the organization's agent is `status: "ready"` (or `"live"`) and
-   the number is `status: "active"`, `inbound_enabled: true` — the admin
-   "Klyro runtime" card on the Customer 360 page
-   (`src/routes/admin.customers.$orgId.tsx`) shows exactly what's still
-   missing for this specific organization.
+Cannot be automated from this repository: it needs a deployed Worker and a
+Vobiz number. Set it up on staging as described in `voice-staging.md`
+(`SARVAM_API_KEY`, the three `VOBIZ_` values, `TELEPHONY_WEBHOOK_BASE_URL`;
+the `VOBIZ_CALL_SESSION` binding is declared in `wrangler.json`). The
+organization's agent must be `ready` or `live`, and its number `active`
+with `inbound_enabled`. A real call needs approval.
 
 ### Making the test call
 
-1. Call the Exotel number from a real phone.
+1. Call the test number from a real phone.
 2. Expect to hear the configured greeting within a few seconds of the call
    connecting.
 3. Speak a question; expect a spoken reply after a short pause.
@@ -221,20 +194,9 @@ Set as real (not placeholder) values, on the deployed Worker:
 ### Where to look when something doesn't work
 
 - Cloudflare Worker logs (`wrangler tail`, filtered for `voice_runtime:`,
-  `call_session_do:`, `exotel_bridge:`, `telephony:` prefixes — every log
-  line in this pipeline is prefixed this way and carries `call_id`/
+  `vobiz_call_session_do:`, `vobiz_bridge:`, `telephony:` prefixes — every
+  log line in this pipeline is prefixed this way and carries `call_id`/
   `organization_id`, never a secret value).
 - The Durable Object's own `/internal/status?callId=<id>` endpoint (only
   reachable from inside the Worker, not public) reports whether a runtime
   session is currently active and its state.
-- The admin "Klyro runtime" readiness card
-  (`getKlyroRuntimeReadiness`/`klyro-runtime-readiness.ts`) for the
-  specific organization — it reports the exact missing prerequisite
-  (credentials, agent readiness, number assignment, webhook config) rather
-  than a generic failure.
-
-Known limitation, stated here rather than left implicit: there is no
-automated health probe wired to this readiness card yet
-(`runtimeVerified` is always `false` until one exists) — "ready for test
-call" means every checkable prerequisite passes, not that a live probe
-confirmed the pipeline is currently healthy.

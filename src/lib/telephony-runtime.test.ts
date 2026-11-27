@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
  * test coverage before this file — the tenant/agent-loading boundary
  * between Phase D (telephony) and the AI runtime was entirely unverified.
  * This sandbox cannot reach a live Supabase instance (confirmed throughout
- * this repo's other tests — e.g. call-session-durable-object.server.test.ts's
+ * this repo's other tests — e.g. telephony/media-session-authorization.server.test.ts's
  * own module doc), and no Supabase-mocking harness exists anywhere in this
  * codebase, so this follows the same established convention as
  * agent.functions.test.ts/sarvam-admin.functions.test.ts: a source scan
@@ -146,24 +146,17 @@ describe("#20 Cross-tenant access rejection — the actual isolation mechanism",
   });
 
   test("the media-session validation path independently re-derives organization_id from call_logs by provider_call_id, never trusts a client-supplied org id on the media socket", () => {
-    // Both call-session-durable-object.server.ts and
-    // exotel-media-route.server.ts delegate this lookup/gate to one shared
-    // module (media-session-authorization.server.ts) rather than each
-    // carrying their own copy — see that module's own doc for why (a prior
-    // fix landed in only one of the two duplicated copies and never reached
-    // production traffic).
+    // The Durable Object delegates this lookup and gate to the shared module
+    // (media-session-authorization.server.ts), as the local-development route does.
     const doSrc = readFileSync(
       join(
         dirname(fileURLToPath(import.meta.url)),
         "telephony",
-        "call-session-durable-object.server.ts",
+        "vobiz-call-session-durable-object.server.ts",
       ),
       "utf8",
     );
-    assert.match(
-      doSrc,
-      /import \{ authorizeExotelMediaSession, maskCallSid \} from "\.\/media-session-authorization\.server\.ts";/,
-    );
+    assert.match(doSrc, /await authorizeMediaSession\("vobiz", callId\)/);
 
     const authSrc = readFileSync(
       join(
@@ -173,18 +166,12 @@ describe("#20 Cross-tenant access rejection — the actual isolation mechanism",
       ),
       "utf8",
     );
-    // Generalized (Vobiz migration) to take a `provider` parameter so a
-    // second provider with the same "connects to us as a WS client" media
-    // shape reuses this exact function rather than carrying its own copy —
-    // see that module's own doc. The lookup itself is still scoped by
-    // provider (never a bare provider_call_id match across providers), and
-    // the original Exotel entry point still passes "exotel" literally via
-    // an unchanged, behavior-identical wrapper.
+    // The lookup is scoped by provider, never a bare provider_call_id match
+    // across providers.
     assert.match(
       authSrc,
       /\.from\("call_logs"\)\s*\n\s*\.select\("id, organization_id, phone_number_id, status"\)\s*\n\s*\.eq\("provider", provider\)\s*\n\s*\.eq\("provider_call_id", callSid\)/,
     );
-    assert.match(authSrc, /return authorizeMediaSession\("exotel", callSid, optionalToken\);/);
     assert.match(
       authSrc,
       /const gate = await checkTelephonyAccess\(call\.organization_id, phoneNumber\.id, "inbound"\);/,
@@ -214,6 +201,15 @@ describe("#14 Invalid agent configuration — handoff refuses to start rather th
   });
 });
 
+describe("only Vobiz calls are routed to a Durable Object", () => {
+  test("starting and ending a call both ask for the object by the call's provider", () => {
+    // The rule itself, and its behaviour, are in telephony/call-runtime-routing.test.ts.
+    assert.match(runtimeSrc, /const doStub = getCallRuntimeStub\(input\.provider\);/);
+    assert.match(runtimeSrc, /const doStub = getCallRuntimeStub\(provider\);/);
+    assert.doesNotMatch(runtimeSrc, /getCallSessionStub|getVobizCallSessionStub/);
+  });
+});
+
 describe("terminateAgentRuntime never throws out into its caller", () => {
   test("the Durable Object RPC path and the direct in-process fallback are both wrapped so a coordinator failure can't break call termination", () => {
     const fnStart = runtimeSrc.indexOf("export async function terminateAgentRuntime(");
@@ -225,10 +221,6 @@ describe("terminateAgentRuntime never throws out into its caller", () => {
 
 describe("Caller ID reaches the voice runtime (trusted webhook `From`, never speech)", () => {
   const telephonyDir = join(dirname(fileURLToPath(import.meta.url)), "telephony");
-  const exotelDoSrc = readFileSync(
-    join(telephonyDir, "call-session-durable-object.server.ts"),
-    "utf8",
-  );
   const vobizDoSrc = readFileSync(
     join(telephonyDir, "vobiz-call-session-durable-object.server.ts"),
     "utf8",
@@ -253,7 +245,7 @@ describe("Caller ID reaches the voice runtime (trusted webhook `From`, never spe
     );
 
   test("the Durable Object RPC body and the in-process fallback both carry callerE164 as callerNumber", () => {
-    const rpcStart = runtimeSrc.indexOf("const rpcInput: StartRuntimeRpcInput = {");
+    const rpcStart = runtimeSrc.indexOf("const rpcInput: VobizStartRuntimeRpcInput = {");
     const rpcBlock = runtimeSrc.slice(rpcStart, runtimeSrc.indexOf("};", rpcStart));
     assert.match(rpcBlock, /callerNumber: input\.callerE164/);
     const fallbackStart = runtimeSrc.indexOf("const handle = await startRuntimeSession({");
@@ -261,12 +253,10 @@ describe("Caller ID reaches the voice runtime (trusted webhook `From`, never spe
     assert.match(fallbackBlock, /callerNumber: input\.callerE164/);
   });
 
-  test("both providers' Durable Objects hand the RPC's callerNumber to startRuntimeSession", () => {
-    for (const src of [exotelDoSrc, vobizDoSrc]) {
-      const start = src.indexOf("const handle = await startRuntimeSession({");
-      const block = src.slice(start, src.indexOf("});", start));
-      assert.match(block, /callerNumber: body\.callerNumber \?\? null/);
-    }
+  test("the Durable Object hands the RPC's callerNumber to startRuntimeSession", () => {
+    const start = vobizDoSrc.indexOf("const handle = await startRuntimeSession({");
+    const block = vobizDoSrc.slice(start, vobizDoSrc.indexOf("});", start));
+    assert.match(block, /callerNumber: body\.callerNumber \?\? null/);
   });
 
   test("the webhook passes the provider's own From (stored caller_number as fallback), never a transcript", () => {
@@ -277,7 +267,7 @@ describe("Caller ID reaches the voice runtime (trusted webhook `From`, never spe
 
   test("the business country and timezone are read live from the business row and reach the runtime on every path", () => {
     assert.match(runtimeSrc, /\.from\("businesses"\)\s*\.select\("country, timezone"\)/);
-    const rpcStart = runtimeSrc.indexOf("const rpcInput: StartRuntimeRpcInput = {");
+    const rpcStart = runtimeSrc.indexOf("const rpcInput: VobizStartRuntimeRpcInput = {");
     const rpcBlock = runtimeSrc.slice(rpcStart, runtimeSrc.indexOf("};", rpcStart));
     assert.match(rpcBlock, /businessCountry,/);
     assert.match(rpcBlock, /businessTimezone,/);
@@ -288,15 +278,13 @@ describe("Caller ID reaches the voice runtime (trusted webhook `From`, never spe
     );
     assert.match(fallbackBlock, /businessCountry,/);
     assert.match(fallbackBlock, /businessTimezone,/);
-    for (const src of [exotelDoSrc, vobizDoSrc]) {
-      const start = src.indexOf("const handle = await startRuntimeSession({");
-      const block = src.slice(start, src.indexOf("});\n", start));
-      assert.match(block, /businessCountry: body\.businessCountry \?\? null/);
-      assert.match(block, /businessTimezone: body\.businessTimezone \?\? null/);
-    }
+    const start = vobizDoSrc.indexOf("const handle = await startRuntimeSession({");
+    const block = vobizDoSrc.slice(start, vobizDoSrc.indexOf("});\n", start));
+    assert.match(block, /businessCountry: body\.businessCountry \?\? null/);
+    assert.match(block, /businessTimezone: body\.businessTimezone \?\? null/);
   });
 
-  test("Vobiz sessions end the PSTN call through Vobiz's hang-up API; Exotel (no documented API here) does not claim to", () => {
+  test("Vobiz sessions end the PSTN call through Vobiz's hang-up API", () => {
     const vobizStart = vobizDoSrc.indexOf("const handle = await startRuntimeSession({");
     const vobizBlock = vobizDoSrc.slice(vobizStart, vobizDoSrc.indexOf("});\n", vobizStart));
     assert.match(vobizBlock, /requestProviderHangup: async \(\) =>/);
@@ -305,11 +293,6 @@ describe("Caller ID reaches the voice runtime (trusted webhook `From`, never spe
     assert.match(
       vobizBlock,
       /hangupWithRetry\(\s*\{ hangupCall: adapter\.hangupCall\.bind\(adapter\) \},\s*body\.providerCallId,?\s*\)/,
-    );
-    const exotelStart = exotelDoSrc.indexOf("const handle = await startRuntimeSession({");
-    assert.doesNotMatch(
-      exotelDoSrc.slice(exotelStart, exotelDoSrc.indexOf("});\n", exotelStart)),
-      /requestProviderHangup/,
     );
   });
 });
@@ -335,16 +318,15 @@ describe("greeting latency: routing reads after the gate", () => {
     assert.match(runtimeSrc, /\.catch\(\(error: unknown\) => \(\{ data: null, error \}\)\)/);
     // Both start paths (Durable Object RPC and in-process) carry the flag.
     assert.equal(runtimeSrc.match(/pricesUnverified: liveServices === null,/g)?.length, 2);
-    for (const file of [
-      "call-session-durable-object.server.ts",
-      "vobiz-call-session-durable-object.server.ts",
-    ]) {
-      const doSrc = readFileSync(
-        join(dirname(fileURLToPath(import.meta.url)), "telephony", file),
-        "utf8",
-      );
-      assert.match(doSrc, /pricesUnverified: body\.pricesUnverified === true,/, file);
-    }
+    const doSrc = readFileSync(
+      join(
+        dirname(fileURLToPath(import.meta.url)),
+        "telephony",
+        "vobiz-call-session-durable-object.server.ts",
+      ),
+      "utf8",
+    );
+    assert.match(doSrc, /pricesUnverified: body\.pricesUnverified === true,/);
   });
 });
 
@@ -362,7 +344,7 @@ describe("a call the runtime can never serve is ended, not left connected in sil
     assert.deepEqual(hungUp, ["CA-1"]);
   });
 
-  test("a provider without a hang-up API (Exotel) is left exactly as before", async () => {
+  test("a provider without a hang-up API is left exactly as before", async () => {
     const { endUnservableCall } = await import("./telephony/unservable-call.ts");
     assert.equal(await endUnservableCall({}, "CA-2", "call-2", "no_business"), false);
     assert.equal(await endUnservableCall(null, "CA-2", "call-2", "no_business"), false);

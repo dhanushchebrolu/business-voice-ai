@@ -89,6 +89,11 @@ Generate the new value on the operator's machine, never in chat or tickets:
 
 ## Exotel retirement (prepared; do not delete anything yet)
 
+Update 2026-11-27: the Worker holds no `EXOTEL_` secret any more, and the
+Exotel code is removed on branch `chore/remove-exotel` (not merged or
+deployed). Step 2 (the Exotel console) is still the owner's; step 4's
+readiness check no longer exists.
+
 Evidence (read-only, 2026-11-18):
 
 - both Exotel numbers are `released` (2026-10-05);

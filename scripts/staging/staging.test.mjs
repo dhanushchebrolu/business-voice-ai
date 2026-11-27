@@ -36,7 +36,6 @@ function complete(overrides = {}) {
     LOVABLE_CRON_SECRET: `cron-${SECRET_MARKER}`,
     SARVAM_API_KEY: `sarvam-${SECRET_MARKER}`,
     TELEPHONY_WEBHOOK_BASE_URL: STAGING_WORKER_URL,
-    MEDIA_SESSION_TOKEN_SECRET: `media-${SECRET_MARKER}-0123456789`,
     VOBIZ_AUTH_ID: "MA_TESTAUTHID",
     VOBIZ_AUTH_TOKEN: `vobiz-${SECRET_MARKER}`,
     VOBIZ_PHONE_NUMBER: "+910000000000",
@@ -84,11 +83,10 @@ test("a complete staging file is READY, shows only the project ref, and prints n
 const VOICE_REQUIRED = ["SARVAM_API_KEY"];
 /** Vobiz inbound: all three or none. */
 const VOBIZ_SET = ["VOBIZ_AUTH_ID", "VOBIZ_AUTH_TOKEN", "VOBIZ_WEBHOOK_VERIFY_TOKEN"];
-/** Optional for a voice-only staging Worker: outbound-only, Exotel-only and Google Calendar settings. */
+/** Optional for a voice-only staging Worker: outbound-only and Google Calendar settings. */
 const VOICE_OPTIONAL = [
   ...VOBIZ_SET,
   "TELEPHONY_WEBHOOK_BASE_URL",
-  "MEDIA_SESSION_TOKEN_SECRET",
   "VOBIZ_PHONE_NUMBER",
   "GOOGLE_CALENDAR_CLIENT_ID",
   "GOOGLE_CALENDAR_CLIENT_SECRET",
@@ -181,7 +179,6 @@ test("optional settings are still validated when set", () => {
     [{ TELEPHONY_WEBHOOK_BASE_URL: `${STAGING_WORKER_URL}/` }, /no path or trailing slash/],
     [{ TELEPHONY_WEBHOOK_BASE_URL: "https://klyro.aiblaze-io.workers.dev" }, /klyro/],
     [{ VOBIZ_PHONE_NUMBER: "09876543210" }, /E\.164/],
-    [{ MEDIA_SESSION_TOKEN_SECRET: "short" }, /shorter than 32/],
     [
       { GOOGLE_CALENDAR_CLIENT_ID: "test-client.apps.googleusercontent.com" },
       /half-configured: set all four or none \(missing GOOGLE_CALENDAR_CLIENT_SECRET, GOOGLE_CALENDAR_REDIRECT_URI, GOOGLE_CALENDAR_CREDENTIAL_ENCRYPTION_KEY\)/,
@@ -303,7 +300,6 @@ test("payments, mock telephony, other providers and unsigned Vobiz webhooks are 
 test("malformed voice settings are NOT READY", () => {
   for (const [overrides, message] of [
     [{ VOBIZ_PHONE_NUMBER: "09876543210" }, /E\.164/],
-    [{ MEDIA_SESSION_TOKEN_SECRET: "short" }, /shorter than 32/],
     [
       { GOOGLE_CALENDAR_CREDENTIAL_ENCRYPTION_KEY: "c2hvcnQ=" },
       /GOOGLE_CALENDAR_CREDENTIAL_ENCRYPTION_KEY isn't 32/,

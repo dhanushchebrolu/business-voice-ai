@@ -298,11 +298,11 @@ export async function processTelephonyEvent(
 
   // A provider whose own runtime handles the entire call (e.g. Sarvam Voice
   // Agents) can deliver its one-and-only webhook already in a terminal
-  // status — unlike Exotel's ringing/answered/completed sequence of
-  // separate events, there may be no later applyCallEvent patch to fill in
+  // status — unlike a ringing/answered/completed sequence of separate
+  // events, there may be no later applyCallEvent patch to fill in
   // ended_at/duration_seconds/transcript, so this insert must capture them
   // itself whenever the very first event is already terminal. For a
-  // provider whose first event is NOT terminal (Exotel today), this
+  // provider whose first event is NOT terminal (Vobiz), this
   // resolves to exactly the same values the column defaults already
   // provided (ended_at: null, duration_seconds: 0, transcript: null) — no
   // behavior change there.
@@ -341,7 +341,7 @@ export async function processTelephonyEvent(
     // (provider, provider_call_id) already won the insert race between this
     // function's own pre-check above (`existingCall`) and this INSERT —
     // exactly the shape a call's fallback-status "call-attempt" event and
-    // its very next real status event racing (or a genuine Exotel retry
+    // its very next real status event racing (or a genuine provider retry
     // delivery) would produce. idx_call_logs_provider_call_id (the existing
     // unique index) rejects the second insert with 23505; fall back to the
     // same update path the pre-check takes for a row that already existed
@@ -376,100 +376,22 @@ export async function processTelephonyEvent(
 
   if (!gate.allowed) return;
 
-  // ROOT CAUSE (production incident: media session accepted, WebSocket
-  // upgrades and Exotel's "start"/"connected" events arrive, but the
-  // caller never hears Klyro's greeting): Exotel's Voicebot Applet flow
-  // hands the entire live call over to a bidirectional WebSocket the
-  // moment the call-flow reaches that step (see
-  // exotel-media-route.server.ts / call-session-durable-object.server.ts,
-  // and media-session-eligibility.ts's own doc comment on this same
-  // race) — its webhook callback for THIS call was observed live to never
-  // carry a recognized status at all (falls back to "initiated" — see
-  // exotel-provider.ts's normalizeWebhookEvent), and there is no
-  // guarantee a later "answered"/"in_progress" event ever arrives for the
-  // Voicebot Applet product surface specifically. Waiting for one before
-  // calling routeToAgentRuntime meant the Exotel media WebSocket was
-  // correctly authorized (media-session-eligibility.ts already allows
-  // "initiated") but nothing ever started the Sarvam voice runtime on it
-  // — no STT/TTS connection, no greeting, the caller heard only Exotel's
-  // own trial-account layer until it timed out and disconnected.
-  // startRuntimeSession is idempotent per call_id (voice-runtime.server.ts),
-  // so also triggering it here — in addition to the pre-existing
-  // "answered"/"in_progress" trigger below and in applyCallEvent, for a
-  // provider that DOES send a later status transition — is safe:
-  // whichever fires first wins, any later one is a no-op. Scoped to
-  // `providerId === "exotel"` specifically, not every provider: a
-  // provider without this WS-bridging design (routeToAgentRuntime's own
-  // doc comment — "a provider without openMediaBridge... still degrades
-  // to handled: false") would otherwise pay a wasted ~15s Durable Object
-  // bridge-await timeout (DEFAULT_BRIDGE_TIMEOUT_MS) on every single
-  // "initiated" event for no benefit.
-  //
-  // SECOND PRODUCTION INCIDENT, found after the fix above shipped: this
-  // exact call site is Exotel's own Passthru webhook callback — the call
-  // flow (App Bazaar) only advances to its Voicebot Applet step, which is
-  // what opens the media WebSocket routeToAgentRuntime is about to wait up
-  // to 15s for (DEFAULT_BRIDGE_TIMEOUT_MS), once THIS webhook responds
-  // 200. Awaiting routeToAgentRuntime here was a deadlock: the socket
-  // can't open until this handler returns, and this handler wouldn't
-  // return until the socket opened (or the full 15s elapsed). Exotel's own
-  // Passthru step has a much shorter timeout than that, so in practice it
-  // gave up and took the call-flow's "if the URL returns anything else"
-  // branch — silence, then hangup — before our 200 ever arrived, no matter
-  // how long it eventually took. Fix: fire this in the background
-  // (runInBackground/waitUntil — see background-task.server.ts) so the
-  // webhook response goes out immediately and Exotel can reach the
-  // Voicebot Applet step — opening the very socket this wait is blocking
-  // on — while routeToAgentRuntime's own bridge wait is still in flight.
-  // Not applied to the "answered"/"in_progress" trigger in applyCallEvent
-  // below: that fires on a later, separate webhook delivery, by which
-  // point (for Exotel) the runtime this fast path starts is normally
-  // already active, so startRuntimeSession's own idempotency makes that a
-  // fast no-op rather than another 15s wait — it was never part of this
-  // deadlock.
-  //
-  // THIRD PRODUCTION INCIDENT (Vobiz, calls dc249661-.../328a707b):
-  // identical root cause, different provider. Vobiz's `<Stream>` Voice XML
-  // opens its own media WebSocket the same way Exotel's Voicebot Applet
-  // does — immediately, with no wait for a separate "answered" signal (see
-  // vobiz-media-route.server.ts / vobiz-call-session-durable-object.server.ts)
-  // — and Vobiz has no "answered" CallStatus at all (Twilio/Plivo-family
-  // semantics; see vobiz-provider.ts's STATUS_MAP). An earlier version of
-  // this fix assumed the answer_url's own first callback carries no
-  // CallStatus field (falling back to "initiated", exactly like Exotel's
-  // documented case) and widened only that branch — but a further
-  // production call (328a707b) proved that assumption wrong: Vobiz's real
-  // first callback DOES carry a recognized CallStatus — "ringing"
-  // (STATUS_MAP maps it straight through, never the "initiated" fallback;
-  // call_log_inserted logged status=ringing, not initiated). "ringing" was
-  // not checked by this condition for any provider, so routeToAgentRuntime
-  // was never invoked at all for that call — not dropped after being
-  // called, never called in the first place (telephony:runtime_handoff,
-  // routeToAgentRuntime's own first log line, never appeared). "initiated"
-  // is kept alongside "ringing" defensively, in case some other Vobiz
-  // callback variant genuinely doesn't carry a recognized CallStatus.
-  // Without either status covered here, routeToAgentRuntime (and
-  // therefore the bridge's one and only onInboundFrame registration, in
-  // startRuntimeSession) never fires until a later, separate Vobiz status
-  // webhook reports "in-progress" — which, as the dc249661 incident
-  // already showed (ringing -> completed with no intermediate status),
-  // is not guaranteed to ever arrive before the call ends. Confirmed in
-  // production: media session accepted, media frames correctly parsed
-  // (vobiz_bridge:media_event_shape), but every frame dropped with no
-  // listener (vobiz_bridge:media_frame_dropped_no_listener) because
-  // nothing had called onInboundFrame yet. Same safety reasoning as
-  // Exotel's case: routeToAgentRuntime/getVobizCallSessionStub are already
-  // fully Vobiz-aware (telephony-runtime.ts), and startRuntimeSession's
-  // idempotency makes firing this twice (here, and again later if a real
-  // "in-progress" event does arrive) a safe no-op. Exotel's own clause is
-  // untouched — scoped to "initiated" only, exactly as before.
+  // Vobiz's `<Stream>` Voice XML opens its media WebSocket at once, with no
+  // separate "answered" signal (it has no such CallStatus). Its first callback
+  // reports "ringing", or in some variants no recognized status ("initiated").
+  // Waiting for a later status meant the voice runtime never started: media
+  // frames arrived with no listener and the caller heard no greeting
+  // (production incidents dc249661 and 328a707b). So both start it here.
+  // startRuntimeSession is idempotent per call_id, so also triggering on a
+  // later "answered"/"in_progress" event is safe. It runs in the background so
+  // the webhook answers at once: the socket the runtime waits for may only open
+  // after this response. Scoped to Vobiz: a provider without a media bridge
+  // would only log a refusal.
   const isAnswered = event.status === "answered";
   const isInProgress = event.status === "in_progress";
-  const isExotelInitiated = providerId === "exotel" && event.status === "initiated";
   const isVobizRinging = providerId === "vobiz" && event.status === "ringing";
   const isVobizInitiated = providerId === "vobiz" && event.status === "initiated";
-  const newCallTriggerMatched =
-    isAnswered || isInProgress || isExotelInitiated || isVobizRinging || isVobizInitiated;
+  const newCallTriggerMatched = isAnswered || isInProgress || isVobizRinging || isVobizInitiated;
   // TEMPORARY DIAGNOSTIC (production incident: routeToAgentRuntime never
   // fires for Vobiz) — logs the exact boolean evaluated at this trigger,
   // site "new_call_insert", every time this branch is reached, regardless
@@ -481,7 +403,7 @@ export async function processTelephonyEvent(
     direction: event.direction,
     isAnswered,
     isInProgress,
-    isInitiated: isExotelInitiated || isVobizInitiated,
+    isInitiated: isVobizInitiated,
     isVobizRinging,
     matched: newCallTriggerMatched,
   });
@@ -661,12 +583,8 @@ async function applyCallEvent(
   // separate events on an already-existing row") already anticipated
   // "ringing" reaching this exact function, but the condition beneath it
   // never implemented that check. Widened the same way as the insert
-  // branch: Vobiz's "ringing"/"initiated" now also match here. Exotel is
-  // untouched — it was never added to this particular trigger and still
-  // isn't; its own fast path is the insert-branch "initiated" clause,
-  // which normally makes its runtime already active by the time a second
-  // event reaches this function (startRuntimeSession's idempotency makes
-  // that a safe no-op either way).
+  // branch: Vobiz's "ringing"/"initiated" now also match here
+  // (startRuntimeSession's idempotency makes a repeat a safe no-op).
   const isApplyAnswered = event.status === "answered";
   const isApplyInProgress = event.status === "in_progress";
   const isApplyVobizRinging = call.provider === "vobiz" && event.status === "ringing";

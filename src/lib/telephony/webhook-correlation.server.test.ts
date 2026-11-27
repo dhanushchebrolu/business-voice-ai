@@ -8,7 +8,6 @@ import {
   sanitizeProviderMetadata,
   telephonyWebhookEventRow,
 } from "./webhook-correlation.server.ts";
-import { ExotelTelephonyAdapter } from "./exotel-provider.ts";
 import { VobizTelephonyAdapter } from "./vobiz-provider.ts";
 import { SarvamTelephonyAdapter } from "./sarvam-provider.server.ts";
 import type { NormalizedCallEvent } from "./adapter.ts";
@@ -91,10 +90,10 @@ test("buildProviderMetadata: another provider's raw fields (numbers, call ids) a
   const metadata = buildProviderMetadata(
     baseEvent({
       raw: { CallSid: "CA1", From: "+919876500097", To: "+911234567890", Status: "completed" },
-      recordingUrl: "https://exotel.example/rec.mp3",
+      recordingUrl: "https://provider.example/rec.mp3",
     }),
   );
-  assert.deepEqual(metadata, { recording_url: "https://exotel.example/rec.mp3" });
+  assert.deepEqual(metadata, { recording_url: "https://provider.example/rec.mp3" });
 });
 
 test("sanitizeProviderMetadata: an older raw row is reduced to the allowlist, keeping a late report", () => {
@@ -162,41 +161,6 @@ describe("telephonyWebhookEventRow: the stored webhook_events row holds identifi
     for (const value of SENSITIVE) assert.ok(!text.includes(value), `row leaks ${value}`);
   };
 
-  test("Exotel GET status callback (fields and verify_token in the query string)", () => {
-    const adapter = new ExotelTelephonyAdapter({
-      accountSid: "acsid",
-      apiKey: "key",
-      apiToken: "token",
-      subdomain: "api.exotel.com",
-      webhookVerifyToken: "SYNTH-VERIFY-TOKEN",
-    });
-    const raw = new URLSearchParams({
-      CallSid: "CA-synth-1",
-      Status: "completed",
-      Direction: "incoming",
-      From: "+919876500091",
-      To: "+917900000061",
-      CallFrom: "09876500091",
-      CallTo: "07900000061",
-      DialWhomNumber: "+917900000061",
-      RecordingUrl: "https://recordings.example/exo.mp3",
-      tenant_id: "tenant-synth",
-      verify_token: "SYNTH-VERIFY-TOKEN",
-    }).toString();
-    const event = adapter.normalizeWebhookEvent(raw);
-    assert.ok(event);
-    assert.ok(
-      JSON.stringify(event.raw).includes("SYNTH-VERIFY-TOKEN"),
-      "fixture carries the token",
-    );
-    const row = telephonyWebhookEventRow("exotel", event);
-    assert.deepEqual(row.payload, {});
-    assert.equal(row.provider, "exotel");
-    assert.match(row.event_id, /^CA-synth-1:/);
-    assert.equal(row.event_type, event.status);
-    assertClean(row);
-  });
-
   test("Vobiz form-encoded hangup callback", () => {
     const adapter = new VobizTelephonyAdapter({
       authId: "AUTH123",
@@ -261,8 +225,8 @@ describe("telephonyWebhookEventRow: the stored webhook_events row holds identifi
       occurredAt: "2026-11-18T10:00:00.000Z",
     } as const;
     assert.deepEqual(
-      telephonyWebhookEventRow("exotel", event as never),
-      telephonyWebhookEventRow("exotel", event as never),
+      telephonyWebhookEventRow("vobiz", event as never),
+      telephonyWebhookEventRow("vobiz", event as never),
     );
   });
 });

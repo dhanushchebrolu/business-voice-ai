@@ -1290,8 +1290,6 @@ Support architecture for:
 
 Sarvam rented number
 
-Exotel
-
 Twilio
 
 Vobiz
@@ -1393,8 +1391,6 @@ Create:
 Connect existing number
 
 Provider selector:
-
-Exotel
 
 Twilio
 

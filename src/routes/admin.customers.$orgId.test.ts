@@ -5,12 +5,10 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 /**
- * Whole-app loading/performance audit: the readiness, klyroReadiness, and
- * profit queries on this heavily-trafficked admin page never checked
+ * Whole-app loading/performance audit: the readiness and profit queries on this heavily-trafficked admin page never checked
  * `error`, and their render sites branched purely on `data ? <content/> :
  * <LoadingState/>` — a thrown/failed fetch left "Running health checks" /
- * "Loading runtime readiness" / "Loading finance" spinning forever with no
- * escape. The finance section also mis-rendered a legitimate "no financial
+ * "Loading finance" spinning forever with no escape. The finance section also mis-rendered a legitimate "no financial
  * activity yet" row as the same perpetual spinner.
  */
 
@@ -19,7 +17,7 @@ const src = readFileSync(
   "utf8",
 );
 
-describe("admin.customers.$orgId.tsx — readiness/klyroReadiness/profit errors are surfaced, never left spinning", () => {
+describe("admin.customers.$orgId.tsx — readiness/profit errors are surfaced, never left spinning", () => {
   test("readiness query destructures isError/error/refetch and its render site checks it before falling to LoadingState", () => {
     assert.match(
       src,
@@ -30,18 +28,6 @@ describe("admin.customers.$orgId.tsx — readiness/klyroReadiness/profit errors 
     const block = src.slice(idx, idx + 250);
     assert.match(block, /<ErrorState/);
     assert.match(block, /onRetry=\{\(\) => void refetchReadiness\(\)\}/);
-  });
-
-  test("klyroReadiness query destructures isError/error/refetch and its render site checks it before falling to LoadingState", () => {
-    assert.match(
-      src,
-      /isError: klyroIsError,\s*\n\s*error: klyroError,\s*\n\s*refetch: refetchKlyro,/,
-    );
-    const idx = src.indexOf("{klyroIsError ? (");
-    assert.ok(idx > -1);
-    const block = src.slice(idx, idx + 250);
-    assert.match(block, /<ErrorState/);
-    assert.match(block, /onRetry=\{\(\) => void refetchKlyro\(\)\}/);
   });
 
   test("the finance section distinguishes loading, error, a real row, and no financial activity — four states, not two", () => {

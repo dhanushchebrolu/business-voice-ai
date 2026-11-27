@@ -292,47 +292,6 @@ describe("VobizCallSessionDurableObject", () => {
     );
   });
 
-  test("PROOF: Vobiz and Exotel Durable Object instances never share bridge-rendezvous state, even with the same providerCallId", async () => {
-    const { CallSessionDurableObject } = await import("./call-session-durable-object.server.ts");
-    const exotelInstance = new CallSessionDurableObject(
-      fakeState("cross-exotel"),
-      {},
-    ) as unknown as {
-      registerBridge: (id: string, bridge: AudioMediaBridge) => void;
-    };
-    const vobizInstance = new VobizCallSessionDurableObject(fakeState("cross-vobiz"), {});
-
-    // Register a bridge on the EXOTEL coordinator for a providerCallId...
-    exotelInstance.registerBridge("cross-provider-shared-id", fakeBridge());
-
-    // ...and ask the VOBIZ coordinator (a genuinely different class/binding)
-    // to await a bridge for that exact same id. If the two providers'
-    // Durable Objects were ever accidentally wired to the same binding or
-    // shared any state, this would resolve immediately instead of timing
-    // out — the one cross-provider isolation failure mode this migration
-    // must never introduce.
-    const started = Date.now();
-    const res = await vobizInstance.fetch(
-      new Request("https://vobiz-call-session/internal/start-runtime", {
-        method: "POST",
-        body: JSON.stringify({
-          ...BASE_RPC_FIELDS,
-          callId: "call-cross-provider",
-          providerCallId: "cross-provider-shared-id",
-          timeoutMs: 80,
-        }),
-      }),
-    );
-    const elapsed = Date.now() - started;
-    const body = (await res.json()) as { handled: boolean; note: string };
-
-    assert.equal(body.handled, false, "Vobiz's DO must NOT see Exotel's DO's registered bridge");
-    assert.ok(
-      elapsed >= 70,
-      `expected the Vobiz DO to genuinely wait out its own timeout, only took ${elapsed}ms`,
-    );
-  });
-
   test("with a real WebSocketPair available, the server-side socket is accepted before the platform-specific 101 response is built", async () => {
     const originalPair = (globalThis as Record<string, unknown>)["WebSocketPair"];
     FakeWebSocketPair.instances = [];
@@ -802,7 +761,7 @@ describe("VobizCallSessionDurableObject", () => {
   });
 });
 
-describe("Vobiz callId correlation is delegated to the shared module (same production-incident class of regression as Exotel's)", () => {
+describe("Vobiz callId correlation is delegated to the shared module (a production-incident class of regression)", () => {
   const src = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "vobiz-call-session-durable-object.server.ts"),
     "utf8",
@@ -813,7 +772,7 @@ describe("Vobiz callId correlation is delegated to the shared module (same produ
       src,
       /import \{ authorizeMediaSession, maskCallSid \} from "\.\/media-session-authorization\.server\.ts";/,
     );
-    assert.match(src, /const auth = await authorizeMediaSession\("vobiz", callId, undefined\);/);
+    assert.match(src, /const auth = await authorizeMediaSession\("vobiz", callId\);/);
   });
 
   test("no independent call_logs lookup/retry loop remains in this file", () => {
@@ -829,16 +788,10 @@ describe("Vobiz callId correlation is delegated to the shared module (same produ
     assert.match(block, /providerCallId: maskCallSid\(callId\)/);
   });
 
-  test("this file never imports Exotel's bridge/path/authorization-wrapper — the two providers' media code stays isolated", () => {
-    assert.doesNotMatch(src, /ExotelMediaBridge/);
-    assert.doesNotMatch(src, /authorizeExotelMediaSession/);
-    assert.doesNotMatch(src, /EXOTEL_MEDIA_STREAM_PATH/);
-  });
-
-  test("media-session token fix (production incident): no longer extracts a 'token'/'session_token' field from the Vobiz start event, and passes undefined to authorizeMediaSession instead", () => {
+  test("media-session token fix (production incident): no 'token'/'session_token' field is read from the Vobiz start event or passed on", () => {
     assert.doesNotMatch(src, /firstDefinedString\(msg, \["token", "session_token"\]\)/);
     assert.doesNotMatch(src, /optionalToken/);
-    assert.match(src, /authorizeMediaSession\("vobiz", callId, undefined\)/);
+    assert.match(src, /authorizeMediaSession\("vobiz", callId\)/);
   });
 });
 

@@ -155,7 +155,7 @@ export async function handleVobizMediaUpgrade(request: Request): Promise<Respons
     // and entitlement gate below remain the mandatory, unweakened baseline —
     // this only removes a check that could never legitimately pass for
     // Vobiz in the first place.
-    const auth = await authorizeMediaSession("vobiz", callId, undefined);
+    const auth = await authorizeMediaSession("vobiz", callId);
     if (!auth.ok) return reject(auth.reason);
 
     if (!claimVobizMediaSession(callId))

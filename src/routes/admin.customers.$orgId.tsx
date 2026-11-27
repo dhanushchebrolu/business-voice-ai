@@ -5,7 +5,7 @@ import { useRef, useState } from "react";
 import { ArrowLeft, Lock, Unlock, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 import { getCustomerDetail, setFeatureLock, adjustWallet } from "@/lib/admin.functions";
-import { getProvisioningReadiness, getKlyroRuntimeReadiness } from "@/lib/admin-clients.functions";
+import { getProvisioningReadiness } from "@/lib/admin-clients.functions";
 import { retryProvisioning } from "@/lib/telephony-admin.functions";
 import { testSarvamInboundDeployment, testSarvamOutboundCall } from "@/lib/sarvam-admin.functions";
 import { getProfitAnalytics } from "@/lib/admin-finance.functions";
@@ -44,7 +44,6 @@ import { VoiceLanguagePanel } from "@/components/admin/VoiceLanguagePanel";
 import type { LifecycleStatus } from "@/lib/lifecycle";
 import type { ProvisioningCheckStatus } from "@/lib/provisioning-health.server";
 import type { ProvisioningState } from "@/lib/provisioning-state";
-import { KLYRO_RUNTIME_STATE_LABEL, type KlyroRuntimeState } from "@/lib/klyro-runtime-readiness";
 
 /** Maps a Phase 1 readiness check's pass/warning/fail onto the HEALTHY/WARNING/BLOCKED vocabulary this page shows admins — same three states, no new health model. */
 const HEALTH_LABEL: Record<
@@ -86,17 +85,6 @@ const PROVISIONING_STATE_LABEL: Record<
   waiting_for_tool_authentication: { label: "Waiting for tool authentication", tone: "ready" },
 };
 
-/** Tone for the Klyro-owned Exotel runtime's readiness state — labels come from KLYRO_RUNTIME_STATE_LABEL itself. */
-const KLYRO_RUNTIME_STATE_TONE: Record<KlyroRuntimeState, "live" | "ready" | "error" | "idle"> = {
-  missing_exotel_credentials: "error",
-  missing_sarvam_key: "error",
-  agent_incomplete: "idle",
-  number_not_assigned: "idle",
-  webhook_not_configured: "error",
-  runtime_unavailable: "error",
-  ready_for_test_call: "ready",
-};
-
 export const Route = createFileRoute("/admin/customers/$orgId")({
   component: CustomerDetail,
 });
@@ -105,7 +93,6 @@ function CustomerDetail() {
   const { orgId } = Route.useParams();
   const fetchDetail = useServerFn(getCustomerDetail);
   const fetchReadiness = useServerFn(getProvisioningReadiness);
-  const fetchKlyroReadiness = useServerFn(getKlyroRuntimeReadiness);
   const fetchProfit = useServerFn(getProfitAnalytics);
   const saveLock = useServerFn(setFeatureLock);
   const saveWallet = useServerFn(adjustWallet);
@@ -143,19 +130,6 @@ function CustomerDetail() {
     queryFn: () => fetchReadiness({ data: { orgId } }),
   });
 
-  const {
-    data: klyroReadiness,
-    isError: klyroIsError,
-    error: klyroError,
-    refetch: refetchKlyro,
-  } = useQuery({
-    queryKey: ["admin-customer-klyro-readiness", orgId],
-    queryFn: () => fetchKlyroReadiness({ data: { orgId } }),
-  });
-
-  // getProfitAnalytics is the existing, platform-wide margin computation
-  // (admin-finance.functions.ts) — reused as-is and filtered to this one
-  // org rather than re-deriving revenue/provider-cost/margin here.
   const {
     data: profit,
     isLoading: profitIsLoading,
@@ -196,7 +170,6 @@ function CustomerDetail() {
   const invalidate = async () => {
     await queryClient.invalidateQueries({ queryKey: ["admin-customer", orgId] });
     await queryClient.invalidateQueries({ queryKey: ["admin-customer-readiness", orgId] });
-    await queryClient.invalidateQueries({ queryKey: ["admin-customer-klyro-readiness", orgId] });
     await queryClient.invalidateQueries({ queryKey: ["admin-customers"] });
     await queryClient.invalidateQueries({ queryKey: ["admin-profit-analytics"] });
   };
@@ -567,88 +540,6 @@ function CustomerDetail() {
       <SarvamIntegrationPanel orgId={org.id} />
 
       <VoiceLanguagePanel orgId={org.id} />
-
-      <SectionCard
-        title="Klyro runtime"
-        description="Readiness of the Klyro-owned Exotel runtime for this org — Exotel telephony, Sarvam STT/LLM/TTS. Never shows 'ready' unless every prerequisite below actually checks out."
-        actions={
-          klyroReadiness ? (
-            <StatusPill tone={KLYRO_RUNTIME_STATE_TONE[klyroReadiness.state]}>
-              {KLYRO_RUNTIME_STATE_LABEL[klyroReadiness.state]}
-            </StatusPill>
-          ) : null
-        }
-      >
-        {klyroIsError ? (
-          <ErrorState
-            message={describeQueryError(klyroError, "Could not load runtime readiness.")}
-            onRetry={() => void refetchKlyro()}
-          />
-        ) : klyroReadiness ? (
-          <>
-            <ul className="grid gap-1.5 text-sm sm:grid-cols-2">
-              <li className="flex items-center justify-between gap-3">
-                <span className="text-muted-foreground">Exotel credentials</span>
-                <StatusPill
-                  tone={klyroReadiness.checklist.exotelCredentialsPresent ? "live" : "error"}
-                >
-                  {klyroReadiness.checklist.exotelCredentialsPresent ? "Present" : "Missing"}
-                </StatusPill>
-              </li>
-              <li className="flex items-center justify-between gap-3">
-                <span className="text-muted-foreground">Sarvam API key</span>
-                <StatusPill tone={klyroReadiness.checklist.sarvamKeyPresent ? "live" : "error"}>
-                  {klyroReadiness.checklist.sarvamKeyPresent ? "Present" : "Missing"}
-                </StatusPill>
-              </li>
-              <li className="flex items-center justify-between gap-3">
-                <span className="text-muted-foreground">Agent configuration</span>
-                <StatusPill tone={klyroReadiness.checklist.agentReady ? "live" : "idle"}>
-                  {klyroReadiness.checklist.agentReady ? "Ready" : "Incomplete"}
-                </StatusPill>
-              </li>
-              <li className="flex items-center justify-between gap-3">
-                <span className="text-muted-foreground">Phone number assigned to Exotel</span>
-                <StatusPill
-                  tone={
-                    klyroReadiness.checklist.numberAssigned &&
-                    klyroReadiness.checklist.numberIsExotel
-                      ? "live"
-                      : "idle"
-                  }
-                >
-                  {klyroReadiness.checklist.numberAssigned
-                    ? klyroReadiness.checklist.numberIsExotel
-                      ? "Assigned"
-                      : "Assigned to another provider"
-                    : "Not assigned"}
-                </StatusPill>
-              </li>
-              <li className="flex items-center justify-between gap-3">
-                <span className="text-muted-foreground">Webhook base URL configured</span>
-                <StatusPill
-                  tone={klyroReadiness.checklist.webhookBaseUrlConfigured ? "live" : "error"}
-                >
-                  {klyroReadiness.checklist.webhookBaseUrlConfigured ? "Configured" : "Missing"}
-                </StatusPill>
-              </li>
-              <li className="flex items-center justify-between gap-3">
-                <span className="text-muted-foreground">Runtime health check</span>
-                <StatusPill tone={klyroReadiness.runtimeVerified ? "live" : "idle"}>
-                  {klyroReadiness.runtimeVerified ? "Verified" : "Not verified"}
-                </StatusPill>
-              </li>
-            </ul>
-            <p className="mt-3 text-xs text-muted-foreground">
-              No automated probe exists yet for the realtime pipeline itself (the Durable Object and
-              its live Sarvam connections) — "Ready for test call" means every checkable
-              prerequisite passes, not that a live health check has run.
-            </p>
-          </>
-        ) : (
-          <LoadingState label="Loading runtime readiness" />
-        )}
-      </SectionCard>
 
       <div className="grid gap-4 lg:grid-cols-3">
         <SectionCard title="Wallet">

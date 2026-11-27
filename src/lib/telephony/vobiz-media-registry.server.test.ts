@@ -57,13 +57,3 @@ test("awaitVobizMediaBridge times out to null if nothing ever registers", async 
   const resolved = await awaitVobizMediaBridge(id, 50);
   assert.equal(resolved, null);
 });
-
-test("Vobiz and Exotel registries are independent modules — a Vobiz claim does not collide with an Exotel one for the same id string", async () => {
-  const { claimMediaSession, releaseMediaSession } =
-    await import("./exotel-media-registry.server.ts");
-  const id = `shared-id-${crypto.randomUUID()}`;
-  assert.equal(claimVobizMediaSession(id), true);
-  assert.equal(claimMediaSession(id), true);
-  releaseVobizMediaSession(id);
-  releaseMediaSession(id);
-});

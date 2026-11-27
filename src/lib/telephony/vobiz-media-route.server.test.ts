@@ -30,8 +30,8 @@ describe("vobiz-media-route.server.ts: media-session token fix (production incid
     assert.doesNotMatch(src, /optionalToken/);
   });
 
-  test("authorizeMediaSession is called with undefined in the token position, not a Vobiz-supplied value", () => {
-    assert.match(src, /authorizeMediaSession\("vobiz", callId, undefined\)/);
+  test("authorizeMediaSession takes the provider and call id only: nothing Vobiz supplies as a token", () => {
+    assert.match(src, /authorizeMediaSession\("vobiz", callId\)/);
   });
 
   test("the mandatory callId -> call_logs authorization is unchanged: callId is still required, auth.ok is still checked, and authorizeMediaSession is still the one shared module used (never an inline copy)", () => {

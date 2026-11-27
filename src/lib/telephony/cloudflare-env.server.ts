@@ -3,7 +3,7 @@
  * and accessor.
  *
  * This project does not depend on `@cloudflare/workers-types` (see the
- * existing runtime-feature-detection style in exotel-media-route.server.ts,
+ * existing runtime-feature-detection style in vobiz-media-route.server.ts,
  * which checks for `globalThis.WebSocketPair` rather than typing against a
  * types package) — this file follows the same convention: just enough
  * structural typing to describe the Durable Object binding this module
@@ -39,7 +39,7 @@ export interface DurableObjectNamespace {
 }
 
 export interface CloudflareEnv {
-  /** Binding name configured in wrangler.json for CallSessionDurableObject. */
+  /** Still bound in wrangler.json for the CallSessionDurableObject stub; nothing calls it. */
   CALL_SESSION?: DurableObjectNamespace;
   /** Binding name configured in wrangler.json for VobizCallSessionDurableObject. */
   VOBIZ_CALL_SESSION?: DurableObjectNamespace;
@@ -49,7 +49,7 @@ export interface CloudflareEnv {
  * Returns the live Cloudflare env bindings for the current deployment, or
  * `null` when running somewhere that doesn't provide them (local `vite dev`,
  * the Node test runner, or a Cloudflare deployment that hasn't been
- * configured with the CALL_SESSION Durable Object binding yet). Every
+ * configured with the Durable Object binding yet). Every
  * caller in this codebase must treat `null` as "fall back to the
  * pre-existing in-process behavior" — never as an error — so that local
  * development and tests keep working exactly as before this change.
@@ -59,32 +59,14 @@ export function getCloudflareEnv(): CloudflareEnv | null {
   return env && typeof env === "object" ? (env as CloudflareEnv) : null;
 }
 
-/** The one Durable Object instance every Exotel media call is coordinated through. */
-export function getCallSessionStub(): DurableObjectStub | null {
-  const env = getCloudflareEnv();
-  const namespace = env?.CALL_SESSION;
-  if (!namespace) return null;
-  return namespace.get(namespace.idFromName(CALL_SESSION_COORDINATOR_NAME));
-}
-
 /**
- * Exotel's Voicebot Applet WSS URL is configured once, statically, in the
- * Exotel dashboard's call-flow (see exotel-media-route.server.ts) — it is
- * NOT dynamically generated per call, so the inbound WebSocket upgrade
- * request carries no per-call identity the Worker could use to address a
- * per-call Durable Object *before* accepting the connection. The call's
- * CallSid is only known once the socket's first ("start") message arrives.
- *
- * Given that hard constraint, this uses ONE fixed-name Durable Object
- * instance as the durable coordinator for every in-flight Exotel media
- * call, rather than one instance per call_id. All per-call isolation is
- * still deterministic and keyed by call_id/providerCallId *within* that one
- * instance (see call-session-durable-object.server.ts) — the instance
- * itself is shared by necessity, not by choice; a genuinely per-call
- * Durable Object would require Exotel to embed the CallSid in the
- * WebSocket URL itself, which this codebase does not control.
+ * The Durable Object holding a call's live voice session, by the call's provider. Only Vobiz
+ * has one: every other provider (Sarvam included) gets `null` and takes the in-process path,
+ * which does nothing for a call this Worker never started a session for.
  */
-export const CALL_SESSION_COORDINATOR_NAME = "exotel-call-session-coordinator";
+export function getCallRuntimeStub(provider: string | null | undefined): DurableObjectStub | null {
+  return provider === "vobiz" ? getVobizCallSessionStub() : null;
+}
 
 /** The one Durable Object instance every Vobiz media call is coordinated through. */
 export function getVobizCallSessionStub(): DurableObjectStub | null {
@@ -111,14 +93,12 @@ export function getVobizCallSessionStub(): DurableObjectStub | null {
 }
 
 /**
- * Same hard constraint as Exotel's CALL_SESSION_COORDINATOR_NAME above:
  * Vobiz's `<Stream>` WSS URL carries no per-call identity the Worker could
  * use to address a per-call Durable Object before accepting the
  * connection — the callId is only known once the socket's first ("start")
  * message arrives. This uses ONE fixed-name Durable Object instance as the
- * durable coordinator for every in-flight Vobiz media call, separate from
- * Exotel's own coordinator so the two providers never share instance
- * state. Per-call isolation is still deterministic and keyed by callId
+ * durable coordinator for every in-flight Vobiz media call. Per-call
+ * isolation is still deterministic and keyed by callId
  * *within* that one instance (see
  * vobiz-call-session-durable-object.server.ts).
  */

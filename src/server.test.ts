@@ -45,14 +45,13 @@ describe("src/server.ts — Vobiz WS routing diagnostic (production incident: WS
     assert.ok(logIdx < handleVobizMediaUpgradeIdx);
   });
 
-  test("the diagnostic is scoped to the Vobiz WS-upgrade branch only, not Exotel's equivalent interception above it", () => {
-    const exotelIdx = src.indexOf("const mediaUpgrade = await handleExotelMediaUpgrade(request);");
-    const logIdx = src.indexOf('console.info("server:vobiz_ws_routing_decision"');
-    assert.ok(exotelIdx > -1 && logIdx > -1);
-    assert.ok(
-      exotelIdx < logIdx,
-      "expected Exotel's own WS interception to precede the Vobiz-scoped diagnostic, confirming it was not duplicated onto Exotel's path",
-    );
+  test("a WebSocket upgrade is forwarded to the Vobiz Durable Object only, never to any other", () => {
+    const forwards = [...src.matchAll(/(\w+)\.get\(\s*\1\.idFromName\((\w+)\)/g)].map((m) => [
+      m[1],
+      m[2],
+    ]);
+    assert.deepEqual(forwards, [["vobizNamespace", "VOBIZ_CALL_SESSION_COORDINATOR_NAME"]]);
+    assert.deepEqual(src.match(/[A-Z_]+_MEDIA_STREAM_PATH &&/g), ["VOBIZ_MEDIA_STREAM_PATH &&"]);
   });
 
   test("records hasVobizCallSessionBinding, hasCallSessionBinding (for cross-provider comparison), the selected routingPath, and the coordinator name", () => {
@@ -114,15 +113,6 @@ describe("src/server.ts — FIX (production incident: VOBIZ_CALL_SESSION resolve
       src,
       /import\s*\{[\s\S]*?getCloudflareEnv[\s\S]*?\}\s*from\s*"\.\/lib\/telephony\/cloudflare-env\.server"/,
     );
-  });
-
-  test("Exotel's own WS-upgrade block is untouched — still resolves cfEnv only from the direct parameter, never getCloudflareEnv()", () => {
-    const exotelBlockStart = src.indexOf("url.pathname === MEDIA_STREAM_PATH &&");
-    const vobizBlockStart = src.indexOf("url.pathname === VOBIZ_MEDIA_STREAM_PATH &&");
-    assert.ok(exotelBlockStart > -1 && vobizBlockStart > -1 && exotelBlockStart < vobizBlockStart);
-    const exotelBlock = src.slice(exotelBlockStart, vobizBlockStart);
-    assert.match(exotelBlock, /const cfEnv = env as CloudflareEnv \| null \| undefined;/);
-    assert.doesNotMatch(exotelBlock, /getCloudflareEnv/);
   });
 
   test("BEHAVIORAL (using the real getCloudflareEnv — the exact function the fix calls, not a reimplementation): globalThis.__env__ wins over the direct parameter when both are present", () => {

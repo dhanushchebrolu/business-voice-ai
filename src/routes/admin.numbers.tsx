@@ -295,7 +295,7 @@ function AddNumberDialog({
             onChange={(e) => setOrgId(e.target.value)}
           />
           <Input
-            placeholder="Provider (e.g. exotel, twilio, sarvam)"
+            placeholder="Provider (e.g. sarvam, vobiz, twilio)"
             value={provider}
             onChange={(e) => setProvider(e.target.value)}
           />

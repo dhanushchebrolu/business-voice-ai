@@ -40,7 +40,7 @@ Every rule runs server-side. The UI shows the same reasons in advance (`getOutbo
 
 **Campaign paths** (off in production) also obey the kill switch: `dispatchDueCampaigns` (both the scheduled job and the cron route), campaign launch, and an admin starting or resuming a Sarvam-side campaign. The Sarvam-cohort upload applies the test allowlist and refuses the whole cohort if any number is outside it. Campaigns do **not** yet apply calling hours, the prior-relationship rule or the call-length billing cap; those must be added before campaigns are switched on.
 
-**No other path dials a single call.** The older generic Vobiz/Exotel server function (`initiateOutboundCall`) is retired: it refuses everything and can no longer dial or write. The LiveKit AI-outbound path (`startAgentOutboundCall`, off unless `VOICE_AGENT_OUTBOUND_ENABLED=true`) applies the same kill switch, calling hours, do-not-call and prior-relationship rules. Campaign dispatch stays off.
+**No other path dials a single call.** The older generic server function (`initiateOutboundCall`) is retired: it refuses everything and can no longer dial or write. The LiveKit AI-outbound path (`startAgentOutboundCall`, off unless `VOICE_AGENT_OUTBOUND_ENABLED=true`) applies the same kill switch, calling hours, do-not-call and prior-relationship rules. Campaign dispatch stays off.
 
 ## 2. Safety gate (every single call)
 
