@@ -50,6 +50,8 @@ type Admin = SupabaseClient<Database>;
 export interface OrchestrateHooks {
   /** The pipeline reports each step as it starts; the job persists it. */
   onStep: (key: JobStepKey) => Promise<void>;
+  /** Nobody asked for this attempt (the sweep): a live number's deployment is left alone. */
+  unattended: boolean;
 }
 type Orchestrate = (
   admin: Admin,
@@ -66,6 +68,8 @@ export interface RunProvisioningInput {
   idempotencyKey?: string;
   /** Admin retry: run now even if an automatic retry is scheduled for later. */
   force?: boolean;
+  /** The sweep: continue this job only, if it is still open. Never creates one. */
+  onlyRunId?: string;
 }
 
 export interface RunProvisioningResult {
@@ -313,10 +317,10 @@ export async function runProvisioning(
   admin: Admin,
   input: RunProvisioningInput,
   orchestrate: Orchestrate = (a, org, hooks) =>
-    runProvisioningPipeline(a, org, undefined, hooks.onStep),
+    runProvisioningPipeline(a, org, undefined, hooks.onStep, hooks),
   now: () => Date = () => new Date(),
 ): Promise<RunProvisioningResult> {
-  const runId = await findOrCreateActiveRun(admin, input);
+  const runId = input.onlyRunId ?? (await findOrCreateActiveRun(admin, input));
 
   const { data: current, error: readError } = await admin
     .from("provisioning_runs")
@@ -326,6 +330,15 @@ export async function runProvisioning(
     .eq("id", runId)
     .single();
   if (readError) throw readError;
+
+  // A job that finished after the sweep listed it stays finished.
+  if (!(ACTIVE_RUN_STATUSES as readonly string[]).includes(current.status))
+    return {
+      runId,
+      claimed: false,
+      status: current.status as ProvisioningRunStatus,
+      result: null,
+    };
 
   const stale =
     current.status === "running" &&
@@ -360,6 +373,13 @@ export async function runProvisioning(
     .select("id");
   if (claimError) throw claimError;
   if (!claimed?.length) return { runId, claimed: false, status: "running", result: null };
+
+  // Unattended: the sweep continuing a waiting or crashed job, and its retries of such an
+  // attempt. A retry of an attempt a person started stays as thorough as that attempt.
+  const unattended =
+    Boolean(input.onlyRunId) &&
+    (current.status !== "pending" ||
+      (current.diagnostics as { unattended?: boolean } | null)?.unattended === true);
 
   const attempt = current.attempts + 1;
   const maxAttempts = current.max_attempts ?? MAX_AUTOMATIC_ATTEMPTS;
@@ -444,6 +464,7 @@ export async function runProvisioning(
           step: currentKey,
           note: sanitizeDiagnostic(f.note),
           seenChange,
+          ...(unattended ? { unattended } : {}),
           ...f.extra,
         } as unknown as Json,
         next_attempt_at:
@@ -469,7 +490,7 @@ export async function runProvisioning(
   let result: ProvisionOrganizationResult;
   try {
     seenChange = (await changeMarks(admin, [input.organizationId])).get(input.organizationId);
-    result = await orchestrate(admin, input.organizationId, { onStep });
+    result = await orchestrate(admin, input.organizationId, { onStep, unattended });
   } catch (err) {
     if (err instanceof Superseded)
       return { runId, claimed: false, status: "running", result: null };
@@ -560,8 +581,9 @@ export interface SweepResult {
 
 /**
  * The scheduled tick's provisioning sweep (job kind `sweep.provisioning_retry`,
- * every minute from the Worker cron). Resumes, through runProvisioning's own
- * claim and backoff checks:
+ * every minute from the Worker cron). It never creates a job, and (except when retrying
+ * an attempt a person started) never reads or changes a live number's deployment.
+ * Resumes, through runProvisioning's own claim and backoff checks:
  *   1. jobs whose automatic retry is due (pending + next_attempt_at <= now);
  *   2. jobs stuck "running" past the stale window (a crashed attempt);
  *   3. customer-started jobs in ANY waiting state whose prerequisites (WAITED_ON; business
@@ -588,7 +610,7 @@ export async function sweepProvisioningRetries(
     allRows((from, to) =>
       admin
         .from("provisioning_runs")
-        .select("organization_id, trigger")
+        .select("id, organization_id, trigger")
         .eq("status", "pending")
         .lte("next_attempt_at", now.toISOString())
         .order("next_attempt_at", { ascending: true })
@@ -598,7 +620,7 @@ export async function sweepProvisioningRetries(
     allRows((from, to) =>
       admin
         .from("provisioning_runs")
-        .select("organization_id, trigger")
+        .select("id, organization_id, trigger")
         .eq("status", "running")
         .lt("updated_at", new Date(now.getTime() - STALE_RUNNING_MS).toISOString())
         .order("id")
@@ -607,7 +629,7 @@ export async function sweepProvisioningRetries(
     allRows((from, to) =>
       admin
         .from("provisioning_runs")
-        .select("organization_id, trigger, current_step, diagnostics")
+        .select("id, organization_id, trigger, current_step, diagnostics")
         .eq("status", "waiting")
         // Only a customer's own activation click authorizes going live automatically.
         .eq("trigger", "customer_activate")
@@ -655,6 +677,7 @@ export async function sweepProvisioningRetries(
       const out = await run(admin, {
         organizationId: r.organization_id,
         trigger: r.trigger as ProvisioningTrigger,
+        onlyRunId: r.id,
       });
       if (out.claimed) processed++;
     } catch (err) {

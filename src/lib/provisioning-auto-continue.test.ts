@@ -57,7 +57,7 @@ function harness(db: World, over: Parameters<typeof deps>[1] = {}) {
     runProvisioning(
       a,
       i,
-      (x, o, h) => runProvisioningPipeline(x, o, mock.d, h.onStep),
+      (x, o, h) => runProvisioningPipeline(x, o, mock.d, h.onStep, h),
       () => new Date(T0 + minute * 60_000),
     );
   const tick = () =>
@@ -391,6 +391,129 @@ describe("continuation keeps the job's safety rules", () => {
       ["waiting", "waiting_for_agent"],
     );
     assert.equal((await listWorkOrders(db.client)).length, 1);
+  });
+});
+
+describe("the sweep leaves a live number's deployment alone", () => {
+  const verifiedOf = (db: World) => [
+    number(db)["verified_deployment_id"],
+    number(db)["verified_sarvam_app_id"],
+    number(db)["verified_sarvam_app_version"],
+  ];
+  /** A live customer whose deployment has since been moved to another version in Sarvam. */
+  async function changedInSarvam() {
+    const h = await waitingForOutboundAuth();
+    h.mock.sarvam.appVersion = 9;
+    return { h, calls: h.mock.calls.log.length, verified: verifiedOf(h.db) };
+  }
+
+  test("an operator step reads, pauses and un-verifies nothing", async () => {
+    const { h, calls, verified } = await changedInSarvam();
+    confirmOutbound(h.db)();
+    assert.equal((await h.tick()).processed, 1);
+    assert.deepEqual(h.mock.calls.log.slice(calls), [], "no Sarvam call at all");
+    assert.deepEqual(verifiedOf(h.db), verified);
+    assert.equal(job(h.db)["status"], "succeeded");
+  });
+
+  test("so does the first sweep after deployment, over jobs with the old marker", async () => {
+    const { h, calls, verified } = await changedInSarvam();
+    job(h.db)["diagnostics"] = { seenChange: "2026-11-27T09:00:00Z||" };
+    assert.equal((await h.tick()).processed, 1);
+    assert.deepEqual(h.mock.calls.log.slice(calls), []);
+    assert.deepEqual(verifiedOf(h.db), verified);
+    assert.equal(job(h.db)["current_step"], "waiting_for_outbound_tool_authentication");
+    await h.idle("once only");
+  });
+
+  test("a line an administrator switched off stays off", async () => {
+    const h = await waitingForOutboundAuth();
+    number(h.db)["inbound_enabled"] = false;
+    const calls = h.mock.calls.log.length;
+    confirmOutbound(h.db)();
+    await h.tick();
+    assert.deepEqual(h.mock.calls.log.slice(calls), []);
+    assert.equal(number(h.db)["inbound_enabled"], false);
+  });
+
+  test("a live number whose verification does not match stops for a person", async () => {
+    const h = await waitingForOutboundAuth();
+    number(h.db)["verified_deployment_id"] = null;
+    const calls = h.mock.calls.log.length;
+    confirmOutbound(h.db)();
+    await h.tick();
+    assert.deepEqual(h.mock.calls.log.slice(calls), []);
+    assert.deepEqual(
+      [job(h.db)["status"], job(h.db)["failure_code"], number(h.db)["status"]],
+      ["failed", "PROVIDER_ACTION_REQUIRED", "active"],
+    );
+  });
+
+  test("the retry of the sweep's own failed attempt is as careful", async () => {
+    const { h, calls } = await changedInSarvam();
+    confirmOutbound(h.db)();
+    (h.db as unknown as ReturnType<typeof world>).failNext("organizations", "select", {
+      message: "database unavailable",
+    });
+    await h.tick();
+    assert.equal(job(h.db)["status"], "pending");
+    await h.tick();
+    assert.equal(job(h.db)["status"], "succeeded");
+    assert.deepEqual(h.mock.calls.log.slice(calls), []);
+  });
+
+  test("an attempt a person starts still verifies the live deployment", async () => {
+    const h = await waitingForOutboundAuth();
+    const calls = h.mock.calls.log.length;
+    await h.run(h.db.client, { organizationId: ORG, trigger: "admin_retry", force: true });
+    assert.deepEqual(h.mock.calls.log.slice(calls), ["get"]);
+  });
+});
+
+describe("the sweep only continues jobs; it never starts one", () => {
+  for (const final of ["succeeded", "failed"] as const)
+    test(`a job that ${final} after the sweep listed it is not replaced by a new one`, async () => {
+      const db = world({ toolAuth: false, outbound: false });
+      const h = harness(db);
+      await h.submit();
+      confirmInbound(db)();
+      const calls = h.mock.calls.log.length;
+      const result = await sweepProvisioningRetries(db.client, {
+        now: new Date(T0 + 60_000),
+        run: (a, i) => {
+          job(db)["status"] = final; // another worker finished it meanwhile
+          return h.run(a, i);
+        },
+      });
+      assert.equal(result.processed, 0);
+      assert.equal(table(db, "provisioning_runs").length, 1);
+      assert.equal(job(db)["status"], final);
+      assert.equal(h.mock.calls.log.length, calls);
+    });
+
+  test("a permanently failed job is never resumed, whatever changes", async () => {
+    const { db, held } = untouched();
+    const h = harness(db);
+    await h.submit();
+    Object.assign(job(db), { status: "failed", retryable: false });
+    saveVoice(db, held.voice)();
+    assignNumber(db)();
+    for (let i = 0; i < 5; i++) assert.equal((await h.tick()).processed, 0);
+    assert.deepEqual([table(db, "provisioning_runs").length, job(db)["attempts"]], [1, 1]);
+  });
+
+  test("an administrator's retry racing the sweep: one job, one deployment", async () => {
+    const db = world({ toolAuth: false, outbound: false });
+    const h = harness(db);
+    await h.submit();
+    confirmInbound(db)();
+    await Promise.all([
+      h.tick(),
+      h.run(db.client, { organizationId: ORG, trigger: "admin_retry", force: true }),
+    ]);
+    assert.equal(table(db, "provisioning_runs").length, 1);
+    assert.equal(h.mock.calls.create, 1);
+    assert.equal(number(db)["status"], "active");
   });
 });
 

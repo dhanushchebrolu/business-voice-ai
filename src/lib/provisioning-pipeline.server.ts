@@ -299,6 +299,8 @@ export async function runProvisioningPipeline(
   depsIn?: PipelineDeps,
   /** Reports the step the run is on (persisted by provisioning-runs.server.ts for real progress). */
   onStep?: (key: JobStepKey) => Promise<void> | void,
+  /** unattended: the sweep's run, with nobody watching. */
+  options: { unattended?: boolean } = {},
 ): Promise<PipelineResult> {
   const step = async (key: JobStepKey) => {
     await onStep?.(key);
@@ -405,7 +407,7 @@ export async function runProvisioningPipeline(
   const { data: numbers, error: numbersError } = await admin
     .from("phone_numbers")
     .select(
-      "id, e164, status, provider, organization_id, connection_id, agent_config_id, provider_deployment_id, inbound_enabled, sarvam_number_confirmed_at",
+      "id, e164, status, provider, organization_id, connection_id, agent_config_id, provider_deployment_id, inbound_enabled, sarvam_number_confirmed_at, verified_deployment_id, verified_sarvam_app_id, verified_sarvam_app_version",
     )
     .eq("organization_id", organizationId)
     .neq("status", "released")
@@ -599,6 +601,25 @@ export async function runProvisioningPipeline(
         null,
         { code: "TOOL_AUTH_PENDING", retryable: false },
       );
+  }
+
+  // An unattended run never creates, reads, edits, pauses, resumes or un-verifies the
+  // deployment of a number that has gone live (even one switched off since). Verified for
+  // exactly the registered agent, only the outbound steps remain; otherwise a person decides.
+  if (options.unattended && number.status === "active") {
+    deploymentId = number.provider_deployment_id ?? null;
+    if (
+      !deploymentId ||
+      number.verified_deployment_id !== deploymentId ||
+      number.verified_sarvam_app_id !== agent.sarvam_app_id ||
+      number.verified_sarvam_app_version !== agent.sarvam_app_version
+    )
+      return done(
+        8,
+        "manual_action_required",
+        `${number.e164} is live but its saved verification does not match the registered agent; use "Re-verify live deployment", then retry.`,
+      );
+    return outboundSteps(`${number.e164} is live on deployment ${deploymentId}.`, null);
   }
 
   // 7. Deployment (create or adopt; never a duplicate).

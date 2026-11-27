@@ -120,6 +120,13 @@ job when the digest differs. The digest holds only what a person changes: not a 
 deployment, verification or activation (the job writes those), not a credential's last use, no clock.
 So an unchanged job is never re-run, and a change made during an attempt still counts.
 
+- The sweep never creates a job: one that finished after the sweep listed it stays finished.
+- When it continues a waiting or crashed job, the sweep never creates, reads, edits, pauses, resumes
+  or un-verifies the deployment of a number that has gone live, even one switched off since. If the
+  saved verification matches the registered agent, only the outbound steps are checked; if not, the
+  job stops for a person (**Re-verify live deployment**, then retry).
+- An automatic retry of an attempt a person started behaves like that attempt, so it can still read
+  and update a live deployment.
 - Jobs started by an admin action or a payment are not resumed automatically.
 - Not detected (still need **Check again** or **Retry provisioning**): Worker configuration such as a
   replaced Sarvam key, and anything changed only in Sarvam.
