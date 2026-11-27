@@ -137,6 +137,7 @@ export function world(
       sarvam_agent_integrations: [
         {
           id: "int_new",
+          organization_id: ORG,
           agent_config_id: "agent_new",
           status: "active",
           expires_at: null,
@@ -147,6 +148,7 @@ export function world(
           : [
               {
                 id: "int_new_out",
+                organization_id: ORG,
                 agent_config_id: "agent_new",
                 status: "active",
                 expires_at: null,

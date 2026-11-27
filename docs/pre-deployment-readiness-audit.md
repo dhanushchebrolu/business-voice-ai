@@ -5,6 +5,9 @@ Branch `feature/automated-voice-provisioning` at `4b4e3548342a3805bb706c1df599b3
 production, Sarvam or Vobiz. **No production system was queried.** Statements about production state
 come from repository documents and the team's session notes, and are marked "per notes".
 
+> **Update:** on `feature/provisioning-auto-resume`, L4 is fixed and L3 can no longer hide a waiting
+> state (see "Continuing a waiting job" in `voice-ai-provisioning-workflow.md`).
+>
 > **Update, 2026-11-27:** H1 and H2 are fixed on this branch after the audit (see "Recovery" in
 > `voice-ai-provisioning-workflow.md`). Their entries below describe `4b4e354`. The fixes need no new
 > migration and have not been tried against real Sarvam. Sections 6 to 16 were not re-audited.

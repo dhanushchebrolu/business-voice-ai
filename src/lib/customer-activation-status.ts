@@ -22,11 +22,10 @@ export function customerActivationStatus(state: ProvisioningState | string | nul
   if (state === "failed" || state === "verification_failed" || state === "manual_action_required")
     return {
       status: "problem",
-      message:
-        "Activation could not finish yet. The ClickAI team has been notified and will follow up.",
+      message: "Activation could not finish yet. Please contact the ClickAI team for help.",
     };
   return {
     status: "preparing",
-    message: "The ClickAI team is preparing your number. We will let you know when it is live.",
+    message: "The ClickAI team is preparing your number.",
   };
 }

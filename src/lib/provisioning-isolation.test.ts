@@ -1,7 +1,11 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { runProvisioningPipeline } from "./provisioning-pipeline.server.ts";
-import { runProvisioning, sweepProvisioningRetries } from "./provisioning-runs.server.ts";
+import {
+  changeMarks,
+  runProvisioning,
+  sweepProvisioningRetries,
+} from "./provisioning-runs.server.ts";
 import { handleBridgeRpc } from "./operator-bridge-mcp.server.ts";
 import {
   authenticateBridge,
@@ -364,22 +368,22 @@ describe("the submission is bound to this customer, job and role", () => {
 /* The recovery sweep                                                  */
 /* ------------------------------------------------------------------ */
 
+/** The mark each crowd job would record if it ran on the data as it stands. */
+const current = new WeakMap<World, Map<string, string>>();
 /** `n` waiting customers; `changed(i)` says whose agent changed since their last attempt. */
-function crowd(n: number, changed: (i: number) => boolean, confirmationsEach = 0) {
+async function crowd(n: number, changed: (i: number) => boolean, confirmationsEach = 0) {
   const db = world();
   db.tables["provisioning_runs"] = [];
   db.tables["provisioning_run_events"] = [];
   for (let i = 0; i < n; i++) {
     const id = String(i).padStart(5, "0");
     const org = `org_${id}`;
-    const confirmed = confirmationsEach ? `c${String(confirmationsEach - 1).padStart(5, "0")}` : "";
     db.tables["provisioning_runs"].push({
       id: `run_${id}`,
       organization_id: org,
       trigger: "customer_activate",
       status: "waiting",
       current_step: "waiting_for_agent",
-      diagnostics: { seenChange: `${changed(i) ? "old" : "a"}||${confirmed}` },
     });
     db.tables["agent_configs"]!.push({
       id: `agent_${id}`,
@@ -395,6 +399,15 @@ function crowd(n: number, changed: (i: number) => boolean, confirmationsEach = 0
         created_at: `c${String(c).padStart(5, "0")}`,
       });
   }
+  const rows = db.tables["provisioning_runs"]!;
+  const marks = await changeMarks(
+    db.client,
+    rows.map((r) => String(r["organization_id"])),
+  );
+  current.set(db, marks);
+  rows.forEach((r, i) => {
+    r["diagnostics"] = { seenChange: changed(i) ? "old" : marks.get(String(r["organization_id"])) };
+  });
   return db;
 }
 /** Sweeps whose runs "fix" the job (marker caught up), as a real attempt would. */
@@ -416,8 +429,7 @@ async function cycle(
       claimed.push(i.organizationId);
       if (how === "ok") {
         const row = jobs(db).find((j) => j["organization_id"] === i.organizationId)!;
-        const d = row["diagnostics"] as { seenChange: string };
-        row["diagnostics"] = { seenChange: d.seenChange.replace(/^old/, "a") };
+        row["diagnostics"] = { seenChange: current.get(db)!.get(i.organizationId) };
       }
       return { runId: "x", claimed: true, status: "waiting", result: null };
     },
@@ -428,7 +440,7 @@ async function cycle(
 describe("sweep fairness beyond any page", () => {
   test("changed jobs far past 200 (and past a 500-row page) are all processed over cycles", async () => {
     const changed = new Set([1, 250, 499, 500, 777, 1199]);
-    const db = crowd(1200, (i) => changed.has(i));
+    const db = await crowd(1200, (i) => changed.has(i));
     const seen: string[] = [];
     for (let minute = 0; minute < 4; minute++) seen.push(...(await cycle(db, minute)).claimed);
     assert.deepEqual(
@@ -439,7 +451,7 @@ describe("sweep fairness beyond any page", () => {
   });
 
   test("more than 1,000 confirmations: markers stay exact, so no unchanged job churns", async () => {
-    const db = crowd(300, () => false, 5); // 1,500 confirmations
+    const db = await crowd(300, () => false, 5); // 1,500 confirmations
     assert.deepEqual((await cycle(db, 0)).tried, []);
     // The very last confirmation row changes for one customer: seen, and only that one.
     db.tables["provisioning_run_events"]!.push({
@@ -452,7 +464,7 @@ describe("sweep fairness beyond any page", () => {
   });
 
   test("jobs that always fail do not block the others", async () => {
-    const db = crowd(8, () => true);
+    const db = await crowd(8, () => true);
     const broken = new Set(["org_00000", "org_00001", "org_00002", "org_00003"]);
     const done = new Set<string>();
     for (let minute = 0; minute < 8; minute++)
@@ -462,7 +474,7 @@ describe("sweep fairness beyond any page", () => {
   });
 
   test("jobs that stay changed take turns: every one gets a run, with a stable order", async () => {
-    const db = crowd(20, () => true);
+    const db = await crowd(20, () => true);
     const done = new Set<string>();
     for (let minute = 0; minute < 20; minute++)
       for (const o of (await cycle(db, minute, () => "stays", 1)).claimed) done.add(o);
@@ -470,12 +482,12 @@ describe("sweep fairness beyond any page", () => {
   });
 
   test("a failing tick is bounded", async () => {
-    const db = crowd(100, () => true);
+    const db = await crowd(100, () => true);
     assert.equal((await cycle(db, 0, () => "throw")).tried.length, 9);
   });
 
   test("a flood of due retries does not hold back a changed waiting job", async () => {
-    const db = crowd(1, () => true);
+    const db = await crowd(1, () => true);
     for (let i = 0; i < 50; i++)
       jobs(db).push({
         id: `due_${i}`,
@@ -512,7 +524,8 @@ describe("concurrent attempts", () => {
             (x, o, h) => runProvisioningPipeline(x, o, dep.d, h.onStep),
             () => NOW,
           );
-          if (r.claimed) claims++;
+          // (The other customer's job has recorded no state yet, so it may run too.)
+          if (r.claimed && i.organizationId === ORG) claims++;
           return r;
         },
       });

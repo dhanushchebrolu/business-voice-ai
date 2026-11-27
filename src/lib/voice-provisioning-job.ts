@@ -158,7 +158,7 @@ const WAITING: Record<string, { code: FailureCode | null; message: string }> = {
   },
   waiting_for_voice_language: {
     code: "VOICE_SETTINGS_INCOMPLETE",
-    message: "Choose your voice and languages in Voice & language, then activate again.",
+    message: "Our team still needs to set up your assistant's voice and languages.",
   },
   waiting_for_number: {
     code: "NUMBER_NOT_ASSIGNED",
@@ -174,22 +174,25 @@ const WAITING: Record<string, { code: FailureCode | null; message: string }> = {
   },
   waiting_for_integration_credential: {
     code: "PROVIDER_SETUP_PENDING",
-    message: "Our team is preparing your voice assistant. We will let you know when it is live.",
+    message: "Our team is preparing your voice assistant. You can check the status on this page.",
   },
   waiting_for_tool_authentication: {
     code: "TOOL_AUTH_PENDING",
     message:
-      "Our team is securing your voice agent's connections. We will let you know when it is live.",
+      "Our team is securing your voice agent's connections. You can check the status on this page.",
   },
   waiting_for_agent: {
     code: "AWAITING_AGENT_CREATION",
-    message: "Our team is setting up your voice agent. We will let you know when it is live.",
+    message: "Our team is setting up your voice agent. You can check the status on this page.",
   },
   // Inbound is live; the outbound agent is an internal follow-up.
   waiting_for_outbound_credential: { code: null, message: "Your number is live." },
   waiting_for_outbound_agent: { code: null, message: "Your number is live." },
   waiting_for_outbound_tool_authentication: { code: null, message: "Your number is live." },
 };
+
+/** Every pipeline state that parks a job until a person acts. */
+export const WAITING_STATES = Object.keys(WAITING);
 
 const FAILED_DEFAULT: Partial<Record<JobStepKey, { code: FailureCode; retryable: boolean }>> = {
   validating: { code: "ORGANIZATION_INELIGIBLE", retryable: false },
@@ -206,7 +209,7 @@ const VERIFICATION_DEFAULT: Partial<Record<JobStepKey, FailureCode>> = {
 };
 
 export const CUSTOMER_PROBLEM =
-  "We could not finish activating your number yet. Our team has been notified and will follow up.";
+  "We could not finish activating your number yet. Please contact our team for help.";
 export const CUSTOMER_RETRYING = "We hit a temporary problem and are trying again automatically.";
 
 /** Maps a pipeline result to what the job does next. Never shows provider detail to customers. */

@@ -42,8 +42,8 @@ trigger `customer_activate`) through the existing idempotent pipeline
 "Complete" (`businessSetupProblems`): a business profile and receptionist, a category, a business
 name, and the data every switched-on capability needs. Voice and languages and the number are the
 team's steps: the job waits for them. Eligibility to submit is the existing phone feature lock;
-this change adds no payment rule. A job waiting for a number continues when the customer presses
-**Check again** or an admin runs it.
+this change adds no payment rule. A waiting job continues by itself once the missing step is done (see
+[Continuing a waiting job](#continuing-a-waiting-job)).
 
 | #     | Task step                                                                                                        | Job step key (dashboard)  | Where                                                                                                          |
 | ----- | ---------------------------------------------------------------------------------------------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------- |
@@ -97,7 +97,7 @@ Nothing buys/claims a number, places a call, or touches billing.
   minute by `periodicJobs` (`src/lib/jobs/scheduler.server.ts`), driven by the Worker cron
   `* * * * *` in `wrangler.json` via `server/plugins/scheduled-jobs.ts`. No extra trigger or
   secret. It resumes due retries, crashed (`running` > 10 min) jobs, and customer-started jobs
-  waiting for an agent that has since been registered. Bounded to 3 jobs / 15 s per tick. Kill switch:
+  whose prerequisites changed while they waited (below). Bounded to 3 jobs / 15 s per tick. Kill switch:
   `JOBS_SCHEDULER_ENABLED=false` (stops all sweeps).
 - Ambiguous timeouts: never blindly recreated; lookup first (agent by name, deployment by number).
 - Failure codes: see `FailureCode` in `src/lib/voice-provisioning-job.ts`. Customers only get a
@@ -105,6 +105,26 @@ Nothing buys/claims a number, places a call, or touches billing.
   `sanitizeDiagnostic` strips tokens, URLs, long opaque ids and phone numbers.
 - The number stays `inactive` until the final read-back passes; the admission gate additionally
   serves no business data to an unverified deployment.
+
+## Continuing a waiting job
+
+Every step a person takes continues a **customer-started** job within about a minute, with no
+**Retry**: saving or applying voice and languages, assigning a number, registering the connection,
+confirming the number, issuing a credential, registering an agent, reporting or confirming tool
+credentials (inbound and outbound), releasing a wrong agent ID, and, while the job waits for the
+business setup, changes to the business, hours, services, FAQs, rules, knowledge or receptionist.
+
+The sweep reads the database, not the screen the change came from. Each attempt records a digest of
+the facts in `WAITED_ON` (`provisioning-runs.server.ts`) before working; the sweep resumes a waiting
+job when the digest differs. The digest holds only what a person changes: not a number's link,
+deployment, verification or activation (the job writes those), not a credential's last use, no clock.
+So an unchanged job is never re-run, and a change made during an attempt still counts.
+
+- Jobs started by an admin action or a payment are not resumed automatically.
+- Not detected (still need **Check again** or **Retry provisioning**): Worker configuration such as a
+  replaced Sarvam key, and anything changed only in Sarvam.
+- A permanently failed job is not resumed.
+- On the first sweep after deployment, every waiting customer-started job runs once.
 
 ## Data
 
@@ -260,10 +280,9 @@ activation.
   that is already live is exempt: it is only re-verified.
 - **Reports belong to one job:** the "tools created" report is scoped to the provisioning job, so an
   earlier job's report never blocks reporting a replacement agent for a new job.
-- **No churn:** each attempt records what it saw (agent, voice settings and confirmation timestamps)
-  before working; the sweep resumes a waiting job only when that has changed since, so a change made
-  while an attempt was running is not lost and an unchanged job is left alone. A superseded (reclaimed)
-  attempt cannot overwrite the newer attempt's record.
+- **No churn:** a job is resumed only after a person's change (see
+  [Continuing a waiting job](#continuing-a-waiting-job)). A superseded (reclaimed) attempt cannot
+  overwrite the newer attempt's record.
 - **Reliability:** reports and submits are idempotent; a second different agent for the same customer
   is refused until an admin releases the first (see Recovery); partial tool creation (not six) is refused and can be completed and re-reported.
 

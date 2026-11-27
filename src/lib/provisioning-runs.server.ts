@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database, Json } from "@/integrations/supabase/types";
 import type { ProvisionOrganizationResult } from "./provisioning-orchestrator.server.ts";
@@ -16,6 +17,7 @@ import {
   type JobStepKey,
   type StepStates,
 } from "./voice-provisioning-job.ts";
+import { AGENT_AUDIT, CONFIRMATION_ACTIONS } from "./tool-auth-checkpoint.server.ts";
 
 /**
  * Persistent, resumable provisioning (provisioning_runs, migration
@@ -161,65 +163,147 @@ async function allRows<T>(
   }
 }
 
+type Tables = Database["public"]["Tables"];
+/** A table a waiting job can be waiting on, and the columns whose change matters. */
+export type WaitedOn = {
+  [T in keyof Tables]: {
+    table: T;
+    columns: (keyof Tables[T]["Row"] & string)[];
+    /** Narrows the rows: [column, the values kept]. */
+    only?: [keyof Tables[T]["Row"] & string, string[]];
+  };
+}[keyof Tables];
+
 /**
- * What a waiting job is waiting ON, per customer: when the agent, the voice settings and the
- * tool-authentication confirmation last changed (database timestamps only, so no clock skew).
- * A run records the marker it saw BEFORE working, so a change made while it was running still
- * counts as news afterwards.
+ * Everything a person changes to resolve a waiting state. Only facts the pipeline never
+ * writes itself (not a number's link, deployment, verification or activation) and nothing a
+ * live call writes (a credential's last use), so a run is never news to its own job.
  */
-async function changeMarks(admin: Admin, organizationIds: string[]) {
-  const agents: { organization_id: string; sarvam_app_id: string | null; updated_at: string }[] =
-    [];
-  const voices: { organization_id: string; updated_at: string }[] = [];
-  const confirms: { organization_id: string; created_at: string }[] = [];
+export const WAITED_ON: WaitedOn[] = [
+  {
+    table: "agent_configs",
+    columns: [
+      "business_id",
+      "sarvam_app_id",
+      "sarvam_app_version",
+      "sarvam_outbound_app_id",
+      "sarvam_outbound_app_version",
+      "sarvam_outbound_ready_app_id",
+      "sarvam_outbound_ready_version",
+    ],
+  },
+  {
+    table: "agent_voice_language_settings",
+    columns: [
+      "status",
+      "default_language",
+      "allowed_languages",
+      "auto_language_switch",
+      "sarvam_voice_internal_id",
+      "applied_sarvam_app_id",
+      "applied_sarvam_app_version",
+    ],
+  },
+  {
+    table: "phone_numbers",
+    columns: ["e164", "provider", "status", "sarvam_number_confirmed_at"],
+  },
+  { table: "telephony_connections", columns: ["provider", "provider_connection_id"] },
+  { table: "sarvam_agent_integrations", columns: ["role", "status", "expires_at"] },
+  {
+    table: "provisioning_run_events",
+    columns: ["event"],
+    only: ["event", ["agent_tools_created", "tool_auth_confirmed", "agent_id_released"]],
+  },
+  {
+    table: "audit_logs",
+    columns: ["action"],
+    only: ["action", [...CONFIRMATION_ACTIONS, AGENT_AUDIT.released]],
+  },
+];
+
+/** The business data the onboarding check reads; compared only while a job waits for it. */
+export const BUSINESS_SETUP: WaitedOn[] = (
+  [
+    "agent_configs",
+    "businesses",
+    "business_hours",
+    "services",
+    "faqs",
+    "business_rules",
+    "knowledge_documents",
+  ] as const
+).map((table) => ({ table, columns: ["updated_at"] }));
+
+/** What one row says that a job could be waiting for; null: nothing. */
+function factsOf({ table, columns }: WaitedOn, row: Record<string, unknown>): unknown[] | null {
+  if (table !== "phone_numbers") return columns.map((c) => row[c]);
+  // A released number is gone, and of its statuses only "suspended" is a person's to resolve
+  // (the pipeline itself makes a number "active").
+  if (row["status"] === "released") return null;
+  return columns.map((c) => (c === "status" ? row[c] === "suspended" : row[c]));
+}
+
+/** One digest per customer of the given tables' facts. */
+async function digest(admin: Admin, watched: WaitedOn[], organizationIds: string[]) {
+  const facts = new Map(organizationIds.map((org) => [org, [] as string[]]));
+  // WaitedOn type-checks each table and column; this generic reader is untyped.
+  const reader = admin as unknown as SupabaseClient;
   // In chunks: the ids travel in the query's URL.
   for (let i = 0; i < organizationIds.length; i += ORG_CHUNK) {
     const ids = organizationIds.slice(i, i + ORG_CHUNK);
-    const [a, v, c] = await Promise.all([
-      allRows((from, to) =>
-        admin
-          .from("agent_configs")
-          .select("organization_id, sarvam_app_id, updated_at")
-          .in("organization_id", ids)
-          .order("id")
-          .range(from, to),
+    const results = await Promise.all(
+      watched.map((w) =>
+        allRows<Record<string, unknown>>((from, to) => {
+          const query = reader
+            .from(w.table)
+            .select(["id", "organization_id", ...w.columns].join(", "))
+            .in("organization_id", ids);
+          return (w.only ? query.in(w.only[0], w.only[1]) : query)
+            .order("id")
+            .range(from, to) as unknown as PromiseLike<{
+            data: Record<string, unknown>[] | null;
+            error: unknown;
+          }>;
+        }),
       ),
-      allRows((from, to) =>
-        admin
-          .from("agent_voice_language_settings")
-          .select("organization_id, updated_at")
-          .in("organization_id", ids)
-          .order("id")
-          .range(from, to),
-      ),
-      allRows((from, to) =>
-        admin
-          .from("provisioning_run_events")
-          .select("organization_id, created_at")
-          .eq("event", "tool_auth_confirmed")
-          .in("organization_id", ids)
-          .order("id")
-          .range(from, to),
-      ),
-    ]);
-    agents.push(...a);
-    voices.push(...v);
-    confirms.push(...c);
+    );
+    results.forEach((rows, n) => {
+      const w = watched[n]!;
+      for (const row of rows) {
+        const values = factsOf(w, row);
+        if (!values) continue;
+        facts
+          .get(String(row["organization_id"]))
+          ?.push(JSON.stringify([w.table, row["id"], ...values]));
+      }
+    });
   }
   return new Map(
-    organizationIds.map((org) => {
-      const of = <T extends { organization_id: string }>(rows: T[]) =>
-        rows.filter((r) => r.organization_id === org);
-      const agentRows = of(agents);
-      const mark = [
-        agentRows.map((r) => r.updated_at),
-        of(voices).map((r) => r.updated_at),
-        of(confirms).map((r) => r.created_at),
-      ]
-        .map((times) => times.sort().at(-1) ?? "")
-        .join("|");
-      return [org, { mark, registered: agentRows.some((r) => r.sarvam_app_id) }] as const;
-    }),
+    [...facts].map(([org, lines]) => [
+      org,
+      createHash("sha256").update(lines.join("\n")).digest("hex").slice(0, 32),
+    ]),
+  );
+}
+
+/**
+ * What a waiting job is waiting ON, per customer, as "<prerequisites>#<business setup>"
+ * digests of database content (no clocks). A run records the mark it saw BEFORE working, so a
+ * change made while it was running still counts as news afterwards. The business setup half is
+ * read only for `setupFor`.
+ */
+export async function changeMarks(
+  admin: Admin,
+  organizationIds: string[],
+  setupFor: string[] = organizationIds,
+) {
+  const [prerequisites, setup] = await Promise.all([
+    digest(admin, WAITED_ON, organizationIds),
+    digest(admin, BUSINESS_SETUP, setupFor),
+  ]);
+  return new Map(
+    organizationIds.map((org) => [org, `${prerequisites.get(org)}#${setup.get(org) ?? ""}`]),
   );
 }
 
@@ -319,6 +403,8 @@ export async function runProvisioning(
       retryable: boolean | null;
       customerMessage: string | null;
       note: string;
+      /** The pipeline state the attempt ended in (absent after an unexpected error). */
+      state?: string;
       extra?: Record<string, unknown>;
     },
   ) => {
@@ -344,6 +430,7 @@ export async function runProvisioning(
       .from("provisioning_runs")
       .update({
         status: kind === "retry" ? "pending" : kind,
+        ...(f.state ? { current_step: f.state } : {}),
         current_job_step: currentKey,
         step_states: states as unknown as Json,
         last_checkpoint: lastDoneStep(states),
@@ -381,7 +468,7 @@ export async function runProvisioning(
 
   let result: ProvisionOrganizationResult;
   try {
-    seenChange = (await changeMarks(admin, [input.organizationId])).get(input.organizationId)?.mark;
+    seenChange = (await changeMarks(admin, [input.organizationId])).get(input.organizationId);
     result = await orchestrate(admin, input.organizationId, { onStep });
   } catch (err) {
     if (err instanceof Superseded)
@@ -417,8 +504,15 @@ export async function runProvisioning(
   await finish(
     outcome.kind,
     outcome.kind === "succeeded"
-      ? { code: null, retryable: null, customerMessage: null, note: result.note }
+      ? {
+          state: result.state,
+          code: null,
+          retryable: null,
+          customerMessage: null,
+          note: result.note,
+        }
       : {
+          state: result.state,
           code: outcome.code,
           retryable:
             outcome.kind === "failed" ? outcome.retryable : outcome.kind === "retry" ? true : null,
@@ -458,7 +552,8 @@ export async function runProvisioning(
 export interface SweepResult {
   due: number;
   stuck: number;
-  agentRegistered: number;
+  /** Waiting jobs whose prerequisites changed since their last attempt. */
+  changed: number;
   processed: number;
   errors: number;
 }
@@ -469,11 +564,11 @@ export interface SweepResult {
  * claim and backoff checks:
  *   1. jobs whose automatic retry is due (pending + next_attempt_at <= now);
  *   2. jobs stuck "running" past the stale window (a crashed attempt);
- *   3. jobs waiting on an agent, voice settings or tool authentication that CHANGED since
- *      the job last ran (an agent registered or its settings saved after the job's last
- *      attempt), so a registration whose own resume failed still continues the job. A job
- *      that has already re-run on the current state is left alone: re-running it every
- *      minute would change nothing and only grow the event trail.
+ *   3. customer-started jobs in ANY waiting state whose prerequisites (WAITED_ON; business
+ *      setup too while it waits for onboarding) CHANGED since the job last ran, so every
+ *      person's step continues the job by itself. A job that has already re-run on the current
+ *      state is left alone: re-running it every minute would change nothing and only grow the
+ *      event trail.
  * Bounded per tick (maxRuns claimed runs, budgetMs); the rest take their turn in later ticks.
  */
 export async function sweepProvisioningRetries(
@@ -512,38 +607,35 @@ export async function sweepProvisioningRetries(
     allRows((from, to) =>
       admin
         .from("provisioning_runs")
-        .select("organization_id, trigger, diagnostics")
+        .select("organization_id, trigger, current_step, diagnostics")
         .eq("status", "waiting")
         // Only a customer's own activation click authorizes going live automatically.
         .eq("trigger", "customer_activate")
-        .in("current_step", [
-          "waiting_for_agent",
-          "waiting_for_voice_language",
-          "waiting_for_tool_authentication",
-        ])
         .order("id")
         .range(from, to),
     ),
   ]);
 
-  let registered: typeof waiting = [];
+  let changed: typeof waiting = [];
   if (waiting.length) {
+    const onboarding = (w: (typeof waiting)[number]) => w.current_step === "waiting_for_onboarding";
     const marks = await changeMarks(
       admin,
       waiting.map((w) => w.organization_id),
+      waiting.filter(onboarding).map((w) => w.organization_id),
     );
-    registered = waiting.filter((w) => {
-      const now = marks.get(w.organization_id);
-      const seenAt = (w.diagnostics as { seenChange?: string } | null)?.seenChange;
+    changed = waiting.filter((w) => {
+      const mark = marks.get(w.organization_id)!;
+      const seen = (w.diagnostics as { seenChange?: string } | null)?.seenChange ?? "";
       // Only a change since the job's last attempt is news; otherwise it would wait again.
-      return Boolean(now?.registered) && now!.mark !== seenAt;
+      return onboarding(w) ? mark !== seen : mark.split("#")[0] !== seen.split("#")[0];
     });
   }
 
   // Fairness: each tick starts one place further along every list, and the lists take turns,
   // so jobs that keep failing (or a flood of one kind) cannot hold the others back.
   const tick = Math.floor(now.getTime() / 60_000);
-  const lists = [due, stuck, registered].map((list) => {
+  const lists = [due, stuck, changed].map((list) => {
     const at = list.length ? tick % list.length : 0;
     return [...list.slice(at), ...list.slice(0, at)];
   });
@@ -573,7 +665,7 @@ export async function sweepProvisioningRetries(
   return {
     due: due.length,
     stuck: stuck.length,
-    agentRegistered: registered.length,
+    changed: changed.length,
     processed,
     errors,
   };

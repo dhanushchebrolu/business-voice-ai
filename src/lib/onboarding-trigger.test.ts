@@ -314,7 +314,7 @@ describe("recovery", () => {
       sarvam_app_id: "Customer-app-1",
       updated_at: new Date().toISOString(),
     });
-    assert.equal((await c.sweep()).agentRegistered, 1);
+    assert.equal((await c.sweep()).changed, 1);
   });
 
   test("an incomplete resubmission leaves an existing job as it was", async () => {

@@ -4,7 +4,11 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runProvisioningPipeline } from "./provisioning-pipeline.server.ts";
-import { runProvisioning, sweepProvisioningRetries } from "./provisioning-runs.server.ts";
+import {
+  changeMarks,
+  runProvisioning,
+  sweepProvisioningRetries,
+} from "./provisioning-runs.server.ts";
 import { handleBridgeRpc, BRIDGE_TOOLS } from "./operator-bridge-mcp.server.ts";
 import {
   authenticateBridge,
@@ -331,7 +335,6 @@ describe("the sweep loses no change and starts no loop", () => {
         trigger: "customer_activate",
         status: "waiting",
         current_step: "waiting_for_agent",
-        diagnostics: { seenChange: "a||" },
       });
       db.tables["agent_configs"]!.push({
         id: `agent_${org}`,
@@ -340,6 +343,14 @@ describe("the sweep loses no change and starts no loop", () => {
         updated_at: "a",
       });
     }
+    // The idle jobs have already seen their current state.
+    const idle = db.tables["provisioning_runs"]!.filter((j) => String(j["id"]).startsWith("idle_"));
+    const marks = await changeMarks(
+      db.client,
+      idle.map((j) => String(j["organization_id"])),
+    );
+    for (const j of idle)
+      j["diagnostics"] = { seenChange: marks.get(String(j["organization_id"])) };
     registerAt(db, t0 + 1000);
     const started: string[] = [];
     await sweepProvisioningRetries(db.client, {

@@ -276,19 +276,22 @@ describe("waiting jobs do not churn", () => {
     Object.assign(db.tables["agent_voice_language_settings"]![0]!, { updated_at: iso(t0 + 1_000) });
     assert.equal((await sweepOnce(db, t0 + 60_000)).processed, 1);
     assert.equal((await sweepOnce(db, t0 + 120_000)).processed, 0);
+    // A timestamp alone is not news.
+    Object.assign(db.tables["agent_configs"]![0]!, { updated_at: iso(t0 + 130_000) });
+    assert.equal((await sweepOnce(db, t0 + 150_000)).processed, 0);
     // The agent is re-registered (a new version): news, so one more resume.
-    Object.assign(db.tables["agent_configs"]![0]!, { updated_at: iso(t0 + 150_000) });
+    Object.assign(db.tables["agent_configs"]![0]!, { sarvam_app_version: 4 });
     assert.equal((await sweepOnce(db, t0 + 180_000)).processed, 1);
     assert.equal((await sweepOnce(db, t0 + 240_000)).processed, 0);
     // The customer's voice settings change: also news.
     Object.assign(db.tables["agent_voice_language_settings"]![0]!, {
-      updated_at: iso(t0 + 250_000),
+      allowed_languages: ["English"],
     });
     assert.equal((await sweepOnce(db, t0 + 300_000)).processed, 1);
     assert.equal(num(db, "num_new")["status"], "provisioning", "still gated throughout");
   });
 
-  test("a job with no registered agent is never swept", async () => {
+  test("an unchanged job with no registered agent is not re-run", async () => {
     const db = newCustomer();
     const t0 = NOW.getTime();
     await run(db);
