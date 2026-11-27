@@ -8,7 +8,14 @@ import { useAuth } from "@/hooks/useAuth";
 import { workspaceQuery } from "@/lib/workspace";
 import { BUSINESS_TYPES, getBusinessType, DAYS } from "@/lib/business-types";
 import { describeInvalidInterval } from "@/lib/calendar/business-hours-validation";
-import { saveOnboarding } from "@/lib/onboarding-save";
+import {
+  buildSetupPayload,
+  formFromSaved,
+  hasMixedHours,
+  loadSetup,
+  saveOnboarding,
+  type SavedSetup,
+} from "@/lib/onboarding-save";
 import { LANGUAGES, VOICES } from "@/lib/voices";
 import { Logo } from "@/components/app/primitives";
 import { Button } from "@/components/ui/button";
@@ -41,41 +48,67 @@ export const Route = createFileRoute("/app/onboarding")({
 
 const STEPS = ["Business type", "Business details", "Hours", "Services", "Voice & greeting"];
 
+/** Loads what is already saved before the form opens, so nothing is overwritten by blanks. */
 function Onboarding() {
   const { user } = useAuth();
+  const { data: ws, error: workspaceError, refetch } = useQuery(workspaceQuery(user?.id));
+  const orgId = ws?.organization?.id;
+  const setup = useQuery({
+    queryKey: ["onboarding-setup", orgId],
+    enabled: Boolean(orgId),
+    queryFn: () => loadSetup(supabase, orgId!),
+    // Read afresh on every visit; never swapped under a form the person is filling in.
+    gcTime: 0,
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
+  const failed = workspaceError ?? setup.error;
+  if (!orgId || !setup.data)
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center gap-3 px-5 text-sm text-muted-foreground">
+        {failed ? (
+          <>
+            <p role="alert">We could not load your saved business details.</p>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void (workspaceError ? refetch() : setup.refetch())}
+            >
+              Try again
+            </Button>
+          </>
+        ) : (
+          <p className="flex items-center gap-2">
+            <Loader2 className="size-4 animate-spin" /> Loading your saved details…
+          </p>
+        )}
+      </div>
+    );
+  return <Wizard key={orgId} orgId={orgId} orgName={ws.organization!.name} saved={setup.data} />;
+}
+
+function Wizard({ orgId, orgName, saved }: { orgId: string; orgName: string; saved: SavedSetup }) {
   const navigate = useNavigate();
   const qc = useQueryClient();
-  const { data: ws } = useQuery(workspaceQuery(user?.id));
+  /** The form as it opened: only what differs from it counts as an edit. */
+  const [loaded] = useState(() => formFromSaved(saved));
   const [step, setStep] = useState(0);
   const [saving, setSaving] = useState(false);
 
-  const [typeId, setTypeId] = useState("");
+  const [typeId, setTypeId] = useState(loaded.typeId);
   const type = useMemo(() => getBusinessType(typeId), [typeId]);
-  const [info, setInfo] = useState({
-    name: "",
-    description: "",
-    address: "",
-    city: "",
-    state: "",
-    postal_code: "",
-    primary_phone: "",
-    email: "",
-    website: "",
-  });
-  const [openTime, setOpenTime] = useState("09:00");
-  const [closeTime, setCloseTime] = useState("19:00");
-  const [openDays, setOpenDays] = useState<number[]>([1, 2, 3, 4, 5, 6]);
-  const [items, setItems] = useState([
-    { name: "", price: "" },
-    { name: "", price: "" },
-    { name: "", price: "" },
-  ]);
-  const [agentName, setAgentName] = useState("Aria");
-  const [language, setLanguage] = useState("en-IN");
-  const [voiceId, setVoiceId] = useState("simran");
-  const [greeting, setGreeting] = useState("");
+  const [info, setInfo] = useState(loaded.info);
+  const [openTime, setOpenTime] = useState(loaded.openTime);
+  const [closeTime, setCloseTime] = useState(loaded.closeTime);
+  const [openDays, setOpenDays] = useState<number[]>(loaded.openDays);
+  const [items, setItems] = useState(loaded.items);
+  const [agentName, setAgentName] = useState(loaded.agentName);
+  const [language, setLanguage] = useState(loaded.language);
+  const [voiceId, setVoiceId] = useState(loaded.voiceId);
+  const [greeting, setGreeting] = useState(loaded.greeting);
 
-  const displayName = info.name || ws?.organization?.name || "";
+  const displayName = info.name || orgName;
   const defaultGreeting = `Thank you for calling ${displayName || "our business"}. This is ${agentName}. How may I help you today?`;
 
   function next() {
@@ -83,7 +116,12 @@ function Onboarding() {
       toast.error("Choose the type of business you run.");
       return;
     }
-    if (step === 1 && (!info.name.trim() || info.description.trim().length < 40)) {
+    // An already saved description is accepted as it is.
+    const keptDescription = loaded.info.description && info.description === loaded.info.description;
+    if (
+      step === 1 &&
+      (!info.name.trim() || (info.description.trim().length < 40 && !keptDescription))
+    ) {
       toast.error("Add your business name and a description of at least 40 characters.");
       return;
     }
@@ -98,11 +136,9 @@ function Onboarding() {
   }
 
   async function finish() {
-    if (!ws?.organization) return;
     setSaving(true);
     try {
-      const { alreadySetUp } = await saveOnboarding(supabase, {
-        orgId: ws.organization.id,
+      const form = {
         typeId,
         info,
         openDays,
@@ -112,13 +148,18 @@ function Onboarding() {
         agentName,
         language,
         voiceId,
-        greeting: greeting.trim() || defaultGreeting,
-      });
+        greeting,
+      };
+      const { createdAgent } = await saveOnboarding(
+        supabase,
+        orgId,
+        buildSetupPayload(form, loaded, defaultGreeting),
+      );
       await qc.invalidateQueries({ queryKey: ["workspace"] });
       toast.success(
-        alreadySetUp
-          ? "Your business is already set up. Edit it on the Business page."
-          : "Workspace ready. Review and publish your receptionist.",
+        createdAgent
+          ? "Workspace ready. Review and publish your receptionist."
+          : "Your changes are saved.",
       );
       navigate({ to: "/app/agent" });
     } catch (error) {
@@ -275,6 +316,12 @@ function Onboarding() {
               The agent will never claim you are open outside these hours. You can add breaks and
               holidays later.
             </p>
+            {hasMixedHours(saved) ? (
+              <p className="text-sm text-muted-foreground" role="note">
+                Your saved days have different hours. They stay as they are unless you change the
+                days or times here.
+              </p>
+            ) : null}
             <div className="flex flex-wrap gap-2">
               {DAYS.map((d, i) => (
                 <button
@@ -371,6 +418,9 @@ function Onboarding() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
+                    {LANGUAGES.some((l) => l.code === language) ? null : (
+                      <SelectItem value={language}>{language}</SelectItem>
+                    )}
                     {LANGUAGES.map((l) => (
                       <SelectItem key={l.code} value={l.code}>
                         {l.label} — {l.native}
@@ -386,6 +436,9 @@ function Onboarding() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent className="max-h-72">
+                  {VOICES.some((v) => v.id === voiceId) ? null : (
+                    <SelectItem value={voiceId}>{voiceId}</SelectItem>
+                  )}
                   {VOICES.map((v) => (
                     <SelectItem key={v.id} value={v.id}>
                       {v.name} · {v.gender}

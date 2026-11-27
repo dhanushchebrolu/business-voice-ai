@@ -1,6 +1,6 @@
 /**
  * A tiny in-memory stand-in for the supabase-js query builder, for
- * behavioral tests: insert (one row or many) / upsert / select / update with eq / neq / in filters,
+ * behavioral tests: insert / select / update with eq / neq / in filters,
  * single / maybeSingle, unique constraints (reported as Postgres 23505) and
  * scripted rpc functions. Only what the provisioning and webhook code uses.
  */
@@ -15,7 +15,7 @@ export interface MemoryDb {
   /** Makes the next such operation on `table` fail with this error. */
   failNext(
     table: string,
-    op: "select" | "insert" | "update" | "upsert",
+    op: "select" | "insert" | "update",
     error: { code?: string; message: string },
   ): void;
 }
@@ -43,9 +43,8 @@ export function memorySupabase(opts: {
 
   function builder(table: string) {
     const filters: Filter[] = [];
-    let op: "select" | "insert" | "update" | "upsert" = "select";
+    let op: "select" | "insert" | "update" = "select";
     let payload: Row | null = null;
-    let conflict: string[] = [];
     let returning = false;
     let mode: "many" | "single" | "maybeSingle" | "count" = "many";
     let limit = Number.POSITIVE_INFINITY;
@@ -62,45 +61,30 @@ export function memorySupabase(opts: {
         return { data: null, error };
       }
       let result: Row[] = [];
-      if (op === "insert" || op === "upsert") {
-        const incoming = (Array.isArray(payload) ? payload : [payload]) as Row[];
-        const added: Row[] = [];
-        for (const values of incoming) {
-          const same =
-            op === "upsert"
-              ? rows().find((r) => conflict.every((c) => r[c] === values[c]))
-              : undefined;
-          if (same) {
-            Object.assign(same, values, { updated_at: new Date().toISOString() });
-            result.push(same);
-            continue;
-          }
-          const row: Row = {
-            id: `id_${++seq}`,
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-            ...values,
-          };
-          for (const u of opts.uniques ?? []) {
-            if (u.table !== table) continue;
-            const k = u.key(row);
-            if (k !== null && [...rows(), ...added].some((r) => u.key(r) === k))
-              return {
-                data: null,
-                error: {
-                  code: "23505",
-                  // Postgres names the violated constraint; named uniques do the same here.
-                  message: u.name
-                    ? `duplicate key value violates unique constraint "${u.name}"`
-                    : "duplicate key",
-                },
-              };
-          }
-          added.push(row);
-          result.push(row);
+      if (op === "insert") {
+        const row: Row = {
+          id: `id_${++seq}`,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          ...payload,
+        };
+        for (const u of opts.uniques ?? []) {
+          if (u.table !== table) continue;
+          const k = u.key(row);
+          if (k !== null && rows().some((r) => u.key(r) === k))
+            return {
+              data: null,
+              error: {
+                code: "23505",
+                // Postgres names the violated constraint; named uniques do the same here.
+                message: u.name
+                  ? `duplicate key value violates unique constraint "${u.name}"`
+                  : "duplicate key",
+              },
+            };
         }
-        // All or nothing, as one statement.
-        rows().push(...added);
+        rows().push(row);
+        result = [row];
       } else {
         const matched = rows().filter((r) => filters.every((f) => f(r)));
         if (op === "update") {
@@ -167,15 +151,9 @@ export function memorySupabase(opts: {
         filters.push((r) => parts.some((f) => f(r)));
         return b;
       },
-      insert(p: Row | Row[]) {
+      insert(p: Row) {
         op = "insert";
-        payload = p as Row;
-        return b;
-      },
-      upsert(p: Row | Row[], options: { onConflict: string }) {
-        op = "upsert";
-        payload = p as Row;
-        conflict = options.onConflict.split(",");
+        payload = p;
         return b;
       },
       update(p: Row) {

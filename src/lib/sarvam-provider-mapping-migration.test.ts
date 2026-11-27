@@ -126,37 +126,29 @@ describe("multiple phone numbers may share the same deployment ID", () => {
   });
 });
 
-describe("existing agent onboarding still works — every column app.onboarding.tsx inserts is in the new GRANT INSERT list", () => {
-  test("cross-file check: onboarding's actual INSERT column set is a subset of the migration's GRANT INSERT column set", () => {
-    const onboardingSrc = readRepoFile("src", "lib", "onboarding-save.ts");
-    const insertBlockMatch = onboardingSrc.match(
-      /supabase\.from\("agent_configs"\)\.insert\(\{([\s\S]*?)\}\);/,
+describe("existing agent onboarding still works — every column the wizard's save inserts is in the new GRANT INSERT list", () => {
+  test("cross-file check: the save function's agent_configs INSERT columns are a subset of the migration's GRANT INSERT column set", () => {
+    const saveSrc = readRepoFile(
+      "supabase",
+      "migrations",
+      "20261205090000_business_setup_save.sql",
     );
-    assert.ok(
-      insertBlockMatch,
-      "expected to find the agent_configs insert call in onboarding-save.ts",
-    );
-    // Only the insert's own top-level keys are columns; keys of a nested
-    // object (e.g. capabilities: { answer_faqs: true, ... } wrapped across
-    // lines by Prettier) are deeper-indented and aren't.
-    const keyLines = [...insertBlockMatch![1]!.matchAll(/^([ \t]*)(\w+):/gm)];
-    const topIndent = Math.min(...keyLines.map((m) => m[1]!.length));
-    const usedColumns = keyLines.filter((m) => m[1]!.length === topIndent).map((m) => m[2]!);
-    assert.ok(usedColumns.length > 0, "expected to parse at least one column from the insert call");
-
+    assert.match(saveSrc, /FUNCTION public\.save_business_setup[\s\S]*?SECURITY INVOKER/);
+    const insert = saveSrc.match(/INSERT INTO public\.agent_configs \(([^)]*)\)/);
+    assert.ok(insert, "expected the save function to insert agent_configs");
+    const columns = (list: string) =>
+      list
+        .split(",")
+        .map((c) => c.trim())
+        .filter(Boolean);
     const grantMatch = migrationSrc.match(/GRANT INSERT \(([\s\S]*?)\) ON public\.agent_configs/);
     assert.ok(grantMatch);
-    const grantedColumns = grantMatch![1]!
-      .split(",")
-      .map((c) => c.trim())
-      .filter(Boolean);
-
-    for (const col of usedColumns) {
+    const granted = columns(grantMatch![1]!);
+    for (const col of columns(insert![1]!))
       assert.ok(
-        grantedColumns.includes(col),
-        `onboarding inserts "${col}" but the migration does not grant INSERT on it`,
+        granted.includes(col),
+        `the wizard inserts "${col}" but the migration does not grant INSERT on it`,
       );
-    }
   });
 });
 

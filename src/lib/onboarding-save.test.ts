@@ -1,211 +1,300 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { saveOnboarding, type OnboardingInput } from "./onboarding-save.ts";
-import { businessSetupProblems } from "./provisioning-pipeline.server.ts";
+import {
+  buildSetupPayload,
+  formFromSaved,
+  hasMixedHours,
+  loadSetup,
+  saveOnboarding,
+  type OnboardingForm,
+  type SavedSetup,
+} from "./onboarding-save.ts";
 import { getBusinessType } from "./business-types.ts";
 import { memorySupabase } from "./payments/memory-supabase.test-helper.ts";
 
 /**
- * The setup wizard's save: every failed write stops it, and running it again finishes the same
- * business so the customer can submit it. A set-up customer is never overwritten.
+ * The setup wizard in the browser: what it loads, how it prefills and what it sends. What the
+ * database then does with it (atomic, serialized, never overwriting with blanks) is tested on
+ * real PostgreSQL: supabase/migrations/business_setup_save.pg.test.ts.
  */
 
 const ORG = "org_wizard";
-const TYPE = "dental_clinic";
+const BREAKS = [
+  { start: "09:00", end: "12:00" },
+  { start: "14:00", end: "18:00" },
+];
 
-const input = (over: Partial<OnboardingInput> = {}): OnboardingInput => ({
-  orgId: ORG,
-  typeId: TYPE,
-  info: {
-    name: "Wizard Dental",
-    description: "A family dental clinic that looks after patients of every age in town.",
+const SAVED: SavedSetup = {
+  business: {
+    business_type: "dental_clinic",
+    name: "Bright Dental",
+    description: "Clinic.",
     address: "1 Main Road",
     city: "Chennai",
-    state: "",
-    postal_code: "",
+    state: "TN",
+    postal_code: "600001",
     primary_phone: "+91 90000 00000",
-    email: "",
-    website: "",
+    email: "front@example.com",
+    website: "https://example.com",
   },
-  openDays: [1, 2, 3],
-  openTime: "09:00",
-  closeTime: "18:00",
-  items: [
-    { name: "Cleaning", price: "500" },
-    { name: "  ", price: "" },
+  hours: [0, 1, 2, 3, 4, 5, 6].map((d) => ({
+    day_of_week: d,
+    is_closed: d === 0,
+    intervals: d === 0 ? [] : [{ start: "10:00", end: "18:00" }],
+  })),
+  services: [
+    { id: "s1", name: "Cleaning", price: 500 },
+    { id: "s2", name: "Braces", price: null },
   ],
-  agentName: "Aria",
-  language: "en-IN",
-  voiceId: "simran",
-  greeting: "Hello.",
-  ...over,
+  agent: {
+    agent_name: "Meera",
+    primary_language: "ta-IN",
+    voice_id: "ritu",
+    greetings: { "ta-IN": "Vanakkam.", "en-IN": "Hello." },
+  },
+};
+const EMPTY: SavedSetup = { business: null, hours: [], services: [], agent: null };
+
+function send(from: SavedSetup, type: (f: OnboardingForm) => void = () => {}) {
+  const loaded = formFromSaved(from);
+  const form = structuredClone(loaded);
+  type(form);
+  return buildSetupPayload(form, loaded, "Default greeting.");
+}
+const NOTHING = { business: {}, hours: [], services: [], agent: {} };
+
+describe("prefilling", () => {
+  test("every saved field is shown", () => {
+    const form = formFromSaved(SAVED);
+    assert.equal(form.typeId, "dental_clinic");
+    assert.deepEqual({ ...form.info, business_type: "dental_clinic" }, SAVED.business);
+    assert.deepEqual(
+      [form.openDays, form.openTime, form.closeTime],
+      [[1, 2, 3, 4, 5, 6], "10:00", "18:00"],
+    );
+    assert.deepEqual(form.items, [
+      { id: "s1", name: "Cleaning", price: "500" },
+      { id: "s2", name: "Braces", price: "" },
+    ]);
+    assert.deepEqual(
+      [form.agentName, form.language, form.voiceId, form.greeting],
+      ["Meera", "ta-IN", "ritu", "Vanakkam."],
+    );
+  });
+
+  test("nothing saved: the usual starting form", () => {
+    const form = formFromSaved(EMPTY);
+    assert.deepEqual([form.typeId, form.info.name, form.agentName], ["", "", "Aria"]);
+    assert.deepEqual(form.openDays, [1, 2, 3, 4, 5, 6]);
+    assert.equal(form.items.length, 3);
+  });
+
+  test("partly saved: saved parts shown, the rest at their defaults", () => {
+    const form = formFromSaved({
+      ...EMPTY,
+      business: { business_type: "other", name: "Half", city: null },
+      hours: [{ day_of_week: 2, is_closed: false, intervals: [{ from: "9", to: "5" }] }],
+    });
+    assert.deepEqual([form.info.name, form.info.city, form.info.email], ["Half", "", ""]);
+    assert.deepEqual([form.openDays, form.openTime], [[2], "09:00"], "an old hours shape");
+    assert.deepEqual([form.agentName, form.language], ["Aria", "en-IN"]);
+  });
+
+  test("days with different hours or breaks are flagged", () => {
+    assert.equal(hasMixedHours(SAVED), false);
+    const withBreak = structuredClone(SAVED);
+    withBreak.hours[1]!.intervals = BREAKS;
+    assert.equal(hasMixedHours(withBreak), true);
+    assert.equal(hasMixedHours(EMPTY), false);
+  });
 });
 
-function setup(tables: Record<string, Record<string, unknown>[]> = {}) {
-  const db = memorySupabase({
-    uniques: [
-      { table: "agent_configs", key: (r) => (r["business_id"] as string | null) ?? null },
-      {
-        table: "business_hours",
-        key: (r) => `${r["business_id"] as string}:${r["day_of_week"] as number}`,
-      },
-    ],
-    tables: { organizations: [{ id: ORG, onboarding_completed: false }], ...tables },
+describe("what is sent", () => {
+  test("opening and submitting a saved setup sends no change", () => {
+    assert.deepEqual(send(SAVED).changes, NOTHING);
+    const mixed = structuredClone(SAVED);
+    mixed.hours[1]!.intervals = BREAKS;
+    assert.deepEqual(send(mixed).changes, NOTHING);
   });
-  const rows = (t: string) => db.tables[t] ?? [];
-  return {
-    db,
-    rows,
-    save: (over?: Partial<OnboardingInput>) => saveOnboarding(db.client, input(over)),
-  };
-}
 
-/** The finished setup: one of each, and nothing the submission would still ask for. */
-async function assertComplete(c: ReturnType<typeof setup>) {
-  const type = getBusinessType(TYPE);
-  assert.equal(c.rows("businesses").length, 1);
-  assert.equal(c.rows("business_hours").length, 7);
-  assert.deepEqual(
-    c.rows("services").map((s) => s["name"]),
-    ["Cleaning"],
-  );
-  assert.equal(c.rows("faqs").length, type.suggestedFaqs.length);
-  assert.equal(c.rows("business_rules").length, type.suggestedRules.length);
-  assert.equal(c.rows("agent_configs").length, 1);
-  assert.equal(c.rows("organizations")[0]!["onboarding_completed"], true);
-  assert.deepEqual(await businessSetupProblems(c.db.client, ORG), []);
-}
-
-describe("a save that goes through", () => {
-  test("writes the whole setup, ready to submit", async () => {
-    const c = setup();
-    assert.deepEqual(await c.save(), { alreadySetUp: false });
-    await assertComplete(c);
-    assert.equal(c.rows("businesses")[0]!["state"], null, "blank fields are stored empty");
-    const closed = c.rows("business_hours").find((h) => h["day_of_week"] === 0)!;
-    assert.deepEqual([closed["is_closed"], closed["intervals"]], [true, []]);
+  test("cleared fields are not sent, so saved values stay", () => {
+    const { changes } = send(SAVED, (f) => {
+      for (const key of Object.keys(f.info) as (keyof typeof f.info)[]) f.info[key] = "  ";
+      f.agentName = "";
+      f.greeting = "";
+      f.items = [
+        { id: "s1", name: "", price: "" },
+        { id: "s2", name: "", price: "" },
+        { name: " ", price: "10" },
+      ];
+    });
+    assert.deepEqual(changes, NOTHING);
   });
-});
 
-describe("a failed save never strands the customer", () => {
-  for (const [table, op] of [
-    ["businesses", "insert"],
-    ["business_hours", "upsert"],
-    ["services", "insert"],
-    ["faqs", "insert"],
-    ["business_rules", "insert"],
-    ["agent_configs", "insert"],
-    ["organizations", "update"],
-  ] as const)
-    test(`${table} ${op} fails: the save stops, and saving again finishes it`, async () => {
-      const c = setup();
-      c.db.failNext(table, op, { message: `${table} is unavailable` });
-      await assert.rejects(c.save(), /unavailable/);
-      // Without a receptionist the dashboard sends the customer back to the wizard.
-      if (table !== "organizations") assert.equal(c.rows("agent_configs").length, 0);
-      await c.save();
-      await assertComplete(c);
+  test("only edited fields are sent", () => {
+    const { changes } = send(SAVED, (f) => {
+      f.info.name = " Renamed ";
+      f.items[1]!.price = "900";
+      f.items.push({ name: "Whitening", price: "abc" });
+      f.voiceId = "simran";
     });
-
-  for (const table of ["businesses", "agent_configs", "services"])
-    test(`reading ${table} fails: reported, never treated as empty`, async () => {
-      const c = setup();
-      if (table === "services") {
-        c.db.failNext("agent_configs", "insert", { message: "first attempt" });
-        await assert.rejects(c.save());
-      }
-      c.db.failNext(table, "select", { message: "read failed" });
-      await assert.rejects(c.save(), /read failed/);
-      if (table !== "services") assert.equal(c.rows("businesses").length, 0, "nothing written");
-      assert.equal(c.rows("agent_configs").length, 0);
-      await c.save();
-      await assertComplete(c);
-    });
-
-  test("saving again keeps earlier optional details left blank, and takes the new answers", async () => {
-    const c = setup();
-    c.db.failNext("agent_configs", "insert", { message: "down" });
-    await assert.rejects(c.save());
-    const blank = { ...input().info, name: "Renamed Dental", address: "", primary_phone: "" };
-    await c.save({
-      info: blank,
-      openDays: [5],
-      items: [
-        { name: "Cleaning", price: "500" },
-        { name: "Braces", price: "" },
+    assert.deepEqual(changes, {
+      business: { name: "Renamed" },
+      hours: [],
+      services: [
+        { id: "s2", name: "Braces", price: 900 },
+        { name: "Whitening", price: null },
       ],
+      agent: { voice_id: "simran" },
     });
-    const [business] = c.rows("businesses");
-    assert.deepEqual(
-      [business!["name"], business!["address"], business!["primary_phone"]],
-      ["Renamed Dental", "1 Main Road", "+91 90000 00000"],
-    );
-    assert.deepEqual(
-      c
-        .rows("business_hours")
-        .filter((h) => !h["is_closed"])
-        .map((h) => h["day_of_week"]),
-      [5],
-    );
-    assert.deepEqual(
-      c.rows("services").map((s) => s["name"]),
-      ["Cleaning", "Braces"],
-    );
   });
 
-  test("a receptionist saved by another tab at the same moment counts as saved", async () => {
-    const c = setup();
-    c.db.failNext("agent_configs", "insert", { code: "23505", message: "duplicate key" });
-    assert.deepEqual(await c.save(), { alreadySetUp: false });
+  test("toggling a day sends that day only; changing the time sends the open days", () => {
+    const toggled = send(SAVED, (f) => (f.openDays = [0, 1, 2, 3, 4, 5]));
+    assert.deepEqual(
+      toggled.changes.hours.map((h) => [h.day_of_week, h.is_closed]),
+      [
+        [0, false],
+        [6, true],
+      ],
+    );
+    assert.deepEqual(toggled.changes.hours[1]!.intervals, []);
+    const later = send(SAVED, (f) => (f.closeTime = "20:00"));
+    assert.deepEqual(
+      later.changes.hours.map((h) => h.day_of_week),
+      [1, 2, 3, 4, 5, 6],
+    );
+    assert.deepEqual(later.changes.hours[0]!.intervals, [{ start: "10:00", end: "20:00" }]);
+  });
+
+  test("a new customer: typed answers are changes, defaults only fill what is missing", () => {
+    const { initial, changes } = send(EMPTY, (f) => {
+      f.typeId = "dental_clinic";
+      f.info.name = "New";
+    });
+    assert.deepEqual(changes, {
+      business: { business_type: "dental_clinic", name: "New" },
+      hours: [],
+      services: [],
+      agent: {},
+    });
+    assert.equal(initial.hours.length, 7);
+    assert.equal(initial.agent.greeting, "Default greeting.");
+    assert.deepEqual(initial.business, { business_type: "dental_clinic", name: "New" });
+    const type = getBusinessType("dental_clinic");
+    assert.deepEqual(
+      [initial.faqs.length, initial.rules.length],
+      [type.suggestedFaqs.length, type.suggestedRules.length],
+    );
   });
 });
 
-describe("a set-up customer is never overwritten", () => {
-  test("running the wizard again changes nothing of theirs", async () => {
-    const c = setup();
-    await c.save();
-    const before = JSON.stringify({ ...c.db.tables, organizations: [] });
-    const again = await c.save({ info: { ...input().info, name: "Other name" }, openDays: [] });
-    assert.deepEqual(again, { alreadySetUp: true });
-    assert.equal(JSON.stringify({ ...c.db.tables, organizations: [] }), before);
-  });
-
-  test("older duplicate businesses with the receptionist on the second: no second receptionist", async () => {
-    const c = setup({
+function database() {
+  return memorySupabase({
+    tables: {
+      agent_configs: [
+        {
+          id: "a1",
+          organization_id: ORG,
+          business_id: "b2",
+          agent_name: "Meera",
+          created_at: "2026-01-02",
+        },
+        { id: "ax", organization_id: "other", business_id: "bx", created_at: "2025-01-01" },
+      ],
       businesses: [
-        { id: "biz_1", organization_id: ORG, name: "First", created_at: "2026-01-01" },
-        { id: "biz_2", organization_id: ORG, name: "Second", created_at: "2026-01-02" },
+        { id: "b1", organization_id: ORG, name: "First", created_at: "2026-01-01" },
+        { id: "b2", organization_id: ORG, name: "Second", created_at: "2026-01-02" },
+        { id: "bx", organization_id: "other", name: "Other", created_at: "2025-01-01" },
       ],
-      agent_configs: [{ id: "agent_1", organization_id: ORG, business_id: "biz_2" }],
-    });
-    assert.deepEqual(await c.save(), { alreadySetUp: true });
-    assert.equal(c.rows("agent_configs").length, 1);
-    assert.equal(c.rows("businesses")[0]!["name"], "First");
-    assert.equal(c.rows("business_hours").length, 0);
+      business_hours: [
+        { id: "h2", business_id: "b2", day_of_week: 1, is_closed: false, intervals: [] },
+        { id: "hx", business_id: "bx", day_of_week: 2, is_closed: false, intervals: [] },
+      ],
+      services: [
+        { id: "s2", business_id: "b2", name: "Mine", price: 1, sort_order: 0 },
+        { id: "sx", business_id: "bx", name: "Theirs", price: 1, sort_order: 0 },
+      ],
+    },
+  });
+}
+
+describe("loading what is saved", () => {
+  test("the receptionist's business, and only this customer's records", async () => {
+    const s = await loadSetup(database().client, ORG);
+    assert.equal(s.business!.name, "Second");
+    assert.deepEqual([s.hours.length, s.services.map((x) => x.name)], [1, ["Mine"]]);
+    assert.equal(s.agent!.agent_name, "Meera");
   });
 
-  test("another customer's business and receptionist are left alone", async () => {
-    const other = { id: "biz_other", organization_id: "org_other", name: "Other" };
-    const c = setup({
-      businesses: [{ ...other }],
-      agent_configs: [{ id: "a_o", organization_id: "org_other", business_id: "biz_other" }],
+  test("without a receptionist: the first business", async () => {
+    const db = database();
+    db.tables["agent_configs"] = [];
+    assert.equal((await loadSetup(db.client, ORG)).business!.name, "First");
+    assert.deepEqual(await loadSetup(db.client, "nobody"), EMPTY);
+  });
+
+  for (const table of ["agent_configs", "businesses", "business_hours", "services"])
+    test(`a failed read of ${table} is an error, never an empty form`, async () => {
+      const db = database();
+      db.failNext(table, "select", { message: `${table} unavailable` });
+      await assert.rejects(loadSetup(db.client, ORG), { message: `${table} unavailable` });
     });
-    await c.save();
-    assert.deepEqual(c.rows("businesses")[0], other);
-    assert.equal(c.rows("agent_configs").filter((a) => a["organization_id"] === ORG).length, 1);
+});
+
+describe("saving", () => {
+  const client = (reply: { data?: unknown; error?: { message: string } | null }) => {
+    const calls: unknown[] = [];
+    return {
+      calls,
+      client: {
+        rpc: async (name: string, args: unknown) => {
+          calls.push([name, args]);
+          return { data: reply.data ?? null, error: reply.error ?? null };
+        },
+      } as never,
+    };
+  };
+
+  test("one database call carries the whole save", async () => {
+    const c = client({ data: { created_agent: true } });
+    const payload = send(SAVED);
+    assert.deepEqual(await saveOnboarding(c.client, ORG, payload), { createdAgent: true });
+    assert.deepEqual(c.calls, [
+      ["save_business_setup", { _org: ORG, _initial: payload.initial, _changes: payload.changes }],
+    ]);
+  });
+
+  test("a failure is reported, in plain words where known", async () => {
+    const fail = (message: string) =>
+      saveOnboarding(client({ error: { message } }).client, ORG, send(SAVED));
+    await assert.rejects(fail("network down"), /network down/);
+    await assert.rejects(fail("BUSINESS_SETUP_NAME_REQUIRED"), /Add your business name/);
   });
 });
 
-describe("the dashboard", () => {
+describe("the pages", () => {
   const read = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8");
+
+  test("the wizard opens only with the saved data loaded, and offers a retry when it cannot", () => {
+    const page = read("../routes/app.onboarding.tsx");
+    assert.match(page, /if \(!orgId \|\| !setup\.data\)/);
+    assert.match(page, /queryFn: \(\) => loadSetup\(supabase, orgId!\)/);
+    assert.match(page, /could not load your saved business details/);
+    assert.match(page, /Try again/);
+    assert.match(page, /gcTime: 0/);
+    assert.match(page, /useState\(\(\) => formFromSaved\(saved\)\)/);
+    // The browser writes nothing itself: one database call.
+    assert.doesNotMatch(page, /supabase\s*\.from\(/);
+  });
+
   test("sends a customer with an unfinished setup back to the wizard", () => {
     const app = read("../routes/app.tsx");
     assert.match(app, /ws\.setupIncomplete &&\s*pathname !== "\/app\/onboarding"/);
     const workspace = read("./workspace.ts");
     assert.match(workspace, /if \(businessRes\.error\) throw businessRes\.error;/);
     assert.match(workspace, /if \(agentError\) throw agentError;/);
-    assert.match(workspace, /if \(anyError\) throw anyError;/);
     assert.match(workspace, /setupIncomplete = !data\?\.length;/);
   });
 });

@@ -1,190 +1,252 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { Database } from "@/integrations/supabase/types";
+import type { Database, Json } from "@/integrations/supabase/types";
 import { DAYS, getBusinessType } from "./business-types.ts";
 import { describeBusinessHoursWriteError } from "./calendar/business-hours-validation.ts";
 
 /**
- * Saves the setup wizard. The writes are separate (the browser client has no transaction), so
- * every one is checked and the whole save can be run again after a failure: it continues the
- * same business and never duplicates what is already there. The receptionist (agent_configs) is
- * written last, so a customer without one is sent back to the wizard (app.tsx). A customer who
- * already has a receptionist is set up: nothing of theirs is overwritten.
+ * The setup wizard's data: what is already saved (to prefill it) and the save.
+ *
+ * The save is one database function (save_business_setup, migration 20261205090000): a single
+ * transaction, one submission at a time per customer. Two things are sent:
+ *   changes  what the person edited on screen. Applied; a blank never replaces a saved value.
+ *   initial  everything on screen, used only for what does not exist yet.
+ * So a second tab, or a wizard opened before another save, cannot put its untouched defaults
+ * over saved data.
  */
 
-export interface OnboardingInput {
-  orgId: string;
+const INFO_KEYS = [
+  "name",
+  "description",
+  "address",
+  "city",
+  "state",
+  "postal_code",
+  "primary_phone",
+  "email",
+  "website",
+] as const;
+
+export type OnboardingInfo = Record<(typeof INFO_KEYS)[number], string>;
+
+export interface OnboardingForm {
   typeId: string;
-  info: {
-    name: string;
-    description: string;
-    address: string;
-    city: string;
-    state: string;
-    postal_code: string;
-    primary_phone: string;
-    email: string;
-    website: string;
-  };
+  info: OnboardingInfo;
   openDays: number[];
   openTime: string;
   closeTime: string;
-  items: { name: string; price: string }[];
+  /** `id`: a saved service. */
+  items: { id?: string; name: string; price: string }[];
   agentName: string;
   language: string;
   voiceId: string;
   greeting: string;
 }
 
-export async function saveOnboarding(
+export interface SavedSetup {
+  business:
+    | ({ business_type: string | null } & Partial<Record<keyof OnboardingInfo, string | null>>)
+    | null;
+  hours: { day_of_week: number; is_closed: boolean; intervals: unknown }[];
+  services: { id: string; name: string; price: number | null }[];
+  agent: {
+    agent_name: string | null;
+    primary_language: string | null;
+    voice_id: string | null;
+    greetings: unknown;
+  } | null;
+}
+
+/** Reads the customer's saved setup. Any failed read throws: it must never look like "nothing saved". */
+export async function loadSetup(
   supabase: SupabaseClient<Database>,
-  input: OnboardingInput,
-): Promise<{ alreadySetUp: boolean }> {
-  const { orgId, info } = input;
-  const type = getBusinessType(input.typeId);
-  const check = (error: { message: string } | null) => {
-    if (error) throw new Error(error.message);
-  };
-  const markCompleted = async () => {
-    const { error } = await supabase
-      .from("organizations")
-      .update({ onboarding_completed: true })
-      .eq("id", orgId);
-    check(error);
-  };
-
-  // Any receptionist of this customer, on whichever business: never a second one.
-  const { data: agents, error: agentsError } = await supabase
+  orgId: string,
+): Promise<SavedSetup> {
+  // The same records the save writes to: the receptionist's business, else the first business.
+  const { data: agent, error: agentError } = await supabase
     .from("agent_configs")
-    .select("id")
-    .eq("organization_id", orgId)
-    .limit(1);
-  check(agentsError);
-  if (agents?.length) {
-    await markCompleted();
-    return { alreadySetUp: true };
-  }
-
-  // The same business the workspace shows (workspaceQuery: the first one).
-  const { data: existing, error: existingError } = await supabase
-    .from("businesses")
-    .select("id")
+    .select("business_id, agent_name, primary_language, voice_id, greetings")
     .eq("organization_id", orgId)
     .order("created_at")
+    .order("id")
     .limit(1)
     .maybeSingle();
-  check(existingError);
+  if (agentError) throw agentError;
+  let query = supabase.from("businesses").select("*").eq("organization_id", orgId);
+  if (agent) query = query.eq("id", agent.business_id);
+  const { data: business, error: businessError } = await query
+    .order("created_at")
+    .order("id")
+    .limit(1)
+    .maybeSingle();
+  if (businessError) throw businessError;
+  if (!business) return { business: null, hours: [], services: [], agent };
+  const [hours, services] = await Promise.all([
+    supabase
+      .from("business_hours")
+      .select("day_of_week, is_closed, intervals")
+      .eq("business_id", business.id)
+      .order("day_of_week"),
+    supabase
+      .from("services")
+      .select("id, name, price")
+      .eq("business_id", business.id)
+      .order("sort_order")
+      .order("created_at"),
+  ]);
+  if (hours.error) throw hours.error;
+  if (services.error) throw services.error;
+  return { business, hours: hours.data ?? [], services: services.data ?? [], agent };
+}
 
-  const required = {
-    name: info.name.trim(),
-    business_type: input.typeId,
-    description: info.description.trim(),
+const firstInterval = (intervals: unknown) => {
+  const first = Array.isArray(intervals)
+    ? (intervals[0] as { start?: unknown; end?: unknown } | undefined)
+    : undefined;
+  return typeof first?.start === "string" && typeof first.end === "string"
+    ? { start: first.start, end: first.end }
+    : null;
+};
+
+/** The wizard shows one opening time; true when saved days differ or have breaks. */
+export function hasMixedHours(saved: SavedSetup): boolean {
+  const open = saved.hours.filter((h) => !h.is_closed);
+  return (
+    new Set(open.map((h) => JSON.stringify(h.intervals))).size > 1 ||
+    open.some((h) => Array.isArray(h.intervals) && h.intervals.length > 1)
+  );
+}
+
+/** The wizard as it opens: saved values where there are any, the usual defaults elsewhere. */
+export function formFromSaved(saved: SavedSetup): OnboardingForm {
+  const open = saved.hours.filter((h) => !h.is_closed);
+  const time = open.map((h) => firstInterval(h.intervals)).find(Boolean);
+  const language = saved.agent?.primary_language || "en-IN";
+  const greetings = (saved.agent?.greetings ?? {}) as Record<string, unknown>;
+  const greeting = greetings[language];
+  return {
+    typeId: saved.business?.business_type ?? "",
+    info: Object.fromEntries(
+      INFO_KEYS.map((k) => [k, saved.business?.[k] ?? ""]),
+    ) as OnboardingInfo,
+    openDays: saved.hours.length ? open.map((h) => h.day_of_week) : [1, 2, 3, 4, 5, 6],
+    openTime: time?.start ?? "09:00",
+    closeTime: time?.end ?? "19:00",
+    items: saved.services.length
+      ? saved.services.map((s) => ({
+          id: s.id,
+          name: s.name,
+          price: s.price === null ? "" : String(Number(s.price)),
+        }))
+      : [1, 2, 3].map(() => ({ name: "", price: "" })),
+    agentName: saved.agent?.agent_name || "Aria",
+    language,
+    voiceId: saved.agent?.voice_id || "simran",
+    greeting: typeof greeting === "string" ? greeting : "",
   };
-  const optional = {
-    address: info.address,
-    city: info.city,
-    state: info.state,
-    postal_code: info.postal_code,
-    primary_phone: info.primary_phone,
-    email: info.email,
-    website: info.website,
+}
+
+const price = (text: string) => {
+  const n = Number(text);
+  return text.trim() && Number.isFinite(n) ? n : null;
+};
+/** Edited, and not to a blank. */
+const edited = (now: string, was: string) => now.trim() !== "" && now.trim() !== was.trim();
+const only = (entries: [string, string | false][]): Record<string, string> =>
+  Object.fromEntries(entries.filter((e): e is [string, string] => Boolean(e[1])));
+
+/** What to send: `loaded` is the form as it opened. */
+export function buildSetupPayload(
+  form: OnboardingForm,
+  loaded: OnboardingForm,
+  defaultGreeting: string,
+) {
+  const type = getBusinessType(form.typeId);
+  const day = (d: number) => {
+    const open = form.openDays.includes(d);
+    return {
+      day_of_week: d,
+      is_closed: !open,
+      // {start, end} — matches calendar-service.server.ts's BusinessHoursInterval (the booking
+      // engine's own contract).
+      intervals: open ? [{ start: form.openTime, end: form.closeTime }] : [],
+    };
   };
-  let businessId: string;
-  if (existing) {
-    // A field left blank this time keeps what was saved before.
-    const filled = Object.fromEntries(Object.entries(optional).filter(([, v]) => v));
-    const { error } = await supabase
-      .from("businesses")
-      .update({ ...required, ...filled })
-      .eq("id", existing.id)
-      .eq("organization_id", orgId);
-    check(error);
-    businessId = existing.id;
-  } else {
-    const { data, error } = await supabase
-      .from("businesses")
-      .insert({
-        organization_id: orgId,
-        ...required,
-        ...(Object.fromEntries(Object.entries(optional).map(([k, v]) => [k, v || null])) as Record<
-          keyof typeof optional,
-          string | null
-        >),
-      })
-      .select("id")
-      .single();
-    if (error) throw new Error(error.message);
-    businessId = data.id;
-  }
-  const owned = { organization_id: orgId, business_id: businessId };
+  const days = DAYS.map((_, d) => d);
+  const timeEdited = form.openTime !== loaded.openTime || form.closeTime !== loaded.closeTime;
 
-  const hours = DAYS.map((_, day) => ({
-    ...owned,
-    day_of_week: day,
-    is_closed: !input.openDays.includes(day),
-    // {start, end} — matches calendar-service.server.ts's BusinessHoursInterval (the booking
-    // engine's own contract).
-    intervals: input.openDays.includes(day)
-      ? [{ start: input.openTime, end: input.closeTime }]
-      : [],
-  }));
-  const { error: hoursError } = await supabase
-    .from("business_hours")
-    .upsert(hours, { onConflict: "business_id,day_of_week" });
-  if (hoursError)
-    throw new Error(describeBusinessHoursWriteError(hoursError) ?? hoursError.message);
-
-  const saved = async (table: "services" | "faqs" | "business_rules") => {
-    const { data, error } = await supabase.from(table).select("*").eq("business_id", businessId);
-    check(error);
-    return data ?? [];
-  };
-
-  const have = new Set((await saved("services")).map((s) => (s as { name: string }).name));
-  const services = input.items
-    .filter((i) => i.name.trim() && !have.has(i.name.trim()))
-    .map((i, idx) => ({
-      ...owned,
-      name: i.name.trim(),
-      price: i.price ? Number(i.price) : null,
-      sort_order: have.size + idx,
-    }));
-  if (services.length) check((await supabase.from("services").insert(services)).error);
-
-  if (type.suggestedFaqs.length && !(await saved("faqs")).length) {
-    const faqs = type.suggestedFaqs.map((f, idx) => ({
-      ...owned,
-      question: f.question,
-      answer: f.answer,
-      sort_order: idx,
-    }));
-    check((await supabase.from("faqs").insert(faqs)).error);
-  }
-
-  if (type.suggestedRules.length && !(await saved("business_rules")).length) {
-    const rules = type.suggestedRules.map((r, idx) => ({ ...owned, rule: r, priority: idx + 1 }));
-    check((await supabase.from("business_rules").insert(rules)).error);
-  }
-
-  const { error: agentError } = await supabase.from("agent_configs").insert({
-    organization_id: orgId,
-    business_id: businessId,
-    agent_name: input.agentName,
-    primary_language: input.language,
-    voice_id: input.voiceId,
-    greetings: { [input.language]: input.greeting },
-    capabilities: {
-      answer_faqs: true,
-      explain_services: true,
-      quote_prices: true,
-      check_hours: true,
-      capture_lead: true,
-      collect_details: true,
+  return {
+    initial: {
+      business: only([
+        ["business_type", form.typeId],
+        ...INFO_KEYS.map((k): [string, string] => [k, form.info[k].trim()]),
+      ]),
+      hours: days.map(day),
+      agent: {
+        agent_name: form.agentName.trim(),
+        primary_language: form.language,
+        voice_id: form.voiceId,
+        greeting: form.greeting.trim() || defaultGreeting,
+        capabilities: {
+          answer_faqs: true,
+          explain_services: true,
+          quote_prices: true,
+          check_hours: true,
+          capture_lead: true,
+          collect_details: true,
+        },
+        objectives: ["answer_questions", "handle_faqs", "capture_leads", "provide_pricing"],
+      },
+      faqs: type.suggestedFaqs.map((f) => ({ question: f.question, answer: f.answer })),
+      rules: type.suggestedRules,
     },
-    objectives: ["answer_questions", "handle_faqs", "capture_leads", "provide_pricing"],
-  });
-  // 23505: another tab saved the receptionist first; the setup is complete.
-  if (agentError && (agentError as { code?: string }).code !== "23505") check(agentError);
+    changes: {
+      business: only([
+        ["business_type", edited(form.typeId, loaded.typeId) && form.typeId],
+        ...INFO_KEYS.map((k): [string, string | false] => [
+          k,
+          edited(form.info[k], loaded.info[k]) && form.info[k].trim(),
+        ]),
+      ]),
+      // Only the days the person touched: other saved days (and their breaks) stay.
+      hours: days
+        .filter((d) => {
+          const open = form.openDays.includes(d);
+          return open !== loaded.openDays.includes(d) || (open && timeEdited);
+        })
+        .map(day),
+      services: form.items.flatMap((item) => {
+        const row = { name: item.name.trim(), price: price(item.price) };
+        if (!item.id) return row.name ? [row] : [];
+        const was = loaded.items.find((i) => i.id === item.id);
+        if (was && !edited(item.name, was.name) && !edited(item.price, was.price)) return [];
+        return [{ id: item.id, ...row }];
+      }),
+      agent: only([
+        ["agent_name", edited(form.agentName, loaded.agentName) && form.agentName.trim()],
+        ["primary_language", edited(form.language, loaded.language) && form.language],
+        ["voice_id", edited(form.voiceId, loaded.voiceId) && form.voiceId],
+        ["greeting", edited(form.greeting, loaded.greeting) && form.greeting.trim()],
+      ]),
+    },
+  };
+}
 
-  await markCompleted();
-  return { alreadySetUp: false };
+export type SetupPayload = ReturnType<typeof buildSetupPayload>;
+
+export async function saveOnboarding(
+  supabase: SupabaseClient<Database>,
+  orgId: string,
+  payload: SetupPayload,
+): Promise<{ createdAgent: boolean }> {
+  const { data, error } = await supabase.rpc("save_business_setup", {
+    _org: orgId,
+    _initial: payload.initial as unknown as Json,
+    _changes: payload.changes as unknown as Json,
+  });
+  if (error) {
+    if (error.message.includes("BUSINESS_SETUP_NAME_REQUIRED"))
+      throw new Error("Add your business name.");
+    throw new Error(describeBusinessHoursWriteError(error) ?? error.message);
+  }
+  return { createdAgent: Boolean((data as { created_agent?: boolean } | null)?.created_agent) };
 }

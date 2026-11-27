@@ -31,14 +31,14 @@ describe("app.onboarding.tsx — Hours step validates before the seed insert", (
     assert.match(fnBody, /toast\.error\(validationError\);\s*\n\s*return;/);
   });
 
-  test("the business_hours write checks its own error and surfaces a translated message", () => {
-    const idx = save.indexOf('.from("business_hours")');
+  test("the save checks its error and surfaces a translated business-hours message", () => {
+    const idx = save.indexOf('supabase.rpc("save_business_setup"');
     assert.ok(idx > -1);
-    const block = save.slice(idx - 80, idx + 300);
-    assert.match(block, /const \{ error: hoursError \} = await supabase/);
+    const block = save.slice(idx - 80, idx + 600);
+    assert.match(block, /const \{ data, error \} = await supabase/);
     assert.match(
       block,
-      /if \(hoursError\)\s*\n?\s*throw new Error\(describeBusinessHoursWriteError\(hoursError\) \?\? hoursError\.message\);/,
+      /throw new Error\(describeBusinessHoursWriteError\(error\) \?\? error\.message\);/,
     );
   });
 });

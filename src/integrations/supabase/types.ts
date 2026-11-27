@@ -5006,6 +5006,10 @@ export type Database = {
       [_ in never]: never;
     };
     Functions: {
+      save_business_setup: {
+        Args: { _org: string; _initial: Json; _changes: Json };
+        Returns: Json;
+      };
       reverse_contact_opt_out: {
         Args: {
           p_contact_id: string;
