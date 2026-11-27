@@ -12,10 +12,10 @@ import { dirname, join } from "node:path";
  * server function or RPC in between.
  */
 
-const src = readFileSync(
-  join(dirname(fileURLToPath(import.meta.url)), "app.onboarding.tsx"),
-  "utf8",
-);
+const here = dirname(fileURLToPath(import.meta.url));
+const src = readFileSync(join(here, "app.onboarding.tsx"), "utf8");
+/** The wizard's writes. */
+const save = readFileSync(join(here, "..", "lib", "onboarding-save.ts"), "utf8");
 
 describe("app.onboarding.tsx — Hours step validates before the seed insert", () => {
   test("imports the shared business-hours validator", () => {
@@ -31,10 +31,10 @@ describe("app.onboarding.tsx — Hours step validates before the seed insert", (
     assert.match(fnBody, /toast\.error\(validationError\);\s*\n\s*return;/);
   });
 
-  test("the business_hours insert checks its own error and surfaces a translated message, rather than ignoring it like the other seed inserts", () => {
-    const idx = src.indexOf('.from("business_hours").insert(hours)');
+  test("the business_hours write checks its own error and surfaces a translated message", () => {
+    const idx = save.indexOf('.from("business_hours")');
     assert.ok(idx > -1);
-    const block = src.slice(idx - 80, idx + 200);
+    const block = save.slice(idx - 80, idx + 300);
     assert.match(block, /const \{ error: hoursError \} = await supabase/);
     assert.match(
       block,

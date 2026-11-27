@@ -7,10 +7,8 @@ import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/useAuth";
 import { workspaceQuery } from "@/lib/workspace";
 import { BUSINESS_TYPES, getBusinessType, DAYS } from "@/lib/business-types";
-import {
-  describeInvalidInterval,
-  describeBusinessHoursWriteError,
-} from "@/lib/calendar/business-hours-validation";
+import { describeInvalidInterval } from "@/lib/calendar/business-hours-validation";
+import { saveOnboarding } from "@/lib/onboarding-save";
 import { LANGUAGES, VOICES } from "@/lib/voices";
 import { Logo } from "@/components/app/primitives";
 import { Button } from "@/components/ui/button";
@@ -103,92 +101,25 @@ function Onboarding() {
     if (!ws?.organization) return;
     setSaving(true);
     try {
-      const orgId = ws.organization.id;
-      const { data: business, error } = await supabase
-        .from("businesses")
-        .insert({
-          organization_id: orgId,
-          name: info.name.trim(),
-          business_type: typeId,
-          description: info.description.trim(),
-          address: info.address || null,
-          city: info.city || null,
-          state: info.state || null,
-          postal_code: info.postal_code || null,
-          primary_phone: info.primary_phone || null,
-          email: info.email || null,
-          website: info.website || null,
-        })
-        .select()
-        .single();
-      if (error) throw error;
-
-      const hours = DAYS.map((_, day) => ({
-        organization_id: orgId,
-        business_id: business.id,
-        day_of_week: day,
-        is_closed: !openDays.includes(day),
-        // {start, end} — matches calendar-service.server.ts's
-        // BusinessHoursInterval (the AI booking/availability engine's own
-        // contract), not the legacy {from, to} shape this seed used to
-        // write.
-        intervals: openDays.includes(day) ? [{ start: openTime, end: closeTime }] : [],
-      }));
-      const { error: hoursError } = await supabase.from("business_hours").insert(hours);
-      if (hoursError)
-        throw new Error(describeBusinessHoursWriteError(hoursError) ?? hoursError.message);
-
-      const services = items
-        .filter((i) => i.name.trim())
-        .map((i, idx) => ({
-          organization_id: orgId,
-          business_id: business.id,
-          name: i.name.trim(),
-          price: i.price ? Number(i.price) : null,
-          sort_order: idx,
-        }));
-      if (services.length) await supabase.from("services").insert(services);
-
-      await supabase.from("faqs").insert(
-        type.suggestedFaqs.map((f, idx) => ({
-          organization_id: orgId,
-          business_id: business.id,
-          question: f.question,
-          answer: f.answer,
-          sort_order: idx,
-        })),
-      );
-
-      await supabase.from("business_rules").insert(
-        type.suggestedRules.map((r, idx) => ({
-          organization_id: orgId,
-          business_id: business.id,
-          rule: r,
-          priority: idx + 1,
-        })),
-      );
-
-      await supabase.from("agent_configs").insert({
-        organization_id: orgId,
-        business_id: business.id,
-        agent_name: agentName,
-        primary_language: language,
-        voice_id: voiceId,
-        greetings: { [language]: greeting.trim() || defaultGreeting },
-        capabilities: {
-          answer_faqs: true,
-          explain_services: true,
-          quote_prices: true,
-          check_hours: true,
-          capture_lead: true,
-          collect_details: true,
-        },
-        objectives: ["answer_questions", "handle_faqs", "capture_leads", "provide_pricing"],
+      const { alreadySetUp } = await saveOnboarding(supabase, {
+        orgId: ws.organization.id,
+        typeId,
+        info,
+        openDays,
+        openTime,
+        closeTime,
+        items,
+        agentName,
+        language,
+        voiceId,
+        greeting: greeting.trim() || defaultGreeting,
       });
-
-      await supabase.from("organizations").update({ onboarding_completed: true }).eq("id", orgId);
       await qc.invalidateQueries({ queryKey: ["workspace"] });
-      toast.success("Workspace ready. Review and publish your receptionist.");
+      toast.success(
+        alreadySetUp
+          ? "Your business is already set up. Edit it on the Business page."
+          : "Workspace ready. Review and publish your receptionist.",
+      );
       navigate({ to: "/app/agent" });
     } catch (error) {
       toast.error(

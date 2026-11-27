@@ -133,8 +133,12 @@ describe("saving details never starts provisioning", () => {
   });
 
   test("the setup wizard and the business page cannot start it", () => {
-    for (const page of ["app.onboarding.tsx", "app.business.tsx"]) {
-      const source = readFileSync(new URL(`../routes/${page}`, import.meta.url), "utf8");
+    for (const page of [
+      "../routes/app.onboarding.tsx",
+      "../routes/app.business.tsx",
+      "./onboarding-save.ts",
+    ]) {
+      const source = readFileSync(new URL(page, import.meta.url), "utf8");
       assert.doesNotMatch(source, /activateMyNumber|runProvisioning|provisioning_runs/, page);
     }
   });

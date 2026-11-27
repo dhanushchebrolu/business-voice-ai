@@ -21,6 +21,9 @@ trigger `customer_activate`) through the existing idempotent pipeline
 | Admin actions on the provisioning page (run, register an agent) | yes (a deliberate operator step)                                    |
 | Background sweep                                                | never creates a job; continues existing ones                        |
 
+The setup wizard checks every save and can be run again after a failure. A customer with no
+receptionist record is sent back to it; one who has it is never overwritten by it.
+
 "Complete" (`businessSetupProblems`): a business profile and receptionist, a category, a business
 name, and the data every switched-on capability needs. Voice and languages and the number are the
 team's steps: the job waits for them. Eligibility to submit is the existing phone feature lock;

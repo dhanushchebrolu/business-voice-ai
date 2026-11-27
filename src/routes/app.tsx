@@ -87,13 +87,14 @@ function AppLayout() {
     if (!loading && session && !isLoading && !org) navigate({ to: "/" });
   }, [loading, session, isLoading, org, navigate]);
 
+  // No receptionist yet means the setup wizard never finished saving: back to it.
   useEffect(() => {
     if (
       !isLoading &&
       ws &&
       org &&
       !showLockedScreen &&
-      !ws.business &&
+      ws.setupIncomplete &&
       pathname !== "/app/onboarding"
     ) {
       navigate({ to: "/app/onboarding" });

@@ -54,6 +54,8 @@ export interface WorkspaceData {
   agent: AgentConfig | null;
   subscription: Subscription | null;
   role: string | null;
+  /** No business yet, or no receptionist at all: the setup wizard has not finished saving. */
+  setupIncomplete: boolean;
 }
 
 export const workspaceQuery = (userId: string | undefined) =>
@@ -70,7 +72,14 @@ export const workspaceQuery = (userId: string | undefined) =>
       if (error) throw error;
       const organization = (membership?.organizations as Organization | null) ?? null;
       if (!organization)
-        return { organization: null, business: null, agent: null, subscription: null, role: null };
+        return {
+          organization: null,
+          business: null,
+          agent: null,
+          subscription: null,
+          role: null,
+          setupIncomplete: true,
+        };
 
       const [businessRes, subRes] = await Promise.all([
         supabase
@@ -87,15 +96,29 @@ export const workspaceQuery = (userId: string | undefined) =>
           .maybeSingle(),
       ]);
 
+      // A failed read must never look like "not set up yet" (the dashboard acts on that).
+      if (businessRes.error) throw businessRes.error;
       const business = businessRes.data ?? null;
       let agent: AgentConfig | null = null;
       if (business) {
-        const { data } = await supabase
+        const { data, error: agentError } = await supabase
           .from("agent_configs")
           .select("*")
           .eq("business_id", business.id)
           .maybeSingle();
+        if (agentError) throw agentError;
         agent = data ?? null;
+      }
+      let setupIncomplete = !business;
+      if (business && !agent) {
+        // Another business of this customer may hold the receptionist (older duplicate saves).
+        const { data, error: anyError } = await supabase
+          .from("agent_configs")
+          .select("id")
+          .eq("organization_id", organization.id)
+          .limit(1);
+        if (anyError) throw anyError;
+        setupIncomplete = !data?.length;
       }
 
       return {
@@ -104,6 +127,7 @@ export const workspaceQuery = (userId: string | undefined) =>
         agent,
         subscription: subRes.data ?? null,
         role: membership?.role ?? null,
+        setupIncomplete,
       };
     },
   });

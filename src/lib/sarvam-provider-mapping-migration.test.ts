@@ -128,13 +128,13 @@ describe("multiple phone numbers may share the same deployment ID", () => {
 
 describe("existing agent onboarding still works — every column app.onboarding.tsx inserts is in the new GRANT INSERT list", () => {
   test("cross-file check: onboarding's actual INSERT column set is a subset of the migration's GRANT INSERT column set", () => {
-    const onboardingSrc = readRepoFile("src", "routes", "app.onboarding.tsx");
+    const onboardingSrc = readRepoFile("src", "lib", "onboarding-save.ts");
     const insertBlockMatch = onboardingSrc.match(
       /supabase\.from\("agent_configs"\)\.insert\(\{([\s\S]*?)\}\);/,
     );
     assert.ok(
       insertBlockMatch,
-      "expected to find the agent_configs insert call in app.onboarding.tsx",
+      "expected to find the agent_configs insert call in onboarding-save.ts",
     );
     // Only the insert's own top-level keys are columns; keys of a nested
     // object (e.g. capabilities: { answer_faqs: true, ... } wrapped across
