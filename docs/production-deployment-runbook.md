@@ -21,10 +21,10 @@ outside the approved tests, buy a number, or activate a campaign. While the hex-
 | --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | B1  | `main` deploys `klyro` on every push: GitHub shows a successful `Workers Builds: klyro` check on the `main` commits of 2026-11-24 and 25. `main` is unprotected and older than the live build, so any push or Lovable publish replaces the live code with older code. | Turn the automatic build off before anything else (step 2).                                                             |
 | B2  | The Supabase Management API lists **no backup** and point-in-time recovery **off** (2026-11-27).                                                                                                                                                                      | A restorable backup before the first migration (step 5).                                                                |
-| B3  | Production has not been read since these migrations were written.                                                                                                                                                                                                     | Step 4 must match the expectations.                                                                                     |
+| B3  | Production was read on 2026-11-27: history ends at `20261203090000` with the expected versions, no mapping difference or cross-customer link, and the three migrations' starting conditions hold.                                                                     | Rerun step 4 on the day.                                                                                                |
 | B4  | Nothing has run against real Sarvam or Vobiz (H5).                                                                                                                                                                                                                    | Supervised tests (steps 11 to 13) before any customer is onboarded; each needs approval, a spare number and real calls. |
 | B5  | Payment eligibility for **submitting** a setup is undecided: with enforcement off (today) submission does not require payment; with it on, a paid `setup_paid` customer cannot submit without an entitlement or override.                                             | Owner decision. Does not block deploying; do not change enforcement during the release.                                 |
-| B6  | Campaign calling has been switched on since 2026-11-24 15:20 UTC and the pilot call list switched off. Running campaigns and outbound-enabled numbers have not been read since 2026-11-25.                                                                            | Read the campaigns (step 4), then switch dispatch off (Appendix A1).                                                    |
+| B6  | Campaign dispatch was switched **off** on 2026-11-27 12:31 UTC (Appendix A1). The pilot call list is still off, and Smile Dental's number is enabled for outbound.                                                                                                    | Keep dispatch off until the release is verified; switching it on is a separate approval.                                |
 | B7  | A Worker binding is _named_ with a 48-character hex string. It was typed in during the Exotel setup and is most likely an Exotel credential (not proven).                                                                                                             | Check and revoke it in Exotel, then remove the binding before step 6 (Appendix A2).                                     |
 
 ## 1. Verify branch and commit
@@ -73,11 +73,12 @@ The filter only protects the screen: Wrangler also writes the full response to i
 `~/.wrangler/logs`. `versions view` prints plain-text values (including the call allowlist): never
 share its raw output.
 
-- Live version per notes: `009eea99-0e4d-4ff9-bb36-fe22dda8b6e0` (build of `b60b77f`). Record the
-  **full** ID actually shown: it is the rollback target `<OLD>`.
+- Live version since 2026-11-27: `109bb657-a7f9-408e-873a-2339771a38b9` (the `b60b77f` build; only the dispatch
+  switch changed). Record the **full** ID actually shown: it is the rollback target `<OLD>`. Never
+  roll back to `009eea99` or older: that switches campaign dispatch on again.
 - Read on 2026-11-27: 30 bindings, compatibility date `2026-09-16`.
-- Listed: `CAMPAIGN_DISPATCH_ENABLED` and `OUTBOUND_PILOT_RESTRICTION` (Appendix A1; values cannot be
-  read back) and the plain-text `SARVAM_OUTBOUND_TEST_ALLOWLIST`.
+- Listed: `CAMPAIGN_DISPATCH_ENABLED` (set to `false`) and `OUTBOUND_PILOT_RESTRICTION` (Appendix A1;
+  values cannot be read back) and the plain-text `SARVAM_OUTBOUND_TEST_ALLOWLIST`.
 - Not listed: `OUTBOUND_CALLING_DISABLED`, `KLYRO_DISPATCH_MODE` (no code reads it),
   `VOICE_AGENT_OUTBOUND_ENABLED`, `LOVABLE_CRON_SECRET` (the dispatch cron route then answers 500).
 - `node scripts/ops/klyro-cron.mjs status` (read only) shows `["* * * * *"]`.
@@ -86,8 +87,7 @@ share its raw output.
 ## 4. Read-only compatibility checks
 
 Run `docs/production-readonly-checks.sql` in the Supabase dashboard SQL editor of project
-`eorazvlmqwunmhwviocn` (not yet tried: whether the editor shows rows for a script ending in
-`rollback`; if it shows none, stop rather than edit it). Do **not** use `supabase db query --linked`:
+`eorazvlmqwunmhwviocn` (it shows the result row; used on 2026-11-27). Do **not** use `supabase db query --linked`:
 without a database password, version 2.120.0 first asks Supabase to create a temporary login role
 with write rights, although the query does not use it.
 
@@ -173,8 +173,7 @@ npx wrangler versions deploy <NEW>@100% --name klyro --yes
 
 - `npx wrangler deployments status --name klyro`: `<NEW>` at 100%.
 - `npx wrangler tail --name klyro`: no new errors; the minute tick runs; `sweep.*` succeed;
-  `campaign.dispatch` as decided in A1 (off: `skipped: disabled`; on: it runs and, with no running
-  campaign, considers 0); no `provisioning_sweep:run_failed`.
+  `campaign.dispatch` `skipped: disabled` (job results); no `provisioning_sweep:run_failed`.
 - https://clickai.in loads and sign-in works.
 - `POST https://clickai.in/api/public/operator/mcp` without a token returns 401 (use the host in
   `TELEPHONY_WEBHOOK_BASE_URL` if different).
@@ -340,15 +339,15 @@ dispatch tick on 2026-11-25. No later secret change appears in the version histo
 - It does not stop single calls, or a campaign that Sarvam paces (`with_provider_campaign`). The
   emergency stop blocks new ClickAI calls but cannot end what Sarvam has accepted.
 
-For the release:
+**Done 2026-11-27 12:31 UTC, on the owner's approval:** `CAMPAIGN_DISPATCH_ENABLED` set to `false`
+(version `109bb657-a7f9-408e-873a-2339771a38b9`: same script, binding names, plain values and compatibility date
+as `009eea99`). Before it, no campaign was draft, scheduled, running or paused. After it, the dispatch
+jobs reported `skipped: disabled`. Campaign launch and resume are refused meanwhile.
 
-1. Read the campaigns (step 4). If any is running, agree with its owner and pause it.
-2. Dashboard → `klyro` → Settings → Variables and Secrets → `CAMPAIGN_DISPATCH_ENABLED` → value
-   `false` → Deploy. Effect: no campaign dialling; launch and resume are refused with "not switched
-   on". Reversible by setting `true`.
-3. Verify: a new version at 100% with the same binding names; no new campaign call afterwards.
-4. Pilot restriction: leave it unless the owner wants it back. Anything but `off` also limits every
-   customer's single calls to the allowlist.
+- To switch on again (separate approval): set the value to `true` in the dashboard (Variables and
+  Secrets) and deploy.
+- Pilot restriction: unchanged (`off`). Anything but `off` also limits every customer's single calls to
+  the allowlist.
 
 Emergency stop for all outbound calls: `outbound-emergency-stop-runbook.md`.
 

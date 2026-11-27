@@ -16,7 +16,7 @@ rollback deletes the setting row; a missing row means **not stopped**).
 
 Campaign dispatch has its own switch: it runs only when
 `CAMPAIGN_DISPATCH_ENABLED=true`. Leaving that unset keeps every campaign idle
-regardless of the stops. In production it has been set since 2026-11-24
+regardless of the stops. In production it was switched off on 2026-11-27
 (`production-deployment-runbook.md`, Appendix A1).
 
 ## 2. Activate
