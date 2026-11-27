@@ -7,7 +7,6 @@ import {
   processRazorpayPlatformEvent,
   type RazorpayEvent,
 } from "./razorpay-platform-webhook.server.ts";
-import type { RunProvisioningInput } from "../provisioning-runs.server.ts";
 
 const ledgerUnique = {
   table: "webhook_events",
@@ -68,14 +67,12 @@ function setup() {
       }),
     },
   });
-  const runs: RunProvisioningInput[] = [];
-  const deps = {
-    runProvisioning: (async (_admin: unknown, input: RunProvisioningInput) => {
-      runs.push(input);
-      return { runId: "run_1", claimed: true, status: "waiting", result: null };
-    }) as never,
-  };
-  return { db, runs, deps };
+  /** Provisioning jobs and their events: a payment must never write either. */
+  const jobs = () => [
+    ...(db.tables["provisioning_runs"] ?? []),
+    ...(db.tables["provisioning_run_events"] ?? []),
+  ];
+  return { db, jobs };
 }
 
 describe("event ledger", () => {
@@ -110,61 +107,37 @@ describe("event ledger", () => {
 });
 
 describe("processRazorpayPlatformEvent", () => {
-  test("setup fee: provisioning runs with the setup_fee trigger and the payment row", async () => {
-    const { db, runs, deps } = setup();
-    const out = await processRazorpayPlatformEvent(
-      db.client,
-      captured("order_setup", "pay_1", 999900),
-      deps,
-    );
-    assert.equal(out.note, null);
-    assert.deepEqual(runs, [
-      { organizationId: "org_1", trigger: "setup_fee", sourcePaymentId: "pay_row_pay_1" },
-    ]);
-  });
-
-  test("phone service fee: provisioning runs with the phone_service_fee trigger", async () => {
-    const { db, runs, deps } = setup();
-    await processRazorpayPlatformEvent(db.client, captured("order_phone", "pay_2", 150000), deps);
-    assert.equal(runs[0]!.trigger, "phone_service_fee");
-  });
-
-  test("monthly plan never starts provisioning", async () => {
-    const { db, runs, deps } = setup();
-    await processRazorpayPlatformEvent(db.client, captured("order_monthly", "pay_3", 499900), deps);
-    assert.equal(runs.length, 0);
-  });
-
-  test("payment.captured and order.paid for one payment hand the same payment to the (single-run) provisioner", async () => {
-    const { db, runs, deps } = setup();
-    await processRazorpayPlatformEvent(db.client, captured("order_setup", "pay_4", 999900), deps);
-    await processRazorpayPlatformEvent(
-      db.client,
-      captured("order_setup", "pay_4", 999900, "order.paid"),
-      deps,
-    );
-    assert.equal(new Set(runs.map((r) => r.sourcePaymentId)).size, 1);
-  });
+  for (const [name, order, amount] of [
+    ["setup fee", "order_setup", 999900],
+    ["phone service fee", "order_phone", 150000],
+    ["monthly plan", "order_monthly", 499900],
+  ] as const)
+    test(`${name}: the payment is recorded and no provisioning starts`, async () => {
+      const { db, jobs } = setup();
+      for (const kind of ["payment.captured", "order.paid"]) {
+        const out = await processRazorpayPlatformEvent(
+          db.client,
+          captured(order, "pay_1", amount, kind),
+        );
+        assert.deepEqual(out, { note: null });
+      }
+      assert.deepEqual(jobs(), []);
+    });
 
   test("an amount mismatch activates nothing and leaves a note", async () => {
-    const { db, runs, deps } = setup();
+    const { db, jobs } = setup();
     const out = await processRazorpayPlatformEvent(
       db.client,
       captured("order_setup", "pay_5", 100),
-      deps,
     );
-    assert.equal(runs.length, 0);
+    assert.deepEqual(jobs(), []);
     assert.match(out.note ?? "", /amount mismatch/);
   });
 
   test("an unknown order is ignored", async () => {
-    const { db, runs, deps } = setup();
-    const out = await processRazorpayPlatformEvent(
-      db.client,
-      captured("order_other", "pay_6", 1),
-      deps,
-    );
-    assert.equal(runs.length, 0);
+    const { db, jobs } = setup();
+    const out = await processRazorpayPlatformEvent(db.client, captured("order_other", "pay_6", 1));
+    assert.deepEqual(jobs(), []);
     assert.equal(out.note, "order not found");
   });
 
@@ -185,7 +158,7 @@ describe("processRazorpayPlatformEvent", () => {
   });
 
   test("payment.failed never regresses a paid order, and its write error is thrown", async () => {
-    const { db, deps } = setup();
+    const { db } = setup();
     db.tables["payment_orders"] = [
       { id: "o1", provider_order_id: "order_paid", status: "paid" },
       { id: "o2", provider_order_id: "order_open", status: "created" },
@@ -194,25 +167,24 @@ describe("processRazorpayPlatformEvent", () => {
       event: "payment.failed",
       payload: { payment: { entity: { id: "p", order_id: orderId } } },
     });
-    await processRazorpayPlatformEvent(db.client, failed("order_paid"), deps);
-    await processRazorpayPlatformEvent(db.client, failed("order_open"), deps);
+    await processRazorpayPlatformEvent(db.client, failed("order_paid"));
+    await processRazorpayPlatformEvent(db.client, failed("order_open"));
     assert.equal(db.tables["payment_orders"]![0]!["status"], "paid");
     assert.equal(db.tables["payment_orders"]![1]!["status"], "failed");
     db.failNext("payment_orders", "update", { message: "write failed" });
-    await assert.rejects(processRazorpayPlatformEvent(db.client, failed("order_open"), deps), {
+    await assert.rejects(processRazorpayPlatformEvent(db.client, failed("order_open")), {
       message: "write failed",
     });
   });
 
   test("refund status write errors are thrown", async () => {
-    const { db, deps } = setup();
+    const { db } = setup();
     db.failNext("refunds", "update", { message: "refund write failed" });
     await assert.rejects(
-      processRazorpayPlatformEvent(
-        db.client,
-        { event: "refund.processed", payload: { refund: { entity: { id: "rfnd_1" } } } },
-        deps,
-      ),
+      processRazorpayPlatformEvent(db.client, {
+        event: "refund.processed",
+        payload: { refund: { entity: { id: "rfnd_1" } } },
+      }),
       { message: "refund write failed" },
     );
   });

@@ -5,9 +5,10 @@ import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { assertFeatureUnlocked } from "@/lib/feature-gate.server";
 
 /**
- * Customer "Activate Number". Starts (or joins) the same provisioning run the
- * setup-fee webhook and the admin retry use, so a customer can never do
- * anything those paths would not. Safety:
+ * Customer "Submit setup" / "Activate Number": the customer action that starts
+ * provisioning (payment never does). Starts (or joins) the same provisioning
+ * run the admin actions use, so a customer can never do anything those would
+ * not. An incomplete business setup is refused without creating a job. Safety:
  *   - the organization must be one the caller OWNS, checked through the
  *     caller's own RLS-scoped membership row (never trusted from input alone);
  *   - eligibility is the existing feature_locked(org, "phone") rule, which

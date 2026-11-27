@@ -504,13 +504,18 @@ describe("retry, recovery and idempotency", () => {
     assert.equal(view.phase, "failed");
     assert.equal(view.canRetry, true);
     const good = deps(db, { initialStatus: "paused" }).d;
-    const after = await startVoiceActivation(db.client, { orgId: ORG, userId: "u1" }, (a, i) =>
-      runProvisioning(
-        a,
-        i,
-        (x, o, h) => runProvisioningPipeline(x, o, good, h.onStep),
-        () => NOW,
-      ),
+    const after = await startVoiceActivation(
+      db.client,
+      { orgId: ORG, userId: "u1" },
+      (a, i) =>
+        runProvisioning(
+          a,
+          i,
+          (x, o, h) => runProvisioningPipeline(x, o, good, h.onStep),
+          () => NOW,
+        ),
+      undefined,
+      good.loadSnapshot,
     );
     assert.equal(after.phase, "completed");
     assert.equal(db.tables["provisioning_runs"]!.length, 2, "history kept: old job + new job");
@@ -550,13 +555,18 @@ describe("duplicate clicks and concurrency", () => {
     const db = world();
     const d = deps(db);
     const start = () =>
-      startVoiceActivation(db.client, { orgId: ORG, userId: "u1" }, (a, i) =>
-        runProvisioning(
-          a,
-          i,
-          (x, o, h) => runProvisioningPipeline(x, o, d.d, h.onStep),
-          () => NOW,
-        ),
+      startVoiceActivation(
+        db.client,
+        { orgId: ORG, userId: "u1" },
+        (a, i) =>
+          runProvisioning(
+            a,
+            i,
+            (x, o, h) => runProvisioningPipeline(x, o, d.d, h.onStep),
+            () => NOW,
+          ),
+        undefined,
+        d.d.loadSnapshot,
       );
     const [a, b] = await Promise.all([start(), start()]);
     assert.equal(db.tables["provisioning_runs"]!.length, 1);

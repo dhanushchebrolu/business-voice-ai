@@ -21,7 +21,7 @@ import {
  * Persistent, resumable provisioning (provisioning_runs, migration
  * 20261114100000). Each organization has at most one active run
  * (pending/running/waiting), enforced by a partial unique index, so
- * duplicate payment events, a payment racing an admin retry, or two Worker
+ * repeated submissions, a submission racing an admin retry, or two Worker
  * isolates can never provision the same organization twice in parallel.
  *
  * A run is claimed with a conditional update before any work starts; a run
@@ -264,6 +264,8 @@ export async function runProvisioning(
     .update({
       status: "running",
       attempts: current.attempts + 1,
+      // The customer's submission takes over an older job, so the sweep may continue it.
+      ...(input.trigger === "customer_activate" ? { trigger: input.trigger } : {}),
       started_at: now().toISOString(),
       next_attempt_at: null,
     })

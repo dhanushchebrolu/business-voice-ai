@@ -98,7 +98,9 @@ function NumbersPage() {
     setActivating(true);
     try {
       const result = await activate({ data: { orgId } });
-      if (result.phase === "completed") toast.success(result.message);
+      if (result.missing?.length)
+        toast.error(result.message, { description: result.missing.join(" ") });
+      else if (result.phase === "completed") toast.success(result.message);
       else toast.message(result.message);
       await refetchActivation();
       await queryClient.invalidateQueries({ queryKey: ["numbers", orgId] });
@@ -127,6 +129,46 @@ function NumbersPage() {
       setRequesting(false);
     }
   };
+
+  /** The job's progress and the one button that submits the business setup. */
+  const submission = (idleLabel: string) => (
+    <>
+      {activation && activation.phase !== "queued" ? (
+        <>
+          <p className="mt-2 text-xs" role="status">
+            {activation.message}
+          </p>
+          <ActivationProgress view={activation} />
+        </>
+      ) : null}
+      {activationError ? (
+        <p className="mt-2 text-xs text-destructive" role="alert">
+          We could not load your activation status.{" "}
+          <button type="button" className="underline" onClick={() => refetchActivation()}>
+            Retry
+          </button>
+        </p>
+      ) : null}
+      {/* A permanent failure waits for the ClickAI team: no button to press. */}
+      {activation?.phase === "completed" ||
+      (activation?.phase === "failed" && !activation.canRetry) ? null : (
+        <Button
+          size="sm"
+          className="mt-3"
+          disabled={activating || activationLoading || activationError || Boolean(activation?.busy)}
+          onClick={onActivate}
+        >
+          {activating || activation?.busy
+            ? "Activating…"
+            : activation?.phase === "failed"
+              ? "Try again"
+              : activation?.phase === "waiting"
+                ? "Check again"
+                : idleLabel}
+        </Button>
+      )}
+    </>
+  );
 
   const fee = pricing?.["pricing.phone_service_fee"];
   const active = numbers?.find((n) => n.status === "active");
@@ -249,54 +291,19 @@ function NumbersPage() {
                         Assigned to your workspace, not live yet. It starts answering only after
                         your AI receptionist and its connection are set up and verified.
                       </p>
-                      {activation && activation.phase !== "queued" ? (
-                        <>
-                          <p className="mt-2 text-xs" role="status">
-                            {activation.message}
-                          </p>
-                          <ActivationProgress view={activation} />
-                        </>
-                      ) : null}
-                      {activationError ? (
-                        <p className="mt-2 text-xs text-destructive" role="alert">
-                          We could not load your activation status.{" "}
-                          <button
-                            type="button"
-                            className="underline"
-                            onClick={() => refetchActivation()}
-                          >
-                            Retry
-                          </button>
-                        </p>
-                      ) : null}
-                      {/* A permanent failure waits for the ClickAI team: no button to press. */}
-                      {activation?.phase === "completed" ||
-                      (activation?.phase === "failed" && !activation.canRetry) ? null : (
-                        <Button
-                          size="sm"
-                          className="mt-3"
-                          disabled={
-                            activating ||
-                            activationLoading ||
-                            activationError ||
-                            Boolean(activation?.busy)
-                          }
-                          onClick={onActivate}
-                        >
-                          {activating || activation?.busy
-                            ? "Activating…"
-                            : activation?.phase === "failed"
-                              ? "Try again"
-                              : activation?.phase === "waiting"
-                                ? "Check again"
-                                : "Activate number"}
-                        </Button>
-                      )}
+                      {submission("Activate number")}
                     </div>
                   ) : (
-                    <p className="mt-1.5 text-xl font-medium text-muted-foreground">
-                      Not assigned yet
-                    </p>
+                    <div data-testid="submit-setup">
+                      <p className="mt-1.5 text-xl font-medium text-muted-foreground">
+                        Not assigned yet
+                      </p>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        When your business details are complete, submit them to start setting up
+                        your AI receptionist.
+                      </p>
+                      {submission("Submit setup")}
+                    </div>
                   )}
                   {candidateNumber ? null : existingRequest ? (
                     <div className="mt-2 flex items-start gap-2 text-xs text-muted-foreground">

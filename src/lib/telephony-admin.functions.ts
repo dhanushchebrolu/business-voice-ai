@@ -438,16 +438,10 @@ export const setNumberDirection = createServerFn({ method: "POST" })
   });
 
 /**
- * Manually re-runs the automatic provisioning orchestrator (Task #93) for
- * one organization — the admin-facing "Retry" action for the Provisioning
- * view on the Customer 360 page. Calls the exact same
- * provisionOrganizationAfterPayment the Razorpay webhook calls on its own,
- * so a retry can never do anything the automatic path wouldn't also do
- * (claim/reuse a pool number, link an already-registered connection/agent,
- * attempt a deployment) — this is not a second, admin-only provisioning
- * implementation. Useful once an admin has finished a manual Sarvam
- * connection/agent mapping and wants deployment creation to happen now,
- * rather than waiting for the next webhook event (there may not be one).
+ * Runs one organization's provisioning job now — the admin-facing "Retry"
+ * action. The same run and pipeline the customer's submission uses
+ * (provisioning-runs.server.ts), so it is not a second, admin-only
+ * implementation. Useful once an admin has finished a manual Sarvam step.
  */
 export const retryProvisioning = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])

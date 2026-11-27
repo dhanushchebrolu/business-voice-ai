@@ -158,6 +158,29 @@ export interface PipelineResult extends ProvisionOrganizationResult {
 const canonical = (n: string) => normalizeCustomerPhone(n, null) ?? n;
 
 /**
+ * What is still missing from this customer's own business setup (customer-safe text); empty
+ * when it can be submitted. The same requirements as step 1 below. Voice and languages are set
+ * by the ClickAI team and are not part of it.
+ */
+export async function businessSetupProblems(
+  admin: Admin,
+  organizationId: string,
+  loadSnapshot?: PipelineDeps["loadSnapshot"],
+): Promise<string[]> {
+  const { data: agent, error } = await admin
+    .from("agent_configs")
+    .select("business_id")
+    .eq("organization_id", organizationId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!agent?.business_id) return ["Complete your business profile and receptionist setup."];
+  const load = loadSnapshot ?? (await import("./agent-service.server.ts")).loadSnapshot;
+  const snapshot = await load(admin, agent.business_id);
+  if (!snapshot.business.business_type?.trim()) return ["Choose your business category."];
+  return buildUniversalAgentConfig(snapshot).blockers;
+}
+
+/**
  * The identity checks every verification makes against Sarvam's own view of a
  * deployment: the deployment id itself, its status, agent, version, result
  * webhook, the routed number, and ClickAI's record pointing at it.
@@ -319,16 +342,6 @@ export async function runProvisioningPipeline(
   if (!org) return done(1, "failed", "organization not found.");
   if (CLOSED_LIFECYCLES.includes(org.lifecycle_status))
     return done(1, "failed", `organization is ${org.lifecycle_status}; nothing provisioned.`);
-  // Payment done, setup underway (forward only; ready/active stay the admin handover's call).
-  if (org.lifecycle_status === "setup_paid") {
-    const { error } = await admin
-      .from("organizations")
-      .update({ lifecycle_status: "provisioning" })
-      .eq("id", organizationId)
-      .eq("lifecycle_status", "setup_paid");
-    if (error) throw error;
-  }
-
   const { data: agent, error: agentError } = await admin
     .from("agent_configs")
     .select(
@@ -371,6 +384,16 @@ export async function runProvisioningPipeline(
   generatedConfig = buildUniversalAgentConfig(snapshot, voiceLanguage ?? null);
   if (generatedConfig.blockers.length)
     return done(1, "waiting_for_onboarding", generatedConfig.blockers.join(" "));
+  // Business setup complete: setup is underway (forward only, from paid; ready/active stay the
+  // admin handover's call). An incomplete customer is left as paid.
+  if (org.lifecycle_status === "setup_paid") {
+    const { error } = await admin
+      .from("organizations")
+      .update({ lifecycle_status: "provisioning" })
+      .eq("id", organizationId)
+      .eq("lifecycle_status", "setup_paid");
+    if (error) throw error;
+  }
   if (generatedConfig.voiceLanguageProblem)
     return done(
       3,

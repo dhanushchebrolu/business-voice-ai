@@ -1,6 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
-import { runProvisioning, type ProvisioningTrigger } from "../provisioning-runs.server.ts";
 
 /**
  * ClickAI's own (platform) Razorpay webhook: setup fee, monthly plan and
@@ -15,8 +14,7 @@ import { runProvisioning, type ProvisioningTrigger } from "../provisioning-runs.
  *  - Payment level (record_razorpay_capture, one transaction keyed by the
  *    Razorpay payment id): payment.captured and order.paid for the same
  *    payment, and concurrent deliveries, produce one payment, one invoice
- *    and one billing extension. Provisioning goes through provisioning_runs
- *    (one active run per organization).
+ *    and one billing extension. Nothing here provisions anything.
  *
  * Every database error is thrown, so the route answers 500 and Razorpay
  * retries; nothing is reported as done unless it was written.
@@ -94,22 +92,17 @@ interface CaptureResult {
 export interface ProcessOutcome {
   /** Stored on the ledger row; set for anything an operator should look at. */
   note: string | null;
-  provisioningRunId?: string;
 }
 
-const PROVISIONING_TRIGGERS: Record<string, ProvisioningTrigger | undefined> = {
-  setup_fee: "setup_fee",
-  phone_service_fee: "phone_service_fee",
-};
-
-export interface ProcessDeps {
-  runProvisioning: typeof runProvisioning;
-}
-
+/**
+ * A captured payment is recorded (record_razorpay_capture: payment, invoice and, for the setup
+ * fee, the lifecycle step that unlocks the dashboard). Payment never starts or resumes
+ * provisioning: the customer's own submission of a complete business setup does
+ * (voice-activation.server.ts).
+ */
 export async function processRazorpayPlatformEvent(
   admin: Admin,
   event: RazorpayEvent,
-  deps: ProcessDeps = { runProvisioning },
 ): Promise<ProcessOutcome> {
   const entity = event.payload?.payment?.entity as
     | {
@@ -147,22 +140,6 @@ export async function processRazorpayPlatformEvent(
       return {
         note: `amount mismatch: paid ${entity.amount} ${entity.currency}, order is ${capture.expected_amount} ${capture.expected_currency}; nothing activated`,
       };
-    }
-
-    const trigger = capture.purpose ? PROVISIONING_TRIGGERS[capture.purpose] : undefined;
-    if (trigger && capture.organization_id) {
-      const run = await deps.runProvisioning(admin, {
-        organizationId: capture.organization_id,
-        trigger,
-        sourcePaymentId: capture.payment_id ?? null,
-      });
-      console.log(
-        "razorpay:webhook_provisioning",
-        capture.organization_id,
-        run.runId,
-        run.claimed ? run.status : "already running",
-      );
-      return { note: null, provisioningRunId: run.runId };
     }
     return { note: null };
   }

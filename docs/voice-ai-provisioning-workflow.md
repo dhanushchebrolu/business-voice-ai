@@ -4,9 +4,28 @@ Branch `feature/automated-voice-provisioning` (off `main` 3b8513e). **Not merged
 
 ## What it does
 
-A customer owner presses **Activate number** (`/app/numbers`). The backend runs one durable job per
-customer (`provisioning_runs`, trigger `customer_activate`) through the existing idempotent pipeline
+A customer owner submits their setup: **Submit setup**, or **Activate number** once a number is
+assigned (`/app/numbers`). The backend runs one durable job per customer (`provisioning_runs`,
+trigger `customer_activate`) through the existing idempotent pipeline
 (`provisioning-pipeline.server.ts`). The browser only starts it and reads the persisted state.
+
+## What starts provisioning
+
+| Event                                                           | Starts a job?                                                       |
+| --------------------------------------------------------------- | ------------------------------------------------------------------- |
+| Signup, accepting an invitation                                 | no                                                                  |
+| Payment (setup fee, phone service fee, monthly plan)            | **no**: it records the payment; the setup fee unlocks the dashboard |
+| Finishing the setup wizard, saving business details             | no                                                                  |
+| Customer submits an **incomplete** setup                        | no: refused with what is missing                                    |
+| Customer submits a **complete** setup                           | **yes**, one per customer; again joins the same job                 |
+| Admin actions on the provisioning page (run, register an agent) | yes (a deliberate operator step)                                    |
+| Background sweep                                                | never creates a job; continues existing ones                        |
+
+"Complete" (`businessSetupProblems`): a business profile and receptionist, a category, a business
+name, and the data every switched-on capability needs. Voice and languages and the number are the
+team's steps: the job waits for them. Eligibility to submit is the existing phone feature lock;
+this change adds no payment rule. A job waiting for a number continues when the customer presses
+**Check again** or an admin runs it.
 
 | #     | Task step                                                                                                        | Job step key (dashboard)  | Where                                                                                                          |
 | ----- | ---------------------------------------------------------------------------------------------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------- |
