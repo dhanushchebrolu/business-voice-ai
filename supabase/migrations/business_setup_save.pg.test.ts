@@ -22,20 +22,19 @@ import {
 } from "../../src/lib/onboarding-save.ts";
 
 /**
- * REAL-PostgreSQL coverage for 20261205090000 (save_business_setup): one atomic, serialized
- * save per customer, as the signed-in member, with production-like grants (no default
- * privileges). Payloads are built by the wizard's own code.
+ * REAL-PostgreSQL coverage for 20261205090000 (save_business_setup) and 20261206090000 (the
+ * guard against direct duplicates): one atomic, serialized save per customer, as the signed-in
+ * member, with production-like grants (no default privileges). Payloads are built by the wizard's
+ * own code.
  */
 
 const migrationsDir = dirname(fileURLToPath(import.meta.url));
 const NEW = "20261205090000_business_setup_save.sql";
-const ROLLBACK = join(
-  migrationsDir,
-  "..",
-  "..",
-  "docs",
-  "production-rollback-20261205090000-business-setup-save.sql",
-);
+const GUARD = "20261206090000_business_setup_guard.sql";
+const rollbackOf = (name: string) =>
+  join(migrationsDir, "..", "..", "docs", `production-rollback-${name}.sql`);
+const ROLLBACK = rollbackOf("20261205090000-business-setup-save");
+const GUARD_ROLLBACK = rollbackOf("20261206090000-business-setup-guard");
 const MIGRATIONS = readdirSync(migrationsDir)
   .filter((f) => /^\d{14}_.*\.sql$/.test(f))
   .sort();
@@ -110,7 +109,7 @@ before(() => {
   for (const file of MIGRATIONS) {
     const sql = readFileSync(join(migrationsDir, file), "utf8");
     // Applied twice for the new one: it must be re-runnable.
-    for (let pass = 0; pass < (file === NEW ? 2 : 1); pass++) {
+    for (let pass = 0; pass < (file === NEW || file === GUARD ? 2 : 1); pass++) {
       const r = execSql(`BEGIN;\n${sql}\nCOMMIT;`);
       if (r.status !== 0) {
         setupFailure = `${file}: ${r.stderr}`;
@@ -573,16 +572,21 @@ describe("who may save", () => {
 });
 
 describe("rollback", () => {
-  test("removes the function and the guard, keeps every row, and the migration re-applies", (t) => {
+  test("guard first, then the function; rows stay and both migrations re-apply", (t) => {
     if (!ready(t)) return;
     const c = customer();
     save(c, payload(EMPTY, fill));
     const rows = counts(c.org);
-    const sql = readFileSync(ROLLBACK, "utf8");
-    for (let pass = 0; pass < 2; pass++) must(`BEGIN;\n${sql}\nCOMMIT;`);
+    const script = (path: string) => `BEGIN;\n${readFileSync(path, "utf8")}\nCOMMIT;`;
+    // The function cannot be dropped from under the guard.
+    assert.match(exec(script(ROLLBACK)).stderr, /ROLLBACK_REFUSED/);
+    save(c, payload(saved(c)));
+    for (let pass = 0; pass < 2; pass++) must(script(GUARD_ROLLBACK));
+    save(c, payload(saved(c)));
+    for (let pass = 0; pass < 2; pass++) must(script(ROLLBACK));
     assert.notEqual(exec(asMember(c, call(c, payload(EMPTY, fill)))).status, 0);
     assert.deepEqual(counts(c.org), rows);
-    must(`BEGIN;\n${readFileSync(join(migrationsDir, NEW), "utf8")}\nCOMMIT;`);
+    for (const file of [NEW, GUARD]) must(script(join(migrationsDir, file)));
     save(c, payload(saved(c)));
     assert.deepEqual(counts(c.org), rows);
   });

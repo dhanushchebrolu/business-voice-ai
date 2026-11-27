@@ -10,47 +10,16 @@
 --       A row is written only when something in it differs, so a retry changes nothing.
 --       Nothing is ever deleted or merged.
 --
---   one_setup_per_customer (trigger on businesses and agent_configs)
---       A browser session cannot INSERT a second business or receptionist for a customer who has
---       one, whatever code it runs. Rows that already exist are left alone, and server-side
---       writes are not restricted (a customer may hold several businesses by other means).
---
--- Apply BEFORE deploying the code that calls the function. Re-runnable. No existing row changes.
+-- PHASE 1 of 2, backward compatible: it only adds two functions. The currently live wizard keeps
+-- working exactly as before. Apply BEFORE deploying the code that calls the function. The guard
+-- against direct duplicate inserts is phase 2 (20261206090000), applied AFTER that code is live.
+-- Re-runnable. No existing row changes.
 -- Rollback: docs/production-rollback-20261205090000-business-setup-save.sql
 
 CREATE OR REPLACE FUNCTION public.lock_business_setup(_org uuid)
 RETURNS void LANGUAGE sql SET search_path = public AS $$
   SELECT pg_advisory_xact_lock(hashtextextended('business_setup:' || _org::text, 0))
 $$;
-
--- SECURITY DEFINER so the check sees every row of that customer, whatever the caller may read.
-CREATE OR REPLACE FUNCTION public.one_setup_per_customer()
-RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-DECLARE
-  v_taken boolean;
-BEGIN
-  PERFORM public.lock_business_setup(NEW.organization_id);
-  EXECUTE format('SELECT EXISTS (SELECT 1 FROM public.%I WHERE organization_id = $1)', TG_TABLE_NAME)
-    INTO v_taken USING NEW.organization_id;
-  IF v_taken THEN
-    RAISE EXCEPTION 'BUSINESS_SETUP_EXISTS: this customer already has a record in %', TG_TABLE_NAME
-      USING ERRCODE = '23505';
-  END IF;
-  RETURN NEW;
-END $$;
-REVOKE ALL ON FUNCTION public.one_setup_per_customer() FROM PUBLIC, anon, authenticated;
-
-DROP TRIGGER IF EXISTS trg_businesses_one_per_customer ON public.businesses;
-CREATE TRIGGER trg_businesses_one_per_customer
-  BEFORE INSERT ON public.businesses
-  FOR EACH ROW WHEN (current_user = 'authenticated')
-  EXECUTE FUNCTION public.one_setup_per_customer();
-
-DROP TRIGGER IF EXISTS trg_agent_configs_one_per_customer ON public.agent_configs;
-CREATE TRIGGER trg_agent_configs_one_per_customer
-  BEFORE INSERT ON public.agent_configs
-  FOR EACH ROW WHEN (current_user = 'authenticated')
-  EXECUTE FUNCTION public.one_setup_per_customer();
 
 CREATE OR REPLACE FUNCTION public.save_business_setup(_org uuid, _initial jsonb, _changes jsonb)
 RETURNS jsonb LANGUAGE plpgsql SECURITY INVOKER SET search_path = public AS $$

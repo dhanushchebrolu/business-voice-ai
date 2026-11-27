@@ -8,8 +8,10 @@ come from repository documents and the team's session notes, and are marked "per
 > **Update, 2026-11-27:** H1 and H2 are fixed on this branch after the audit (see "Recovery" in
 > `voice-ai-provisioning-workflow.md`). Their entries below describe `4b4e354`. The fixes need no new
 > migration and have not been tried against real Sarvam. Sections 6 to 16 were not re-audited.
-> A later change adds a second unapplied migration, `20261205090000` (setup wizard save), which must be
-> applied before deploying, after `20261204090000`.
+> **Release preparation, 2026-11-27:** there are now three unapplied migrations (`20261204090000`,
+> `20261205090000` before deploying; `20261206090000` after), each with gate scripts (H4 addressed).
+> For releasing, `production-deployment-runbook.md` and `production-migration-checklist.md` replace
+> sections 4 and 12 to 15 below.
 
 ## 1. Executive verdict
 

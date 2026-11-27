@@ -21,7 +21,7 @@ trigger `customer_activate`) through the existing idempotent pipeline
 | Admin actions on the provisioning page (run, register an agent) | yes (a deliberate operator step)                                    |
 | Background sweep                                                | never creates a job; continues existing ones                        |
 
-### The setup wizard (migration `20261205090000`, **apply before deploying this code**)
+### The setup wizard (migrations `20261205090000` before deploying, `20261206090000` after)
 
 - It opens with everything already saved (the receptionist's business, else the first one) and does
   not open until that has been read; a failed read offers a retry.
@@ -30,12 +30,14 @@ trigger `customer_activate`) through the existing idempotent pipeline
 - Only what the person edited is applied, and a blank never replaces a saved value (to clear a field,
   use the Business page). Untouched days keep their own hours and breaks. The same submission again
   writes nothing. Two people editing the same field: the later save wins.
-- A browser session cannot insert a second business or receptionist for a customer (trigger).
-  Server-side writes can, and existing duplicate records are left exactly as they are.
+- A browser session cannot insert a second business or receptionist for a customer (trigger,
+  `20261206090000`). Server-side writes can, and existing duplicate records are left exactly as they
+  are.
 - A customer with no receptionist record is sent back to the wizard.
-- Rollback: `production-rollback-20261205090000-business-setup-save.sql`, after rolling the code back.
-  The build that is live today saves the wizard with direct inserts: with the migration applied, its
-  retry after a failed save is refused, so deploy right after applying.
+- Two migrations because the build that is live today saves the wizard with direct inserts:
+  `20261205090000` (the function) does not affect it; `20261206090000` (the trigger) would refuse its
+  retry after a failed save, so apply it only after this code is live and remove it before rolling the
+  code back. See `production-migration-checklist.md` and `production-deployment-runbook.md`.
 
 "Complete" (`businessSetupProblems`): a business profile and receptionist, a category, a business
 name, and the data every switched-on capability needs. Voice and languages and the number are the

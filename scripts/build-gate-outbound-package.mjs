@@ -257,6 +257,91 @@ GATES[20261203090000] = {
   newColumns: { provisioning_runs: JOB_COLS },
 };
 
+// Setup-flow release (2026-11): each of these also needs the operator to write the approval
+// phrase into the script, and refuses to run outside one transaction.
+const SETUP_TABLES = [
+  "organizations",
+  "businesses",
+  "business_hours",
+  "services",
+  "faqs",
+  "business_rules",
+  "subscriptions",
+  "provisioning_runs",
+  "provisioning_run_events",
+];
+const TOKEN_SCOPE_COLS = ["agent_role", "organization_id", "run_id"];
+const exists = (sig) => `to_regprocedure('public.${sig}') IS NOT NULL`;
+const gone = (sig) => `to_regprocedure('public.${sig}') IS NULL`;
+const trigger = (name, table) =>
+  `(SELECT count(*) FROM pg_trigger WHERE tgname = '${name}' AND tgrelid = 'public.${table}'::regclass AND tgenabled = 'O') = 1`;
+/** A function members run with their own rights; signed-out visitors cannot. */
+const memberFn = (sig) =>
+  `(SELECT NOT prosecdef AND proconfig = ARRAY['search_path=public'] FROM pg_proc WHERE oid = to_regprocedure('public.${sig}'))
+     AND has_function_privilege('authenticated', 'public.${sig}', 'EXECUTE')
+     AND NOT has_function_privilege('anon', 'public.${sig}', 'EXECUTE')`;
+const SAVE_SIG = "save_business_setup(uuid, jsonb, jsonb)";
+const LOCK_SIG = "lock_business_setup(uuid)";
+const GUARD_SIG = "one_setup_per_customer()";
+const GUARD_TRIGGERS = [
+  ["trg_businesses_one_per_customer", "businesses"],
+  ["trg_agent_configs_one_per_customer", "agent_configs"],
+];
+
+GATES[20261204090000] = {
+  name: "operator_bridge_token_scope",
+  previous: "20261203090000",
+  rollback: "docs/production-rollback-20261204090000-operator-bridge-token-scope.sql",
+  extraTables: SETUP_TABLES,
+  outboundPrecondition: false,
+  approval: true,
+  // operator_bridge_tokens is not fingerprinted: this migration revokes unscoped tokens.
+  absent: `to_regclass('public.operator_bridge_tokens') IS NOT NULL
+     AND ${noCols("operator_bridge_tokens", TOKEN_SCOPE_COLS)}
+     AND to_regclass('public.idx_provisioning_runs_id_org') IS NULL
+     AND to_regclass('public.idx_operator_bridge_tokens_one_live') IS NULL
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname IN ('operator_bridge_tokens_run_of_customer', 'operator_bridge_tokens_role', 'operator_bridge_tokens_scoped'))`,
+  present: `${cols("operator_bridge_tokens", TOKEN_SCOPE_COLS)} = 'agent_role:text:YES:-,organization_id:uuid:YES:-,run_id:uuid:YES:-'
+     AND ${conDef("operator_bridge_tokens", "operator_bridge_tokens_run_of_customer")} LIKE 'FOREIGN KEY (run_id, organization_id) REFERENCES %provisioning_runs(id, organization_id) ON DELETE CASCADE'
+     AND ${conDef("operator_bridge_tokens", "operator_bridge_tokens_role")} IS NOT NULL
+     AND ${conDef("operator_bridge_tokens", "operator_bridge_tokens_scoped")} IS NOT NULL
+     AND ${idxDef("idx_provisioning_runs_id_org")} LIKE 'CREATE UNIQUE INDEX %'
+     AND ${idxDef("idx_operator_bridge_tokens_one_live")} LIKE 'CREATE UNIQUE INDEX %'
+     AND NOT EXISTS (SELECT 1 FROM public.operator_bridge_tokens t WHERE t.revoked_at IS NULL
+           AND (to_jsonb(t) ->> 'organization_id' IS NULL OR to_jsonb(t) ->> 'run_id' IS NULL))`,
+  newColumns: {},
+};
+GATES[20261205090000] = {
+  name: "business_setup_save",
+  previous: "20261204090000",
+  rollback: "docs/production-rollback-20261205090000-business-setup-save.sql",
+  extraTables: SETUP_TABLES,
+  outboundPrecondition: false,
+  approval: true,
+  // The function relies on one hours row per business and day.
+  absent: `${gone(SAVE_SIG)} AND ${gone(LOCK_SIG)} AND ${gone(GUARD_SIG)}
+     AND ${exists("is_org_member(uuid)")}
+     AND EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.business_hours'::regclass AND contype = 'u'
+           AND pg_get_constraintdef(oid) = 'UNIQUE (business_id, day_of_week)')`,
+  present: `${memberFn(SAVE_SIG)} AND ${memberFn(LOCK_SIG)}`,
+  newColumns: {},
+};
+GATES[20261206090000] = {
+  name: "business_setup_guard",
+  previous: "20261205090000",
+  rollback: "docs/production-rollback-20261206090000-business-setup-guard.sql",
+  extraTables: SETUP_TABLES,
+  outboundPrecondition: false,
+  approval: true,
+  approvalNote: " AFTER THE NEW WORKER SERVES ALL TRAFFIC",
+  absent: `${gone(GUARD_SIG)} AND ${exists(SAVE_SIG)} AND ${exists(LOCK_SIG)}
+     AND NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname IN (${GUARD_TRIGGERS.map(([n]) => `'${n}'`).join(", ")}))`,
+  present: `${GUARD_TRIGGERS.map(([n, t]) => trigger(n, t)).join(" AND ")}
+     AND (SELECT prosecdef FROM pg_proc WHERE oid = to_regprocedure('public.${GUARD_SIG}'))
+     AND NOT has_function_privilege('authenticated', 'public.${GUARD_SIG}', 'EXECUTE')`,
+  newColumns: {},
+};
+
 const VERSION = process.argv[2];
 const gate = GATES[VERSION];
 if (!gate) throw new Error(`no gate described for ${VERSION}`);
@@ -340,12 +425,35 @@ const safetyIf = (msg) =>
   END IF;
 `;
 
-const execute = `${header(`Outbound gate: execution script for migration ${VERSION} (${gate.name}).`)}
+// The operator edits the empty value to the exact phrase. The transaction check also stops a
+// client that runs statements one by one (SET LOCAL would not hold there).
+const approvalLine = (phrase) =>
+  gate.approval
+    ? `
+-- OPERATOR APPROVAL. To run this script, replace the empty value on the next line with exactly:
+--   ${phrase}
+SELECT set_config('gate_outbound.operator_approval', '', true);
+`
+    : "";
+const approvalGuard = (phrase) =>
+  gate.approval
+    ? `  IF current_setting('lock_timeout') IS DISTINCT FROM '5s' THEN
+    RAISE EXCEPTION '${P}_NOT_ONE_TRANSACTION: run the whole file as one request';
+  END IF;
+  IF current_setting('gate_outbound.operator_approval', true) IS DISTINCT FROM '${phrase}' THEN
+    RAISE EXCEPTION '${P}_NOT_APPROVED: the operator approval line is empty or wrong';
+  END IF;
+`
+    : "";
+const APPLY_PHRASE = `APPLY ${VERSION}${gate.approvalNote ?? ""}`;
+const UNDO_PHRASE = `ROLL BACK ${VERSION}`;
+
+const execute = `${header(`Outbound gate: execution script for migration ${VERSION} (${gate.name}).`)}${approvalLine(APPLY_PHRASE)}
 -- ===== Guard: abort before any change unless this is the expected database in the expected state =====
 DO $guard$
 BEGIN
 ${identityGuard}
-  IF (SELECT max(version) FROM supabase_migrations.schema_migrations) IS DISTINCT FROM '${gate.previous}' THEN
+${approvalGuard(APPLY_PHRASE)}  IF (SELECT max(version) FROM supabase_migrations.schema_migrations) IS DISTINCT FROM '${gate.previous}' THEN
     RAISE EXCEPTION '${P}_UNEXPECTED_HISTORY: latest is %', (SELECT max(version) FROM supabase_migrations.schema_migrations);
   END IF;
   IF NOT (${gate.absent}) THEN
@@ -390,11 +498,11 @@ SELECT json_build_object(
 
 const rollbackScript = `${header(`Outbound gate: rollback script for migration ${VERSION} (${gate.name}).`)}
 -- Runs the reviewed rollback and removes the history row. Roll back in
--- reverse order only (the latest applied migration first).
+-- reverse order only (the latest applied migration first).${approvalLine(UNDO_PHRASE)}
 DO $guard$
 BEGIN
 ${identityGuard}
-  IF (SELECT max(version) FROM supabase_migrations.schema_migrations) IS DISTINCT FROM '${VERSION}' THEN
+${approvalGuard(UNDO_PHRASE)}  IF (SELECT max(version) FROM supabase_migrations.schema_migrations) IS DISTINCT FROM '${VERSION}' THEN
     RAISE EXCEPTION '${P}_ROLLBACK_UNEXPECTED_HISTORY: latest is %', (SELECT max(version) FROM supabase_migrations.schema_migrations);
   END IF;
   PERFORM set_config('gate_outbound.data_before', md5(${FINGERPRINT}), true);
