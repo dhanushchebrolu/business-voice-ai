@@ -86,6 +86,9 @@ function sarvam(
       if (over.patchFails) throw new Error("Sarvam rejected the request (422).");
       state.version = v === 5 ? 5 : (over.patchLandsOn ?? v);
     },
+    setDeploymentStatus: async () => {
+      state.status = "active";
+    },
     masterAgentAppId: "Master-agent",
     now: () => new Date("2026-11-14T12:00:00Z"),
   };

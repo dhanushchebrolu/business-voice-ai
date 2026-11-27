@@ -1,5 +1,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
+import { withDeploymentLock } from "./sarvam-deployment-lock.server.ts";
+import { getTelephonyAdapter } from "./telephony.server.ts";
+import { SarvamTelephonyAdapter } from "./telephony/sarvam-provider.server.ts";
 
 /**
  * Number-to-customer assignment rules shared by the admin number actions
@@ -109,4 +112,65 @@ export async function assignNumberToOrganization(
     throw error;
   }
   return before;
+}
+
+/** Throws unless Sarvam itself says this deployment is answering. Reads only. */
+async function assertDeploymentAnswers(deploymentId: string) {
+  const adapter = getTelephonyAdapter("sarvam");
+  if (!adapter || !(adapter instanceof SarvamTelephonyAdapter))
+    throw new Error("Sarvam is not connected, so the number was not activated.");
+  const { status } = await adapter.getDeployment(deploymentId).catch((err: Error) => {
+    throw new Error(
+      `Sarvam could not confirm that deployment ${deploymentId} is answering, so the number was not activated: ${err.message}`,
+    );
+  });
+  if (status !== "active")
+    throw new Error(
+      `Sarvam deployment ${deploymentId} is ${status ?? "in an unknown state"}, so calls are not answered and the number was not activated. Resume the deployment (or retry provisioning), then activate it.`,
+    );
+}
+
+/**
+ * The admin "Activate" action. Under the number's deployment lock, so it never lands in the
+ * middle of provisioning or another deployment change; and a Sarvam number is not called active
+ * while its deployment is not answering. Nothing is resumed or paused for the person.
+ */
+export async function activateAssignedNumber(
+  supabaseAdmin: SupabaseClient<Database>,
+  numberId: string,
+) {
+  return withDeploymentLock(supabaseAdmin, [numberId], async (lock) => {
+    const { data: before, error: readError } = await supabaseAdmin
+      .from("phone_numbers")
+      .select("status, organization_id, e164, provider, provider_deployment_id")
+      .eq("id", numberId)
+      .maybeSingle();
+    if (readError) throw readError;
+    if (!before) throw new Error("Number not found");
+    if (before.status === "active") throw new Error("This number is already active");
+    if (before.status === "released")
+      throw new Error("A released number cannot be reactivated — provision a new one");
+    if (before.provider === "sarvam" && before.provider_deployment_id)
+      await assertDeploymentAnswers(before.provider_deployment_id);
+
+    await lock.confirm();
+    const { data: activated, error } = await supabaseAdmin
+      .from("phone_numbers")
+      .update({ status: "active", suspended_reason: null })
+      .eq("id", numberId)
+      // Only from the state just read: never over a release or reassignment made meanwhile.
+      .eq("status", before.status)
+      .select("id");
+    if (error) {
+      // Most likely the global "one active row per e164" uniqueness constraint.
+      if ((error as { code?: string }).code === "23505") {
+        throw new Error("This number is already active on another organization.");
+      }
+      throw error;
+    }
+    if (!activated?.length)
+      throw new Error("The number changed while it was being activated; reload and try again.");
+    const { status, organization_id, e164 } = before;
+    return { status, organization_id, e164 };
+  });
 }

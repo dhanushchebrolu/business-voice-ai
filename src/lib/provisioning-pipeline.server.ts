@@ -1021,6 +1021,9 @@ async function pipelineSteps(
       verifiedAt,
     );
   }
+  // Sarvam confirmed it active just above, so nothing is owed for an earlier pause.
+  const { saveRecoveryMarker } = await import("./sarvam-webhook-rotation.server.ts");
+  await saveRecoveryMarker(admin, [number.id], deploymentId, null);
   return outboundSteps(`${number.e164} is live on deployment ${deploymentId}.`, verifiedAt);
 
   // 11 + 12. The outbound agent. Read-only checks: nothing here can disturb

@@ -4,6 +4,11 @@ import {
   withDeploymentLock,
   type DeploymentLock,
 } from "./sarvam-deployment-lock.server.ts";
+import {
+  recoveryMarkerOf,
+  saveRecoveryMarker,
+  type RecoveryMarker,
+} from "./sarvam-webhook-rotation.server.ts";
 import type { Database } from "@/integrations/supabase/types";
 import { getTelephonyAdapter, sarvamOutboundWebhookUrl } from "./telephony.server.ts";
 import { SarvamTelephonyAdapter } from "./telephony/sarvam-provider.server.ts";
@@ -55,11 +60,13 @@ export async function createInboundDeploymentForNumbers(
 }
 
 /**
- * Records a deployment on numbers that still have none. A creator that lost its lock cannot
- * overwrite what a newer one recorded.
+ * Records a deployment on numbers that still have none AND still belong to the customer it was
+ * made for: the write itself carries both conditions, so a reassignment made while Sarvam was
+ * answering, or a creator that lost its lock, records nothing.
  */
 async function recordDeployment(
   supabaseAdmin: SupabaseClient<Database>,
+  organizationId: string,
   phoneNumberIds: string[],
   deploymentId: string,
 ) {
@@ -67,12 +74,13 @@ async function recordDeployment(
     .from("phone_numbers")
     .update({ provider_deployment_id: deploymentId })
     .in("id", phoneNumberIds)
+    .eq("organization_id", organizationId)
     .is("provider_deployment_id", null)
     .select("id");
   if (error) throw error;
-  if (!data?.length)
+  if (data?.length !== phoneNumberIds.length)
     throw new Error(
-      `Another change recorded a deployment for this number first. Sarvam deployment ${deploymentId} was not recorded: check it in the Sarvam console.`,
+      `The number was reassigned or another change recorded a deployment for it first, so Sarvam deployment ${deploymentId} was not recorded for it: check it in the Sarvam console.`,
     );
 }
 
@@ -211,7 +219,7 @@ async function createUnderLock(
         `Sarvam already routes ${numbers[0]!.e164} through ${existing.map((d) => `deployment ${d.deploymentId} (agent ${d.appId})`).join(" and ")}. Resolve that in Sarvam first; no duplicate was created.`,
       );
     await lock.confirm();
-    await recordDeployment(supabaseAdmin, phoneNumberIds, match!.deploymentId);
+    await recordDeployment(supabaseAdmin, organizationId, phoneNumberIds, match!.deploymentId);
     return { deploymentId: match!.deploymentId, organizationId, outcome: "adopted" };
   }
 
@@ -225,7 +233,7 @@ async function createUnderLock(
     webhookConfig: { url: webhook.url, metadata: { organization_id: organizationId } },
   });
 
-  await recordDeployment(supabaseAdmin, phoneNumberIds, created.deploymentId);
+  await recordDeployment(supabaseAdmin, organizationId, phoneNumberIds, created.deploymentId);
 
   return { deploymentId: created.deploymentId, organizationId, outcome: "created" };
 }
@@ -262,11 +270,16 @@ export async function setCustomerDeploymentStatus(
   const adapter = getTelephonyAdapter("sarvam");
   if (!adapter || !(adapter instanceof SarvamTelephonyAdapter))
     throw new Error("Sarvam is not connected. Configure SARVAM_API_KEY first.");
-  return withDeploymentLock(
-    supabaseAdmin,
-    own.map((n) => n.id),
-    () => adapter.setDeploymentStatus(params.deploymentId, params.action),
-  );
+  const ids = own.map((n) => n.id);
+  return withDeploymentLock(supabaseAdmin, ids, async () => {
+    const after = await adapter.setDeploymentStatus(params.deploymentId, params.action);
+    // A person's pause, or their resume that Sarvam confirms, settles any recovery owed.
+    if (params.action === "pause" || after.status === "active") {
+      if (!(await saveRecoveryMarker(supabaseAdmin, ids, params.deploymentId, null)))
+        console.error("sarvam_deployment:recovery_clear_failed", params.deploymentId);
+    }
+    return after;
+  });
 }
 
 export async function setDeploymentAppVersion(
@@ -304,8 +317,12 @@ export interface DeploymentSyncItem {
  * when it is missing. A deployment on a different app cannot be repointed
  * (app_id is not updatable) and is reported, never replaced automatically.
  * A number that has gone live (or is suspended) is only brought back to the version it was
- * verified on; moving it needs the verify-first registration. Each deployment is changed
- * under its numbers' lock; `held` is the provisioning job's own lock.
+ * verified on; moving it needs the verify-first registration. A released number's deployment
+ * is never touched. Each deployment is changed under its numbers' lock; `held` is the
+ * provisioning job's own lock.
+ * A recovery marker is on record before an active deployment is paused and cleared only once
+ * Sarvam confirms it active again. While one is outstanding, or a live number's deployment is
+ * not active, the result is never in_sync or updated.
  * Idempotent: a deployment already in line is not touched.
  */
 export async function syncAgentDeployments(
@@ -319,21 +336,18 @@ export async function syncAgentDeployments(
     .eq("id", agentConfigId)
     .maybeSingle();
   if (!agent) throw new Error("Agent not found.");
-  const { data: numbers } = await supabaseAdmin
+  const { data: linked } = await supabaseAdmin
     .from("phone_numbers")
-    .select(
-      "id, e164, status, organization_id, provider, provider_deployment_id, verified_sarvam_app_id, verified_sarvam_app_version",
-    )
+    .select("id, e164, status, organization_id, provider, provider_deployment_id")
     .eq("agent_config_id", agentConfigId);
+  // A released number is gone: neither it nor its deployment is this sync's to change.
+  const numbers = (linked ?? []).filter(
+    (n) => n.status !== "released" && n.organization_id === agent.organization_id,
+  );
   const deploymentIds = [
     ...new Set(
-      (numbers ?? [])
-        .filter(
-          (n) =>
-            n.provider === "sarvam" &&
-            n.provider_deployment_id &&
-            n.organization_id === agent.organization_id,
-        )
+      numbers
+        .filter((n) => n.provider === "sarvam" && n.provider_deployment_id)
         .map((n) => n.provider_deployment_id as string),
     ),
   ];
@@ -348,10 +362,7 @@ export async function syncAgentDeployments(
 
   const items: DeploymentSyncItem[] = [];
   for (const deploymentId of deploymentIds) {
-    const routed = (numbers ?? []).filter(
-      (n) =>
-        n.provider_deployment_id === deploymentId && n.organization_id === agent.organization_id,
-    );
+    const routed = numbers.filter((n) => n.provider_deployment_id === deploymentId);
     const refuse = (detail: string, fromVersion: number | null = null) =>
       items.push({
         deploymentId,
@@ -390,9 +401,57 @@ export async function syncAgentDeployments(
         );
         continue;
       }
+      // Read again under the lock, after Sarvam answered: a number released meanwhile is left
+      // alone.
+      const { data: fresh, error: freshError } = await supabaseAdmin
+        .from("phone_numbers")
+        .select(
+          "id, status, organization_id, inbound_enabled, provider_deployment_id, verified_sarvam_app_id, verified_sarvam_app_version, metadata",
+        )
+        .in(
+          "id",
+          routed.map((n) => n.id),
+        );
+      if (freshError) throw freshError;
+      const rows = (fresh ?? []).filter(
+        (n) =>
+          n.status !== "released" &&
+          n.organization_id === agent.organization_id &&
+          n.provider_deployment_id === deploymentId,
+      );
+      if (!rows.length) {
+        refuse(
+          "The number changed while Sarvam was being read; nothing was changed.",
+          current.appVersion,
+        );
+        continue;
+      }
+      const ids = rows.map((n) => n.id);
+      const live = rows.some((n) => n.status === "active" && n.inbound_enabled);
+      const notAnswering = `The number is live but deployment ${deploymentId} is ${current.status ?? "in an unknown state"}: calls are not answered. Resume it.`;
+      if (rows.some((n) => recoveryMarkerOf(n.metadata)?.deploymentId === deploymentId)) {
+        // The provisioning job (held lock) takes over the pause of a number not yet live: it
+        // resumes it itself when it activates. Anything else waits until it is confirmed back.
+        const takenOver = held && rows.every((n) => n.status === "provisioning");
+        if (current.status !== "active" && !takenOver) {
+          refuse(
+            `An earlier change paused deployment ${deploymentId} and it is not confirmed back: run "Resume deployment" (or "Re-verify live deployment" if a version move was interrupted). Nothing was changed.`,
+            current.appVersion,
+          );
+          continue;
+        }
+        if (!(await saveRecoveryMarker(supabaseAdmin, ids, deploymentId, null))) {
+          refuse("Could not clear the recovery record; nothing was changed.", current.appVersion);
+          continue;
+        }
+      }
       const needsVersion = current.appVersion !== agent.sarvam_app_version;
       const needsWebhook = !current.webhookUrlConfigured && webhook.ok;
       if (!needsVersion && !needsWebhook) {
+        if (live && current.status !== "active") {
+          refuse(notAnswering, current.appVersion);
+          continue;
+        }
         items.push({
           deploymentId,
           action: "in_sync",
@@ -402,7 +461,7 @@ export async function syncAgentDeployments(
         });
         continue;
       }
-      const unverified = routed.some(
+      const unverified = rows.some(
         (n) =>
           (n.status === "active" || n.status === "suspended") &&
           (n.verified_sarvam_app_id !== agent.sarvam_app_id ||
@@ -419,22 +478,64 @@ export async function syncAgentDeployments(
       // pause, edit, and always resume one we paused, so a failed edit never leaves calls unanswered.
       const wasActive = current.status === "active";
       await lock.confirm();
-      if (wasActive) await adapter.setDeploymentStatus(deploymentId, "pause");
-      try {
-        await lock.confirm();
-        await adapter.updateInboundDeployment(deploymentId, {
-          ...(needsVersion ? { appVersion: agent.sarvam_app_version } : {}),
-          ...(needsWebhook && webhook.ok
-            ? {
-                webhookConfig: {
-                  url: webhook.url,
-                  metadata: { organization_id: agent.organization_id },
-                },
-              }
-            : {}),
+      const owe = (state: RecoveryMarker["state"]) =>
+        saveRecoveryMarker(supabaseAdmin, ids, deploymentId, {
+          deploymentId,
+          originalStatus: "active",
+          appId: current.appId,
+          appVersion: current.appVersion,
+          alsoVersion: agent.sarvam_app_version!,
+          state,
+          recordedAt: new Date().toISOString(),
         });
-      } finally {
-        if (wasActive) await adapter.setDeploymentStatus(deploymentId, "resume");
+      // On record before the pause: no record, no pause.
+      if (wasActive && !(await owe("in_progress"))) {
+        refuse(
+          "Could not record the recovery marker, so the deployment was not paused; nothing was changed.",
+          current.appVersion,
+        );
+        continue;
+      }
+      let failure: Error | null = null;
+      try {
+        if (wasActive) await adapter.setDeploymentStatus(deploymentId, "pause");
+        try {
+          await lock.confirm();
+          await adapter.updateInboundDeployment(deploymentId, {
+            ...(needsVersion ? { appVersion: agent.sarvam_app_version } : {}),
+            ...(needsWebhook && webhook.ok
+              ? {
+                  webhookConfig: {
+                    url: webhook.url,
+                    metadata: { organization_id: agent.organization_id },
+                  },
+                }
+              : {}),
+          });
+        } finally {
+          if (wasActive) await adapter.setDeploymentStatus(deploymentId, "resume");
+        }
+      } catch (err) {
+        failure = err as Error;
+      }
+      if (wasActive) {
+        // Whatever the calls said, only Sarvam's own answer settles the record.
+        const back = await adapter.getDeployment(deploymentId).catch(() => null);
+        if (back?.status !== "active") {
+          await owe("recovery_required");
+          refuse(
+            `Deployment ${deploymentId} was paused for the edit and is not confirmed active again, so calls may not be answered: run "Resume deployment".${failure ? ` (${failure.message})` : ""}`,
+            current.appVersion,
+          );
+          continue;
+        }
+        if (!(await saveRecoveryMarker(supabaseAdmin, ids, deploymentId, null)))
+          console.error("sarvam_deployment:recovery_clear_failed", deploymentId);
+      }
+      if (failure) throw failure;
+      if (live && !wasActive) {
+        refuse(`The deployment was edited and left paused. ${notAnswering}`, current.appVersion);
+        continue;
       }
       items.push({
         deploymentId,

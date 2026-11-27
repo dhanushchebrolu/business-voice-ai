@@ -279,8 +279,8 @@ function ProvisioningDetail() {
             className="mt-2 rounded-md border border-destructive/40 p-2 text-xs text-destructive"
           >
             <p>
-              Recovery required: a webhook-token update left deployment{" "}
-              {data.webhookRecovery.deploymentId} out of its original state (
+              Recovery required: a change (webhook token, version sync or version move) left
+              deployment {data.webhookRecovery.deploymentId} out of its original state (
               {data.webhookRecovery.originalStatus}). It may not be answering calls. No further
               token update is allowed until it is resumed.
             </p>
@@ -842,7 +842,7 @@ function ProvisioningDetail() {
         open={reverifyOpen}
         onOpenChange={setReverifyOpen}
         title="Re-verify the live deployment"
-        description="Reads this customer's deployment from Sarvam (no changes there) and checks deployment, agent, version, number and status. Saves the verified mapping only if every check passes; a mismatch blocks business data until fixed."
+        description="Reads this customer's deployment from Sarvam and checks deployment, agent, version, number and status. Nothing is changed there, except that a deployment an interrupted change left paused is first put back on the verified version and resumed. Saves the verified mapping only if every check passes; a mismatch blocks business data until fixed."
         onConfirm={async (reason) => {
           const r = await reverifyLive({ data: { orgId, reason } });
           if (r.outcome === "verified") toast.success(r.detail);
@@ -881,7 +881,7 @@ function ProvisioningDetail() {
         open={resumeOpen}
         onOpenChange={setResumeOpen}
         title="Resume the deployment"
-        description="Recovery after a failed webhook-token update: resumes this customer's deployment back to active, its original state, only if Sarvam still shows the same agent, version and number. Nothing else is changed."
+        description="Recovery after an interrupted deployment change: resumes this customer's deployment back to active, its original state, only if Sarvam still shows the same agent, version and number. Nothing else is changed."
         onConfirm={async (reason) => {
           const r = await resumeAfterUpdate({ data: { orgId, reason } });
           if (r.outcome === "resumed" || r.outcome === "already_resumed") toast.success(r.detail);

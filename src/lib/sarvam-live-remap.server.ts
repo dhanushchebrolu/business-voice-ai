@@ -8,6 +8,11 @@ import {
 } from "./provisioning-pipeline.server.ts";
 import { applySarvamAgentMapping } from "./sarvam-agent-registration.server.ts";
 import { withDeploymentLock, type DeploymentLock } from "./sarvam-deployment-lock.server.ts";
+import {
+  recoveryMarkerOf,
+  saveRecoveryMarker,
+  type RecoveryMarker,
+} from "./sarvam-webhook-rotation.server.ts";
 
 /**
  * Re-verification for a customer whose Sarvam number is ALREADY LIVE
@@ -23,15 +28,24 @@ import { withDeploymentLock, type DeploymentLock } from "./sarvam-deployment-loc
  *   4. only then save the new mapping AND the new verified fields.
  *
  * If step 2 or 3 fails, the Sarvam deployment is put back on the old
- * version and read back: when the old mapping is confirmed the existing
- * verification is kept (business data keeps flowing); when it cannot be
- * confirmed the verified fields are cleared (fail closed) and a person must
- * look. ClickAI's mapping only changes after step 3 passes. No onboarding,
+ * version, resumed if the move left it paused, and read back: when the old
+ * mapping is confirmed the existing verification is kept (business data
+ * keeps flowing); when it cannot be confirmed the verified fields are
+ * cleared (fail closed) and a person must look.
+ *
+ * A recovery marker is on record before the deployment is paused and is
+ * cleared only once Sarvam confirms it active. If the resume keeps failing
+ * the outcome is recovery_required (old verification kept); the next call, or
+ * "Resume deployment", puts the line back. A number switched off meanwhile is
+ * not resumed.
+ *
+ * ClickAI's mapping only changes after step 3 passes. No onboarding,
  * voice settings or new-customer steps are required; nothing here creates,
  * pauses for longer than an edit, or activates anything.
  *
- * Calling it with the current agent and version is a plain re-verification
- * (no Sarvam write): it refreshes the verified fields on success.
+ * Calling it with the current agent and version is a plain re-verification:
+ * it refreshes the verified fields on success, and writes to Sarvam only to
+ * undo a pause that is on record.
  */
 
 type Admin = SupabaseClient<Database>;
@@ -40,6 +54,8 @@ export interface LiveRemapDeps {
   getDeployment: (deploymentId: string) => Promise<DeploymentView>;
   /** Same agent, other committed version; keeps paused/active (setDeploymentAppVersion). */
   setDeploymentAppVersion: (deploymentId: string, appVersion: number) => Promise<void>;
+  /** Resumes a deployment the move left paused. */
+  setDeploymentStatus: (deploymentId: string, action: "resume") => Promise<unknown>;
   masterAgentAppId: string | null;
   now: () => Date;
 }
@@ -56,6 +72,8 @@ export type LiveRemapOutcome =
   | "verified"
   /** Failed; Sarvam is back on (or never left) the old version, confirmed; old verification kept. */
   | "rolled_back"
+  /** Failed; on the old version but still paused. Old verification kept, recovery on record. */
+  | "recovery_required"
   /** Failed and the old mapping could not be confirmed: verified fields cleared, business data blocked. */
   | "blocked";
 
@@ -81,6 +99,7 @@ export async function defaultLiveRemapDeps(): Promise<LiveRemapDeps> {
   return {
     getDeployment: async (id) => adapter().getDeployment(id),
     setDeploymentAppVersion: async (id, v) => setDeploymentAppVersion(adapter(), id, v),
+    setDeploymentStatus: async (id, action) => adapter().setDeploymentStatus(id, action),
     masterAgentAppId: masterAgentAppId(),
     now: () => new Date(),
   };
@@ -238,12 +257,91 @@ async function remapUnderLock(
     }
   };
 
+  const owe = (state: RecoveryMarker["state"]) =>
+    saveRecoveryMarker(admin, [number.id], number.deploymentId, {
+      deploymentId: number.deploymentId,
+      originalStatus: "active",
+      appId,
+      appVersion: oldVersion,
+      state,
+      recordedAt: deps.now().toISOString(),
+    });
+  const settle = async () => {
+    if (!(await saveRecoveryMarker(admin, [number.id], number.deploymentId, null)))
+      console.error("sarvam_deployment:recovery_clear_failed", number.deploymentId);
+  };
+  /** Resumes what ClickAI itself paused, unless a person has switched the number off since. */
+  const resume = async () => {
+    const { data, error } = await admin
+      .from("phone_numbers")
+      .select("status, inbound_enabled, organization_id")
+      .eq("id", number.id)
+      .maybeSingle();
+    if (error) throw error;
+    if (data?.status !== "active" || !data.inbound_enabled) return;
+    if (data.organization_id !== input.organizationId) return;
+    try {
+      await lock.confirm();
+      await deps.setDeploymentStatus(number.deploymentId, "resume");
+    } catch {
+      // The read after it decides.
+    }
+  };
+  /** Back to the verified version (editable only while paused). */
+  const moveBack = async () => {
+    try {
+      await lock.confirm();
+      await deps.setDeploymentAppVersion(number.deploymentId, oldVersion);
+    } catch {
+      // Confirmed (or not) by the read after it.
+    }
+  };
+  const stillPaused = (why: string, checks: VerificationCheck[]): LiveRemapResult => ({
+    outcome: "recovery_required",
+    detail: `${why}. Deployment ${number.deploymentId} is on v${oldVersion} but paused and could not be resumed: calls are not answered. The existing verification is kept. Run "Resume deployment" or "Re-verify live deployment".`,
+    checks,
+  });
+
   // 1. Before changing anything, the deployment must match the current mapping.
-  const before = await read();
+  let before = await read();
   if (!before)
     throw new Error(
       `Could not read deployment ${number.deploymentId} from Sarvam; nothing was changed and the existing verification is kept.`,
     );
+  const { data: row, error: rowError } = await admin
+    .from("phone_numbers")
+    .select("metadata")
+    .eq("id", number.id)
+    .maybeSingle();
+  if (rowError) throw rowError;
+  const marker = recoveryMarkerOf(row?.metadata);
+  const owed = marker?.deploymentId === number.deploymentId && marker.originalStatus === "active";
+  // An earlier change paused this deployment and never confirmed it back: first put it back,
+  // on the verified version and answering, then do what was asked.
+  if (
+    owed &&
+    before.status === "paused" &&
+    !checksFor(before, oldVersion).some(
+      (c) => !c.ok && !["status", "version", "webhook"].includes(c.id),
+    )
+  ) {
+    if (before.appVersion !== oldVersion) await moveBack();
+    if ((await read())?.appVersion === oldVersion) await resume();
+    before = (await read()) ?? before;
+    if (before.status !== "active") {
+      const checks = checksFor(before, oldVersion);
+      await owe("recovery_required");
+      if (!isIdentityFailure(checks))
+        return stillPaused("An earlier change is still not undone", checks);
+      await clearVerified();
+      return {
+        outcome: "blocked",
+        detail: `Deployment ${number.deploymentId} was left paused by an earlier change and could not be put back (${failed(checks)}). Business data is blocked; run "Re-verify live deployment" to try again.`,
+        checks,
+      };
+    }
+  }
+  if (owed && before.status === "active") await settle();
   const beforeChecks = checksFor(before, oldVersion);
   /** ClickAI's mapping, saved only once Sarvam is confirmed on the version. */
   const saveMapping = () =>
@@ -284,7 +382,7 @@ async function remapUnderLock(
       checks: beforeChecks,
     };
 
-  // Plain re-verification (same version): refresh on success, never write Sarvam.
+  // Plain re-verification (same version): refresh on success, nothing more to write.
   if (newVersion === oldVersion) {
     await saveVerified(oldVersion);
     return {
@@ -294,7 +392,14 @@ async function remapUnderLock(
     };
   }
 
-  // 2 + 3. Move Sarvam to the new version, read back and verify.
+  // 2 + 3. Move Sarvam to the new version, read back and verify. The recovery owed is on
+  // record before anything is paused.
+  if (!(await owe("in_progress")))
+    return {
+      outcome: "rolled_back",
+      detail: "Could not record the recovery marker, so nothing was paused or changed. Retry.",
+      checks: beforeChecks,
+    };
   let changeError: string | null = null;
   try {
     await lock.confirm();
@@ -308,6 +413,7 @@ async function remapUnderLock(
     // 4. Only now: ClickAI's mapping and the verified fields.
     await saveMapping();
     await saveVerified(newVersion);
+    await settle();
     return {
       outcome: "verified",
       detail: `${number.e164} now runs ${appId} v${newVersion}, verified with Sarvam.`,
@@ -318,16 +424,16 @@ async function remapUnderLock(
     changeError ?? (after ? failed(afterChecks) : "the deployment could not be read back");
 
   // Roll back: put Sarvam back on the old version unless it never left it.
-  if (!after || after.appVersion !== oldVersion) {
-    try {
-      await lock.confirm();
-      await deps.setDeploymentAppVersion(number.deploymentId, oldVersion);
-    } catch {
-      // Confirmed (or not) by the read below.
-    }
+  if (!after || after.appVersion !== oldVersion) await moveBack();
+  let back = await read();
+  // The move paused it: never leave it that way when it is confirmed on the verified version.
+  if (back && back.status !== "active" && !isIdentityFailure(checksFor(back, oldVersion))) {
+    await resume();
+    back = await read();
   }
-  const back = await read();
   const backChecks = back ? checksFor(back, oldVersion) : [];
+  if (back?.status === "active") await settle();
+  else await owe("recovery_required");
   if (back && backChecks.every((c) => c.ok)) {
     await saveVerified(oldVersion);
     return {
@@ -336,6 +442,8 @@ async function remapUnderLock(
       checks: afterChecks,
     };
   }
+  if (back && back.status !== "active" && !isIdentityFailure(backChecks))
+    return stillPaused(`Moving to v${newVersion} was not verified (${why})`, backChecks);
   await clearVerified();
   return {
     outcome: "blocked",

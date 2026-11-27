@@ -8,6 +8,7 @@ import { VobizTelephonyAdapter } from "@/lib/telephony/vobiz-provider";
 import type { Json } from "@/integrations/supabase/types";
 import { UNRESOLVED_SARVAM_STATUSES } from "@/lib/sarvam-call-review";
 import {
+  activateAssignedNumber,
   assignNumberToOrganization,
   findOtherE164Holder,
   NUMBER_HELD_MESSAGE,
@@ -235,27 +236,8 @@ export const activatePhoneNumber = createServerFn({ method: "POST" })
     const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
-    const { data: before } = await supabaseAdmin
-      .from("phone_numbers")
-      .select("status, organization_id, e164")
-      .eq("id", data.numberId)
-      .maybeSingle();
-    if (!before) throw new Error("Number not found");
-    if (before.status === "active") throw new Error("This number is already active");
-    if (before.status === "released")
-      throw new Error("A released number cannot be reactivated — provision a new one");
-
-    const { error } = await supabaseAdmin
-      .from("phone_numbers")
-      .update({ status: "active", suspended_reason: null })
-      .eq("id", data.numberId);
-    if (error) {
-      // Most likely the global "one active row per e164" uniqueness constraint.
-      if ((error as { code?: string }).code === "23505") {
-        throw new Error("This number is already active on another organization.");
-      }
-      throw error;
-    }
+    // Serialized with provisioning, and refused while Sarvam is not answering the number.
+    const before = await activateAssignedNumber(supabaseAdmin, data.numberId);
 
     await writeAudit(admin, {
       action: "NUMBER_ASSIGNED",

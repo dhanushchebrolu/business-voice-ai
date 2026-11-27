@@ -20,7 +20,8 @@ import type { DeploymentView } from "./provisioning-pipeline.server.ts";
  * answer calls to that number. This is a short, controlled interruption, not
  * zero downtime, and it happens only after an explicit confirmation.
  *
- * Durable recovery state: before ClickAI pauses an active deployment it
+ * Durable recovery state (shared with the version sync and the live version
+ * move): before ClickAI pauses an active deployment for an edit it
  * writes a recovery marker on the customer's own phone_numbers row
  * (metadata.sarvam_webhook_recovery, an existing jsonb column; compare-and-
  * swap on updated_at). The marker is the source of truth for "recovery
@@ -93,6 +94,8 @@ export interface PendingRecovery {
   originalStatus: string;
   appId: string;
   appVersion: number | null;
+  /** A version sync only: the registered version it was moving to, also safe to resume on. */
+  alsoVersion?: number;
 }
 
 /** The durable marker on the customer's phone_numbers row. */
@@ -144,12 +147,61 @@ export function recoveryMarkerOf(metadata: unknown): RecoveryMarker | null {
     originalStatus: v["originalStatus"],
     appId: typeof v["appId"] === "string" ? v["appId"] : "",
     appVersion: typeof v["appVersion"] === "number" ? v["appVersion"] : null,
+    ...(typeof v["alsoVersion"] === "number" ? { alsoVersion: v["alsoVersion"] } : {}),
     state: v["state"] === "recovery_required" ? "recovery_required" : "in_progress",
     recordedAt: typeof v["recordedAt"] === "string" ? v["recordedAt"] : "",
   };
 }
 
 const canonical = (n: string) => normalizeCustomerPhone(n, null) ?? n;
+
+/**
+ * Writes, or clears (null), one deployment's marker on the given number rows, each with a
+ * compare-and-swap on updated_at read just before (a row changed meanwhile is read again).
+ * Clearing leaves another deployment's marker alone. False when a row could not be written;
+ * never throws.
+ */
+export async function saveRecoveryMarker(
+  admin: Admin,
+  numberIds: string[],
+  deploymentId: string,
+  marker: RecoveryMarker | null,
+): Promise<boolean> {
+  const save = async (id: string): Promise<boolean> => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const { data: row, error } = await admin
+        .from("phone_numbers")
+        .select("metadata, updated_at")
+        .eq("id", id)
+        .maybeSingle();
+      if (error || !row) return false;
+      if (!marker && recoveryMarkerOf(row.metadata)?.deploymentId !== deploymentId) return true;
+      const next: Record<string, unknown> = {
+        ...(row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
+          ? row.metadata
+          : {}),
+      };
+      if (marker) next[RECOVERY_MARKER_KEY] = marker;
+      else delete next[RECOVERY_MARKER_KEY];
+      const { data, error: writeError } = await admin
+        .from("phone_numbers")
+        .update({ metadata: next as Json })
+        .eq("id", id)
+        .eq("updated_at", row.updated_at)
+        .select("id");
+      if (writeError) return false;
+      if (data?.length) return true;
+    }
+    return false;
+  };
+  try {
+    let saved = true;
+    for (const id of numberIds) saved = (await save(id)) && saved;
+    return saved;
+  } catch {
+    return false;
+  }
+}
 
 interface OwnNumber {
   id: string;
@@ -338,7 +390,7 @@ async function rotateUnderLock(
     return done(
       "recovery_required",
       "precondition",
-      'An earlier webhook-token update may have left this deployment out of its original state. Run "Resume deployment" first; nothing was changed.',
+      'An earlier change (webhook-token update, version sync or version move) may have left this deployment out of its original state. Run "Resume deployment" first; nothing was changed.',
     );
   }
 
@@ -646,7 +698,7 @@ async function resumeUnderLock(
     return done(
       "refused",
       "precondition",
-      "No webhook-token update is waiting for recovery for this customer.",
+      "No interrupted change is waiting for recovery for this customer.",
     );
   if (recovery.deploymentId !== number.deploymentId)
     return done(
@@ -677,7 +729,8 @@ async function resumeUnderLock(
   const sameMapping = (d: DeploymentView) =>
     d.deploymentId === number.deploymentId &&
     d.appId === recovery.appId &&
-    d.appVersion === recovery.appVersion &&
+    (d.appVersion === recovery.appVersion ||
+      (recovery.alsoVersion !== undefined && d.appVersion === recovery.alsoVersion)) &&
     d.phoneNumbers.map(canonical).includes(canonical(number.e164));
   const confirmAndClear = async (d: DeploymentView, outcome: "resumed" | "already_resumed") => {
     r.statusAfter = d.status;
@@ -709,7 +762,7 @@ async function resumeUnderLock(
     return done(
       "refused",
       "read_before",
-      "Sarvam shows a different agent, version or number than before the update; not resumed. Check it in the Sarvam console.",
+      'Sarvam shows a different agent, version or number than before the change; not resumed. If a version move was interrupted, run "Re-verify live deployment"; otherwise check it in the Sarvam console.',
     );
   if (before.status === "active") return confirmAndClear(before, "already_resumed");
   if (before.status !== "paused")

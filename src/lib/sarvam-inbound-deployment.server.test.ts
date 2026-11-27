@@ -531,11 +531,14 @@ describe("syncAgentDeployments", () => {
   };
   const numbersFor = (ids: string[]) =>
     ids.map((d) => ({ organization_id: "org_1", provider: "sarvam", provider_deployment_id: d }));
+  /** Read once to find the deployments, then again per deployment under its lock. */
+  const reads = (ids: string[]) =>
+    Array.from({ length: ids.length + 1 }, () => ({ data: numbersFor(ids), error: null }));
 
   test("moves a deployment to the newly mapped version and adds a missing webhook, via PATCH only", async () => {
     const { client } = makeFakeSupabase({
       agent_configs: { select: [{ data: agent, error: null }] },
-      phone_numbers: { select: [{ data: numbersFor(["dep_1"]), error: null }] },
+      phone_numbers: { select: reads(["dep_1"]) },
     });
     const { result, requests } = await withRoutedFetch(
       [
@@ -580,7 +583,7 @@ describe("syncAgentDeployments", () => {
   test("an active deployment is paused, moved to the new version, then resumed (Sarvam edits only paused ones)", async () => {
     const { client } = makeFakeSupabase({
       agent_configs: { select: [{ data: agent, error: null }] },
-      phone_numbers: { select: [{ data: numbersFor(["dep_1"]), error: null }] },
+      phone_numbers: { select: reads(["dep_1"]) },
     });
     const { result, requests } = await withRoutedFetch(
       [
@@ -627,7 +630,7 @@ describe("syncAgentDeployments", () => {
   test("a failed edit still resumes the paused deployment and reports the error", async () => {
     const { client } = makeFakeSupabase({
       agent_configs: { select: [{ data: agent, error: null }] },
-      phone_numbers: { select: [{ data: numbersFor(["dep_1"]), error: null }] },
+      phone_numbers: { select: reads(["dep_1"]) },
     });
     const { result, requests } = await withRoutedFetch(
       [
@@ -662,7 +665,7 @@ describe("syncAgentDeployments", () => {
   test("an in-line deployment is untouched; one on a different agent is reported, not replaced", async () => {
     const { client } = makeFakeSupabase({
       agent_configs: { select: [{ data: agent, error: null }] },
-      phone_numbers: { select: [{ data: numbersFor(["dep_ok", "dep_other"]), error: null }] },
+      phone_numbers: { select: reads(["dep_ok", "dep_other"]) },
     });
     const { result, requests } = await withRoutedFetch(
       [
@@ -708,14 +711,10 @@ describe("sync preserves paused/active state (Phase 5)", () => {
     const { client } = makeFakeSupabase({
       agent_configs: { select: [{ data: agent, error: null }] },
       phone_numbers: {
-        select: [
-          {
-            data: [
-              { organization_id: "org_1", provider: "sarvam", provider_deployment_id: "dep_1" },
-            ],
-            error: null,
-          },
-        ],
+        select: Array.from({ length: 2 }, () => ({
+          data: [{ organization_id: "org_1", provider: "sarvam", provider_deployment_id: "dep_1" }],
+          error: null,
+        })),
       },
     });
     const { result, requests } = await withRoutedFetch(

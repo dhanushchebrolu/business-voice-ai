@@ -154,8 +154,12 @@ refused; with inbound off, turn it on first.
 **Switched off** (suspended, or active with inbound off): the customer sees "Your number is switched
 off" with nothing to press, and no deployment can be created for it.
 
-**While a number is still being set up**, an attempt stops if a person activates, suspends or releases
-it meanwhile, and activation applies only from the status the attempt started with.
+**While a number is still being set up**, an attempt stops if a person suspends or releases it
+meanwhile, and activation applies only from the status the attempt started with.
+
+**Activate (admin)** takes the deployment lock, so it is refused while another change is in progress.
+For a Sarvam number with a deployment, Sarvam must report it active; a paused or unreadable one is
+not activated, and nothing is resumed for you. Resume it (or retry provisioning), then activate.
 
 **Deployment lock.** One per number (`phone_numbers.metadata.deployment_lock`, compare-and-swap, no
 migration), held by every change to its deployment or mapping: creation and adoption, the job from
@@ -169,7 +173,24 @@ pause**, until the lock lapses after 5 minutes. Description-only edits do not ta
 runs this customer's agent and routes exactly that number. A recorded deployment of another agent or
 number is never paused, edited or resumed. Both lookups rely on Sarvam's deployment search finding
 the number, which has not been verified live. Reassigning a number drops its deployment,
-verification and confirmation; remove the old deployment in Sarvam before provisioning it again.
+verification and confirmation; remove the old deployment in Sarvam before provisioning it again. A
+reassignment made while a deployment is being created leaves that deployment unrecorded.
+
+**Interrupted pauses.** Before sync, the live version move or a webhook update pauses an active
+deployment, it records `phone_numbers.metadata.sarvam_webhook_recovery`; if it cannot, nothing is
+paused. The record is cleared only when Sarvam confirms the deployment active, or when an admin
+pauses it. While it stands:
+
+| Action                         | Effect                                                                                      |
+| ------------------------------ | ------------------------------------------------------------------------------------------- |
+| Sync                           | changes nothing and reports an error, never `in_sync`                                       |
+| Re-verify / register a version | puts the verified version back, resumes it, then does what was asked                        |
+| Resume deployment              | resumes it if agent, number and a safe version match; never an unverified live version move |
+| Webhook update                 | refused until resumed                                                                       |
+
+Nothing resumes it unattended: a crash leaves the line paused until a person runs one of these, and
+no alert is sent. A live number whose deployment is paused for any other reason is also never
+`in_sync`. Sync never touches a released number's deployment.
 
 ## Data
 

@@ -793,7 +793,7 @@ export const confirmOutboundToolAuth = createServerFn({ method: "POST" })
 
 /**
  * Re-verifies a customer whose number is already live, against Sarvam's own
- * view of the deployment (read only; no Sarvam write). Saves the verified
+ * view of the deployment (read only, apart from undoing a recorded pause). Saves the verified
  * mapping on success, so a working live customer keeps (or regains) business
  * data without new onboarding or voice settings. Never activates a number.
  */

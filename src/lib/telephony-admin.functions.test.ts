@@ -123,7 +123,18 @@ describe("importPhoneNumberToPool — supply side of automatic provisioning", ()
 });
 
 describe("activatePhoneNumber — duplicate-activation cannot create an inconsistent cross-tenant record", () => {
-  const fnSrc = extractFn("activatePhoneNumber");
+  // The rules live in phone-number-assignment.server.ts (behaviour-tested in
+  // provisioning-concurrency.test.ts); the admin function delegates to it.
+  const handlerSrc = extractFn("activatePhoneNumber");
+  const fnSrc = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "phone-number-assignment.server.ts"),
+    "utf8",
+  );
+
+  test("the admin function delegates to the shared activation rules", () => {
+    assert.match(handlerSrc, /await activateAssignedNumber\(supabaseAdmin, data\.numberId\)/);
+    assert.doesNotMatch(handlerSrc, /\.update\(/, "no second way to activate");
+  });
 
   test("relies on the database's global unique-active-e164 constraint (23505), not application-level guessing, to prevent two organizations sharing one active number", () => {
     assert.match(fnSrc, /code.*===\s*"23505"/);
