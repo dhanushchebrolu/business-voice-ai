@@ -44,6 +44,12 @@ import type { EnsureAgentContext, EnsureAgentOutcome } from "./sarvam-agent-prov
  * outbound agent never switches outbound calling on: that still needs the
  * separate confirmation after a supervised call (setOutboundReady).
  *
+ * Steps 7-10 are for a number that has never gone live. Once a number is ACTIVE
+ * (switched off for inbound included), no attempt creates, pauses, resumes, edits,
+ * re-links or activates anything. An unattended attempt, or a switched-off number,
+ * gets no Sarvam call; a person's attempt on a line that is on reads the deployment
+ * once. Any doubt about a live number stops for a person and is not retried.
+ *
  * The admission gate (sarvam-inbound-admission.server.ts) serves business
  * data only to ACTIVE numbers whose saved verified ids match the mapping.
  *
@@ -311,6 +317,8 @@ export async function runProvisioningPipeline(
   let deploymentId: string | null = null;
   let deploymentCreatedNow = false;
   let verification: VerificationReport | null = null;
+  /** The number has been activated at some point (it may be switched off since). */
+  let wentLive = false;
 
   const done = (
     step: number,
@@ -318,20 +326,27 @@ export async function runProvisioningPipeline(
     note: string,
     verifiedAt: string | null = null,
     failure?: { code: FailureCode; retryable: boolean },
-  ): PipelineResult => ({
-    organizationId,
-    phoneNumberId,
-    numberClaimedNow: false,
-    deploymentCreatedNow,
-    deploymentId,
-    note: `Step ${step}: ${note}`,
-    state,
-    step,
-    generatedConfig,
-    deploymentVerifiedAt: verifiedAt,
-    verification,
-    ...(failure ? { failure } : {}),
-  });
+  ): PipelineResult => {
+    // Doubt about a number that has gone live is for a person: never retried by itself.
+    if (wentLive && state === "verification_failed") {
+      state = "manual_action_required";
+      if (failure) failure = { ...failure, retryable: false };
+    }
+    return {
+      organizationId,
+      phoneNumberId,
+      numberClaimedNow: false,
+      deploymentCreatedNow,
+      deploymentId,
+      note: `Step ${step}: ${note}`,
+      state,
+      step,
+      generatedConfig,
+      deploymentVerifiedAt: verifiedAt,
+      verification,
+      ...(failure ? { failure } : {}),
+    };
+  };
 
   await step("validating");
   // 1. Onboarding.
@@ -432,6 +447,7 @@ export async function runProvisioningPipeline(
       "no Sarvam number is assigned to this customer yet. Assign one from the admin numbers page.",
     );
   phoneNumberId = number.id;
+  wentLive = number.status === "active";
   if (number.status === "suspended")
     return done(2, "failed", `number ${number.e164} is suspended; resolve that first.`, null, {
       code: "NUMBER_UNUSABLE",
@@ -457,11 +473,11 @@ export async function runProvisioningPipeline(
   if (number.connection_id !== connection.id) link.connection_id = connection.id;
   if (number.agent_config_id !== agent.id) link.agent_config_id = agent.id;
   if (Object.keys(link).length) {
-    if (number.provider_deployment_id)
+    if (number.provider_deployment_id || wentLive)
       return done(
         2,
         "failed",
-        `number ${number.e164} already has deployment ${number.provider_deployment_id} but is linked to a different connection or agent; fix it by hand.`,
+        `number ${number.e164} ${number.provider_deployment_id ? `already has deployment ${number.provider_deployment_id}` : "is live"} but is linked to a different connection or agent; fix it by hand.`,
         null,
         { code: "NUMBER_UNUSABLE", retryable: false },
       );
@@ -583,9 +599,9 @@ export async function runProvisioningPipeline(
   // however the agent was registered (operator bridge or the admin screen). Sarvam's MCP
   // cannot set tool credentials, so the number is not deployed or activated until a person's
   // confirmation (submit_agent_result) is on record for THIS agent id and version. A number
-  // that is already live is only re-verified, never gated.
+  // that has gone live is never gated (nothing below changes it).
   await step("authorizing_tools");
-  if (!(number.status === "active" && number.inbound_enabled)) {
+  if (!wentLive) {
     const lookup =
       deps.toolAuthStatus ?? (await import("./tool-auth-checkpoint.server.ts")).toolAuthStatus;
     const gate = await lookup(admin, {
@@ -603,29 +619,53 @@ export async function runProvisioningPipeline(
       );
   }
 
-  // An unattended run never creates, reads, edits, pauses, resumes or un-verifies the
-  // deployment of a number that has gone live (even one switched off since). Verified for
-  // exactly the registered agent, only the outbound steps remain; otherwise a person decides.
-  if (options.unattended && number.status === "active") {
+  // A number that has gone live is never changed by this job, whoever started the attempt:
+  // nothing is created, paused, resumed, edited, re-linked or switched on, so switching it off
+  // stays a person's choice. Only a person's attempt on a line that is on reads Sarvam.
+  if (wentLive) {
     deploymentId = number.provider_deployment_id ?? null;
-    if (
-      !deploymentId ||
-      number.verified_deployment_id !== deploymentId ||
-      number.verified_sarvam_app_id !== agent.sarvam_app_id ||
-      number.verified_sarvam_app_version !== agent.sarvam_app_version
-    )
-      return done(
-        8,
-        "manual_action_required",
-        `${number.e164} is live but its saved verification does not match the registered agent; use "Re-verify live deployment", then retry.`,
+    const forAPerson = (why: string) =>
+      done(8, "manual_action_required", `${number.e164} is live and was left as it is: ${why}`);
+    if (!deploymentId) return forAPerson("it has no recorded deployment.");
+    if (options.unattended || !number.inbound_enabled) {
+      if (
+        number.verified_deployment_id !== deploymentId ||
+        number.verified_sarvam_app_id !== agent.sarvam_app_id ||
+        number.verified_sarvam_app_version !== agent.sarvam_app_version
+      )
+        return forAPerson(
+          'its saved verification does not match the registered agent; use "Re-verify live deployment", then retry.',
+        );
+      return outboundSteps(
+        number.inbound_enabled
+          ? `${number.e164} is live on deployment ${deploymentId}.`
+          : `${number.e164} is switched off for inbound calls and was left off.`,
+        null,
       );
-    return outboundSteps(`${number.e164} is live on deployment ${deploymentId}.`, null);
+    }
   }
 
   // 7. Deployment (create or adopt; never a duplicate).
   await step("creating_deployment");
   deploymentId = number.provider_deployment_id ?? null;
+  /** A person may activate, suspend or release the number while this attempt works. */
+  const changedByAPerson = async () => {
+    const { data, error } = await admin
+      .from("phone_numbers")
+      .select("status, organization_id")
+      .eq("id", number.id)
+      .maybeSingle();
+    if (error) throw error;
+    return data?.status !== number.status || data.organization_id !== organizationId;
+  };
+  const leftAlone = (stepNo: number) =>
+    done(
+      stepNo,
+      "verification_failed",
+      `${number.e164} changed while this attempt ran; nothing further was changed.`,
+    );
   if (!deploymentId) {
+    if (await changedByAPerson()) return leftAlone(7);
     try {
       const created = await deps.createDeployment(admin, {
         phoneNumberIds: [number.id],
@@ -657,7 +697,6 @@ export async function runProvisioningPipeline(
     }
   }
 
-  const numberLive = number.status === "active" && number.inbound_enabled;
   const readDeployment = async (stepNo: number): Promise<DeploymentView | PipelineResult> => {
     try {
       return await deps.getDeployment(deploymentId!);
@@ -689,7 +728,7 @@ export async function runProvisioningPipeline(
       `deployment ${deploymentId} is also recorded for ${others.length} other ClickAI number(s); a deployment serves one customer's one number. Resolve it by hand.`,
     );
   const clickaiProvisioned = deploymentCreatedNow || Boolean(number.sarvam_number_confirmed_at);
-  if (!numberLive && !clickaiProvisioned)
+  if (!wentLive && !clickaiProvisioned)
     return done(
       8,
       "manual_action_required",
@@ -712,7 +751,8 @@ export async function runProvisioningPipeline(
       "manual_action_required",
       `deployment ${deploymentId} is in an unexpected state (${deployment.status ?? "unknown"}); check it in the Sarvam console.`,
     );
-  if (!numberLive && deployment.status === "active") {
+  if (!wentLive && deployment.status === "active") {
+    if (await changedByAPerson()) return leftAlone(8);
     try {
       await deps.setDeploymentStatus(deploymentId, "pause");
       stateChangedByUs = true;
@@ -735,10 +775,13 @@ export async function runProvisioningPipeline(
   }
   // A deployment on an older version of this same agent is brought up to the
   // registered version (documented PATCH; the sync keeps paused/active as it was).
+  // Never a live number's: that is the "Re-verify live deployment" or registration action.
   if (
+    !wentLive &&
     deployment.appId === agent.sarvam_app_id &&
     deployment.appVersion !== agent.sarvam_app_version
   ) {
+    if (await changedByAPerson()) return leftAlone(8);
     try {
       await deps.syncDeployments(admin, agent.id);
     } catch {
@@ -815,7 +858,7 @@ export async function runProvisioningPipeline(
     if (error) throw error;
   };
 
-  const firstChecks = checksFor(deployment, numberLive);
+  const firstChecks = checksFor(deployment, wentLive);
   verification = report(deployment, firstChecks);
   if (firstChecks.some((c) => !c.ok)) {
     // The exact failing step: a deployment check or the number mapping.
@@ -847,7 +890,7 @@ export async function runProvisioningPipeline(
   if (!persisted?.length)
     return done(9, "verification_failed", "the number changed during verification; run again.");
 
-  if (numberLive)
+  if (wentLive)
     return outboundSteps(`${number.e164} is live on deployment ${deploymentId}.`, verifiedAt);
 
   // 10. Resume in Sarvam, read it back, and only then mark ClickAI's number
@@ -856,11 +899,19 @@ export async function runProvisioningPipeline(
   const repause = async () => {
     if (!stateChangedByUs) return;
     try {
+      // A number a person made live meanwhile keeps answering.
+      const { data } = await admin
+        .from("phone_numbers")
+        .select("status")
+        .eq("id", number.id)
+        .maybeSingle();
+      if (data?.status === "active") return;
       await deps.setDeploymentStatus(deploymentId!, "pause");
     } catch {
       // Best effort; the admission gate still refuses business data.
     }
   };
+  if (await changedByAPerson()) return leftAlone(10);
   if (deployment.status !== "active") {
     try {
       stateChangedByUs = true;
@@ -893,6 +944,8 @@ export async function runProvisioningPipeline(
     .update({ status: "active", inbound_enabled: true })
     .eq("id", number.id)
     .eq("organization_id", organizationId)
+    // Only from the state this attempt started with: never over a suspension or release.
+    .eq("status", number.status)
     .eq("provider_deployment_id", deploymentId)
     .eq("verified_deployment_id", deploymentId)
     .eq("verified_sarvam_app_id", agent.sarvam_app_id!)

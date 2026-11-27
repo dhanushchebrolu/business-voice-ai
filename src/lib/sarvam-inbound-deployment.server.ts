@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/integrations/supabase/types";
 import { getTelephonyAdapter, sarvamOutboundWebhookUrl } from "./telephony.server.ts";
@@ -42,15 +43,112 @@ export async function createInboundDeploymentForNumbers(
   supabaseAdmin: SupabaseClient<Database>,
   params: { phoneNumberIds: string[]; name: string },
 ): Promise<CreateInboundDeploymentForNumbersResult> {
+  // Every creator (admin action, test action, provisioning job) comes through here, and
+  // everything is read again once the lock is held.
+  return withDeploymentLock(supabaseAdmin, params.phoneNumberIds, () =>
+    createUnderLock(supabaseAdmin, params),
+  );
+}
+
+const DEPLOYMENT_BUSY_MESSAGE =
+  "A deployment for this number is already being created. Try again in a few minutes.";
+/** Far longer than a creation's two provider calls, so only a crashed holder's lock lapses. */
+const DEPLOYMENT_LOCK_MS = 5 * 60_000;
+
+interface DeploymentLock {
+  token: string;
+  until: string;
+}
+
+/**
+ * Takes (until) or releases (null) one number's lock, kept in phone_numbers.metadata and
+ * written only if the row is unchanged since it was read. false: someone else holds it.
+ */
+async function writeLock(
+  admin: SupabaseClient<Database>,
+  numberId: string,
+  token: string,
+  until: string | null,
+): Promise<boolean> {
+  const { data: row, error } = await admin
+    .from("phone_numbers")
+    .select("metadata, updated_at")
+    .eq("id", numberId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!row) return true; // no such number: the creation itself reports that
+  const metadata =
+    row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
+      ? row.metadata
+      : {};
+  const { deployment_lock, ...rest } = metadata;
+  const held = deployment_lock as unknown as DeploymentLock | undefined;
+  if (held?.token !== token) {
+    if (until === null) return true; // lapsed and taken over: not ours to release
+    if (held && Date.parse(held.until) > Date.now()) return false;
+  }
+  const { data, error: writeError } = await admin
+    .from("phone_numbers")
+    .update({ metadata: until ? { ...rest, deployment_lock: { token, until } } : rest })
+    .eq("id", numberId)
+    .eq("updated_at", row.updated_at)
+    .select("id");
+  if (writeError) throw writeError;
+  return Boolean(data?.length);
+}
+
+async function withDeploymentLock<T>(
+  admin: SupabaseClient<Database>,
+  numberIds: string[],
+  work: () => Promise<T>,
+): Promise<T> {
+  const token = randomUUID();
+  const held: string[] = [];
+  try {
+    // Sorted, so two callers naming the same numbers cannot each hold half.
+    for (const id of [...new Set(numberIds)].sort()) {
+      const until = new Date(Date.now() + DEPLOYMENT_LOCK_MS).toISOString();
+      if (!(await writeLock(admin, id, token, until))) throw new Error(DEPLOYMENT_BUSY_MESSAGE);
+      held.push(id);
+    }
+    return await work();
+  } finally {
+    for (const id of held) {
+      let released = false;
+      for (let attempt = 0; attempt < 3 && !released; attempt++)
+        released = await writeLock(admin, id, token, null).catch(() => false);
+      if (!released) console.error("sarvam_deployment:lock_release_failed", id);
+    }
+  }
+}
+
+async function createUnderLock(
+  supabaseAdmin: SupabaseClient<Database>,
+  params: { phoneNumberIds: string[]; name: string },
+): Promise<CreateInboundDeploymentForNumbersResult> {
   const { phoneNumberIds, name } = params;
 
   const { data: numbers, error: numbersError } = await supabaseAdmin
     .from("phone_numbers")
-    .select("id, e164, organization_id, connection_id, agent_config_id, provider_deployment_id")
+    .select(
+      "id, e164, status, inbound_enabled, organization_id, connection_id, agent_config_id, provider_deployment_id",
+    )
     .in("id", phoneNumberIds);
   if (numbersError) throw numbersError;
   if (!numbers || numbers.length !== phoneNumberIds.length)
     throw new Error("One or more phone numbers were not found.");
+
+  // A new Sarvam deployment answers calls at once, so a number a person switched off is refused.
+  const off = numbers.find(
+    (n) =>
+      n.status === "suspended" ||
+      n.status === "released" ||
+      (n.status === "active" && !n.inbound_enabled),
+  );
+  if (off)
+    throw new Error(
+      `${off.e164} is ${off.status === "active" ? "switched off for inbound calls" : off.status}; no deployment was created or changed.`,
+    );
 
   // A single deployment binds one connection + one app to a set of
   // numbers — every number in the request must share both, and (as a
@@ -93,10 +191,14 @@ export async function createInboundDeploymentForNumbers(
 
   const { data: connection } = await supabaseAdmin
     .from("telephony_connections")
-    .select("id, provider, provider_connection_id")
+    .select("id, organization_id, provider, provider_connection_id")
     .eq("id", connectionId)
     .maybeSingle();
   if (!connection) throw new Error("Telephony connection not found.");
+  if (connection.organization_id !== organizationId)
+    throw new Error(
+      "The connection's organization does not match the phone numbers' organization.",
+    );
   if (connection.provider !== "sarvam")
     throw new Error("This deployment flow only applies to sarvam connections.");
   if (!connection.provider_connection_id)

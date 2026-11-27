@@ -287,10 +287,12 @@ function NumbersPage() {
                   {candidateNumber ? (
                     <div data-testid="activate-number">
                       <p className="mt-1.5 font-mono text-xl">{candidateNumber.e164}</p>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        Assigned to your workspace, not live yet. It starts answering only after
-                        your AI receptionist and its connection are set up and verified.
-                      </p>
+                      {activation?.switchedOff ? null : (
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          Assigned to your workspace, not live yet. It starts answering only after
+                          your AI receptionist and its connection are set up and verified.
+                        </p>
+                      )}
                       {submission("Activate number")}
                     </div>
                   ) : (

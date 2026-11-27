@@ -28,7 +28,11 @@ export interface ActivationView extends CustomerJobView {
   numberMasked: string | null;
   /** Set when a submission was refused: what the business setup still needs. */
   missing?: string[];
+  /** A person switched the number off: nothing the customer presses changes that. */
+  switchedOff?: boolean;
 }
+
+export const NUMBER_OFF_MESSAGE = "Your number is switched off. Please contact our team.";
 
 export const SETUP_INCOMPLETE_MESSAGE = "Finish your business setup before submitting it.";
 
@@ -63,7 +67,18 @@ export async function loadActivationView(admin: Admin, orgId: string): Promise<A
     number.provider_deployment_id &&
     number.verified_deployment_id === number.provider_deployment_id,
   );
-  return { ...customerJobView(run, live), numberMasked: maskPhone(number?.e164) };
+  const view = { ...customerJobView(run, live), numberMasked: maskPhone(number?.e164) };
+  const switchedOff =
+    number?.status === "suspended" || (number?.status === "active" && !number.inbound_enabled);
+  if (!switchedOff) return view;
+  return {
+    ...view,
+    phase: "failed",
+    message: NUMBER_OFF_MESSAGE,
+    canRetry: false,
+    busy: false,
+    switchedOff: true,
+  };
 }
 
 export async function startVoiceActivation(
@@ -74,8 +89,8 @@ export async function startVoiceActivation(
   loadSnapshot?: PipelineDeps["loadSnapshot"],
 ): Promise<ActivationView> {
   const before = await loadActivationView(admin, input.orgId);
-  // Already live, or a job is queued/running/retrying: a click changes nothing.
-  if (before.phase === "completed" || before.busy) return before;
+  // Switched off, already live, or a job is queued/running/retrying: a click changes nothing.
+  if (before.switchedOff || before.phase === "completed" || before.busy) return before;
 
   if (before.phase === "failed" && !before.canRetry) {
     const { data: last, error } = await admin

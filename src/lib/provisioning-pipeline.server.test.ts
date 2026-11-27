@@ -448,17 +448,32 @@ describe("Phase 5: safe activation order and provider failures (mocked Sarvam)",
     }
   });
 
-  test("a stale version on the deployment is synced (state preserved) before verification", async () => {
-    const db = world();
-    const { d, calls, sarvam } = deps(db);
-    await runProvisioningPipeline(db.client, ORG, d);
+  const newVersion = (db: ReturnType<typeof world>) => {
     db.tables["agent_configs"]![0]!["sarvam_app_version"] = 2;
     db.tables["agent_voice_language_settings"]![0]!["applied_sarvam_app_version"] = 2;
+    confirmToolAuth(db, "Customer-app-1", 2);
+  };
+
+  test("a not-yet-live number's stale deployment version is synced before verification", async () => {
+    const db = world({ deploymentId: "dep-new" });
+    Object.assign(num(db, "num_new"), { connection_id: "conn_new", agent_config_id: "agent_new" });
+    newVersion(db);
+    const { d, calls, sarvam } = deps(db, { initialStatus: "paused" });
     const r = await runProvisioningPipeline(db.client, ORG, d);
     assert.equal(r.state, "active", r.note);
     assert.equal(calls.sync, 1);
     assert.equal(sarvam.appVersion, 2);
     assert.equal(num(db, "num_new")["verified_sarvam_app_version"], 2);
+  });
+
+  test("a live number's deployment version is never synced: a person decides", async () => {
+    const db = world();
+    const { d, calls, sarvam } = deps(db);
+    await runProvisioningPipeline(db.client, ORG, d);
+    newVersion(db);
+    const r = await runProvisioningPipeline(db.client, ORG, d);
+    assert.equal(r.state, "manual_action_required", r.note);
+    assert.deepEqual([calls.sync, sarvam.appVersion], [0, 1]);
   });
 
   test("a legacy deployment (not ClickAI-provisioned) on a number that is not live: stop, never pause or resume", async () => {
@@ -485,7 +500,7 @@ describe("Phase 5: safe activation order and provider failures (mocked Sarvam)",
       },
     });
     const r = await runProvisioningPipeline(db.client, ORG, bad);
-    assert.equal(r.state, "verification_failed");
+    assert.equal(r.state, "manual_action_required");
     assert.equal(num(db, "num_new")["verified_deployment_id"], null);
   });
 

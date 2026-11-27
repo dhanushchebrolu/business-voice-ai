@@ -69,14 +69,29 @@ function makeFakeSupabase(script: Record<string, Partial<Record<OpType, QueryRes
     return builder;
   }
 
+  /** The creation lock's own reads and writes: always free here, and not part of a script. */
+  function lockBuilder(data: unknown) {
+    const builder = {
+      select: () => builder,
+      eq: () => builder,
+      maybeSingle: () => builder,
+      then: (resolve: (r: QueryResult) => void) => resolve({ data, error: null }),
+    };
+    return builder;
+  }
+
   const client = {
     from(table: string) {
       return {
-        select() {
-          return makeBuilder(table, "select");
+        select(columns?: string) {
+          return columns === "metadata, updated_at"
+            ? lockBuilder({ metadata: {}, updated_at: "unchanged" })
+            : makeBuilder(table, "select");
         },
         update(payload: unknown) {
-          return makeBuilder(table, "update", payload);
+          return payload && typeof payload === "object" && "metadata" in payload
+            ? lockBuilder([{ id: "locked" }])
+            : makeBuilder(table, "update", payload);
         },
       };
     },
@@ -265,11 +280,21 @@ describe("provisionOrganizationAfterPayment — automatic deployment when connec
       telephony_connections: {
         select: [
           {
-            data: { id: "conn_1", provider: "sarvam", provider_connection_id: "sarvam_conn_1" },
+            data: {
+              id: "conn_1",
+              organization_id: "org_1",
+              provider: "sarvam",
+              provider_connection_id: "sarvam_conn_1",
+            },
             error: null,
           },
           {
-            data: { id: "conn_1", provider: "sarvam", provider_connection_id: "sarvam_conn_1" },
+            data: {
+              id: "conn_1",
+              organization_id: "org_1",
+              provider: "sarvam",
+              provider_connection_id: "sarvam_conn_1",
+            },
             error: null,
           },
         ],
@@ -342,11 +367,21 @@ describe("provisionOrganizationAfterPayment — automatic deployment when connec
       telephony_connections: {
         select: [
           {
-            data: { id: "conn_1", provider: "sarvam", provider_connection_id: "sarvam_conn_1" },
+            data: {
+              id: "conn_1",
+              organization_id: "org_1",
+              provider: "sarvam",
+              provider_connection_id: "sarvam_conn_1",
+            },
             error: null,
           },
           {
-            data: { id: "conn_1", provider: "sarvam", provider_connection_id: "sarvam_conn_1" },
+            data: {
+              id: "conn_1",
+              organization_id: "org_1",
+              provider: "sarvam",
+              provider_connection_id: "sarvam_conn_1",
+            },
             error: null,
           },
         ],

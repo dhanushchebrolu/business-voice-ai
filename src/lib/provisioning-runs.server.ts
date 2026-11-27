@@ -50,7 +50,7 @@ type Admin = SupabaseClient<Database>;
 export interface OrchestrateHooks {
   /** The pipeline reports each step as it starts; the job persists it. */
   onStep: (key: JobStepKey) => Promise<void>;
-  /** Nobody asked for this attempt (the sweep): a live number's deployment is left alone. */
+  /** Nobody asked for this attempt (the sweep): a live number gets no provider call. */
   unattended: boolean;
 }
 type Orchestrate = (
@@ -374,12 +374,8 @@ export async function runProvisioning(
   if (claimError) throw claimError;
   if (!claimed?.length) return { runId, claimed: false, status: "running", result: null };
 
-  // Unattended: the sweep continuing a waiting or crashed job, and its retries of such an
-  // attempt. A retry of an attempt a person started stays as thorough as that attempt.
-  const unattended =
-    Boolean(input.onlyRunId) &&
-    (current.status !== "pending" ||
-      (current.diagnostics as { unattended?: boolean } | null)?.unattended === true);
+  // Every attempt the sweep makes, retries of a person's attempt included.
+  const unattended = Boolean(input.onlyRunId);
 
   const attempt = current.attempts + 1;
   const maxAttempts = current.max_attempts ?? MAX_AUTOMATIC_ATTEMPTS;
@@ -464,7 +460,6 @@ export async function runProvisioning(
           step: currentKey,
           note: sanitizeDiagnostic(f.note),
           seenChange,
-          ...(unattended ? { unattended } : {}),
           ...f.extra,
         } as unknown as Json,
         next_attempt_at:
@@ -581,9 +576,9 @@ export interface SweepResult {
 
 /**
  * The scheduled tick's provisioning sweep (job kind `sweep.provisioning_retry`,
- * every minute from the Worker cron). It never creates a job, and (except when retrying
- * an attempt a person started) never reads or changes a live number's deployment.
- * Resumes, through runProvisioning's own claim and backoff checks:
+ * every minute from the Worker cron). It never creates a job, and never reads or changes
+ * the deployment of a number that has gone live. Resumes, through runProvisioning's own
+ * claim and backoff checks:
  *   1. jobs whose automatic retry is due (pending + next_attempt_at <= now);
  *   2. jobs stuck "running" past the stale window (a crashed attempt);
  *   3. customer-started jobs in ANY waiting state whose prerequisites (WAITED_ON; business

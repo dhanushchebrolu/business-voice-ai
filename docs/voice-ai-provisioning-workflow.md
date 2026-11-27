@@ -121,17 +121,42 @@ deployment, verification or activation (the job writes those), not a credential'
 So an unchanged job is never re-run, and a change made during an attempt still counts.
 
 - The sweep never creates a job: one that finished after the sweep listed it stays finished.
-- When it continues a waiting or crashed job, the sweep never creates, reads, edits, pauses, resumes
-  or un-verifies the deployment of a number that has gone live, even one switched off since. If the
-  saved verification matches the registered agent, only the outbound steps are checked; if not, the
-  job stops for a person (**Re-verify live deployment**, then retry).
-- An automatic retry of an attempt a person started behaves like that attempt, so it can still read
-  and update a live deployment.
 - Jobs started by an admin action or a payment are not resumed automatically.
 - Not detected (still need **Check again** or **Retry provisioning**): Worker configuration such as a
   replaced Sarvam key, and anything changed only in Sarvam.
 - A permanently failed job is not resumed.
 - On the first sweep after deployment, every waiting customer-started job runs once.
+
+## Live and switched-off numbers, and the deployment lock
+
+**A number that has gone live** (status `active`, even with inbound switched off) is never changed by
+a provisioning attempt, whoever starts it (**Retry**, **Check again**, an agent registration, the
+operator bridge or the sweep): nothing is created, paused, resumed, edited, re-linked or switched on.
+
+| Attempt                                    | Sarvam calls | Result when the saved verification matches | Otherwise          |
+| ------------------------------------------ | ------------ | ------------------------------------------ | ------------------ |
+| The sweep, including its automatic retries | none         | outbound steps only                        | stops for a person |
+| Any attempt on a number with inbound off   | none         | outbound steps only; left off              | stops for a person |
+| Any attempt on a suspended number          | none         | stops at once                              | stops at once      |
+| A person's attempt on a line that is on    | one read     | outbound steps                             | stops for a person |
+
+"Stops for a person" is a failed job that is not retried by itself. A definite identity mismatch in a
+person's read still withdraws the saved verification (the admission gate then serves no business data).
+Changing a live deployment is only done by its own admin actions (**Re-verify live deployment**, agent
+registration, pause/resume, webhook update, sync).
+
+**Switched off** (suspended, or active with inbound off): the customer sees "Your number is switched
+off" with nothing to press, and no deployment can be created for it.
+
+**While a number is still being set up**, an attempt stops if a person activates, suspends or releases
+it meanwhile, and activation applies only from the status the attempt started with.
+
+**Deployment lock.** Every creation (admin **Create deployment**, the test action and the job) goes
+through `createInboundDeploymentForNumbers`, which holds a per-number lock
+(`phone_numbers.metadata.deployment_lock`, compare-and-swap, no migration). A second creator is told
+the deployment is being created; the job retries with backoff. A crashed holder's lock lapses after
+5 minutes, and the next creator looks Sarvam up before creating. That lookup relies on Sarvam's
+deployment search finding the number, which has not been verified live.
 
 ## Data
 
