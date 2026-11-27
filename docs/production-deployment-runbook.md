@@ -11,21 +11,21 @@ unexpected result.
 
 Never: merge to `main`, `supabase db push`, `wrangler deploy` or `wrangler triggers deploy`, change
 payment enforcement, outbound switches or environment variables, touch Smile Dental or Smile Dental 1
-outside the approved tests, buy a number, or activate a campaign. While the hex-named binding exists
-(Appendix A2), never run `wrangler secret list` or `versions view` unfiltered. Never use
-`supabase db query --linked` as a read-only check (step 4).
+outside the approved tests, buy a number, activate a campaign, or start or retry a Cloudflare build.
+While the hex-named binding exists (Appendix A2), never run `wrangler secret list` or
+`versions view` unfiltered. Never use `supabase db query --linked` as a read-only check (step 4).
 
 ## 0. Blockers to settle before starting
 
-| #   | Blocker                                                                                                                                                                                                                                                               | Needed                                                                                                                  |
-| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| B1  | `main` deploys `klyro` on every push: GitHub shows a successful `Workers Builds: klyro` check on the `main` commits of 2026-11-24 and 25. `main` is unprotected and older than the live build, so any push or Lovable publish replaces the live code with older code. | Turn the automatic build off before anything else (step 2).                                                             |
-| B2  | The Supabase Management API lists **no backup** and point-in-time recovery **off** (2026-11-27).                                                                                                                                                                      | A restorable backup before the first migration (step 5).                                                                |
-| B3  | Production was read on 2026-11-27: history ends at `20261203090000` with the expected versions, no mapping difference or cross-customer link, and the three migrations' starting conditions hold.                                                                     | Rerun step 4 on the day.                                                                                                |
-| B4  | Nothing has run against real Sarvam or Vobiz (H5).                                                                                                                                                                                                                    | Supervised tests (steps 11 to 13) before any customer is onboarded; each needs approval, a spare number and real calls. |
-| B5  | Payment eligibility for **submitting** a setup is undecided: with enforcement off (today) submission does not require payment; with it on, a paid `setup_paid` customer cannot submit without an entitlement or override.                                             | Owner decision. Does not block deploying; do not change enforcement during the release.                                 |
-| B6  | Campaign dispatch was switched **off** on 2026-11-27 12:31 UTC (Appendix A1). The pilot call list is still off, and Smile Dental's number is enabled for outbound.                                                                                                    | Keep dispatch off until the release is verified; switching it on is a separate approval.                                |
-| B7  | A Worker binding is _named_ with a 48-character hex string. It was typed in during the Exotel setup and is most likely an Exotel credential (not proven).                                                                                                             | Check and revoke it in Exotel, then remove the binding before step 6 (Appendix A2).                                     |
+| #   | Blocker                                                                                                                                                                                                                   | Needed                                                                                                                  |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| B1  | **Held** since 2026-11-27: automatic builds are disabled for `klyro`, so a push to `main` or a Lovable publish no longer deploys. `main` is still older than the live code.                                               | Keep disabled; never start or retry a build by hand (step 2).                                                           |
+| B2  | The Supabase Management API lists **no backup** and point-in-time recovery **off** (2026-11-27).                                                                                                                          | A restorable backup before the first migration (step 5).                                                                |
+| B3  | Production was read on 2026-11-27: history ends at `20261203090000` with the expected versions, no mapping difference or cross-customer link, and the three migrations' starting conditions hold.                         | Rerun step 4 on the day.                                                                                                |
+| B4  | Nothing has run against real Sarvam or Vobiz (H5).                                                                                                                                                                        | Supervised tests (steps 11 to 13) before any customer is onboarded; each needs approval, a spare number and real calls. |
+| B5  | Payment eligibility for **submitting** a setup is undecided: with enforcement off (today) submission does not require payment; with it on, a paid `setup_paid` customer cannot submit without an entitlement or override. | Owner decision. Does not block deploying; do not change enforcement during the release.                                 |
+| B6  | Campaign dispatch was switched **off** on 2026-11-27 12:31 UTC (Appendix A1). The pilot call list is still off, and Smile Dental's number is enabled for outbound.                                                        | Keep dispatch off until the release is verified; switching it on is a separate approval.                                |
+| B7  | A Worker binding is _named_ with a 48-character hex string. It was typed in during the Exotel setup and is most likely an Exotel credential (not proven).                                                                 | Check and revoke it in Exotel, then remove the binding before step 6 (Appendix A2).                                     |
 
 ## 1. Verify branch and commit
 
@@ -39,21 +39,58 @@ git rev-list --left-right --count origin/main...origin/feature/automated-voice-p
   from the release). If `main` moved, stop and re-test.
 - The GitHub `Test` run for that SHA is green.
 
-## 2. Hold the `main` deployment mechanisms
+## 2. Hold the `main` deployment mechanisms (done 2026-11-27; verify)
 
-Do this first: nothing in the repository can stop a push to `main` from deploying.
+### What deploys `klyro`
 
-1. Cloudflare dashboard (the account that owns `klyro`) → Workers & Pages → `klyro` → Settings →
-   Builds: record the production branch and deploy command, then disable automatic deployments (or
-   disconnect the repository). It is reversible and changes no running code. Effect: pushes to
-   `main`, Lovable's included, no longer update production.
-2. Verify: the setting shows disabled, and `npx wrangler deployments status --name klyro` still shows
-   the same version.
-3. No publishing or editing in Lovable and no merge to `main` during the release.
-4. Optional second barrier: protect `main` on GitHub (it has no protection on 2026-11-27).
+| Trigger                                                                                                                                                               | State on 2026-11-27                                  |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| Cloudflare Workers Builds: push to `main` of `dhanushchebrolu/business-voice-ai` (Lovable publishes by pushing there), then `bun run build` and `npx wrangler deploy` | **disabled** about 12:42 UTC                         |
+| Builds for preview (non-production) branches; their command is `versions upload`, which does not deploy                                                               | off, unchanged                                       |
+| Deploy hooks                                                                                                                                                          | none defined                                         |
+| GitHub Actions (`test.yml`, `voice-agent.yml`)                                                                                                                        | test only, no deploy                                 |
+| Other Workers or projects                                                                                                                                             | only `clickai-staging`, with no repository connected |
+| **Still possible by hand:** a build started or retried in the dashboard, `wrangler deploy`, `versions deploy`, a secret or variable change                            | not blocked                                          |
 
-Releasing from the feature branch leaves `main` older than production, so keep builds off until
-`main` contains the released code (a separate, approved change).
+### The change
+
+Dashboard → Workers & Pages → `klyro` → Settings → Builds → **Production** tab → **Disable builds** on,
+then Save. Nothing else was changed. Cloudflare's own description: "Pushes to the production branch
+don't start builds. Manual builds and deploy hooks still work." The live version, script, bindings,
+plain values, compatibility date, cron and domains were the same before and after.
+
+Not tested: no push was made to `main` to prove it, because that changes `main`.
+
+### Verify (before the release and after any push to `main`)
+
+1. The switch reads **on** after reloading the page.
+2. `npx wrangler deployments status --name klyro` shows the expected version.
+3. A new `main` commit on GitHub shows **no** `Workers Builds: klyro` check.
+
+### Do not
+
+- Press **Retry build** or start a manual build: it deploys `main` or an older commit, and
+  `wrangler deploy` would replace the newer live code at once.
+- Add a deploy hook.
+
+### Recovery (turn automatic deployment back on)
+
+Only after `main` contains the released code and its migrations are applied, as a separate approval:
+
+1. Same page: **Disable builds** off, then Save.
+2. Confirm the settings it restores: production branch `main`; build command `bun run build`; deploy
+   command `npx wrangler deploy`; root directory `/`; include paths `*`; no exclude paths; API token
+   `ai-blaze build token`; build variables `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY`
+   (encrypted); build cache off. The branch, commands, root directory and variable names reappeared
+   when the switch was previewed off without saving; the other settings were read before the change.
+3. Cloudflare documents that saved build settings apply to the next build: from then on a push to
+   `main` builds and deploys.
+
+On 2026-11-27 this page once showed "Error fetching GitHub User or Organization details. This may
+cause deployments to fail." Check the GitHub connection before relying on builds again.
+
+Releasing from the feature branch leaves `main` older than production, so keep builds disabled until
+then.
 
 ## 3. Verify the production environment (read only)
 
@@ -371,6 +408,6 @@ code, git commit or local setting contains the string. ClickAI has held no Exote
    put the name in shell history. Verify with the filtered list in step 3: one binding fewer.
 5. Never roll back to a version older than that deletion.
 6. Afterwards, delete local copies if wanted: `~/.wrangler/logs`, saved session transcripts and
-   scratch files, the one PowerShell history line. Old Cloudflare versions keep the name, so revoking
+   scratch files and browser screenshots, the one PowerShell history line. Old Cloudflare versions keep the name, so revoking
    is the real fix.
 7. Record the outcome in `architecture/saas-scale-plan.md` section 5.

@@ -4,6 +4,9 @@ This documents how the `klyro` Worker (production: `https://klyro.aiblaze-io.wor
 is built and deployed, and — most importantly — which configuration lives where,
 so a deploy never wipes dashboard-managed variables/secrets again.
 
+> **Since 2026-11-27 automatic builds of `klyro` are disabled:** a push to `main` does not deploy.
+> See `docs/production-deployment-runbook.md`, step 2, before turning them back on.
+
 ## Three places configuration can live
 
 | Where | What goes here | Example |
