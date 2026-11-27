@@ -1,6 +1,7 @@
 -- Release checks for production: READ ONLY (a read-only transaction that rolls back). Run before
 -- the first migration and again after the deployment, and compare.
---   npx -y supabase@2.120.0 db query --linked --project-ref eorazvlmqwunmhwviocn -f docs/production-readonly-checks.sql
+-- Run it in the Supabase dashboard SQL editor of project eorazvlmqwunmhwviocn (runbook, step 4).
+-- Not with `supabase db query --linked`: that first creates a temporary login role with write rights.
 -- Works on the schema as it is before and after 20261204090000-20261206090000. No names, e-mail
 -- addresses, full phone numbers or token values are selected.
 begin transaction read only;
@@ -118,10 +119,28 @@ SELECT json_build_object(
           AND (to_jsonb(t) ->> 'organization_id' IS NULL OR to_jsonb(t) ->> 'run_id' IS NULL)))
     FROM public.operator_bridge_tokens t),
 
+  -- Only a "running" campaign in ClickAI's own mode is dialled by the dispatch switch. It keeps
+  -- that status while the switch is off and resumes by itself. Draft, scheduled and paused ones
+  -- need a launch. A campaign with a provider id is paced by Sarvam, whatever the switch says.
   'campaigns', (SELECT json_build_object(
       'running_or_scheduled', count(*) FILTER (WHERE status::text IN ('running', 'scheduled', 'queued')),
-      'with_provider_campaign', count(*) FILTER (WHERE provider_campaign_id IS NOT NULL))
+      'with_provider_campaign', count(*) FILTER (WHERE provider_campaign_id IS NOT NULL),
+      'dialled_when_switch_on', count(*) FILTER (WHERE status::text = 'running'
+          AND dispatch_mode::text = 'instant_outbound_fallback'),
+      'can_be_launched_by_customer', count(*) FILTER (WHERE status::text IN ('draft', 'scheduled', 'paused')))
     FROM public.campaigns),
+  'campaigns_by_status', (SELECT coalesce(json_agg(x), '[]') FROM (
+      SELECT status::text AS status, dispatch_mode::text AS mode, count(*) AS n FROM public.campaigns
+       GROUP BY 1, 2 ORDER BY 1, 2) x),
+  'contacts_waiting_in_running_campaigns', (SELECT count(*) FROM public.campaign_contacts cc
+      JOIN public.campaigns c ON c.id = cc.campaign_id
+     WHERE c.status::text = 'running' AND cc.status::text IN ('pending', 'retry_scheduled')),
+  'outbound_enabled_numbers', (SELECT coalesce(json_agg(x), '[]') FROM (
+      SELECT organization_id, count(*) AS numbers FROM public.phone_numbers
+       WHERE outbound_enabled AND status::text = 'active' GROUP BY organization_id ORDER BY organization_id) x),
+  'outbound_calls_unfinished', (SELECT count(*) FROM public.call_logs
+     WHERE direction::text = 'outbound'
+       AND status::text NOT IN ('completed', 'failed', 'busy', 'no_answer', 'cancelled')),
 
   -- Smile Dental (id starts 5669e43f) and Smile Dental 1: must be identical before and after.
   'protected_fingerprints', (SELECT coalesce(json_agg(x), '[]') FROM (

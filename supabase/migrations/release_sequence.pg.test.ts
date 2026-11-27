@@ -336,6 +336,24 @@ describe("release rehearsal", () => {
     assert.equal(report.live_mapping_differences.length, 1);
     assert.equal(report.bridge_tokens.live_without_scope, 1);
     assert.doesNotMatch(text, /\+91\d{10}|cbr_/);
+    assert.equal(report.campaigns.dialled_when_switch_on, 0);
+    // What the release must see before dispatch is switched off.
+    const [running, paused] = [customer(), customer()];
+    must(`INSERT INTO public.campaigns (organization_id, name, status) VALUES
+        ('${running.org}', 'r', 'running'), ('${paused.org}', 'p', 'paused');`);
+    const after = checks().report;
+    assert.equal(after.campaigns.dialled_when_switch_on, 1);
+    assert.equal(after.campaigns.can_be_launched_by_customer, 1);
+    assert.deepEqual(
+      after.campaigns_by_status.map((c: { status: string; n: number }) => [c.status, c.n]),
+      [
+        ["paused", 1],
+        ["running", 1],
+      ],
+    );
+    assert.equal(after.contacts_waiting_in_running_campaigns, 0);
+    assert.equal(after.outbound_calls_unfinished, 0);
+    assert.deepEqual(after.outbound_enabled_numbers, []);
   });
 
   test("every apply script refuses: no approval, wrong phrase, wrong database, wrong order, not one transaction", (t) => {

@@ -16,9 +16,15 @@ rollback deletes the setting row; a missing row means **not stopped**).
 
 Campaign dispatch has its own switch: it runs only when
 `CAMPAIGN_DISPATCH_ENABLED=true`. Leaving that unset keeps every campaign idle
-regardless of the stops.
+regardless of the stops. In production it has been set since 2026-11-24
+(`production-deployment-runbook.md`, Appendix A1).
 
 ## 2. Activate
+
+Side effect of the `supabase db query` commands below: without a database
+password the CLI first creates a temporary Supabase login role with write rights,
+also for the status check. Accept that in an emergency, or run the same SQL files
+in the dashboard SQL editor.
 
 ```powershell
 npx -y supabase@2.120.0 db query --linked --project-ref eorazvlmqwunmhwviocn -f docs/outbound-emergency-stop-activate.sql

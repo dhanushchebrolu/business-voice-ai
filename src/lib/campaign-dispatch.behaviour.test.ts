@@ -6,6 +6,7 @@ import {
   type CampaignAdmissionRequest,
   type DispatchDeps,
 } from "./campaign-dispatch.server.ts";
+import { buildJobHandlers } from "./jobs/handlers.server.ts";
 import { TelephonyAdapterError } from "./telephony/adapter.ts";
 import { memorySupabase } from "./payments/memory-supabase.test-helper.ts";
 
@@ -292,6 +293,44 @@ describe("campaign dispatch — the global outbound kill switch", () => {
     // Switched back on: the same campaign dials.
     await dispatchDueCampaigns({ deps: t.deps });
     assert.equal(t.dialed.length, 3);
+  });
+});
+
+describe("campaign dispatch — the platform switch CAMPAIGN_DISPATCH_ENABLED off, then on", () => {
+  test("off pauses nothing: a running campaign resumes by itself when on; a paused one stays paused", async () => {
+    const prior = process.env["CAMPAIGN_DISPATCH_ENABLED"];
+    try {
+      for (const [status, calls] of [
+        ["running", 3],
+        ["paused", 0],
+      ] as const) {
+        const t = setup(3);
+        setCampaignStatus(t, status);
+        // The every-minute job, as the Worker runs it.
+        const tick = () =>
+          buildJobHandlers({
+            supabaseAdmin: t.db.client,
+            store: {} as never,
+            now: () => new Date(t.deps.now()),
+            dispatchCampaigns: async (options) => ({
+              ...(await dispatchDueCampaigns({ ...options, deps: t.deps })),
+            }),
+          })["campaign.dispatch"]!({ payload: {} } as never);
+
+        process.env["CAMPAIGN_DISPATCH_ENABLED"] = "false";
+        assert.deepEqual(await tick(), { skipped: "disabled" });
+        assert.equal(t.dialed.length, 0);
+        assert.equal(t.table("campaigns")[0]!["status"], status, "the switch changes no campaign");
+        assert.ok(t.table("campaign_contacts").every((c) => c["status"] === "pending"));
+
+        process.env["CAMPAIGN_DISPATCH_ENABLED"] = "true";
+        await tick();
+        assert.equal(t.dialed.length, calls, status);
+      }
+    } finally {
+      if (prior === undefined) delete process.env["CAMPAIGN_DISPATCH_ENABLED"];
+      else process.env["CAMPAIGN_DISPATCH_ENABLED"] = prior;
+    }
   });
 });
 

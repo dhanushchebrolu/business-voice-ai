@@ -97,6 +97,11 @@ The third phrase is the operator's statement: no script can see which Worker is 
 Locks above were measured on PostgreSQL in the rehearsal test and are held until the script
 commits.
 
+Side effect of the command line: `supabase db query --linked` without a database password first asks
+Supabase to create a temporary login role with write rights (version 2.120.0), on every run,
+including the verify scripts whose headers say read only. Approve it with the migration. Do read-only
+checks in the dashboard SQL editor instead.
+
 Known limits:
 
 - The fingerprint reads whole tables while those locks are held. Duration depends on
@@ -120,7 +125,7 @@ For each of 1, 2, 3 (3 only after the Worker steps in the runbook):
 
 ## Verification queries
 
-The verify scripts are the verification (read only, `all_pass`). By hand, in a read-only
+The verify scripts are the verification (read-only SQL, `all_pass`; see the side effect above). By hand, in a read-only
 transaction:
 
 ```sql
