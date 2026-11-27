@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { withOrganizationDeploymentLock } from "./sarvam-deployment-lock.server.ts";
 import type { Database } from "@/integrations/supabase/types";
 
 /**
@@ -62,6 +63,39 @@ export interface ApplyMappingInput {
   /** When set, the agent must belong to this organization. */
   organizationId?: string;
   masterAgentAppId: string | null;
+  /** The live version move, after Sarvam confirmed this version (sarvam-live-remap.server.ts). */
+  verifiedWithSarvam?: boolean;
+}
+
+/**
+ * A number that is live, or was verified and is now suspended, keeps the agent and version it
+ * was verified on: mapping anything else would cut off its business data or move it unchecked.
+ */
+export async function assertMappingMayChange(
+  admin: Admin,
+  organizationId: string,
+  appId: string | null,
+  version: number | null,
+) {
+  const { data, error } = await admin
+    .from("phone_numbers")
+    .select(
+      "organization_id, status, provider_deployment_id, verified_deployment_id, verified_sarvam_app_id, verified_sarvam_app_version",
+    )
+    .eq("organization_id", organizationId)
+    .eq("provider", "sarvam");
+  if (error) throw error;
+  const held = (data ?? []).some(
+    (n) =>
+      n.organization_id === organizationId &&
+      n.provider_deployment_id &&
+      (n.status === "active" || (n.status === "suspended" && n.verified_deployment_id)) &&
+      (n.verified_sarvam_app_id !== appId || n.verified_sarvam_app_version !== version),
+  );
+  if (held)
+    throw new Error(
+      'This customer\'s number is live or suspended, so its agent changes only after it is checked with Sarvam: switch the number on, then register the new version of the same agent (or "Re-verify live deployment"). Nothing was changed.',
+    );
 }
 
 export interface ApplyMappingResult {
@@ -98,33 +132,45 @@ export async function applySarvamAgentMapping(
   if (!before) throw new Error("Agent not found");
   if (input.organizationId && before.organization_id !== input.organizationId)
     throw new Error("That agent does not belong to this customer.");
+  const write = async () => {
+    const { error } = await admin
+      .from("agent_configs")
+      // A direct mapping replaces any template mapping (the template's
+      // trigger would otherwise copy its own app id back over this one).
+      .update({
+        sarvam_app_id: appId,
+        sarvam_app_version: input.sarvamAppVersion,
+        sarvam_application_id: null,
+      })
+      .eq("id", input.agentConfigId)
+      .eq("organization_id", before.organization_id);
+    if (error) {
+      // idx_agent_configs_sarvam_app_id or the template guard trigger.
+      if ((error as { code?: string }).code === "23505")
+        throw new Error("This Sarvam app is already mapped to a different agent.");
+      throw error;
+    }
 
-  const { error } = await admin
-    .from("agent_configs")
-    // A direct mapping replaces any template mapping (the template's
-    // trigger would otherwise copy its own app id back over this one).
-    .update({
-      sarvam_app_id: appId,
-      sarvam_app_version: input.sarvamAppVersion,
-      sarvam_application_id: null,
-    })
-    .eq("id", input.agentConfigId)
-    .eq("organization_id", before.organization_id);
-  if (error) {
-    // idx_agent_configs_sarvam_app_id or the template guard trigger.
-    if ((error as { code?: string }).code === "23505")
-      throw new Error("This Sarvam app is already mapped to a different agent.");
-    throw error;
-  }
-
-  // Numbers assigned before the agent existed get it now (same org only).
-  const { error: linkError } = await admin
-    .from("phone_numbers")
-    .update({ agent_config_id: input.agentConfigId })
-    .eq("organization_id", before.organization_id)
-    .is("agent_config_id", null)
-    .neq("status", "released");
-  if (linkError) throw linkError;
+    // Numbers assigned before the agent existed get it now (same org only).
+    const { error: linkError } = await admin
+      .from("phone_numbers")
+      .update({ agent_config_id: input.agentConfigId })
+      .eq("organization_id", before.organization_id)
+      .is("agent_config_id", null)
+      .neq("status", "released");
+    if (linkError) throw linkError;
+  };
+  // The live version move already holds the lock and has checked Sarvam; confirming the
+  // mapping already in place (a replaced credential) changes nothing. Any other change must
+  // not land in the middle of an activation or another deployment change.
+  const unchanged =
+    before.sarvam_app_id === appId && before.sarvam_app_version === input.sarvamAppVersion;
+  if (input.verifiedWithSarvam || unchanged) await write();
+  else
+    await withOrganizationDeploymentLock(admin, before.organization_id, async () => {
+      await assertMappingMayChange(admin, before.organization_id, appId, input.sarvamAppVersion);
+      await write();
+    });
 
   return {
     organizationId: before.organization_id,

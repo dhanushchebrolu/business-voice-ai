@@ -104,6 +104,31 @@ after(() => {
   if (cluster) teardownCluster(cluster);
 });
 
+describe("a reassigned number drops its old deployment on the real schema", () => {
+  test("clearing deployment, verification and confirmation satisfies every constraint", (t: TestContext) => {
+    if (setupFailure) assert.fail(setupFailure);
+    if (skipReason) return t.skip(skipReason);
+    rows(
+      `UPDATE public.phone_numbers SET provider_deployment_id = 'dep-old',
+         verified_deployment_id = 'dep-old', verified_sarvam_app_id = 'Old-app',
+         verified_sarvam_app_version = 1, deployment_verified_at = now(),
+         sarvam_number_confirmed_at = now(), status = 'active'
+       WHERE id = '${NUMBER}';`,
+    );
+    // The columns assignNumberToOrganization writes (phone-number-assignment.server.ts).
+    const cleared = rows(
+      `UPDATE public.phone_numbers SET provider_deployment_id = NULL,
+         verified_deployment_id = NULL, verified_sarvam_app_id = NULL,
+         verified_sarvam_app_version = NULL, deployment_verified_at = NULL,
+         sarvam_number_confirmed_at = NULL, sarvam_number_confirmed_by = NULL,
+         admission_blocked_at = NULL, admission_blocked_reason = NULL,
+         status = 'provisioning', inbound_enabled = false, outbound_enabled = false
+       WHERE id = '${NUMBER}' RETURNING status;`,
+    );
+    assert.ok(cleared.includes("provisioning"));
+  });
+});
+
 describe("deployment lock compare-and-swap on the real schema", () => {
   test("only the first writer holding a given updated_at wins", (t: TestContext) => {
     if (setupFailure) assert.fail(setupFailure);

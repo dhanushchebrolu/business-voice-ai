@@ -1,4 +1,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import {
+  DeploymentBusyError,
+  withOrganizationDeploymentLock,
+} from "./sarvam-deployment-lock.server.ts";
 import type { Database, Json } from "@/integrations/supabase/types";
 import { normalizeCustomerPhone } from "./phone-number.ts";
 import type { DeploymentView } from "./provisioning-pipeline.server.ts";
@@ -150,6 +154,8 @@ const canonical = (n: string) => normalizeCustomerPhone(n, null) ?? n;
 interface OwnNumber {
   id: string;
   e164: string;
+  /** A person turned the number off (suspended, or inbound off). */
+  switchedOff: boolean;
   organizationId: string;
   deploymentId: string;
   metadata: Record<string, unknown>;
@@ -168,7 +174,7 @@ async function ownNumber(
   const { data: rows, error } = await admin
     .from("phone_numbers")
     .select(
-      "id, e164, status, provider, organization_id, provider_deployment_id, metadata, updated_at",
+      "id, e164, status, inbound_enabled, provider, organization_id, provider_deployment_id, metadata, updated_at",
     )
     .eq("organization_id", organizationId)
     .eq("provider", "sarvam");
@@ -207,6 +213,7 @@ async function ownNumber(
     number: {
       id: n.id,
       e164: n.e164,
+      switchedOff: n.status === "suspended" || (n.status === "active" && !n.inbound_enabled),
       organizationId,
       deploymentId: n.provider_deployment_id,
       metadata,
@@ -247,7 +254,51 @@ async function writeMarker(
   }
 }
 
+/**
+ * Runs `work` holding the customer's deployment lock, so no other change touches the
+ * deployment meanwhile; a busy lock is reported as a refusal like any other precondition.
+ */
+async function underOrganizationLock<T>(
+  admin: Admin,
+  organizationId: string,
+  work: () => Promise<T>,
+  busy: (detail: string) => T,
+): Promise<T> {
+  try {
+    return await withOrganizationDeploymentLock(admin, organizationId, work);
+  } catch (err) {
+    if (err instanceof DeploymentBusyError) return busy(`${err.message} Nothing was changed.`);
+    throw err;
+  }
+}
+
 export async function rotateDeploymentWebhook(
+  admin: Admin,
+  input: { organizationId: string; confirmPause: boolean },
+  deps: WebhookRotationDeps,
+): Promise<WebhookRotationResult> {
+  return underOrganizationLock(
+    admin,
+    input.organizationId,
+    () => rotateUnderLock(admin, input, deps),
+    (detail) => ({
+      outcome: "refused",
+      stage: "precondition",
+      detail,
+      deploymentId: null,
+      statusBefore: null,
+      statusAfter: null,
+      tokenStatusBefore: null,
+      tokenStatusAfter: null,
+      appIdBefore: null,
+      appVersionBefore: null,
+      pausedByUs: false,
+      recovery: null,
+    }),
+  );
+}
+
+async function rotateUnderLock(
   admin: Admin,
   input: { organizationId: string; confirmPause: boolean },
   deps: WebhookRotationDeps,
@@ -550,6 +601,27 @@ export async function resumeAfterFailedRotation(
   input: { organizationId: string },
   deps: Pick<WebhookRotationDeps, "getDeployment" | "setDeploymentStatus">,
 ): Promise<ResumeResult> {
+  return underOrganizationLock(
+    admin,
+    input.organizationId,
+    () => resumeUnderLock(admin, input, deps),
+    (detail) => ({
+      outcome: "refused",
+      stage: "precondition",
+      detail,
+      deploymentId: null,
+      statusBefore: null,
+      statusAfter: null,
+      markerCleared: false,
+    }),
+  );
+}
+
+async function resumeUnderLock(
+  admin: Admin,
+  input: { organizationId: string },
+  deps: Pick<WebhookRotationDeps, "getDeployment" | "setDeploymentStatus">,
+): Promise<ResumeResult> {
   const r: ResumeResult = {
     outcome: "refused",
     stage: "precondition",
@@ -581,6 +653,12 @@ export async function resumeAfterFailedRotation(
       "refused",
       "precondition",
       "The recorded recovery is for a different deployment than this customer's current one; check it by hand. Nothing was changed.",
+    );
+  if (number.switchedOff)
+    return done(
+      "refused",
+      "precondition",
+      "This number is switched off, so its deployment is not resumed. Switch the number on first. Nothing was changed.",
     );
   if (recovery.originalStatus !== "active")
     return done(

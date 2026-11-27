@@ -1,5 +1,9 @@
-import { randomUUID } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import {
+  acquireDeploymentLock,
+  withDeploymentLock,
+  type DeploymentLock,
+} from "./sarvam-deployment-lock.server.ts";
 import type { Database } from "@/integrations/supabase/types";
 import { getTelephonyAdapter, sarvamOutboundWebhookUrl } from "./telephony.server.ts";
 import { SarvamTelephonyAdapter } from "./telephony/sarvam-provider.server.ts";
@@ -45,86 +49,37 @@ export async function createInboundDeploymentForNumbers(
 ): Promise<CreateInboundDeploymentForNumbersResult> {
   // Every creator (admin action, test action, provisioning job) comes through here, and
   // everything is read again once the lock is held.
-  return withDeploymentLock(supabaseAdmin, params.phoneNumberIds, () =>
-    createUnderLock(supabaseAdmin, params),
+  return withDeploymentLock(supabaseAdmin, params.phoneNumberIds, (lock) =>
+    createUnderLock(supabaseAdmin, params, lock),
   );
 }
 
-const DEPLOYMENT_BUSY_MESSAGE =
-  "A deployment for this number is already being created. Try again in a few minutes.";
-/** Far longer than a creation's two provider calls, so only a crashed holder's lock lapses. */
-const DEPLOYMENT_LOCK_MS = 5 * 60_000;
-
-interface DeploymentLock {
-  token: string;
-  until: string;
-}
-
 /**
- * Takes (until) or releases (null) one number's lock, kept in phone_numbers.metadata and
- * written only if the row is unchanged since it was read. false: someone else holds it.
+ * Records a deployment on numbers that still have none. A creator that lost its lock cannot
+ * overwrite what a newer one recorded.
  */
-async function writeLock(
-  admin: SupabaseClient<Database>,
-  numberId: string,
-  token: string,
-  until: string | null,
-): Promise<boolean> {
-  const { data: row, error } = await admin
+async function recordDeployment(
+  supabaseAdmin: SupabaseClient<Database>,
+  phoneNumberIds: string[],
+  deploymentId: string,
+) {
+  const { data, error } = await supabaseAdmin
     .from("phone_numbers")
-    .select("metadata, updated_at")
-    .eq("id", numberId)
-    .maybeSingle();
-  if (error) throw error;
-  if (!row) return true; // no such number: the creation itself reports that
-  const metadata =
-    row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
-      ? row.metadata
-      : {};
-  const { deployment_lock, ...rest } = metadata;
-  const held = deployment_lock as unknown as DeploymentLock | undefined;
-  if (held?.token !== token) {
-    if (until === null) return true; // lapsed and taken over: not ours to release
-    if (held && Date.parse(held.until) > Date.now()) return false;
-  }
-  const { data, error: writeError } = await admin
-    .from("phone_numbers")
-    .update({ metadata: until ? { ...rest, deployment_lock: { token, until } } : rest })
-    .eq("id", numberId)
-    .eq("updated_at", row.updated_at)
+    .update({ provider_deployment_id: deploymentId })
+    .in("id", phoneNumberIds)
+    .is("provider_deployment_id", null)
     .select("id");
-  if (writeError) throw writeError;
-  return Boolean(data?.length);
-}
-
-async function withDeploymentLock<T>(
-  admin: SupabaseClient<Database>,
-  numberIds: string[],
-  work: () => Promise<T>,
-): Promise<T> {
-  const token = randomUUID();
-  const held: string[] = [];
-  try {
-    // Sorted, so two callers naming the same numbers cannot each hold half.
-    for (const id of [...new Set(numberIds)].sort()) {
-      const until = new Date(Date.now() + DEPLOYMENT_LOCK_MS).toISOString();
-      if (!(await writeLock(admin, id, token, until))) throw new Error(DEPLOYMENT_BUSY_MESSAGE);
-      held.push(id);
-    }
-    return await work();
-  } finally {
-    for (const id of held) {
-      let released = false;
-      for (let attempt = 0; attempt < 3 && !released; attempt++)
-        released = await writeLock(admin, id, token, null).catch(() => false);
-      if (!released) console.error("sarvam_deployment:lock_release_failed", id);
-    }
-  }
+  if (error) throw error;
+  if (!data?.length)
+    throw new Error(
+      `Another change recorded a deployment for this number first. Sarvam deployment ${deploymentId} was not recorded: check it in the Sarvam console.`,
+    );
 }
 
 async function createUnderLock(
   supabaseAdmin: SupabaseClient<Database>,
   params: { phoneNumberIds: string[]; name: string },
+  lock: DeploymentLock,
 ): Promise<CreateInboundDeploymentForNumbersResult> {
   const { phoneNumberIds, name } = params;
 
@@ -244,23 +199,23 @@ async function createUnderLock(
     d.phoneNumbers.some((p) => wanted.has(canonical(p))),
   );
   if (existing.length > 0) {
-    const match = existing.find(
-      (d) =>
-        d.appId === agentConfig.sarvam_app_id &&
-        [...wanted].every((w) => d.phoneNumbers.some((p) => canonical(p) === w)),
-    );
-    if (!match)
+    // Adopted only when there is exactly one, running this agent on exactly these numbers:
+    // never a pick among several, never one that also answers someone else's number.
+    const [match] = existing;
+    if (
+      existing.length > 1 ||
+      match!.appId !== agentConfig.sarvam_app_id ||
+      !sameNumbers(match!.phoneNumbers, [...wanted])
+    )
       throw new Error(
-        `Sarvam already routes ${numbers[0]!.e164} through deployment ${existing[0]!.deploymentId} (agent ${existing[0]!.appId}). Resolve that deployment in Sarvam first; no duplicate was created.`,
+        `Sarvam already routes ${numbers[0]!.e164} through ${existing.map((d) => `deployment ${d.deploymentId} (agent ${d.appId})`).join(" and ")}. Resolve that in Sarvam first; no duplicate was created.`,
       );
-    const { error: adoptError } = await supabaseAdmin
-      .from("phone_numbers")
-      .update({ provider_deployment_id: match.deploymentId })
-      .in("id", phoneNumberIds);
-    if (adoptError) throw adoptError;
-    return { deploymentId: match.deploymentId, organizationId, outcome: "adopted" };
+    await lock.confirm();
+    await recordDeployment(supabaseAdmin, phoneNumberIds, match!.deploymentId);
+    return { deploymentId: match!.deploymentId, organizationId, outcome: "adopted" };
   }
 
+  await lock.confirm();
   const created = await adapter.createInboundDeployment({
     name,
     appId: agentConfig.sarvam_app_id,
@@ -270,11 +225,7 @@ async function createUnderLock(
     webhookConfig: { url: webhook.url, metadata: { organization_id: organizationId } },
   });
 
-  const { error: updateError } = await supabaseAdmin
-    .from("phone_numbers")
-    .update({ provider_deployment_id: created.deploymentId })
-    .in("id", phoneNumberIds);
-  if (updateError) throw updateError;
+  await recordDeployment(supabaseAdmin, phoneNumberIds, created.deploymentId);
 
   return { deploymentId: created.deploymentId, organizationId, outcome: "created" };
 }
@@ -285,6 +236,39 @@ async function createUnderLock(
  * active deployment is paused for the edit (Sarvam edits only paused ones)
  * and always resumed afterwards; a paused one is edited and left paused.
  */
+const sameNumbers = (a: string[], b: string[]) => {
+  const set = new Set(a.map(canonical));
+  return set.size === new Set(b.map(canonical)).size && b.every((n) => set.has(canonical(n)));
+};
+
+/**
+ * The admin "Pause" and "Resume" actions: only a deployment recorded on this customer's own
+ * numbers (never a raw id), and never in the middle of another change to it.
+ */
+export async function setCustomerDeploymentStatus(
+  supabaseAdmin: SupabaseClient<Database>,
+  params: { organizationId: string; deploymentId: string; action: "pause" | "resume" },
+) {
+  const { data: numbers, error } = await supabaseAdmin
+    .from("phone_numbers")
+    .select("id, organization_id, provider")
+    .eq("organization_id", params.organizationId)
+    .eq("provider_deployment_id", params.deploymentId);
+  if (error) throw error;
+  const own = (numbers ?? []).filter(
+    (n) => n.organization_id === params.organizationId && n.provider === "sarvam",
+  );
+  if (!own.length) throw new Error("That deployment does not belong to this customer.");
+  const adapter = getTelephonyAdapter("sarvam");
+  if (!adapter || !(adapter instanceof SarvamTelephonyAdapter))
+    throw new Error("Sarvam is not connected. Configure SARVAM_API_KEY first.");
+  return withDeploymentLock(
+    supabaseAdmin,
+    own.map((n) => n.id),
+    () => adapter.setDeploymentStatus(params.deploymentId, params.action),
+  );
+}
+
 export async function setDeploymentAppVersion(
   adapter: Pick<
     SarvamTelephonyAdapter,
@@ -319,11 +303,15 @@ export interface DeploymentSyncItem {
  * committed version of the same app (app_version), and the result webhook
  * when it is missing. A deployment on a different app cannot be repointed
  * (app_id is not updatable) and is reported, never replaced automatically.
+ * A number that has gone live (or is suspended) is only brought back to the version it was
+ * verified on; moving it needs the verify-first registration. Each deployment is changed
+ * under its numbers' lock; `held` is the provisioning job's own lock.
  * Idempotent: a deployment already in line is not touched.
  */
 export async function syncAgentDeployments(
   supabaseAdmin: SupabaseClient<Database>,
   agentConfigId: string,
+  held?: DeploymentLock,
 ): Promise<{ items: DeploymentSyncItem[] }> {
   const { data: agent } = await supabaseAdmin
     .from("agent_configs")
@@ -333,7 +321,9 @@ export async function syncAgentDeployments(
   if (!agent) throw new Error("Agent not found.");
   const { data: numbers } = await supabaseAdmin
     .from("phone_numbers")
-    .select("organization_id, provider, provider_deployment_id")
+    .select(
+      "id, e164, status, organization_id, provider, provider_deployment_id, verified_sarvam_app_id, verified_sarvam_app_version",
+    )
     .eq("agent_config_id", agentConfigId);
   const deploymentIds = [
     ...new Set(
@@ -358,7 +348,25 @@ export async function syncAgentDeployments(
 
   const items: DeploymentSyncItem[] = [];
   for (const deploymentId of deploymentIds) {
+    const routed = (numbers ?? []).filter(
+      (n) =>
+        n.provider_deployment_id === deploymentId && n.organization_id === agent.organization_id,
+    );
+    const refuse = (detail: string, fromVersion: number | null = null) =>
+      items.push({
+        deploymentId,
+        action: "error",
+        fromVersion,
+        toVersion: null,
+        webhookAdded: false,
+        detail,
+      });
+    let lock = held;
     try {
+      lock ??= await acquireDeploymentLock(
+        supabaseAdmin,
+        routed.map((n) => n.id),
+      );
       const current = await adapter.getDeployment(deploymentId);
       if (current.appId !== agent.sarvam_app_id) {
         items.push({
@@ -369,6 +377,17 @@ export async function syncAgentDeployments(
           webhookAdded: false,
           detail: `Deployment runs agent ${current.appId}; the mapped agent is ${agent.sarvam_app_id}. Create a deployment for the new agent and remove this one in Sarvam.`,
         });
+        continue;
+      }
+      if (
+        routed.some(
+          (n) => n.e164 && !current.phoneNumbers.map(canonical).includes(canonical(n.e164)),
+        )
+      ) {
+        refuse(
+          `Deployment ${deploymentId} does not route this customer's number; nothing was changed.`,
+          current.appVersion,
+        );
         continue;
       }
       const needsVersion = current.appVersion !== agent.sarvam_app_version;
@@ -383,11 +402,26 @@ export async function syncAgentDeployments(
         });
         continue;
       }
+      const unverified = routed.some(
+        (n) =>
+          (n.status === "active" || n.status === "suspended") &&
+          (n.verified_sarvam_app_id !== agent.sarvam_app_id ||
+            n.verified_sarvam_app_version !== agent.sarvam_app_version),
+      );
+      if (needsVersion && unverified) {
+        refuse(
+          `This number is live or suspended and v${agent.sarvam_app_version} is not verified on it. Register the version (or "Re-verify live deployment") with the number on; nothing was changed.`,
+          current.appVersion,
+        );
+        continue;
+      }
       // Sarvam edits only paused deployments (422 "Only paused deployments can be edited"):
       // pause, edit, and always resume one we paused, so a failed edit never leaves calls unanswered.
       const wasActive = current.status === "active";
+      await lock.confirm();
       if (wasActive) await adapter.setDeploymentStatus(deploymentId, "pause");
       try {
+        await lock.confirm();
         await adapter.updateInboundDeployment(deploymentId, {
           ...(needsVersion ? { appVersion: agent.sarvam_app_version } : {}),
           ...(needsWebhook && webhook.ok
@@ -418,6 +452,8 @@ export async function syncAgentDeployments(
         webhookAdded: false,
         detail: (err as Error).message,
       });
+    } finally {
+      if (lock && lock !== held) await lock.release();
     }
   }
   return { items };

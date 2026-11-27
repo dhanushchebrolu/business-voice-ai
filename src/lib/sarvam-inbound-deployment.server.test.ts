@@ -50,6 +50,9 @@ function makeFakeSupabase(script: Record<string, Partial<Record<OpType, QueryRes
       in() {
         return builder;
       },
+      is() {
+        return builder;
+      },
       maybeSingle() {
         return builder;
       },
@@ -61,13 +64,24 @@ function makeFakeSupabase(script: Record<string, Partial<Record<OpType, QueryRes
     return builder;
   }
 
-  /** The creation lock's own reads and writes: always free here, and not part of a script. */
-  function lockBuilder(data: unknown) {
+  /** The deployment lock's own reads and writes: remembered per number, outside the script. */
+  const locks = new Map<unknown, unknown>();
+  function lockBuilder(payload?: { metadata: unknown }) {
+    let id: unknown;
     const builder = {
       select: () => builder,
-      eq: () => builder,
+      eq: (column: string, value: unknown) => {
+        if (column === "id") id = value;
+        return builder;
+      },
       maybeSingle: () => builder,
-      then: (resolve: (r: QueryResult) => void) => resolve({ data, error: null }),
+      then: (resolve: (r: QueryResult) => void) => {
+        if (payload) locks.set(id, payload.metadata);
+        const data = payload
+          ? [{ id }]
+          : { metadata: locks.get(id) ?? {}, updated_at: "unchanged" };
+        resolve({ data, error: null });
+      },
     };
     return builder;
   }
@@ -76,13 +90,11 @@ function makeFakeSupabase(script: Record<string, Partial<Record<OpType, QueryRes
     from(table: string) {
       return {
         select(columns?: string) {
-          return columns === "metadata, updated_at"
-            ? lockBuilder({ metadata: {}, updated_at: "unchanged" })
-            : makeBuilder(table, "select");
+          return columns === "metadata, updated_at" ? lockBuilder() : makeBuilder(table, "select");
         },
         update(payload: unknown) {
           return payload && typeof payload === "object" && "metadata" in payload
-            ? lockBuilder([{ id: "locked" }])
+            ? lockBuilder(payload as { metadata: unknown })
             : makeBuilder(table, "update", payload);
         },
       };

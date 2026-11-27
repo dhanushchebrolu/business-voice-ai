@@ -281,17 +281,28 @@ export const setSarvamApplicationMapping = createServerFn({ method: "POST" })
         "Shared Sarvam applications are not enabled on this server. Use a dedicated application.",
       );
 
-    const { error } = await supabaseAdmin
-      .from("agent_configs")
-      // The template's employee type becomes the agent's, so the prompt and
-      // the Sarvam app's tools describe the same job.
-      .update({ sarvam_application_id: app.id, employee_type: app.employee_type })
-      .eq("id", data.agentConfigId);
-    if (error) {
-      if ((error as { code?: string }).code === "23505")
-        throw new Error("This Sarvam application is already mapped to a different agent.");
-      throw error;
-    }
+    // The template's trigger copies its app id and version onto the agent.
+    const { assertMappingMayChange } = await import("@/lib/sarvam-agent-registration.server");
+    const { withOrganizationDeploymentLock } = await import("@/lib/sarvam-deployment-lock.server");
+    await withOrganizationDeploymentLock(supabaseAdmin, before.organization_id, async () => {
+      await assertMappingMayChange(
+        supabaseAdmin,
+        before.organization_id,
+        app.sarvam_app_id,
+        app.sarvam_app_version,
+      );
+      const { error } = await supabaseAdmin
+        .from("agent_configs")
+        // The template's employee type becomes the agent's, so the prompt and
+        // the Sarvam app's tools describe the same job.
+        .update({ sarvam_application_id: app.id, employee_type: app.employee_type })
+        .eq("id", data.agentConfigId);
+      if (error) {
+        if ((error as { code?: string }).code === "23505")
+          throw new Error("This Sarvam application is already mapped to a different agent.");
+        throw error;
+      }
+    });
 
     const { error: linkError } = await supabaseAdmin
       .from("phone_numbers")
@@ -568,11 +579,12 @@ export const setSarvamDeploymentStatus = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     const admin = await assertPlatformAdmin(context.supabase, context.userId, "numbers.write");
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    // Only a deployment recorded on this customer's own numbers, never a raw id.
-    if (!(await organizationDeploymentIds(supabaseAdmin, data.orgId)).includes(data.deploymentId))
-      throw new Error("That deployment does not belong to this customer.");
-    const adapter = await requireSarvamAdapter();
-    const after = await adapter.setDeploymentStatus(data.deploymentId, data.action);
+    const { setCustomerDeploymentStatus } = await import("@/lib/sarvam-inbound-deployment.server");
+    const after = await setCustomerDeploymentStatus(supabaseAdmin, {
+      organizationId: data.orgId,
+      deploymentId: data.deploymentId,
+      action: data.action,
+    });
     await writeAudit(admin, {
       action: data.action === "pause" ? "SARVAM_DEPLOYMENT_PAUSED" : "SARVAM_DEPLOYMENT_RESUMED",
       entityType: "sarvam_deployment",

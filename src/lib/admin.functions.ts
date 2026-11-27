@@ -499,10 +499,8 @@ export const getCustomerDetail = createServerFn({ method: "GET" })
  * Wraps computeProvisioningState (provisioning-state.ts) for the admin
  * Customer 360 view, deriving its inputs from the same rows this function
  * already fetched — no new query. `lastAttemptFailed` here is a best-effort
- * heuristic (the word "failed" appearing in the stored provisioning_note),
- * unlike the orchestrator's own live computation, which has a real boolean
- * from its own try/catch (see provisioning-orchestrator.server.ts) — this
- * is read-only historical display, not a decision input, so the weaker
+ * heuristic (the word "failed" appearing in the stored provisioning_note):
+ * this is read-only historical display, not a decision input, so the weaker
  * signal is an acceptable, clearly-labeled tradeoff here.
  */
 function computeProvisioningStateForAdminView(input: {

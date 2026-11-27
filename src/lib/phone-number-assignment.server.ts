@@ -35,8 +35,11 @@ export async function findOtherE164Holder(
  * Moves a number to a customer. It always lands `provisioning` with inbound
  * and outbound off, and is linked to the DESTINATION customer's own
  * connection (same provider) and agent, or to none: a number must never keep
- * its previous customer's connection or agent, or a call could be placed or
- * answered through another tenant's setup.
+ * its previous customer's connection, agent, deployment, verification or
+ * confirmation, or a call could be placed or answered through, or a change
+ * made to, another tenant's setup. A deployment Sarvam still has for the
+ * number stays there until a person removes it; none is adopted from another
+ * agent.
  */
 export async function assignNumberToOrganization(
   supabaseAdmin: SupabaseClient<Database>,
@@ -85,6 +88,15 @@ export async function assignNumberToOrganization(
       business_id: null,
       connection_id: connection?.id ?? null,
       agent_config_id: agent?.id ?? null,
+      provider_deployment_id: null,
+      verified_deployment_id: null,
+      verified_sarvam_app_id: null,
+      verified_sarvam_app_version: null,
+      deployment_verified_at: null,
+      sarvam_number_confirmed_at: null,
+      sarvam_number_confirmed_by: null,
+      admission_blocked_at: null,
+      admission_blocked_reason: null,
       status: "provisioning",
       inbound_enabled: false,
       outbound_enabled: false,

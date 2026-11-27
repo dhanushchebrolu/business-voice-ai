@@ -194,6 +194,7 @@ describe("rotation workflow with a durable recovery marker (mocked Sarvam)", () 
   const T0 = "2026-11-14T10:00:00.000Z";
   const row = (over: Record<string, unknown>) => ({
     status: "active",
+    inbound_enabled: true,
     provider: "sarvam",
     metadata: { unrelated_key: "kept" },
     updated_at: T0,
@@ -361,8 +362,14 @@ describe("rotation workflow with a durable recovery marker (mocked Sarvam)", () 
   describe("database failures", () => {
     test("marker cannot be written (database error): nothing is paused", async () => {
       const db = world();
-      db.failNext("phone_numbers", "update", { message: "connection reset" });
-      const { deps, s } = sarvam();
+      const { deps: base, s } = sarvam();
+      const deps: WebhookRotationDeps = {
+        ...base,
+        getDeployment: async (id) => {
+          db.failNext("phone_numbers", "update", { message: "connection reset" });
+          return base.getDeployment(id);
+        },
+      };
       const r = await run(db, deps);
       assert.equal(r.outcome, "refused");
       assert.equal(r.stage, "persist");
@@ -417,8 +424,13 @@ describe("rotation workflow with a durable recovery marker (mocked Sarvam)", () 
       const db = world();
       const { deps } = sarvam({ resumeFails: 1 });
       await run(db, deps);
-      db.failNext("phone_numbers", "update", { message: "connection reset" });
-      const rec = await resume(db, deps);
+      const rec = await resume(db, {
+        ...deps,
+        getDeployment: async (id) => {
+          db.failNext("phone_numbers", "update", { message: "connection reset" });
+          return deps.getDeployment(id);
+        },
+      });
       assert.equal(rec.outcome, "failed");
       assert.equal(rec.stage, "persist");
       assert.notEqual(markerOn(db), null);

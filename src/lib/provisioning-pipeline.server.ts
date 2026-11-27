@@ -13,6 +13,7 @@ import {
 import { CLOSED_LIFECYCLES, type FailureCode, type JobStepKey } from "./voice-provisioning-job.ts";
 import { DEFAULT_MASTER_AGENT_APP_ID } from "./sarvam-agent-tools-spec.ts";
 import type { EnsureAgentContext, EnsureAgentOutcome } from "./sarvam-agent-provisioner.server.ts";
+import { acquireDeploymentLock, type DeploymentLock } from "./sarvam-deployment-lock.server.ts";
 
 /**
  * Provisioning pipeline: one dedicated Sarvam agent per customer, copied
@@ -101,7 +102,7 @@ export interface PipelineDeps {
   /** Documented PUT .../deployments/{id}/status (pause | resume). */
   setDeploymentStatus: (deploymentId: string, action: "pause" | "resume") => Promise<unknown>;
   /** Brings the agent's deployments to its registered version, keeping each one's paused/active state. */
-  syncDeployments: (admin: Admin, agentConfigId: string) => Promise<unknown>;
+  syncDeployments: (admin: Admin, agentConfigId: string, held?: DeploymentLock) => Promise<unknown>;
   /** The universal master agent's Sarvam app id; a customer may never be mapped to it. */
   masterAgentAppId: string | null;
   /** The outbound master template's Sarvam app id; never a customer's outbound agent. */
@@ -307,6 +308,23 @@ export async function runProvisioningPipeline(
   onStep?: (key: JobStepKey) => Promise<void> | void,
   /** unattended: the sweep's run, with nobody watching. */
   options: { unattended?: boolean } = {},
+): Promise<PipelineResult> {
+  const holding: { lock?: DeploymentLock } = {};
+  try {
+    return await pipelineSteps(admin, organizationId, holding, depsIn, onStep, options);
+  } finally {
+    await holding.lock?.release();
+  }
+}
+
+async function pipelineSteps(
+  admin: Admin,
+  organizationId: string,
+  /** Set once the number's deployment is about to be read or changed. */
+  holding: { lock?: DeploymentLock },
+  depsIn: PipelineDeps | undefined,
+  onStep: ((key: JobStepKey) => Promise<void> | void) | undefined,
+  options: { unattended?: boolean },
 ): Promise<PipelineResult> {
   const step = async (key: JobStepKey) => {
     await onStep?.(key);
@@ -735,6 +753,32 @@ export async function runProvisioningPipeline(
       `deployment ${deploymentId} was not created through ClickAI's confirmed-number flow and ${number.e164} is not live in ClickAI, so it may already be answering calls. Check it in the Sarvam console; for a working live customer use "Re-verify live deployment" instead.`,
     );
 
+  // From here to the end, no one else changes this number's deployment, a person's read of a
+  // live one included: what it saw must not be saved over a version move.
+  try {
+    holding.lock = await acquireDeploymentLock(admin, [number.id]);
+  } catch (err) {
+    return done(8, "verification_failed", (err as Error).message);
+  }
+  // A change may have finished while this attempt was getting here.
+  const { data: mapping, error: mappingError } = await admin
+    .from("agent_configs")
+    .select("sarvam_app_id, sarvam_app_version")
+    .eq("id", agent.id)
+    .maybeSingle();
+  if (mappingError) throw mappingError;
+  if (
+    mapping?.sarvam_app_id !== agent.sarvam_app_id ||
+    mapping?.sarvam_app_version !== agent.sarvam_app_version ||
+    (await changedByAPerson())
+  )
+    return leftAlone(8);
+  /** Before each provider change: still ours to change, and nobody changed the number. */
+  const mayChange = async () => {
+    await holding.lock!.confirm();
+    return !(await changedByAPerson());
+  };
+
   // 8. Read the deployment. Sarvam creates deployments active (documented):
   // a not-yet-live number's deployment is paused (and the pause confirmed)
   // until step 10. Calls can still ring through in the seconds before the
@@ -751,8 +795,13 @@ export async function runProvisioningPipeline(
       "manual_action_required",
       `deployment ${deploymentId} is in an unexpected state (${deployment.status ?? "unknown"}); check it in the Sarvam console.`,
     );
-  if (!wentLive && deployment.status === "active") {
-    if (await changedByAPerson()) return leftAlone(8);
+  // Never pause, edit or resume a deployment that is not this agent's on this number: the
+  // checks below report the mismatch without anything having been changed.
+  const ours =
+    deployment.appId === agent.sarvam_app_id &&
+    deployment.phoneNumbers.map(canonical).includes(canonical(number.e164));
+  if (!wentLive && ours && deployment.status === "active") {
+    if (!(await mayChange())) return leftAlone(8);
     try {
       await deps.setDeploymentStatus(deploymentId, "pause");
       stateChangedByUs = true;
@@ -781,9 +830,9 @@ export async function runProvisioningPipeline(
     deployment.appId === agent.sarvam_app_id &&
     deployment.appVersion !== agent.sarvam_app_version
   ) {
-    if (await changedByAPerson()) return leftAlone(8);
+    if (!(await mayChange())) return leftAlone(8);
     try {
-      await deps.syncDeployments(admin, agent.id);
+      await deps.syncDeployments(admin, agent.id, holding.lock);
     } catch {
       // Reported by the version check below.
     }
@@ -906,12 +955,13 @@ export async function runProvisioningPipeline(
         .eq("id", number.id)
         .maybeSingle();
       if (data?.status === "active") return;
+      await holding.lock!.confirm();
       await deps.setDeploymentStatus(deploymentId!, "pause");
     } catch {
       // Best effort; the admission gate still refuses business data.
     }
   };
-  if (await changedByAPerson()) return leftAlone(10);
+  if (!(await mayChange())) return leftAlone(10);
   if (deployment.status !== "active") {
     try {
       stateChangedByUs = true;

@@ -7,6 +7,7 @@ import {
   type VerificationCheck,
 } from "./provisioning-pipeline.server.ts";
 import { applySarvamAgentMapping } from "./sarvam-agent-registration.server.ts";
+import { withDeploymentLock, type DeploymentLock } from "./sarvam-deployment-lock.server.ts";
 
 /**
  * Re-verification for a customer whose Sarvam number is ALREADY LIVE
@@ -127,16 +128,29 @@ export async function findLiveNumber(
   };
 }
 
+interface LiveRemapInput {
+  organizationId: string;
+  agentConfigId: string;
+  number: LiveNumber;
+  appId: string;
+  appVersion: number;
+}
+
 export async function remapLiveAgent(
   admin: Admin,
-  input: {
-    organizationId: string;
-    agentConfigId: string;
-    number: LiveNumber;
-    appId: string;
-    appVersion: number;
-  },
+  input: LiveRemapInput,
   deps: LiveRemapDeps,
+): Promise<LiveRemapResult> {
+  return withDeploymentLock(admin, [input.number.id], (lock) =>
+    remapUnderLock(admin, input, deps, lock),
+  );
+}
+
+async function remapUnderLock(
+  admin: Admin,
+  input: LiveRemapInput,
+  deps: LiveRemapDeps,
+  lock: DeploymentLock,
 ): Promise<LiveRemapResult> {
   const { number } = input;
   const appId = input.appId.trim();
@@ -231,6 +245,27 @@ export async function remapLiveAgent(
       `Could not read deployment ${number.deploymentId} from Sarvam; nothing was changed and the existing verification is kept.`,
     );
   const beforeChecks = checksFor(before, oldVersion);
+  /** ClickAI's mapping, saved only once Sarvam is confirmed on the version. */
+  const saveMapping = () =>
+    applySarvamAgentMapping(admin, {
+      agentConfigId: input.agentConfigId,
+      organizationId: input.organizationId,
+      sarvamAppId: appId,
+      sarvamAppVersion: newVersion,
+      masterAgentAppId: deps.masterAgentAppId,
+      verifiedWithSarvam: true,
+    });
+  // An earlier attempt may have moved Sarvam and stopped before saving: finish it.
+  const alreadyMoved = checksFor(before, newVersion);
+  if (newVersion !== oldVersion && alreadyMoved.every((c) => c.ok)) {
+    await saveMapping();
+    await saveVerified(newVersion);
+    return {
+      outcome: "verified",
+      detail: `${number.e164} already runs ${appId} v${newVersion}, verified with Sarvam.`,
+      checks: alreadyMoved,
+    };
+  }
   if (isIdentityFailure(beforeChecks)) {
     // The saved verification no longer describes reality: never keep it.
     await clearVerified();
@@ -262,6 +297,7 @@ export async function remapLiveAgent(
   // 2 + 3. Move Sarvam to the new version, read back and verify.
   let changeError: string | null = null;
   try {
+    await lock.confirm();
     await deps.setDeploymentAppVersion(number.deploymentId, newVersion);
   } catch (err) {
     changeError = (err as Error).message;
@@ -270,13 +306,7 @@ export async function remapLiveAgent(
   const afterChecks = after ? checksFor(after, newVersion) : [];
   if (after && afterChecks.every((c) => c.ok)) {
     // 4. Only now: ClickAI's mapping and the verified fields.
-    await applySarvamAgentMapping(admin, {
-      agentConfigId: input.agentConfigId,
-      organizationId: input.organizationId,
-      sarvamAppId: appId,
-      sarvamAppVersion: newVersion,
-      masterAgentAppId: deps.masterAgentAppId,
-    });
+    await saveMapping();
     await saveVerified(newVersion);
     return {
       outcome: "verified",
@@ -290,6 +320,7 @@ export async function remapLiveAgent(
   // Roll back: put Sarvam back on the old version unless it never left it.
   if (!after || after.appVersion !== oldVersion) {
     try {
+      await lock.confirm();
       await deps.setDeploymentAppVersion(number.deploymentId, oldVersion);
     } catch {
       // Confirmed (or not) by the read below.

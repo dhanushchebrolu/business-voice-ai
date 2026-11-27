@@ -142,8 +142,14 @@ operator bridge or the sweep): nothing is created, paused, resumed, edited, re-l
 
 "Stops for a person" is a failed job that is not retried by itself. A definite identity mismatch in a
 person's read still withdraws the saved verification (the admission gate then serves no business data).
-Changing a live deployment is only done by its own admin actions (**Re-verify live deployment**, agent
-registration, pause/resume, webhook update, sync).
+Changing a live deployment is only done by its own admin actions, each under the deployment lock below:
+**Re-verify live deployment** or registering a new version of the same agent (checked with Sarvam
+before it is saved; one cut off after Sarvam accepted it is finished by running it again),
+pause/resume, webhook update, and sync (which only restores the verified version).
+
+**Agent mapping.** While a number is live, or verified and suspended, its agent id and version change
+only through that checked move. The operator bridge, template mapping and direct registration are
+refused; with inbound off, turn it on first.
 
 **Switched off** (suspended, or active with inbound off): the customer sees "Your number is switched
 off" with nothing to press, and no deployment can be created for it.
@@ -151,12 +157,19 @@ off" with nothing to press, and no deployment can be created for it.
 **While a number is still being set up**, an attempt stops if a person activates, suspends or releases
 it meanwhile, and activation applies only from the status the attempt started with.
 
-**Deployment lock.** Every creation (admin **Create deployment**, the test action and the job) goes
-through `createInboundDeploymentForNumbers`, which holds a per-number lock
-(`phone_numbers.metadata.deployment_lock`, compare-and-swap, no migration). A second creator is told
-the deployment is being created; the job retries with backoff. A crashed holder's lock lapses after
-5 minutes, and the next creator looks Sarvam up before creating. That lookup relies on Sarvam's
-deployment search finding the number, which has not been verified live.
+**Deployment lock.** One per number (`phone_numbers.metadata.deployment_lock`, compare-and-swap, no
+migration), held by every change to its deployment or mapping: creation and adoption, the job from
+verification to activation (including a person's read of a live number), sync, the live version move,
+webhook update and its recovery, admin pause/resume and agent mapping changes. A second change is
+refused as "in progress" (the job retries a not-yet-live number with backoff). Each holder confirms it
+still has the lock before changing Sarvam. A crashed holder blocks that number, **including admin
+pause**, until the lock lapses after 5 minutes. Description-only edits do not take it.
+
+**Recovery.** A deployment found at Sarvam is adopted only if it is the only one routing the number,
+runs this customer's agent and routes exactly that number. A recorded deployment of another agent or
+number is never paused, edited or resumed. Both lookups rely on Sarvam's deployment search finding
+the number, which has not been verified live. Reassigning a number drops its deployment,
+verification and confirmation; remove the old deployment in Sarvam before provisioning it again.
 
 ## Data
 

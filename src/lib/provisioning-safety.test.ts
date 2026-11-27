@@ -355,7 +355,7 @@ describe("deployment creation takes one lock", () => {
       assert.equal(sarvam.posts, 1);
       assert.ok(results.some((r) => r.status === "fulfilled"));
       for (const r of results)
-        if (r.status === "rejected") assert.match(String(r.reason), /being created/);
+        if (r.status === "rejected") assert.match(String(r.reason), /Another change/);
       assert.equal(number(db)["provider_deployment_id"], "dep-1");
     });
 
@@ -392,7 +392,7 @@ describe("deployment creation takes one lock", () => {
       note: "kept",
     });
     number(db)["metadata"] = held(Date.now() + 60_000);
-    await assert.rejects(create(db), /being created/);
+    await assert.rejects(create(db), /Another change/);
     assert.equal(sarvam.posts, 0);
     number(db)["metadata"] = held(Date.now() - 1000);
     assert.equal((await create(db)).outcome, "created");
